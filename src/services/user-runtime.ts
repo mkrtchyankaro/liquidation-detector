@@ -49,6 +49,27 @@ export function buildUserRuntime(
   let executionRecords: ExecutionRecordRepository | null = null;
   let executionClaims: ExecutionClaimRepository | null = null;
 
+  // Sep 8 2026 (Karo) -- CRITICAL FIX: telegram must be constructed
+  // BEFORE execution, so it can be passed into BinanceExecutionService
+  // instead of the null placeholder this used to pass. Found during a
+  // full manual audit -- confirmed liqwatch-bot's own
+  // sendCriticalAlert() (BINANCE_GLOBAL_HALT_ENGAGED, orphan-position-
+  // detected, emergency-close-failure) NEVER actually sent anything in
+  // this project until this fix, because `this.telegram` was always
+  // null. This is exactly the "Binance crash -> Telegram alert"
+  // feature the operator confirmed existed in the old bot and asked
+  // whether it was preserved here -- it was NOT, until now.
+  let telegram: TelegramClient | null = null;
+  if (config.telegram && config.telegram.enabled) {
+    telegram = new TelegramClient({
+      enabled: true,
+      botToken: config.telegram.botToken,
+      chatIds: config.telegram.chatIds,
+      parseMode: "none",
+      disableNotification: false,
+    });
+  }
+
   if (config.binance && config.binance.enabled) {
     // Same BinanceRestClient/BinanceExecutionService CLASSES as
     // liqwatch-bot's own execution wiring -- one instance per user,
@@ -70,12 +91,15 @@ export function buildUserRuntime(
     // full rationale). "karo=live, friend=shadow, artak=disabled"
     // is expressed correctly HERE -- each BinanceExecutionService
     // instance is independently configured from that one user's own
-    // UserConfig.binance block.
+    // UserConfig.binance block. `telegram` (this user's OWN client,
+    // constructed above -- possibly null if this user has no Telegram
+    // configured, which sendCriticalAlert() itself already handles
+    // gracefully) is now correctly wired, not the old `null` literal.
     execution = new BinanceExecutionService(
       binanceRest,
       executionRecords,
       executionClaims,
-      null,
+      telegram,
       {
         mode: config.binance.mode,
         orderExecutionEnabled: config.binance.orderExecutionEnabled,
@@ -84,17 +108,6 @@ export function buildUserRuntime(
         riskUsdForValidation: config.risk.riskUsd,
       },
     );
-  }
-
-  let telegram: TelegramClient | null = null;
-  if (config.telegram && config.telegram.enabled) {
-    telegram = new TelegramClient({
-      enabled: true,
-      botToken: config.telegram.botToken,
-      chatIds: config.telegram.chatIds,
-      parseMode: "none",
-      disableNotification: false,
-    });
   }
 
   return {

@@ -69,10 +69,24 @@ export class MarketDataOrchestrator {
       typeof LiquidationStatsService
     >[0],
     wallTrackerConfig: ConstructorParameters<typeof WallTrackerService>[0],
+    /** Sep 8 2026 (Karo) -- CRITICAL FIX: LiqFeedWatchdogService's own
+     *  automatic Telegram alert ("🚨 LIQ FEED DEAD... bot likely needs
+     *  restart") NEVER actually sent anything until this fix -- it
+     *  previously defaulted to null (same class of bug as
+     *  BinanceExecutionService's own critical-alert wiring, found in
+     *  the same audit pass). System-wide event (affects every user
+     *  equally, not any one user's own trade), so this is optionally
+     *  a broadcast to every enabled-telegram user, not scoped to one. */
+    liqFeedAlertTelegram: {
+      sendMessage: (text: string) => Promise<unknown>;
+    } | null = null,
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
-    this.liqFeedWatchdog = new LiqFeedWatchdogService(log);
+    this.liqFeedWatchdog = new LiqFeedWatchdogService(
+      log,
+      liqFeedAlertTelegram,
+    );
     // Auto-starts its own refresh cycle immediately (see field's own doc comment).
     this.oiTracker = new OiTrackerService(symbols);
     this.globalSignalRepo = new GlobalSignalRepository(mongo);

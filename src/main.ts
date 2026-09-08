@@ -117,6 +117,29 @@ async function main(): Promise<void> {
   const reconciliation = new ReconciliationManager(mongo, userRuntimes);
 
   const ws = new BinanceWsClient(binanceConfig);
+  // Sep 8 2026 (Karo) -- CRITICAL FIX: broadcasts system-wide alerts
+  // (currently: liq-feed-dead) to EVERY enabled-telegram user, since
+  // this affects everyone's own data equally, not any one user's own
+  // trade. Failures for one user's own chat never block delivery to
+  // any other -- matches the same isolation principle used
+  // everywhere else in this project.
+  const liqFeedAlertTelegram = {
+    sendMessage: async (text: string): Promise<void> => {
+      for (const runtime of userRuntimes) {
+        if (!runtime.telegram) continue;
+        try {
+          await runtime.telegram.sendMessage(text);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.error(
+            { err: msg, userId: runtime.config.userId },
+            "[LIQ_FEED_ALERT_SEND_FAILED] -- isolated",
+          );
+        }
+      }
+    },
+  };
+
   const orchestrator = new MarketDataOrchestrator(
     ws,
     symbols,
@@ -126,6 +149,7 @@ async function main(): Promise<void> {
     mongo,
     observabilityConfig,
     observabilityConfig,
+    liqFeedAlertTelegram,
   );
   orchestratorPlaceholder.instance = orchestrator;
 
