@@ -23,7 +23,7 @@ interface RawUsersConfigFile {
       leverage: number;
       marginMode: "ISOLATED" | "CROSSED";
     };
-    risk: {
+    risk?: {
       riskUsd: number;
       accountBudgetUsd: number;
       dailyLossLimitPct: number;
@@ -72,16 +72,30 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
     }
     seenIds.add(userId);
 
+    // Sep 8 2026 (Karo) -- `risk` is only REQUIRED when this user
+    // actually trades (binance.enabled===true) -- a Telegram-only
+    // monitoring destination (e.g. "main", a test server that never
+    // executes) has no meaningful risk-per-trade to configure at all.
+    // When binance is absent/disabled, risk defaults to the same
+    // safe fallback DailyLossLimitTracker itself already uses
+    // internally (500/5) if unconfigured -- never blocks startup.
+    const binanceWillTrade = Boolean(u.binance && u.binance.enabled);
     if (
-      !u.risk ||
-      typeof u.risk.riskUsd !== "number" ||
-      typeof u.risk.accountBudgetUsd !== "number" ||
-      typeof u.risk.dailyLossLimitPct !== "number"
+      binanceWillTrade &&
+      (!u.risk ||
+        typeof u.risk.riskUsd !== "number" ||
+        typeof u.risk.accountBudgetUsd !== "number" ||
+        typeof u.risk.dailyLossLimitPct !== "number")
     ) {
       throw new Error(
-        `user "${userId}" is missing required risk config (riskUsd/accountBudgetUsd/dailyLossLimitPct).`,
+        `user "${userId}" has binance.enabled=true but is missing required risk config (riskUsd/accountBudgetUsd/dailyLossLimitPct).`,
       );
     }
+    const risk = {
+      riskUsd: u.risk?.riskUsd ?? 10,
+      accountBudgetUsd: u.risk?.accountBudgetUsd ?? 500,
+      dailyLossLimitPct: u.risk?.dailyLossLimitPct ?? 5,
+    };
 
     const telegram = u.telegram
       ? {
@@ -124,11 +138,7 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
       enabled: u.enabled,
       telegram,
       binance,
-      risk: {
-        riskUsd: u.risk.riskUsd,
-        accountBudgetUsd: u.risk.accountBudgetUsd,
-        dailyLossLimitPct: u.risk.dailyLossLimitPct,
-      },
+      risk,
     });
   }
 
