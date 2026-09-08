@@ -117,8 +117,46 @@ async function main(): Promise<void> {
             symbol,
           )
         : 0,
-    null,
-    null,
+    // Sep 8 2026 (Karo) -- CRITICAL FIX, found during a full manual
+    // audit: this was `null`, meaning EVERY trade-plan was computed
+    // with NO_WALLS (all zeros) -- the wall-cap-on-TP step in
+    // deriveLiquidityTradePlan() was therefore structurally NEVER
+    // active, a real trading-behavior difference from the old bot,
+    // not just a missing diagnostic. Restored, byte-identical logic
+    // to liqwatch-bot's own app.ts V5WaveService construction (same
+    // wall-tracker method calls, same ctx shape, same atAnchor=atEntry
+    // choice -- confirmed the ORIGINAL itself used the identical
+    // snapshot for both, not a new approximation).
+    (symbol, _side) => {
+      const wallTracker = orchestratorPlaceholder.instance?.wallTracker;
+      const bidWall = wallTracker?.getLargestPersistentWall(symbol, "BID");
+      const askWall = wallTracker?.getLargestPersistentWall(symbol, "ASK");
+      const ctx = {
+        topBidNotional: bidWall?.currentNotional ?? 0,
+        topAskNotional: askWall?.currentNotional ?? 0,
+        topBidPrice: bidWall?.representativePrice ?? 0,
+        topAskPrice: askWall?.representativePrice ?? 0,
+        imbalance:
+          bidWall && askWall
+            ? (bidWall.currentNotional - askWall.currentNotional) /
+              (bidWall.currentNotional + askWall.currentNotional || 1)
+            : 0,
+        topBidPersistent: bidWall?.isPersistent ?? false,
+        topAskPersistent: askWall?.isPersistent ?? false,
+      };
+      return { atEntry: ctx, atAnchor: ctx, atSweepStart: null };
+    },
+    // Sep 8 2026 (Karo) -- CRITICAL FIX, same audit: this was `null`,
+    // meaning every wave's own takerBuyUsd/takerSellUsd/takerImbalance
+    // forensic field was silently always null (AggressiveFlowService
+    // itself was never even constructed anywhere -- fixed in
+    // market-data-orchestrator.ts).
+    (symbol, lookbackMs, now) =>
+      orchestratorPlaceholder.instance?.aggressiveFlow.getRecentFlow(
+        symbol,
+        lookbackMs,
+        now,
+      ) ?? null,
   );
 
   const distributor = new SignalDistributor(mongo, userRuntimes);

@@ -13,6 +13,7 @@ import { CandleStore } from "../domain/market/candle.store";
 import { TradeStore } from "../domain/market/trade.store";
 import { OrderbookStore } from "../domain/market/orderbook.store";
 import { ATRTrackerService } from "../domain/market/atr-tracker.service";
+import { AggressiveFlowService } from "../domain/liquidation/aggressive-flow.service";
 import type { GlobalSignalDoc } from "../domain/signal/global-signal.model";
 import type { SignalDistributor } from "./signal-distributor";
 import type { ReconciliationManager } from "./reconciliation-manager";
@@ -56,6 +57,12 @@ export class MarketDataOrchestrator {
    *  own 60s-refresh timer in its OWN constructor -- no separate
    *  .start() call exists on this class (confirmed from source). */
   readonly oiTracker: OiTrackerService;
+  /** Sep 8 2026 (Karo) -- CRITICAL FIX: found NEVER constructed
+   *  anywhere in this project during a full manual audit. V5WaveService's
+   *  own getFlow callback (main.ts) reads from this via getRecentFlow()
+   *  -- without it, every wave's own takerBuyUsd/takerSellUsd/
+   *  takerImbalance forensic field was silently always null. */
+  readonly aggressiveFlow = new AggressiveFlowService();
   private readonly globalSignalRepo: GlobalSignalRepository;
 
   constructor(
@@ -133,6 +140,7 @@ export class MarketDataOrchestrator {
 
     this.ws.on("aggTrade", (t) => {
       this.tradeStore.ingest(t);
+      this.aggressiveFlow.ingest(t);
     });
 
     this.ws.start();
