@@ -32,6 +32,18 @@ export interface UserSignalDoc {
   executionEnabled: boolean; // snapshot of this user's own config at signal time
   status: UserSignalStatus;
 
+  /** Sep 8 2026 (Karo) -- CRITICAL diagnostic fix: previously,
+   *  execute-for-user.usecase.ts threw away the REAL reason
+   *  (execResult.reason, e.g. "plan invalid: invalid-input") whenever
+   *  status became NOT_EXECUTED/EXECUTION_FAILED, silently
+   *  discarding it -- the only way to find out WHY a trade didn't
+   *  fire was manually grepping raw PM2 logs for [BINANCE_PRE_FLIGHT]
+   *  by signalId (confirmed this exact gap during a real incident
+   *  investigation). Null whenever status doesn't need one (OPEN,
+   *  TELEGRAM_ONLY, BTC_BLOCKED, DIRECTION_DISABLED -- those already
+   *  self-explain via status alone). */
+  executionSkipReason: string | null;
+
   isLive: boolean;
   binanceSlOrderId: number | null;
   binanceTpOrderId: number | null;

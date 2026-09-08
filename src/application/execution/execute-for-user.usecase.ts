@@ -14,11 +14,25 @@ const log = childLogger({ mod: "execute-for-user" });
  * BinanceExecutionService.run()) -- see MIGRATION_NOTES.md for the
  * exact old file/line references. Only the ORCHESTRATION (which
  * user's own runtime, which user's own Mongo doc) is new.
+ *
+ * Sep 8 2026 (Karo) -- TWO diagnostic fixes, found during a real
+ * incident investigation (karo's own live-armed execution silently
+ * never firing):
+ *   1. `telegramSent` used to be unconditionally hardcoded false in
+ *      this function's own baseDoc -- now takes the REAL result of
+ *      notifyUser() as a parameter (signal-distributor.ts calls
+ *      notifyUser() first and passes its boolean return value in).
+ *   2. `execResult.reason` (e.g. "plan invalid: invalid-input") used
+ *      to be thrown away whenever status became NOT_EXECUTED/
+ *      EXECUTION_FAILED -- now persisted as executionSkipReason, so
+ *      the operator never again has to manually grep raw PM2 logs by
+ *      signalId to find out WHY a trade didn't fire.
  */
 export async function executeForUser(
   globalSignal: GlobalSignalDoc,
   runtime: UserRuntime,
   userSignalRepo: { upsert(userId: string, doc: UserSignalDoc): Promise<void> },
+  telegramSent: boolean,
 ): Promise<void> {
   const userId = runtime.config.userId;
   const now = Date.now();
@@ -27,10 +41,11 @@ export async function executeForUser(
     signalId: globalSignal.signalId,
     symbol: globalSignal.symbol,
     side: globalSignal.side,
-    telegramSent: false,
-    telegramSentAt: null,
+    telegramSent,
+    telegramSentAt: telegramSent ? now : null,
     executionEnabled: runtime.config.binance?.enabled ?? false,
     status: "NOT_EXECUTED",
+    executionSkipReason: null,
     isLive: false,
     binanceSlOrderId: null,
     binanceTpOrderId: null,
@@ -49,8 +64,14 @@ export async function executeForUser(
     updatedAt: now,
   };
 
-  if (globalSignal.entry === null || globalSignal.sl === null || globalSignal.tp === null) {
+  if (
+    globalSignal.entry === null ||
+    globalSignal.sl === null ||
+    globalSignal.tp === null
+  ) {
     baseDoc.status = "TELEGRAM_ONLY";
+    baseDoc.executionSkipReason =
+      "canonical plan has no entry/sl/tp (plan-rejected)";
     await userSignalRepo.upsert(userId, baseDoc);
     return;
   }
@@ -64,6 +85,7 @@ export async function executeForUser(
   const slDistance = Math.abs(globalSignal.entry - globalSignal.sl);
   if (slDistance <= 0) {
     baseDoc.status = "NOT_EXECUTED";
+    baseDoc.executionSkipReason = "slDistance <= 0";
     await userSignalRepo.upsert(userId, baseDoc);
     return;
   }
@@ -73,8 +95,11 @@ export async function executeForUser(
   // this user's own tracker -- there is no second strategy to combine
   // with in this project).
   if (runtime.dailyLossLimit.isOwnBlocked(now)) {
-    log.warn(`[USER_DAILY_LOSS_LIMIT] userId=${userId} symbol=${globalSignal.symbol} -- execution skipped`);
+    log.warn(
+      `[USER_DAILY_LOSS_LIMIT] userId=${userId} symbol=${globalSignal.symbol} -- execution skipped`,
+    );
     baseDoc.status = "NOT_EXECUTED";
+    baseDoc.executionSkipReason = "daily loss limit reached";
     await userSignalRepo.upsert(userId, baseDoc);
     return;
   }
@@ -97,8 +122,40 @@ export async function executeForUser(
       liqBaseline: globalSignal.physics?.liqBaseline ?? 0,
       atr15mPct: globalSignal.physics?.atrPct ?? 0,
       walls: globalSignal.wallContext
-        ? { atEntry: { ...globalSignal.wallContext, topBidPersistent: false, topAskPersistent: false }, atAnchor: { ...globalSignal.wallContext, topBidPersistent: false, topAskPersistent: false }, atSweepStart: null }
-        : { atEntry: { topBidNotional: 0, topAskNotional: 0, topBidPrice: 0, topAskPrice: 0, imbalance: 0, topBidPersistent: false, topAskPersistent: false }, atAnchor: { topBidNotional: 0, topAskNotional: 0, topBidPrice: 0, topAskPrice: 0, imbalance: 0, topBidPersistent: false, topAskPersistent: false }, atSweepStart: null },
+        ? {
+            atEntry: {
+              ...globalSignal.wallContext,
+              topBidPersistent: false,
+              topAskPersistent: false,
+            },
+            atAnchor: {
+              ...globalSignal.wallContext,
+              topBidPersistent: false,
+              topAskPersistent: false,
+            },
+            atSweepStart: null,
+          }
+        : {
+            atEntry: {
+              topBidNotional: 0,
+              topAskNotional: 0,
+              topBidPrice: 0,
+              topAskPrice: 0,
+              imbalance: 0,
+              topBidPersistent: false,
+              topAskPersistent: false,
+            },
+            atAnchor: {
+              topBidNotional: 0,
+              topAskNotional: 0,
+              topBidPrice: 0,
+              topAskPrice: 0,
+              imbalance: 0,
+              topBidPersistent: false,
+              topAskPersistent: false,
+            },
+            atSweepStart: null,
+          },
     });
 
     if (execResult.status === "SUCCESS") {
@@ -112,14 +169,27 @@ export async function executeForUser(
       baseDoc.positionQty = execResult.actualQty;
       baseDoc.notional = execResult.actualNotionalUsdt;
       baseDoc.riskUsd = execResult.actualRiskUsd;
-      log.info(`[USER_LIVE_EXECUTED] userId=${userId} symbol=${globalSignal.symbol} entry=${execResult.actualEntry}`);
+      log.info(
+        `[USER_LIVE_EXECUTED] userId=${userId} symbol=${globalSignal.symbol} entry=${execResult.actualEntry}`,
+      );
     } else {
       baseDoc.status = "NOT_EXECUTED";
+      baseDoc.executionSkipReason =
+        execResult.status === "ABORTED"
+          ? execResult.reason
+          : "shadow mode -- not a real error, no order was ever intended";
+      log.warn(
+        `[USER_EXECUTION_SKIPPED] userId=${userId} symbol=${globalSignal.symbol} signalId=${globalSignal.signalId} reason=${baseDoc.executionSkipReason}`,
+      );
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    log.error({ err: msg, userId, signalId: globalSignal.signalId }, "[USER_EXECUTION_FAILED] -- isolated, other users unaffected");
+    log.error(
+      { err: msg, userId, signalId: globalSignal.signalId },
+      "[USER_EXECUTION_FAILED] -- isolated, other users unaffected",
+    );
     baseDoc.status = "EXECUTION_FAILED";
+    baseDoc.executionSkipReason = msg;
   }
 
   await userSignalRepo.upsert(userId, baseDoc);

@@ -107,8 +107,9 @@ export class SignalDistributor {
         continue;
       }
 
+      let telegramSent = false;
       try {
-        await notifyUser(globalSignal, runtime);
+        telegramSent = await notifyUser(globalSignal, runtime);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(
@@ -122,7 +123,12 @@ export class SignalDistributor {
       }
 
       try {
-        await executeForUser(globalSignal, runtime, userSignalRepo);
+        await executeForUser(
+          globalSignal,
+          runtime,
+          userSignalRepo,
+          telegramSent,
+        );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(
@@ -160,6 +166,12 @@ export class SignalDistributor {
       telegramSentAt: null,
       executionEnabled: runtime.config.binance?.enabled ?? false,
       status,
+      executionSkipReason:
+        status === "BTC_BLOCKED"
+          ? "btcBlockEnabled=true, same-side active BTC setup"
+          : status === "DIRECTION_DISABLED"
+            ? "longEnabled/shortEnabled=false for this signal's side"
+            : null,
       isLive: false,
       binanceSlOrderId: null,
       binanceTpOrderId: null,
