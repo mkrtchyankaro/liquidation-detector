@@ -1,0 +1,39 @@
+{
+  "name": "liquidation-detector",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Single global V5 liquidation-cascade detector, fanning out one canonical signal to many independently-configured users (Telegram/Binance/risk). Standalone project -- no dependency on liqwatch-bot.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/main.js",
+    "dev": "tsx src/main.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run test:v5-wave && npm run test:in-flight-guard && npm run test:reconciliation-health && npm run test:execution-dispatch && npm run test:signal-distributor && npm run test:multi-user && npm run test:user-id && npm run test:per-user-binance",
+    "test:v5-wave": "tsx tests/v5-wave.test.ts",
+    "test:in-flight-guard": "tsx tests/in-flight-guard.test.ts",
+    "test:reconciliation-health": "tsx tests/reconciliation-health.test.ts",
+    "test:execution-dispatch": "tsx tests/binance-execution-dispatch.test.ts",
+    "test:signal-distributor": "tsx tests/signal-distributor.test.ts",
+    "test:multi-user": "tsx tests/multi-user-isolation.test.ts",
+    "test:user-id": "tsx tests/user-id.test.ts",
+    "test:per-user-binance": "tsx tests/per-user-binance-config.test.ts"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "mongodb": "^6.10.0",
+    "pino": "^9.5.0",
+    "pino-pretty": "^11.3.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.12",
+    "tsx": "^4.19.1",
+    "typescript": "^5.6.2"
+  }
+}

@@ -1,0 +1,73 @@
+{
+  "users": [
+    {
+      "userId": "karo",
+      "enabled": true,
+      "telegram": {
+        "enabled": true,
+        "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
+        "chatId": "PLACEHOLDER_CHAT_ID"
+      },
+      "binance": {
+        "enabled": true,
+        "apiKey": "PLACEHOLDER_BINANCE_API_KEY",
+        "apiSecret": "PLACEHOLDER_BINANCE_API_SECRET",
+        "mode": "live",
+        "orderExecutionEnabled": true,
+        "leverage": 20,
+        "marginMode": "ISOLATED"
+      },
+      "risk": {
+        "riskUsd": 10,
+        "accountBudgetUsd": 500,
+        "dailyLossLimitPct": 5
+      }
+    },
+    {
+      "userId": "friend",
+      "enabled": true,
+      "telegram": {
+        "enabled": true,
+        "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
+        "chatId": "PLACEHOLDER_CHAT_ID"
+      },
+      "binance": {
+        "enabled": true,
+        "apiKey": "PLACEHOLDER_BINANCE_API_KEY",
+        "apiSecret": "PLACEHOLDER_BINANCE_API_SECRET",
+        "mode": "shadow",
+        "orderExecutionEnabled": false,
+        "leverage": 20,
+        "marginMode": "ISOLATED"
+      },
+      "risk": {
+        "riskUsd": 10,
+        "accountBudgetUsd": 500,
+        "dailyLossLimitPct": 5
+      }
+    },
+    {
+      "userId": "artak",
+      "enabled": true,
+      "telegram": {
+        "enabled": true,
+        "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
+        "chatId": "PLACEHOLDER_CHAT_ID"
+      },
+      "binance": {
+        "enabled": false,
+        "apiKey": "",
+        "apiSecret": "",
+        "mode": "shadow",
+        "orderExecutionEnabled": false,
+        "leverage": 20,
+        "marginMode": "ISOLATED"
+      },
+      "risk": {
+        "riskUsd": 10,
+        "accountBudgetUsd": 500,
+        "dailyLossLimitPct": 5
+      }
+    }
+  ]
+}
