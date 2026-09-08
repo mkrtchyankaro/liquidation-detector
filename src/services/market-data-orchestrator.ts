@@ -1,6 +1,9 @@
 import { randomUUID } from "crypto";
 import { BinanceWsClient } from "../infrastructure/binance/binanceWs.client";
-import { V5WaveService, type V5TickOutcome } from "../strategy/v5/v5-wave.service";
+import {
+  V5WaveService,
+  type V5TickOutcome,
+} from "../strategy/v5/v5-wave.service";
 import { OiTrackerService } from "../domain/liquidation/oi-tracker.service";
 import { LiquidationStore } from "../domain/liquidation/liquidation.store";
 import { LiquidationStatsService } from "../domain/liquidation/liquidation-stats.service";
@@ -62,7 +65,9 @@ export class MarketDataOrchestrator {
     private readonly distributor: SignalDistributor,
     private readonly reconciliation: ReconciliationManager,
     private readonly mongo: MongoClientWrapper,
-    liquidationStatsConfig: ConstructorParameters<typeof LiquidationStatsService>[0],
+    liquidationStatsConfig: ConstructorParameters<
+      typeof LiquidationStatsService
+    >[0],
     wallTrackerConfig: ConstructorParameters<typeof WallTrackerService>[0],
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
@@ -122,11 +127,21 @@ export class MarketDataOrchestrator {
   private async handleTickOutcome(outcome: V5TickOutcome): Promise<void> {
     try {
       if (outcome.kind === "TERMINAL_NON_SIGNAL") {
-        await this.persistTerminalNonSignal(outcome.event.watch.symbol, outcome.event.reason, outcome.event.watch, outcome.event.waveHistory);
+        await this.persistTerminalNonSignal(
+          outcome.event.watch.symbol,
+          outcome.event.reason,
+          outcome.event.watch,
+          outcome.event.waveHistory,
+        );
         return;
       }
 
-      const event = this.v5.evaluateSignal(outcome.watch, outcome.entryWave, outcome.entryWave.reclaimPrice ?? outcome.entryWave.anchorPrice, Date.now());
+      const event = this.v5.evaluateSignal(
+        outcome.watch,
+        outcome.entryWave,
+        outcome.entryWave.reclaimPrice ?? outcome.entryWave.anchorPrice,
+        Date.now(),
+      );
       if (!event) return; // already-issued guard inside evaluateSignal -- safe no-op
 
       const globalSignal: GlobalSignalDoc = {
@@ -165,9 +180,9 @@ export class MarketDataOrchestrator {
               actualRR: event.plan.rr,
             }
           : null,
-        btcContext: null,
-        liq24hContext: null,
-        wallContext: null,
+        btcContext: event.btcContext,
+        liq24hContext: event.liq24hContext,
+        wallContext: event.wallContext,
         entry: event.plan?.entry ?? null,
         tp: event.plan?.tp ?? null,
         sl: event.plan?.sl ?? null,
@@ -183,11 +198,29 @@ export class MarketDataOrchestrator {
       this.v5.releaseWatch(outcome.watch.symbol, outcome.watch.victim);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error({ err: msg }, "[MARKET_DATA_ORCHESTRATOR_TICK_OUTCOME_UNHANDLED_ERROR]");
+      log.error(
+        { err: msg },
+        "[MARKET_DATA_ORCHESTRATOR_TICK_OUTCOME_UNHANDLED_ERROR]",
+      );
     }
   }
 
-  private async persistTerminalNonSignal(symbol: string, reason: string, watch: { symbol: string; side: "LONG" | "SHORT"; victim: "LONG" | "SHORT"; signalId: string; createdAt: number; totalEpisodePressure: number; qualifyingEventUsd: number; qualifyingEventTs: number; p95AtQualification: number }, waveHistory: unknown): Promise<void> {
+  private async persistTerminalNonSignal(
+    symbol: string,
+    reason: string,
+    watch: {
+      symbol: string;
+      side: "LONG" | "SHORT";
+      victim: "LONG" | "SHORT";
+      signalId: string;
+      createdAt: number;
+      totalEpisodePressure: number;
+      qualifyingEventUsd: number;
+      qualifyingEventTs: number;
+      p95AtQualification: number;
+    },
+    waveHistory: unknown,
+  ): Promise<void> {
     const doc: GlobalSignalDoc = {
       signalId: watch.signalId ?? randomUUID(),
       symbol,

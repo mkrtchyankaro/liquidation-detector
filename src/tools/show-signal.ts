@@ -48,7 +48,72 @@ function buildMongo(): MongoClientWrapper {
   return new MongoClientWrapper(cfg);
 }
 
-function printGlobalReport(doc: GlobalSignalDoc): void {
+function fmtDur(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "n/a";
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(1)}min`;
+  return `${(m / 60).toFixed(2)}h`;
+}
+
+function num(n: number | null | undefined, digits = 6): string {
+  if (n === null || n === undefined) return "n/a";
+  return n.toFixed(digits);
+}
+
+function printWave(
+  w: GlobalSignalDoc["waveHistory"][number],
+  entryWaveNumber: number,
+): void {
+  const isEntryWave = w.waveNumber === entryWaveNumber;
+  console.log(
+    `W${w.waveNumber} (${w.state})${isEntryWave ? "  <-- ENTRY WAVE" : ""}`,
+  );
+  console.log(
+    `  Anchor:            ${num(w.anchorPrice)} @ ${fmtTs(w.anchorTs)}`,
+  );
+  console.log(
+    `  Extreme:           ${num(w.extremePrice)} @ ${fmtTs(w.extremeTs)}`,
+  );
+  console.log(
+    `  Reclaim:           ${w.reclaimPrice !== null ? num(w.reclaimPrice) + " @ " + fmtTs(w.reclaimTs) : "n/a (SUPERSEDED, never reclaimed)"}`,
+  );
+  console.log(
+    `  Liquidation:       ${fmtUsd(w.liqNotionalUsd)}  (${w.liqEvents} events, max single ${fmtUsd(w.maxSingleEventUsd)})`,
+  );
+  console.log(`  Max Recovery:      ${num(w.maxRecoveryPrice)}`);
+  console.log(
+    `  Recovery %:        ${w.recoveryPct !== null ? w.recoveryPct.toFixed(1) + "%" : "n/a (anchor===extreme, undefined)"}`,
+  );
+  console.log(
+    `  Extreme Dist ATR:  ${w.extremeDistanceAtr.toFixed(4)}  (meaningful=${w.isMeaningful})`,
+  );
+  console.log(
+    `  Price Efficiency:  ${w.priceEfficiency !== null ? w.priceEfficiency.toExponential(3) + " ATR/$" : "n/a (layer never completed)"}`,
+  );
+  console.log(
+    `  vs Dominant:       liq=${w.liquidationRatioVsDominant !== null ? w.liquidationRatioVsDominant.toFixed(3) + "x" : "n/a (first-ever layer)"}  efficiency=${w.priceEfficiencyRatioVsDominant !== null ? w.priceEfficiencyRatioVsDominant.toFixed(3) + "x" : "n/a"}`,
+  );
+  console.log(
+    `  Selected Trigger:  ${w.selectedRecoveryPct !== null ? w.selectedRecoveryPct + "%" : "n/a (Wave1, never became meaningful)"}  target=${w.recoveryTargetPrice ?? "n/a"}`,
+  );
+  console.log(
+    `  Recovery 50% at:   ${w.recovery50AtTs !== null ? fmtTs(w.recovery50AtTs) + " (price=" + w.recovery50AtPrice + ")" : "never reached"}`,
+  );
+  console.log(
+    `  Recovery 75% at:   ${w.recovery75AtTs !== null ? fmtTs(w.recovery75AtTs) + " (price=" + w.recovery75AtPrice + ")" : "never reached"}`,
+  );
+  console.log(
+    `  Taker Buy/Sell:    ${fmtUsd(w.takerBuyUsd)} / ${fmtUsd(w.takerSellUsd)}  (imbalance=${num(w.takerImbalance, 3)})`,
+  );
+  console.log(
+    `  OI Start/End:      ${w.oiStart ?? "n/a"} / ${w.oiEnd ?? "n/a"}  (Δ=${w.oiDeltaPct !== null ? w.oiDeltaPct.toFixed(3) + "%" : "n/a"})`,
+  );
+  console.log("");
+}
+
+export function printGlobalReport(doc: GlobalSignalDoc): void {
   console.log("=".repeat(50));
   console.log("GLOBAL V5 SIGNAL (v5_global_signals)");
   console.log("=".repeat(50));
@@ -88,16 +153,81 @@ function printGlobalReport(doc: GlobalSignalDoc): void {
   console.log(
     `  Intended side at signal: ${doc.btcIntendedSideAtSignalTime ?? "n/a (no active BTC setup)"}`,
   );
-  console.log("");
   console.log(
-    `Wave chain (${doc.waveHistory.length} wave${doc.waveHistory.length === 1 ? "" : "s"}):`,
+    `  Price at signal:      ${doc.btcContext?.priceAtSignal ?? "n/a"}`,
   );
-  doc.waveHistory.forEach((w) => {
-    const isEntry = w.waveNumber === doc.entryWaveNumber;
+  console.log(`  OI at signal:         ${doc.btcContext?.oiAtSignal ?? "n/a"}`);
+  console.log("");
+  console.log("24h Liquidation Context:");
+  if (doc.liq24hContext) {
+    console.log(`  Day total:  ${fmtUsd(doc.liq24hContext.dayLiqTotalUsd)}`);
+    console.log(`  Day events: ${doc.liq24hContext.dayLiqEvents}`);
+  } else {
+    console.log("  n/a");
+  }
+  console.log("");
+  console.log("Wall Context (at entry):");
+  if (doc.wallContext) {
     console.log(
-      `  W${w.waveNumber} (${w.state})${isEntry ? "  <-- ENTRY WAVE" : ""}  liq=${fmtUsd(w.liqNotionalUsd)}  anchor=${w.anchorPrice} extreme=${w.extremePrice} reclaim=${w.reclaimPrice ?? "—"}`,
+      `  Top bid: ${fmtUsd(doc.wallContext.topBidNotional)} @ ${doc.wallContext.topBidPrice}`,
     );
-  });
+    console.log(
+      `  Top ask: ${fmtUsd(doc.wallContext.topAskNotional)} @ ${doc.wallContext.topAskPrice}`,
+    );
+    console.log(`  Imbalance: ${doc.wallContext.imbalance.toFixed(3)}`);
+  } else {
+    console.log("  n/a");
+  }
+  console.log("");
+  console.log("Wave1 Diagnostics (measurement only, never gates entry):");
+  if (doc.w1Diagnostics) {
+    const d = doc.w1Diagnostics;
+    console.log(
+      `  Concluded:              ${d.concludedReason} @ ${fmtTs(d.concludedTs)}`,
+    );
+    console.log(
+      `  Qualifying/P95 ratio:   ${d.qualifyingEventToP95Ratio.toFixed(2)}x`,
+    );
+    console.log(
+      `  Anchor->Extreme:        ${fmtDur(d.anchorToExtremeMs)} (${d.anchorToExtremeMs}ms)`,
+    );
+    console.log(`  Extreme Distance ATR:   ${d.extremeDistanceAtr.toFixed(4)}`);
+    console.log(
+      `  Speed ATR/min:          ${d.speedAtrPerMinute !== null ? d.speedAtrPerMinute.toFixed(4) : "n/a (instantaneous extreme)"}`,
+    );
+    console.log(
+      `  W1 total liq / events:  ${fmtUsd(d.w1TotalLiqUsd)} / ${d.w1LiqEvents}`,
+    );
+    console.log(
+      `  Continuation liq:       ${fmtUsd(d.continuationLiqUsd)}  (ratio=${d.continuationRatio.toFixed(3)})`,
+    );
+    console.log(
+      `  Price impact per $1M:   ${d.priceImpactPer1M !== null ? d.priceImpactPer1M.toFixed(4) + "%" : "n/a"}`,
+    );
+    console.log(
+      `  Taker Buy/Sell:         ${fmtUsd(d.takerBuyUsd)} / ${fmtUsd(d.takerSellUsd)}  (imbalance=${num(d.takerImbalance, 3)})`,
+    );
+    console.log(
+      `  OI Start/End/Δ:         ${d.oiStart ?? "n/a"} / ${d.oiEnd ?? "n/a"} / ${d.oiDeltaPct !== null ? d.oiDeltaPct.toFixed(3) + "%" : "n/a"}`,
+    );
+    console.log(
+      `  Extreme->Recovery:      ${fmtDur(d.extremeToRecoveryMs)} (${d.extremeToRecoveryMs}ms)`,
+    );
+    console.log(
+      `  Recovery % at entry:    ${d.recoveryPctAtEntry !== null ? d.recoveryPctAtEntry.toFixed(1) + "%" : "n/a"}`,
+    );
+  } else {
+    console.log(
+      "  n/a (W1 never concluded, or episode ended before Wave1 finished)",
+    );
+  }
+  console.log("");
+  console.log("=".repeat(50));
+  console.log(
+    `WAVE CHAIN (${doc.waveHistory.length} wave${doc.waveHistory.length === 1 ? "" : "s"})`,
+  );
+  console.log("=".repeat(50));
+  doc.waveHistory.forEach((w) => printWave(w, doc.entryWaveNumber));
   console.log("=".repeat(50));
 }
 
@@ -129,6 +259,12 @@ function printUserReport(userId: string, doc: UserSignalDoc | null): void {
   if (doc.closedAt !== null) {
     console.log(
       `  Closed:        ${doc.closeReason} @ ${fmtTs(doc.closedAt)}  price=${doc.closePrice}`,
+    );
+    console.log(
+      `  MFE:           ${doc.maxFavorableR !== null ? doc.maxFavorableR.toFixed(2) + "R" : "n/a"}`,
+    );
+    console.log(
+      `  MAE:           ${doc.maxAdverseR !== null ? doc.maxAdverseR.toFixed(2) + "R" : "n/a"}`,
     );
   }
 }
@@ -171,6 +307,63 @@ async function anyUserHasOpenPosition(
   return false;
 }
 
+async function findSignals(
+  globalCol: Awaited<ReturnType<MongoClientWrapper["globalSignals"]>>,
+  filtered: string[],
+): Promise<GlobalSignalDoc[] | null> {
+  const getFlag = (name: string): string | null => {
+    const idx = filtered.indexOf(name);
+    return idx !== -1 && filtered[idx + 1] !== undefined
+      ? filtered[idx + 1]
+      : null;
+  };
+  const symbolArg = getFlag("--symbol");
+  const sideArg = getFlag("--side");
+  const aroundArg = getFlag("--around");
+  const windowMinutesArg = getFlag("--window-minutes");
+
+  const query: Record<string, unknown> = {};
+  if (symbolArg) query.symbol = symbolArg.toUpperCase();
+  if (sideArg) query.side = sideArg.toUpperCase();
+
+  let centerTs: number | null = null;
+  if (aroundArg) {
+    const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(:\d{2})?$/.test(
+      aroundArg,
+    )
+      ? aroundArg.replace(" ", "T") + "Z"
+      : aroundArg;
+    const parsed = new Date(normalized);
+    if (isNaN(parsed.getTime())) {
+      console.error(
+        `Could not parse --around value "${aroundArg}". Expected e.g. "2026-09-07 15:40".`,
+      );
+      process.exit(1);
+    }
+    centerTs = parsed.getTime();
+    const windowMinutes = windowMinutesArg ? Number(windowMinutesArg) : 30;
+    if (!(windowMinutes > 0)) {
+      console.error(`Invalid --window-minutes value "${windowMinutesArg}".`);
+      process.exit(1);
+    }
+    const windowMs = windowMinutes * 60_000;
+    query.signalTs = { $gte: centerTs - windowMs, $lte: centerTs + windowMs };
+  }
+
+  if (!globalCol) return null;
+  let results = (await globalCol
+    .find(query)
+    .toArray()) as unknown as GlobalSignalDoc[];
+  results =
+    centerTs !== null
+      ? results.sort(
+          (a, b) =>
+            Math.abs(a.signalTs - centerTs!) - Math.abs(b.signalTs - centerTs!),
+        )
+      : results.sort((a, b) => b.signalTs - a.signalTs);
+  return results;
+}
+
 async function main(): Promise<void> {
   const args = process.argv.slice(2);
   const jsonMode = args.includes("--json");
@@ -196,6 +389,24 @@ async function main(): Promise<void> {
   } catch {
     // users.config.json missing/invalid -- --open/--user checks simply
     // find nothing, rather than crashing this read-only tool.
+  }
+
+  if (filtered[0] === "--find") {
+    const results = await findSignals(globalCol, filtered);
+    if (results === null) {
+      console.log("No matching signals.");
+      await mongo.close();
+      return;
+    }
+    if (jsonMode) {
+      console.log(JSON.stringify(results, null, 2));
+    } else if (results.length === 0) {
+      console.log("No matching signals.");
+    } else {
+      printListTable(results);
+    }
+    await mongo.close();
+    return;
   }
 
   if (filtered[0] === "--list") {
@@ -254,6 +465,7 @@ async function main(): Promise<void> {
         "  npx tsx src/tools/show-signal.ts <signalId> --user karo\n" +
         "  npx tsx src/tools/show-signal.ts <signalId> --json\n" +
         "  npx tsx src/tools/show-signal.ts --list [SYMBOL] [--open] [--json]\n" +
+        '  npx tsx src/tools/show-signal.ts --find --symbol SOLUSDT --side SHORT --around "2026-09-07 15:40" [--window-minutes N]\n' +
         "  npx tsx src/tools/show-signal.ts --latest [SYMBOL]",
     );
     process.exit(1);
