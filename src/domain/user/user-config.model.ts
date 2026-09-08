@@ -47,4 +47,21 @@ export interface UserConfig {
   telegram: TelegramUserConfig | null;
   binance: BinanceUserConfig | null;
   risk: RiskUserConfig;
+  /** Sep 8 2026 (Karo) -- ported from liqwatch-bot's own V5_BTC_BLOCK
+   *  (per-instance env flag there; per-user config field here, same
+   *  underlying rule). When true, for THIS user only:
+   *    1. BTC's own signal never reaches them at all (no Telegram, no
+   *       execution) -- BTC is used purely as a directional filter.
+   *    2. Any OTHER symbol's signal is blocked entirely (no Telegram,
+   *       no execution) for this user if BTC currently has an active,
+   *       unresolved SAME-SIDE setup (btcIntendedSideAtSignalTime on
+   *       the global signal === this signal's own side).
+   *  Every user (including one with btcBlockEnabled=false, e.g.
+   *  "main") still sees the informational "BTC_BLOCK would apply
+   *  here: YES/NO" line on every Telegram message regardless -- that
+   *  diagnostic is unconditional, baked into the shared formatter
+   *  (infrastructure/telegram/signal.formatter.ts), not gated by this
+   *  flag at all. This flag ONLY controls whether the block is
+   *  actually ENFORCED for this user's own delivery/execution. */
+  btcBlockEnabled: boolean;
 }

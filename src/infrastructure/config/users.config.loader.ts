@@ -9,6 +9,7 @@ interface RawUsersConfigFile {
   users: Array<{
     userId: string;
     enabled: boolean;
+    btcBlockEnabled?: boolean;
     telegram?: {
       enabled: boolean;
       botToken: string;
@@ -136,6 +137,10 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
     result.push({
       userId,
       enabled: u.enabled,
+      // Sep 8 2026 (Karo) -- defaults to false (safe default: block
+      // NOT enforced) if omitted, matching liqwatch-bot's own
+      // V5_BTC_BLOCK default.
+      btcBlockEnabled: u.btcBlockEnabled ?? false,
       telegram,
       binance,
       risk,
