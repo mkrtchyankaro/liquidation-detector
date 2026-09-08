@@ -17,7 +17,8 @@
     "test:signal-distributor": "tsx tests/signal-distributor.test.ts",
     "test:multi-user": "tsx tests/multi-user-isolation.test.ts",
     "test:user-id": "tsx tests/user-id.test.ts",
-    "test:per-user-binance": "tsx tests/per-user-binance-config.test.ts"
+    "test:per-user-binance": "tsx tests/per-user-binance-config.test.ts",
+    "show-signal": "tsx src/tools/show-signal.ts"
   },
   "engines": {
     "node": ">=18.17"
