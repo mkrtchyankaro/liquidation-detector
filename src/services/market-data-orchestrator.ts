@@ -52,7 +52,12 @@ const log = childLogger({ mod: "market-data-orchestrator" });
  *      V5WaveService.markTradeLive() on the shared instance, so
  *      onPriceTickForTrades()'s own `if (trade.isLive) continue`
  *      guard never skips a MAIN close for this reason -- confirmed via
- *      that method's own source.
+ *      that method's own source. MAIN's own close notification uses
+ *      ONLY mainTelegram (the "main" user's own dedicated telegram
+ *      config), NEVER a broadcast to every user -- operator-corrected
+ *      invariant: "USER CLOSE != MAIN CLOSE, MAIN CLOSE != USER
+ *      CLOSE", confirmed via a real production trace that user-side
+ *      closes already correctly never touched MAIN's own record.
  *   2. NEW FEATURE (confirmed the old bot never had this either, per
  *      the same audit): mainSymbolLocks blocks a NEW canonical watch
  *      from starting for a symbol that already has an OPEN MAIN
@@ -83,7 +88,7 @@ export class MarketDataOrchestrator {
    *  framing: "XRP MAIN OPEN blocks another MAIN XRP signal", not
    *  "XRP-LONG blocks only XRP-LONG"). */
   private readonly mainSymbolLocks = new Set<string>();
-  private readonly broadcastTelegram: {
+  private readonly mainTelegram: {
     sendMessage: (text: string) => Promise<unknown>;
   } | null;
 
@@ -99,11 +104,26 @@ export class MarketDataOrchestrator {
     >[0],
     wallTrackerConfig: ConstructorParameters<typeof WallTrackerService>[0],
     /** Sep 8 2026 (Karo) -- broadcasts to every enabled-telegram user.
-     *  Used for BOTH the liq-feed-dead alert AND (new) MAIN close
-     *  notifications -- both are system-wide/strategy-wide events, not
-     *  scoped to one user, so the same broadcast mechanism serves
-     *  both. */
+     *  Used ONLY for the liq-feed-dead alert (a genuine system-wide
+     *  event affecting every user's own data equally). NOT used for
+     *  MAIN close anymore -- see mainTelegram below for that. */
     broadcastTelegram: {
+      sendMessage: (text: string) => Promise<unknown>;
+    } | null = null,
+    /** Sep 8 2026 (Karo) -- CRITICAL FIX, operator-corrected
+     *  architecture: MAIN's own ENTRY/CLOSE must use ONLY MAIN's own
+     *  dedicated Telegram configuration (the "main" user's own
+     *  telegram.chatIds), never a broadcast to every user. MAIN's own
+     *  ENTRY already achieved this correctly (SignalDistributor's own
+     *  per-user notifyUser() loop naturally uses each user's own
+     *  config, "main" included) -- this parameter fixes the ONE place
+     *  that didn't: handleMainTradeClose() used to reuse the generic
+     *  broadcastTelegram (every enabled user), incorrectly turning
+     *  MAIN's own close into a de facto broadcast. A user's own
+     *  telegram.chatIds MAY intentionally list multiple chat ids
+     *  (fan-out for THAT one runtime) -- that is a property of the
+     *  "main" user's own config, not of this mechanism. */
+    mainTelegram: {
       sendMessage: (text: string) => Promise<unknown>;
     } | null = null,
   ) {
@@ -113,7 +133,7 @@ export class MarketDataOrchestrator {
     this.oiTracker = new OiTrackerService(symbols);
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
     this.rawLiquidationEventRepo = new RawLiquidationEventRepository(mongo);
-    this.broadcastTelegram = broadcastTelegram;
+    this.mainTelegram = mainTelegram;
   }
 
   async ensureIndexes(): Promise<void> {
@@ -270,7 +290,7 @@ export class MarketDataOrchestrator {
         `[MAIN_TRADE_CLOSED_${close.outcome}] ${close.trade.symbol} ${close.trade.side} signalId=${close.trade.signalId} entry=${close.trade.entry} close=${close.closePrice} -- symbol lock released`,
       );
 
-      if (this.broadcastTelegram) {
+      if (this.mainTelegram) {
         try {
           const message = formatV5CloseMessage(
             close.trade.symbol,
@@ -280,7 +300,7 @@ export class MarketDataOrchestrator {
             close.closePrice,
             close.trade.entryWaveNumber,
           );
-          await this.broadcastTelegram.sendMessage(message);
+          await this.mainTelegram.sendMessage(message);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(
