@@ -64,4 +64,21 @@ export interface UserConfig {
    *  flag at all. This flag ONLY controls whether the block is
    *  actually ENFORCED for this user's own delivery/execution. */
   btcBlockEnabled: boolean;
+  /** Sep 8 2026 (Karo) -- per-user directional kill-switch. Both
+   *  default to true (nothing disabled) if omitted. Deliberately
+   *  implemented at the SIGNAL-DISTRIBUTION level (services/
+   *  signal-distributor.ts), NOT inside V5WaveService's own watch-
+   *  qualification gate -- V5WaveService is ONE global, shared engine
+   *  across every user; gating qualification there would disable that
+   *  direction for EVERYONE, including "main" (which must always see
+   *  every signal -- its only filter is TP/SL, per explicit operator
+   *  instruction). Setting longEnabled=false for one user only stops
+   *  THEIR OWN Telegram/execution for LONG signals -- the underlying
+   *  global strategy engine, and every other user, are completely
+   *  unaffected. Example real use case (operator's own): "tonight
+   *  Trump might announce something, I don't want to trade either
+   *  direction for a while" -> set BOTH longEnabled=false AND
+   *  shortEnabled=false for that one user, temporarily. */
+  longEnabled: boolean;
+  shortEnabled: boolean;
 }

@@ -15,6 +15,7 @@ export type UserSignalStatus =
   | "NOT_EXECUTED" // execution was attempted-eligible but did not result in a live position (e.g. daily-loss-limit block, pre-flight rejection)
   | "EXECUTION_FAILED" // a real execution attempt threw/errored
   | "BTC_BLOCKED" // this user's own btcBlockEnabled=true, and BTC currently has an active same-side setup (or this IS BTC's own signal) -- neither Telegram nor execution ran at all
+  | "DIRECTION_DISABLED" // this user's own longEnabled/shortEnabled=false for this signal's side -- neither Telegram nor execution ran at all
   | "OPEN" // this user has a real, live Binance position for this signal
   | "CLOSED_TP"
   | "CLOSED_SL"

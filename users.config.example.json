@@ -8,7 +8,9 @@
         "enabled": true,
         "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
         "chatIds": ["PLACEHOLDER_MAIN_CHAT_ID_1", "PLACEHOLDER_MAIN_CHAT_ID_2"]
-      }
+      },
+      "longEnabled": true,
+      "shortEnabled": true
     },
     {
       "userId": "karo",
@@ -32,7 +34,9 @@
         "riskUsd": 10,
         "accountBudgetUsd": 500,
         "dailyLossLimitPct": 5
-      }
+      },
+      "longEnabled": true,
+      "shortEnabled": true
     },
     {
       "userId": "friend",
@@ -56,7 +60,9 @@
         "riskUsd": 10,
         "accountBudgetUsd": 500,
         "dailyLossLimitPct": 5
-      }
+      },
+      "longEnabled": true,
+      "shortEnabled": true
     },
     {
       "userId": "artak",
@@ -80,7 +86,9 @@
         "riskUsd": 10,
         "accountBudgetUsd": 500,
         "dailyLossLimitPct": 5
-      }
+      },
+      "longEnabled": true,
+      "shortEnabled": true
     }
   ]
 }

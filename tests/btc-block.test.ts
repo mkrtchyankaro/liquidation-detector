@@ -68,6 +68,8 @@ function baseUser(overrides: Partial<UserConfig>): UserConfig {
     binance: null,
     risk: { riskUsd: 10, accountBudgetUsd: 500, dailyLossLimitPct: 5 },
     btcBlockEnabled: false,
+    longEnabled: true,
+    shortEnabled: true,
     ...overrides,
   };
 }

@@ -10,6 +10,8 @@ interface RawUsersConfigFile {
     userId: string;
     enabled: boolean;
     btcBlockEnabled?: boolean;
+    longEnabled?: boolean;
+    shortEnabled?: boolean;
     telegram?: {
       enabled: boolean;
       botToken: string;
@@ -141,6 +143,10 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
       // NOT enforced) if omitted, matching liqwatch-bot's own
       // V5_BTC_BLOCK default.
       btcBlockEnabled: u.btcBlockEnabled ?? false,
+      // Sep 8 2026 (Karo) -- default true (nothing disabled) if
+      // omitted, matching the safe/permissive default.
+      longEnabled: u.longEnabled ?? true,
+      shortEnabled: u.shortEnabled ?? true,
       telegram,
       binance,
       risk,
