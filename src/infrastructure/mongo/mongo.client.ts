@@ -4,6 +4,7 @@ import { assertValidUserId } from "../../domain/user/user-id.validator";
 import type { LiqMinuteAggregateDoc } from "./liq-aggregate.repository";
 import type { WallMinuteAggregateDoc } from "./wall-aggregate.repository";
 import type { GlobalSignalDoc } from "../../domain/signal/global-signal.model";
+import type { RawLiquidationEventDoc } from "./raw-liquidation-event.repository";
 import type { UserSignalDoc } from "../../domain/signal/user-signal.model";
 import type { ExecutionRecordDoc } from "./execution-record.model";
 import type { ExecutionClaimDoc } from "./execution-claim.model";
@@ -57,10 +58,13 @@ export class MongoClientWrapper {
    *  from one MongoClient/one connection. */
   private async ensure(): Promise<{ shared: Db; own: Db } | null> {
     if (!this.cfg.enabled) return null;
-    if (this.sharedDb && this.ownDb) return { shared: this.sharedDb, own: this.ownDb };
+    if (this.sharedDb && this.ownDb)
+      return { shared: this.sharedDb, own: this.ownDb };
     if (this.connecting) {
       await this.connecting;
-      return this.sharedDb && this.ownDb ? { shared: this.sharedDb, own: this.ownDb } : null;
+      return this.sharedDb && this.ownDb
+        ? { shared: this.sharedDb, own: this.ownDb }
+        : null;
     }
 
     const sinceFailure = Date.now() - this.lastFailureAt;
@@ -70,7 +74,10 @@ export class MongoClientWrapper {
 
     this.connecting = (async (): Promise<void> => {
       try {
-        this.log.info({ sharedDb: this.cfg.sharedMarketDataDb, ownDb: this.cfg.ownDb }, "connecting to mongo");
+        this.log.info(
+          { sharedDb: this.cfg.sharedMarketDataDb, ownDb: this.cfg.ownDb },
+          "connecting to mongo",
+        );
         const client = new MongoClient(this.cfg.uri, {
           serverSelectionTimeoutMS: 8_000,
           maxPoolSize: 10,
@@ -85,7 +92,10 @@ export class MongoClientWrapper {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.lastFailureAt = Date.now();
-        this.log.error({ err: msg, retryInSec: Math.round(this.failureCooldownMs / 1000) }, "mongo connection failed; persistence disabled until cooldown expires");
+        this.log.error(
+          { err: msg, retryInSec: Math.round(this.failureCooldownMs / 1000) },
+          "mongo connection failed; persistence disabled until cooldown expires",
+        );
         this.sharedDb = null;
         this.ownDb = null;
       } finally {
@@ -94,7 +104,9 @@ export class MongoClientWrapper {
     })();
 
     await this.connecting;
-    return this.sharedDb && this.ownDb ? { shared: this.sharedDb, own: this.ownDb } : null;
+    return this.sharedDb && this.ownDb
+      ? { shared: this.sharedDb, own: this.ownDb }
+      : null;
   }
 
   async close(): Promise<void> {
@@ -125,14 +137,18 @@ export class MongoClientWrapper {
    *  minutes into this SAME, shared collection. */
   async liqMinuteAggregates(): Promise<Collection<LiqMinuteAggregateDoc> | null> {
     const dbs = await this.ensure();
-    return dbs ? dbs.shared.collection<LiqMinuteAggregateDoc>("liq_minute_aggregates") : null;
+    return dbs
+      ? dbs.shared.collection<LiqMinuteAggregateDoc>("liq_minute_aggregates")
+      : null;
   }
 
   /** Exact same collection name/shape as liqwatch-bot's own
    *  db/wall-aggregate.repository.ts (COLL_AGGREGATES = "wall_minute_aggregates"). */
   async wallMinuteAggregates(): Promise<Collection<WallMinuteAggregateDoc> | null> {
     const dbs = await this.ensure();
-    return dbs ? dbs.shared.collection<WallMinuteAggregateDoc>("wall_minute_aggregates") : null;
+    return dbs
+      ? dbs.shared.collection<WallMinuteAggregateDoc>("wall_minute_aggregates")
+      : null;
   }
 
   // ─── OWN, new (liquidation_detector database) ──────────────────────────
@@ -141,7 +157,22 @@ export class MongoClientWrapper {
    *  signal every user's own execution refers to by signalId. */
   async globalSignals(): Promise<Collection<GlobalSignalDoc> | null> {
     const dbs = await this.ensure();
-    return dbs ? dbs.own.collection<GlobalSignalDoc>("v5_global_signals") : null;
+    return dbs
+      ? dbs.own.collection<GlobalSignalDoc>("v5_global_signals")
+      : null;
+  }
+
+  /** Sep 8 2026 (Karo) -- bounded (TTL-indexed) raw liquidation-event
+   *  archive. GLOBAL, own database (never per-user, never the shared
+   *  liqwatch_bot db -- this is a NEW capability the old bot never
+   *  had). See RawLiquidationEventRepository's own doc comment for
+   *  why liq_minute_aggregates' own top-N sampling is insufficient
+   *  for dense-burst replay research. */
+  async rawLiquidationEvents(): Promise<Collection<RawLiquidationEventDoc> | null> {
+    const dbs = await this.ensure();
+    return dbs
+      ? dbs.own.collection<RawLiquidationEventDoc>("liq_raw_events")
+      : null;
   }
 
   /** Sep 8 2026, operator-approved (Karo) -- PER-USER collection,
@@ -154,16 +185,22 @@ export class MongoClientWrapper {
   async userSignals(userId: string): Promise<Collection<UserSignalDoc> | null> {
     assertValidUserId(userId);
     const dbs = await this.ensure();
-    return dbs ? dbs.own.collection<UserSignalDoc>(`v5_signals_${userId}`) : null;
+    return dbs
+      ? dbs.own.collection<UserSignalDoc>(`v5_signals_${userId}`)
+      : null;
   }
 
   /** Per-user, per explicit operator instruction ("YES if those
    *  collections represent user-specific Binance execution state" --
    *  they do, each user has their own separate Binance account). */
-  async executionRecords(userId: string): Promise<Collection<ExecutionRecordDoc> | null> {
+  async executionRecords(
+    userId: string,
+  ): Promise<Collection<ExecutionRecordDoc> | null> {
     assertValidUserId(userId);
     const dbs = await this.ensure();
-    return dbs ? dbs.own.collection<ExecutionRecordDoc>(`execution_records_${userId}`) : null;
+    return dbs
+      ? dbs.own.collection<ExecutionRecordDoc>(`execution_records_${userId}`)
+      : null;
   }
 
   /** Per-user. Unlike liqwatch-bot's own GLOBAL execution_claims
@@ -171,9 +208,13 @@ export class MongoClientWrapper {
    *  underlying account/symbol-space), each user here has their OWN,
    *  separate Binance account -- a symbol-lock scoped per-user is the
    *  architecturally correct equivalent, not a cross-user global lock. */
-  async executionClaims(userId: string): Promise<Collection<ExecutionClaimDoc> | null> {
+  async executionClaims(
+    userId: string,
+  ): Promise<Collection<ExecutionClaimDoc> | null> {
     assertValidUserId(userId);
     const dbs = await this.ensure();
-    return dbs ? dbs.own.collection<ExecutionClaimDoc>(`execution_claims_${userId}`) : null;
+    return dbs
+      ? dbs.own.collection<ExecutionClaimDoc>(`execution_claims_${userId}`)
+      : null;
   }
 }

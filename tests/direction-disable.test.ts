@@ -56,6 +56,7 @@ function baseSignal(side: "LONG" | "SHORT"): GlobalSignalDoc {
     btcIntendedSideAtSignalTime: null,
     rejectionReason: null,
     status: "SIGNAL",
+    researchCheckpoints: [],
     createdAt: Date.now(),
   };
 }

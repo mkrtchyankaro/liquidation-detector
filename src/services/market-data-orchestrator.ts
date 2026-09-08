@@ -14,11 +14,14 @@ import { TradeStore } from "../domain/market/trade.store";
 import { OrderbookStore } from "../domain/market/orderbook.store";
 import { ATRTrackerService } from "../domain/market/atr-tracker.service";
 import { AggressiveFlowService } from "../domain/liquidation/aggressive-flow.service";
+import { ResearchCheckpointTracker } from "../domain/signal/research-checkpoint-tracker";
 import type { GlobalSignalDoc } from "../domain/signal/global-signal.model";
+import type { V5Wave } from "../strategy/v5/v5-wave.model";
 import type { SignalDistributor } from "./signal-distributor";
 import type { ReconciliationManager } from "./reconciliation-manager";
 import type { MongoClientWrapper } from "../infrastructure/mongo/mongo.client";
 import { GlobalSignalRepository } from "../infrastructure/mongo/global-signal.repository";
+import { RawLiquidationEventRepository } from "../infrastructure/mongo/raw-liquidation-event.repository";
 import { childLogger } from "../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "market-data-orchestrator" });
@@ -33,7 +36,15 @@ const log = childLogger({ mod: "market-data-orchestrator" });
  * LiquidationStatsService + V5WaveService.onLiquidation(), orderbook ->
  * WallTrackerService. What's NEW: SIGNAL_CANDIDATE outcomes are mapped
  * to a GlobalSignalDoc and hand off to SignalDistributor, instead of
- * app.ts's own inline handleV5TickOutcome.
+ * app.ts's own inline handleV5TickOutcome. ALSO NEW (Sep 8 2026,
+ * research-data layer): 1m kline subscription (confirmed the old bot
+ * never had this -- see the audit this was requested from), raw
+ * liquidation-event archiving, and GLOBAL research-checkpoint
+ * tracking. None of this changes V5's own strategy behavior -- 1m
+ * candles are fed to CandleStore only, never to ATRTrackerService
+ * (which only tracks 5m/15m/1h internally, confirmed by its own
+ * isTracked() method -- 1m candles are silently ignored there by
+ * construction, not by a new guard added here).
  */
 export class MarketDataOrchestrator {
   readonly liquidationStore = new LiquidationStore();
@@ -63,7 +74,11 @@ export class MarketDataOrchestrator {
    *  -- without it, every wave's own takerBuyUsd/takerSellUsd/
    *  takerImbalance forensic field was silently always null. */
   readonly aggressiveFlow = new AggressiveFlowService();
+  /** Sep 8 2026 (Karo) -- GLOBAL, in-memory, research-only (see
+   *  ResearchCheckpointTracker's own doc comment). Never per-user. */
+  readonly researchCheckpoints = new ResearchCheckpointTracker();
   private readonly globalSignalRepo: GlobalSignalRepository;
+  private readonly rawLiquidationEventRepo: RawLiquidationEventRepository;
 
   constructor(
     private readonly ws: BinanceWsClient,
@@ -97,12 +112,31 @@ export class MarketDataOrchestrator {
     // Auto-starts its own refresh cycle immediately (see field's own doc comment).
     this.oiTracker = new OiTrackerService(symbols);
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
+    this.rawLiquidationEventRepo = new RawLiquidationEventRepository(mongo);
+  }
+
+  /** Call once at startup, alongside every other repository's own
+   *  ensureIndexes(). Separate from the constructor since it's async
+   *  I/O, matching this project's own convention everywhere else. */
+  async ensureIndexes(): Promise<void> {
+    await this.rawLiquidationEventRepo.ensureIndexes();
   }
 
   start(): void {
     this.ws.subscribe({
       symbols: this.symbols,
-      intervals: ["15m", "5m"],
+      // Sep 8 2026 (Karo) -- "1m" ADDED for the new research-data
+      // layer only (raw 1-minute price structure, for later
+      // liquidation-bar correlation). Confirmed via a full manual
+      // audit that the old bot NEVER subscribed to this at all (only
+      // REST-fetched 1m klines on-demand, once, for boot-time
+      // candle-replay -- see fetchKlinesSinceV5 in the old app.ts).
+      // "15m"/"5m" stay exactly as before -- V5's own ATR input is
+      // UNCHANGED (ATRTrackerService.isTracked() only accepts
+      // 5m/15m/1h; 1m candles reaching atrTracker.onCandle() below are
+      // filtered out THERE, by that pre-existing, unmodified method --
+      // not by a new guard added here).
+      intervals: ["15m", "5m", "1m"],
       aggTrade: true,
       bookTicker: true,
       depth: true,
@@ -114,7 +148,14 @@ export class MarketDataOrchestrator {
     this.ws.on("error", (err) => log.error({ err: err.message }, "[ws] error"));
 
     this.ws.on("kline", (c) => {
-      if (c.interval === "15m") this.atrTracker.onCandle(c);
+      // Sep 8 2026 (Karo) -- atrTracker.onCandle() is called for EVERY
+      // interval now (not just "15m" as before), matching the old
+      // bot's own unconditional call shape exactly (its own
+      // ws.on("kline") handler called atrTracker.onCandle(c)
+      // unfiltered, relying on the SAME internal isTracked() gate this
+      // project already has). candleStore.ingest() already accepted
+      // any interval, unchanged.
+      this.atrTracker.onCandle(c);
       this.candleStore.ingest(c);
     });
 
@@ -122,6 +163,16 @@ export class MarketDataOrchestrator {
       this.liqFeedWatchdog.recordEvent(l.symbol);
       this.liquidationStore.ingest(l);
       this.liquidationStats.ingest(l);
+      // Sep 8 2026 (Karo) -- NEW, research-data layer. Zero derivation
+      // (see RawLiquidationEventRepository's own doc comment) -- the
+      // SAME victim-side convention V5WaveService itself uses.
+      void this.rawLiquidationEventRepo.insert({
+        symbol: l.symbol,
+        victim: l.side === "SELL" ? "LONG" : "SHORT",
+        price: l.price,
+        quoteQty: l.quoteQty,
+        timestamp: l.timestamp,
+      });
       const outcomes = this.v5.onLiquidation(l);
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
     });
@@ -131,6 +182,7 @@ export class MarketDataOrchestrator {
       const outcomes = this.v5.onTick(b.symbol, mid, b.timestamp);
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
       void this.reconciliation.onTick(b.symbol, b.timestamp);
+      this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
     });
 
     this.ws.on("orderbook", (snap) => {
@@ -146,6 +198,33 @@ export class MarketDataOrchestrator {
     this.ws.start();
   }
 
+  /** Sep 8 2026 (Karo) -- advances every active GLOBAL research
+   *  checkpoint watch for this symbol and persists whichever offsets
+   *  just completed. Deliberately separate from any per-user path --
+   *  see research-checkpoint.model.ts's own doc comment: this must
+   *  never depend on, or duplicate per user. */
+  private tickResearchCheckpoints(
+    symbol: string,
+    price: number,
+    now: number,
+  ): void {
+    const completed = this.researchCheckpoints.onTick(symbol, price, now);
+    for (const c of completed) {
+      void this.globalSignalRepo.appendCheckpoint(c.signalId, c.group);
+    }
+  }
+
+  /** Sep 8 2026 (Karo) -- atrAbs (absolute price units, not %) for
+   *  ATR-normalized checkpoint watches. Returns null when ATR isn't
+   *  warm yet for this symbol (registerWatch itself already refuses a
+   *  <=0 denominator, so this is a safe, honest null rather than a
+   *  fabricated fallback). */
+  private atrAbsFor(symbol: string, referencePrice: number): number | null {
+    const atrPct = this.atrTracker.getATR(symbol, "15m");
+    if (!atrPct || !(atrPct > 0)) return null;
+    return atrPct * referencePrice;
+  }
+
   private async handleTickOutcome(outcome: V5TickOutcome): Promise<void> {
     try {
       if (outcome.kind === "TERMINAL_NON_SIGNAL") {
@@ -158,13 +237,39 @@ export class MarketDataOrchestrator {
         return;
       }
 
+      const anchorPrice =
+        outcome.entryWave.reclaimPrice ?? outcome.entryWave.anchorPrice;
       const event = this.v5.evaluateSignal(
         outcome.watch,
         outcome.entryWave,
-        outcome.entryWave.reclaimPrice ?? outcome.entryWave.anchorPrice,
+        anchorPrice,
         Date.now(),
       );
-      if (!event) return; // already-issued guard inside evaluateSignal -- safe no-op
+
+      if (!event) {
+        // Sep 8 2026 (Karo) -- EXHAUSTION_CANDIDATE research checkpoint:
+        // this layer reached the exhaustion-candidate moment (that's
+        // what produces a SIGNAL_CANDIDATE outcome in the first place)
+        // but evaluateSignal() itself rejected it (e.g.
+        // WAVE_CHRONOLOGY_INVALID, or the already-issued guard). ATR-
+        // normalized (no real SL exists for a rejected candidate).
+        // signalId reused from the watch so this stays correlated with
+        // whatever GlobalSignalDoc (if any) the episode eventually
+        // produces via its OWN terminal path.
+        const atrAbs = this.atrAbsFor(outcome.watch.symbol, anchorPrice);
+        if (atrAbs !== null) {
+          const dirMul = outcome.watch.side === "LONG" ? 1 : -1;
+          this.researchCheckpoints.registerWatch(
+            outcome.watch.signalId,
+            outcome.watch.symbol,
+            "EXHAUSTION_CANDIDATE",
+            Date.now(),
+            anchorPrice,
+            { kind: "ATR", dirMul, denom: atrAbs },
+          );
+        }
+        return; // already-issued guard inside evaluateSignal -- safe no-op
+      }
 
       const globalSignal: GlobalSignalDoc = {
         signalId: event.signalId,
@@ -213,10 +318,40 @@ export class MarketDataOrchestrator {
         btcIntendedSideAtSignalTime: event.btcIntendedSideAtSignalTime,
         rejectionReason: event.plan ? null : "plan-rejected",
         status: "SIGNAL",
+        researchCheckpoints: [],
         createdAt: Date.now(),
       };
 
       await this.distributor.distribute(globalSignal, this.mongo);
+
+      // Sep 8 2026 (Karo) -- SIGNAL research checkpoint, R-normalized
+      // against the CANONICAL entry/SL (never any one user's actual
+      // fill -- see research-checkpoint.model.ts's own doc comment).
+      // Only registered when a real plan exists (entry/sl both
+      // non-null) -- a rejected plan ("plan-rejected") has no usable
+      // SL to normalize against, so it's simply not tracked here (the
+      // EXHAUSTION_CANDIDATE branch above already covers that case
+      // for evaluateSignal()-level rejections; a plan-rejected SIGNAL
+      // is a narrower, later-stage rejection this project accepts as
+      // untracked for now, rather than inventing a third fallback
+      // anchor).
+      if (
+        event.plan &&
+        globalSignal.entry !== null &&
+        globalSignal.sl !== null
+      ) {
+        const denom = Math.abs(globalSignal.entry - globalSignal.sl);
+        const dirMul = event.side === "LONG" ? 1 : -1;
+        this.researchCheckpoints.registerWatch(
+          event.signalId,
+          event.symbol,
+          "SIGNAL",
+          event.signalTs,
+          globalSignal.entry,
+          { kind: "R", dirMul, denom },
+        );
+      }
+
       this.v5.releaseWatch(outcome.watch.symbol, outcome.watch.victim);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -273,8 +408,36 @@ export class MarketDataOrchestrator {
       btcIntendedSideAtSignalTime: null,
       rejectionReason: reason,
       status: reason as GlobalSignalDoc["status"],
+      researchCheckpoints: [],
       createdAt: Date.now(),
     };
     await this.globalSignalRepo.insert(doc);
+
+    // Sep 8 2026 (Karo) -- EPISODE_END research checkpoint. This
+    // episode never even reached the exhaustion-candidate moment (or
+    // did, but that path already registered its own
+    // EXHAUSTION_CANDIDATE watch above -- registerWatch is a no-op if
+    // one already exists for this signalId, so no double-tracking).
+    // Anchored at the LAST known wave's own extreme price -- the best
+    // available "where did this episode actually end" reference when
+    // no live tick/price is otherwise passed into this method. Skipped
+    // entirely (no anchor) when waveHistory is empty (nothing to
+    // anchor to) or ATR isn't warm yet.
+    const waves = doc.waveHistory as V5Wave[];
+    const lastWave = waves.length > 0 ? waves[waves.length - 1] : null;
+    if (lastWave) {
+      const atrAbs = this.atrAbsFor(symbol, lastWave.extremePrice);
+      if (atrAbs !== null) {
+        const dirMul = watch.side === "LONG" ? 1 : -1;
+        this.researchCheckpoints.registerWatch(
+          doc.signalId,
+          symbol,
+          "EPISODE_END",
+          Date.now(),
+          lastWave.extremePrice,
+          { kind: "ATR", dirMul, denom: atrAbs },
+        );
+      }
+    }
   }
 }

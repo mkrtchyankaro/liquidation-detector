@@ -9,7 +9,7 @@
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:v5-wave && npm run test:in-flight-guard && npm run test:reconciliation-health && npm run test:execution-dispatch && npm run test:signal-distributor && npm run test:multi-user && npm run test:user-id && npm run test:per-user-binance && npm run test:btc-block && npm run test:direction-disable",
+    "test": "npm run test:v5-wave && npm run test:in-flight-guard && npm run test:reconciliation-health && npm run test:execution-dispatch && npm run test:signal-distributor && npm run test:multi-user && npm run test:user-id && npm run test:per-user-binance && npm run test:btc-block && npm run test:direction-disable && npm run test:research-checkpoint && npm run test:research-data-layer && npm run test:atr-1m-isolation",
     "test:v5-wave": "tsx tests/v5-wave.test.ts",
     "test:in-flight-guard": "tsx tests/in-flight-guard.test.ts",
     "test:reconciliation-health": "tsx tests/reconciliation-health.test.ts",
@@ -20,6 +20,9 @@
     "test:per-user-binance": "tsx tests/per-user-binance-config.test.ts",
     "test:btc-block": "tsx tests/btc-block.test.ts",
     "test:direction-disable": "tsx tests/direction-disable.test.ts",
+    "test:research-checkpoint": "tsx tests/research-checkpoint-tracker.test.ts",
+    "test:research-data-layer": "tsx tests/research-data-layer.test.ts",
+    "test:atr-1m-isolation": "tsx tests/atr-1m-isolation.test.ts",
     "show-signal": "tsx src/tools/show-signal.ts"
   },
   "engines": {

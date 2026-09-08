@@ -55,6 +55,7 @@ function baseSignal(overrides: Partial<GlobalSignalDoc>): GlobalSignalDoc {
     btcIntendedSideAtSignalTime: null,
     rejectionReason: null,
     status: "SIGNAL",
+    researchCheckpoints: [],
     createdAt: Date.now(),
     ...overrides,
   };

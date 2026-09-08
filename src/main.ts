@@ -199,6 +199,11 @@ async function main(): Promise<void> {
   );
   orchestratorPlaceholder.instance = orchestrator;
 
+  // Sep 8 2026 (Karo) -- ensures the new liq_raw_events TTL/symbol
+  // indexes (RawLiquidationEventRepository, wrapped by the
+  // orchestrator's own ensureIndexes()).
+  await orchestrator.ensureIndexes();
+
   // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
   // app.ts "Restart safety — Phase A: ATR bootstrap from REST history"
   // (found NEVER called anywhere in this project during a full manual

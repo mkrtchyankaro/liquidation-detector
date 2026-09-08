@@ -1,5 +1,10 @@
 import type { Side } from "../../shared/common.types";
-import type { V5Wave, V5Wave1Diagnostics, V5TerminalReason } from "../../strategy/v5/v5-wave.model";
+import type {
+  V5Wave,
+  V5Wave1Diagnostics,
+  V5TerminalReason,
+} from "../../strategy/v5/v5-wave.model";
+import type { ResearchCheckpointGroup } from "./research-checkpoint.model";
 
 /**
  * Sep 8 2026 (Karo). Split from liqwatch-bot's own single, mixed
@@ -50,7 +55,10 @@ export interface GlobalSignalDoc {
     actualRR: number;
   } | null;
 
-  btcContext: { priceAtSignal: number | null; oiAtSignal: number | null } | null;
+  btcContext: {
+    priceAtSignal: number | null;
+    oiAtSignal: number | null;
+  } | null;
   liq24hContext: { dayLiqTotalUsd: number; dayLiqEvents: number } | null;
   wallContext: {
     topBidNotional: number;
@@ -80,6 +88,16 @@ export interface GlobalSignalDoc {
    *  every other value is a V5TerminalReason (episode ended without
    *  ever producing an executable signal at all). */
   status: V5TerminalReason | "SIGNAL";
+
+  /** Sep 8 2026 (Karo) -- GLOBAL research observations, NEVER
+   *  per-user (see research-checkpoint.model.ts's own doc comment).
+   *  Grouped by anchor since a single episode has exactly ONE anchor
+   *  group in practice (SIGNAL supersedes EXHAUSTION_CANDIDATE for
+   *  the same signalId -- see ResearchCheckpointTracker.registerWatch).
+   *  Populated incrementally as each of the 5 sparse offsets
+   *  completes -- absent/empty until the first one fires, and never
+   *  fully populated for episodes still in progress. */
+  researchCheckpoints: ResearchCheckpointGroup[];
 
   createdAt: number;
 }
