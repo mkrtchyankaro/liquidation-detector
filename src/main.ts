@@ -10,6 +10,7 @@ import {
   type MongoDetectorConfig,
 } from "./infrastructure/mongo/mongo.client";
 import { BinanceWsClient } from "./infrastructure/binance/binanceWs.client";
+import { BinanceRestClient } from "./infrastructure/binance/binanceRest.client";
 import { V5WaveService } from "./strategy/v5/v5-wave.service";
 import { v5IndividualEventP95 } from "./strategy/v5/v5-liq-stats";
 import { buildUserRuntime, type UserRuntime } from "./services/user-runtime";
@@ -19,6 +20,13 @@ import { ReconciliationManager } from "./services/reconciliation-manager";
 import { MarketDataOrchestrator } from "./services/market-data-orchestrator";
 import { GlobalSignalRepository } from "./infrastructure/mongo/global-signal.repository";
 import { UserSignalRepository } from "./infrastructure/mongo/user-signal.repository";
+import { bootstrapAtrFromRest, pairsFor } from "./domain/market/atr-bootstrap";
+import { loadPersistenceConfig } from "./infrastructure/config/persistence.config";
+import { loadWallPersistenceConfig } from "./infrastructure/config/wall-persistence.config";
+import { LiqAggregateRepository } from "./infrastructure/mongo/liq-aggregate.repository";
+import { LiqAggregateOrchestrator } from "./infrastructure/mongo/liq-aggregate-persistence.orchestrator";
+import { WallAggregateRepository } from "./infrastructure/mongo/wall-aggregate.repository";
+import { WallAggregateOrchestrator } from "./infrastructure/mongo/wall-aggregate-persistence.orchestrator";
 
 const log = childLogger({ mod: "main" });
 
@@ -153,6 +161,67 @@ async function main(): Promise<void> {
   );
   orchestratorPlaceholder.instance = orchestrator;
 
+  // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
+  // app.ts "Restart safety — Phase A: ATR bootstrap from REST history"
+  // (found NEVER called anywhere in this project during a full manual
+  // audit -- atr-bootstrap.ts was copied but never wired). Without
+  // this, ATRTrackerService starts completely empty at every restart
+  // -- getAtrAbs() returns 0 for every symbol until enough LIVE 15m/5m
+  // candles close naturally (up to 15-20+ minutes), during which
+  // V5's own extremeDistanceAtr math (which DIVIDES by this value) is
+  // either NaN/Infinity or otherwise meaningless -- directly affects
+  // whether/how signals fire after every single restart. Pulls 100
+  // closed candles per (symbol, interval) via REST, runs BEFORE
+  // orchestrator.start() (which itself calls ws.subscribe()) so no
+  // live kline ever races the bootstrap -- identical ordering to the
+  // original.
+  const bootstrapPairs = pairsFor(symbols, ["15m", "5m"], 100);
+  await bootstrapAtrFromRest(
+    new BinanceRestClient(binanceConfig),
+    orchestrator.atrTracker,
+    bootstrapPairs,
+  );
+
+  // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
+  // "Step E" LiqAggregateOrchestrator, found NEVER wired anywhere in
+  // this project during a full manual audit (only the repository was
+  // copied, not the orchestrator that actually calls it). Without
+  // this, TWO things were silently broken: (1) no boot-time P95/
+  // percentile warm-up from historical data -- every restart started
+  // cold; (2) no ongoing writes to the SHARED liq_minute_aggregates
+  // collection -- contradicting the operator's own explicit
+  // requirement to keep writing to it. The old MARKET_DATA_WRITER
+  // gate (avoiding duplicate writers across THREE processes) does not
+  // apply -- this is the only process here, unconditionally the sole
+  // writer.
+  const persistenceConfig = loadPersistenceConfig();
+  const liqAggregateRepo = new LiqAggregateRepository(mongo, persistenceConfig);
+  const liqAggregateOrchestrator = new LiqAggregateOrchestrator(
+    persistenceConfig,
+    liqAggregateRepo,
+    orchestrator.liquidationStats,
+    symbols,
+  );
+  await liqAggregateOrchestrator.warmup();
+
+  // Sep 8 2026 (Karo) -- CRITICAL FIX, same class of gap as above --
+  // WallAggregateOrchestrator was never wired either. No warmup for
+  // this one by design (walls are pure live-state, see the original
+  // class's own doc comment), but the periodic flush to the SHARED
+  // wall_minute_aggregates collection was equally silently missing.
+  const wallPersistenceConfig = loadWallPersistenceConfig();
+  const wallAggregateRepo = new WallAggregateRepository(
+    mongo,
+    wallPersistenceConfig,
+  );
+  const wallAggregateOrchestrator = new WallAggregateOrchestrator(
+    wallPersistenceConfig,
+    wallAggregateRepo,
+    orchestrator.wallTracker,
+    symbols,
+  );
+  await wallAggregateOrchestrator.ensureIndexes();
+
   // Sep 8 2026 (Karo) -- starts the reconciliation cache's own
   // periodic refresh (see ReconciliationManager's own doc comment for
   // the OOM-crash this fixes). Must start BEFORE orchestrator.start()
@@ -190,6 +259,11 @@ async function main(): Promise<void> {
 
   await reconciliation.start();
   orchestrator.start();
+  // Sep 8 2026 (Karo) -- starts the 60s flush timer, AFTER ws.start()
+  // (matching old app.ts's own ordering exactly -- "runs after WS so
+  // live data flow is never blocked by Mongo index creation").
+  liqAggregateOrchestrator.start();
+  wallAggregateOrchestrator.start();
   log.info(
     `liquidation-detector started -- ${symbols.length} symbols, ${userRuntimes.filter((r) => r.config.enabled).length} enabled user(s)`,
   );
@@ -197,12 +271,16 @@ async function main(): Promise<void> {
   process.on("SIGINT", async () => {
     log.info("shutting down (SIGINT)");
     reconciliation.stop();
+    await liqAggregateOrchestrator.stop();
+    await wallAggregateOrchestrator.stop();
     await mongo.close();
     process.exit(0);
   });
   process.on("SIGTERM", async () => {
     log.info("shutting down (SIGTERM)");
     reconciliation.stop();
+    await liqAggregateOrchestrator.stop();
+    await wallAggregateOrchestrator.stop();
     await mongo.close();
     process.exit(0);
   });
