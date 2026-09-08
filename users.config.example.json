@@ -1,12 +1,21 @@
 {
   "users": [
     {
+      "userId": "main",
+      "enabled": true,
+      "telegram": {
+        "enabled": true,
+        "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
+        "chatIds": ["PLACEHOLDER_FRIEND_CHAT_ID"]
+      }
+    },
+    {
       "userId": "karo",
       "enabled": true,
       "telegram": {
         "enabled": true,
         "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
-        "chatId": "PLACEHOLDER_CHAT_ID"
+        "chatIds": ["PLACEHOLDER_KARO_CHAT_ID"]
       },
       "binance": {
         "enabled": true,
@@ -24,35 +33,13 @@
       }
     },
     {
-      "userId": "friend",
-      "enabled": true,
-      "telegram": {
-        "enabled": true,
-        "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
-        "chatId": "PLACEHOLDER_CHAT_ID"
-      },
-      "binance": {
-        "enabled": true,
-        "apiKey": "PLACEHOLDER_BINANCE_API_KEY",
-        "apiSecret": "PLACEHOLDER_BINANCE_API_SECRET",
-        "mode": "shadow",
-        "orderExecutionEnabled": false,
-        "leverage": 20,
-        "marginMode": "ISOLATED"
-      },
-      "risk": {
-        "riskUsd": 10,
-        "accountBudgetUsd": 500,
-        "dailyLossLimitPct": 5
-      }
-    },
-    {
       "userId": "artak",
       "enabled": true,
       "telegram": {
         "enabled": true,
+        "_comment": "Example: Artak's own signals ALSO reach Karo's chat -- just list both chat ids here. This is entirely independent from Karo's OWN user block above; it does not make Artak and Karo share risk/execution/anything else, only this one Telegram delivery list.",
         "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
-        "chatId": "PLACEHOLDER_CHAT_ID"
+        "chatIds": ["PLACEHOLDER_ARTAK_CHAT_ID", "PLACEHOLDER_KARO_CHAT_ID"]
       },
       "binance": {
         "enabled": false,

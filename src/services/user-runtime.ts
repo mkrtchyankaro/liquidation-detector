@@ -40,7 +40,10 @@ export interface UserRuntime {
   readonly executionClaims: ExecutionClaimRepository | null;
 }
 
-export function buildUserRuntime(config: UserConfig, mongo: MongoClientWrapper): UserRuntime {
+export function buildUserRuntime(
+  config: UserConfig,
+  mongo: MongoClientWrapper,
+): UserRuntime {
   let binanceRest: BinanceRestClient | null = null;
   let execution: BinanceExecutionService | null = null;
   let executionRecords: ExecutionRecordRepository | null = null;
@@ -68,13 +71,19 @@ export function buildUserRuntime(config: UserConfig, mongo: MongoClientWrapper):
     // is expressed correctly HERE -- each BinanceExecutionService
     // instance is independently configured from that one user's own
     // UserConfig.binance block.
-    execution = new BinanceExecutionService(binanceRest, executionRecords, executionClaims, null, {
-      mode: config.binance.mode,
-      orderExecutionEnabled: config.binance.orderExecutionEnabled,
-      leverage: config.binance.leverage,
-      marginMode: config.binance.marginMode,
-      riskUsdForValidation: config.risk.riskUsd,
-    });
+    execution = new BinanceExecutionService(
+      binanceRest,
+      executionRecords,
+      executionClaims,
+      null,
+      {
+        mode: config.binance.mode,
+        orderExecutionEnabled: config.binance.orderExecutionEnabled,
+        leverage: config.binance.leverage,
+        marginMode: config.binance.marginMode,
+        riskUsdForValidation: config.risk.riskUsd,
+      },
+    );
   }
 
   let telegram: TelegramClient | null = null;
@@ -82,7 +91,7 @@ export function buildUserRuntime(config: UserConfig, mongo: MongoClientWrapper):
     telegram = new TelegramClient({
       enabled: true,
       botToken: config.telegram.botToken,
-      chatIds: [config.telegram.chatId],
+      chatIds: config.telegram.chatIds,
       parseMode: "none",
       disableNotification: false,
     });
@@ -93,7 +102,11 @@ export function buildUserRuntime(config: UserConfig, mongo: MongoClientWrapper):
     binanceRest,
     execution,
     telegram,
-    dailyLossLimit: new DailyLossLimitTracker(config.userId, config.risk.accountBudgetUsd, config.risk.dailyLossLimitPct),
+    dailyLossLimit: new DailyLossLimitTracker(
+      config.userId,
+      config.risk.accountBudgetUsd,
+      config.risk.dailyLossLimitPct,
+    ),
     reconcileInFlight: new InFlightGuard(),
     reconcileHealth: new ReconciliationHealthTracker(),
     executionRecords,

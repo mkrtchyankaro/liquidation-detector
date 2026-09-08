@@ -1,7 +1,14 @@
 export interface TelegramUserConfig {
   enabled: boolean;
   botToken: string;
-  chatId: string;
+  /** Sep 8 2026 (Karo) -- ARRAY, not a single id, matching liqwatch-bot's
+   *  own proven TELEGRAM_CHAT_ID pattern exactly (main bot's own .env:
+   *  "TELEGRAM_CHAT_ID=1313457310,1317696535" -- every signal already
+   *  goes to BOTH ids there). Lets one user's own Telegram delivery
+   *  fan out to multiple chats -- e.g. Artak's own config can list his
+   *  own chat id AND Karo's chat id, so Artak's signals also reach
+   *  Karo, without needing a second "user". */
+  chatIds: string[];
 }
 
 export interface BinanceUserConfig {

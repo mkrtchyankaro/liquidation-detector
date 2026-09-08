@@ -9,7 +9,11 @@ interface RawUsersConfigFile {
   users: Array<{
     userId: string;
     enabled: boolean;
-    telegram?: { enabled: boolean; botToken: string; chatId: string };
+    telegram?: {
+      enabled: boolean;
+      botToken: string;
+      chatIds: string[] | string;
+    };
     binance?: {
       enabled: boolean;
       apiKey: string;
@@ -19,7 +23,11 @@ interface RawUsersConfigFile {
       leverage: number;
       marginMode: "ISOLATED" | "CROSSED";
     };
-    risk: { riskUsd: number; accountBudgetUsd: number; dailyLossLimitPct: number };
+    risk: {
+      riskUsd: number;
+      accountBudgetUsd: number;
+      dailyLossLimitPct: number;
+    };
   }>;
 }
 
@@ -39,11 +47,17 @@ interface RawUsersConfigFile {
  */
 export function loadUsersConfig(filePath: string): UserConfig[] {
   if (!fs.existsSync(filePath)) {
-    throw new Error(`users config file not found at ${filePath} -- copy users.config.example.json and fill in real values.`);
+    throw new Error(
+      `users config file not found at ${filePath} -- copy users.config.example.json and fill in real values.`,
+    );
   }
-  const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as RawUsersConfigFile;
+  const raw = JSON.parse(
+    fs.readFileSync(filePath, "utf8"),
+  ) as RawUsersConfigFile;
   if (!Array.isArray(raw.users) || raw.users.length === 0) {
-    throw new Error(`users config at ${filePath} must have a non-empty "users" array.`);
+    throw new Error(
+      `users config at ${filePath} must have a non-empty "users" array.`,
+    );
   }
 
   const seenIds = new Set<string>();
@@ -52,17 +66,47 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
   for (const u of raw.users) {
     const userId = normalizeAndValidateUserId(u.userId); // throws on invalid -- fail-fast
     if (seenIds.has(userId)) {
-      throw new Error(`duplicate userId "${userId}" in users config -- each user must be unique.`);
+      throw new Error(
+        `duplicate userId "${userId}" in users config -- each user must be unique.`,
+      );
     }
     seenIds.add(userId);
 
-    if (!u.risk || typeof u.risk.riskUsd !== "number" || typeof u.risk.accountBudgetUsd !== "number" || typeof u.risk.dailyLossLimitPct !== "number") {
-      throw new Error(`user "${userId}" is missing required risk config (riskUsd/accountBudgetUsd/dailyLossLimitPct).`);
+    if (
+      !u.risk ||
+      typeof u.risk.riskUsd !== "number" ||
+      typeof u.risk.accountBudgetUsd !== "number" ||
+      typeof u.risk.dailyLossLimitPct !== "number"
+    ) {
+      throw new Error(
+        `user "${userId}" is missing required risk config (riskUsd/accountBudgetUsd/dailyLossLimitPct).`,
+      );
     }
 
     const telegram = u.telegram
-      ? { enabled: u.telegram.enabled, botToken: u.telegram.botToken, chatId: u.telegram.chatId }
+      ? {
+          enabled: u.telegram.enabled,
+          botToken: u.telegram.botToken,
+          // Sep 8 2026 (Karo) -- accepts either a real JSON array
+          // (["111","222"]) or a comma-separated string ("111,222"),
+          // matching liqwatch-bot's own TELEGRAM_CHAT_ID convenience
+          // parsing exactly. Always normalized to string[] here.
+          chatIds: Array.isArray(u.telegram.chatIds)
+            ? u.telegram.chatIds
+                .map((id) => id.trim())
+                .filter((id) => id.length > 0)
+            : u.telegram.chatIds
+                .split(",")
+                .map((id) => id.trim())
+                .filter((id) => id.length > 0),
+        }
       : null;
+
+    if (telegram?.enabled && telegram.chatIds.length === 0) {
+      throw new Error(
+        `user "${userId}" has telegram.enabled=true but no valid chatIds -- fix users.config.json`,
+      );
+    }
     const binance = u.binance
       ? {
           enabled: u.binance.enabled,
@@ -80,11 +124,17 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
       enabled: u.enabled,
       telegram,
       binance,
-      risk: { riskUsd: u.risk.riskUsd, accountBudgetUsd: u.risk.accountBudgetUsd, dailyLossLimitPct: u.risk.dailyLossLimitPct },
+      risk: {
+        riskUsd: u.risk.riskUsd,
+        accountBudgetUsd: u.risk.accountBudgetUsd,
+        dailyLossLimitPct: u.risk.dailyLossLimitPct,
+      },
     });
   }
 
   const enabledCount = result.filter((u) => u.enabled).length;
-  log.info(`loaded ${result.length} user(s) from config, ${enabledCount} enabled: [${result.map((u) => u.userId).join(", ")}]`);
+  log.info(
+    `loaded ${result.length} user(s) from config, ${enabledCount} enabled: [${result.map((u) => u.userId).join(", ")}]`,
+  );
   return result;
 }
