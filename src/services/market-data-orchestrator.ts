@@ -292,7 +292,25 @@ export class MarketDataOrchestrator {
         physics: event.plan
           ? {
               cumLiqUsd: event.totalEpisodePressure,
-              atrPct: 0,
+              // Sep 8 2026 (Karo) -- CRITICAL FIX, the single most
+              // severe bug found in this entire project: this was
+              // hardcoded to 0. execute-for-user.usecase.ts reads
+              // globalSignal.physics.atrPct directly into its own
+              // pre-flight re-plan call (atr15mPct: ...?? 0) --
+              // deriveLiquidityTradePlan() REQUIRES atr15mPct > 0
+              // (Step "invalid-input" guard) or the WHOLE pre-flight
+              // check SKIPs the trade. Confirmed via a real production
+              // log: "[BINANCE_PRE_FLIGHT] decision=SKIP reason=plan
+              // invalid: invalid-input" -- this meant EVERY live
+              // execution, for EVERY user, was silently skipped since
+              // this project's first deploy, regardless of BTC-block/
+              // direction-disable/daily-loss-limit/anything else. Now
+              // reads the SAME live ATR(15m) value used everywhere
+              // else in this file (this.atrTracker.getATR(symbol,
+              // "15m")), matching what evaluateSignal() itself used
+              // internally (watch.atrAtStart / entryPrice) to compute
+              // this exact plan in the first place.
+              atrPct: this.atrTracker.getATR(event.symbol, "15m") ?? 0,
               liqBaseline: event.plan.liqBaseline,
               liqStrengthRaw: event.plan.liqStrengthRaw,
               liqStrength: event.plan.liqStrength,
