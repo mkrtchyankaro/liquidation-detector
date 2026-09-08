@@ -5,7 +5,10 @@ import { loadBinanceConfig } from "./infrastructure/config/binance.config";
 import { loadSymbolsConfig } from "./infrastructure/config/symbols.config";
 import { loadObservabilityConfig } from "./infrastructure/config/observability.config";
 import { loadUsersConfig } from "./infrastructure/config/users.config.loader";
-import { MongoClientWrapper, type MongoDetectorConfig } from "./infrastructure/mongo/mongo.client";
+import {
+  MongoClientWrapper,
+  type MongoDetectorConfig,
+} from "./infrastructure/mongo/mongo.client";
 import { BinanceWsClient } from "./infrastructure/binance/binanceWs.client";
 import { V5WaveService } from "./strategy/v5/v5-wave.service";
 import { v5IndividualEventP95 } from "./strategy/v5/v5-liq-stats";
@@ -39,10 +42,14 @@ async function main(): Promise<void> {
   };
   const mongo = new MongoClientWrapper(mongoCfg);
 
-  const usersConfigPath = process.env.USERS_CONFIG_PATH ?? path.join(process.cwd(), "users.config.json");
+  const usersConfigPath =
+    process.env.USERS_CONFIG_PATH ??
+    path.join(process.cwd(), "users.config.json");
   const users = loadUsersConfig(usersConfigPath);
 
-  const userRuntimes: UserRuntime[] = users.map((u) => buildUserRuntime(u, mongo));
+  const userRuntimes: UserRuntime[] = users.map((u) =>
+    buildUserRuntime(u, mongo),
+  );
   log.info(`built ${userRuntimes.length} user runtime(s)`);
 
   // Sep 8 2026 (Karo) -- startup-blocker index validation, same
@@ -56,29 +63,51 @@ async function main(): Promise<void> {
     await new GlobalSignalRepository(mongo).ensureIndexes();
     for (const runtime of userRuntimes) {
       if (!runtime.config.enabled) continue;
-      await new UserSignalRepository(mongo, runtime.config.userId).ensureIndexes();
-      if (runtime.executionRecords) await runtime.executionRecords.ensureIndexes();
-      if (runtime.executionClaims) await runtime.executionClaims.ensureIndexes();
+      await new UserSignalRepository(
+        mongo,
+        runtime.config.userId,
+      ).ensureIndexes();
+      if (runtime.executionRecords)
+        await runtime.executionRecords.ensureIndexes();
+      if (runtime.executionClaims)
+        await runtime.executionClaims.ensureIndexes();
     }
     log.info("all Mongo indexes ensured");
   } else {
-    log.warn("MONGO_URI not set -- skipping index validation, persistence disabled");
+    log.warn(
+      "MONGO_URI not set -- skipping index validation, persistence disabled",
+    );
   }
 
   // V5's own strategy engine -- SINGLE, global instance. Callback
   // wiring below is the SAME pattern app.ts used (ATR/OI/baseline/P95/
   // walls/flow all read from the SAME domain market-data stores this
   // orchestrator itself owns).
-  const orchestratorPlaceholder: { instance: MarketDataOrchestrator | null } = { instance: null };
+  const orchestratorPlaceholder: { instance: MarketDataOrchestrator | null } = {
+    instance: null,
+  };
 
   const v5 = new V5WaveService(
     (symbol, referencePrice) => {
-      const atrPct = orchestratorPlaceholder.instance?.atrTracker.getATR(symbol, "15m") ?? null;
+      const atrPct =
+        orchestratorPlaceholder.instance?.atrTracker.getATR(symbol, "15m") ??
+        null;
       return atrPct ? atrPct * referencePrice : 0;
     },
-    (symbol) => orchestratorPlaceholder.instance?.oiTracker.getCachedOI(symbol) ?? null,
-    (symbol) => orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin(symbol, 60) ?? 0,
-    (symbol) => (orchestratorPlaceholder.instance ? v5IndividualEventP95(orchestratorPlaceholder.instance.liquidationStats, symbol) : 0),
+    (symbol) =>
+      orchestratorPlaceholder.instance?.oiTracker.getCachedOI(symbol) ?? null,
+    (symbol) =>
+      orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin(
+        symbol,
+        60,
+      ) ?? 0,
+    (symbol) =>
+      orchestratorPlaceholder.instance
+        ? v5IndividualEventP95(
+            orchestratorPlaceholder.instance.liquidationStats,
+            symbol,
+          )
+        : 0,
     null,
     null,
   );
@@ -99,22 +128,36 @@ async function main(): Promise<void> {
   );
   orchestratorPlaceholder.instance = orchestrator;
 
+  // Sep 8 2026 (Karo) -- starts the reconciliation cache's own
+  // periodic refresh (see ReconciliationManager's own doc comment for
+  // the OOM-crash this fixes). Must start BEFORE orchestrator.start()
+  // -- ws ticks begin flowing immediately once WS connects, and
+  // onTick() should never run against an empty, never-populated cache
+  // for longer than necessary.
+  await reconciliation.start();
   orchestrator.start();
-  log.info(`liquidation-detector started -- ${symbols.length} symbols, ${userRuntimes.filter((r) => r.config.enabled).length} enabled user(s)`);
+  log.info(
+    `liquidation-detector started -- ${symbols.length} symbols, ${userRuntimes.filter((r) => r.config.enabled).length} enabled user(s)`,
+  );
 
   process.on("SIGINT", async () => {
     log.info("shutting down (SIGINT)");
+    reconciliation.stop();
     await mongo.close();
     process.exit(0);
   });
   process.on("SIGTERM", async () => {
     log.info("shutting down (SIGTERM)");
+    reconciliation.stop();
     await mongo.close();
     process.exit(0);
   });
 }
 
 main().catch((err) => {
-  log.error({ err: err instanceof Error ? err.message : String(err) }, "[FATAL_STARTUP_ERROR]");
+  log.error(
+    { err: err instanceof Error ? err.message : String(err) },
+    "[FATAL_STARTUP_ERROR]",
+  );
   process.exit(1);
 });
