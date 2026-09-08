@@ -14,6 +14,7 @@ import { V5WaveService } from "./strategy/v5/v5-wave.service";
 import { v5IndividualEventP95 } from "./strategy/v5/v5-liq-stats";
 import { buildUserRuntime, type UserRuntime } from "./services/user-runtime";
 import { SignalDistributor } from "./services/signal-distributor";
+import { runStartupSafetyChecks } from "./services/startup-safety";
 import { ReconciliationManager } from "./services/reconciliation-manager";
 import { MarketDataOrchestrator } from "./services/market-data-orchestrator";
 import { GlobalSignalRepository } from "./infrastructure/mongo/global-signal.repository";
@@ -134,6 +135,35 @@ async function main(): Promise<void> {
   // -- ws ticks begin flowing immediately once WS connects, and
   // onTick() should never run against an empty, never-populated cache
   // for longer than necessary.
+  // Sep 8 2026 (Karo) -- CRITICAL, ported from liqwatch-bot's own
+  // fail-fast startup validation + reconciliation (see
+  // startup-safety.ts's own doc comment for the exact real production
+  // incident this guards against). MUST run before any WS ticks flow
+  // -- a live-armed user's first-ever real order must never be placed
+  // before we've confirmed Binance's actual state matches what we
+  // expect.
+  await runStartupSafetyChecks(userRuntimes, mongo, symbols);
+
+  // Sep 8 2026 (Karo) -- CRITICAL, ported from liqwatch-bot's own
+  // initializeDailyPnlFromDb() call in app.ts. Without this, a
+  // restart silently resets every user's own daily-loss counter to
+  // zero even if they'd already realized losses earlier that same
+  // day -- found during a full manual audit (defined, never called).
+  for (const runtime of userRuntimes) {
+    if (!runtime.config.enabled) continue;
+    const userSignalRepo = new UserSignalRepository(
+      mongo,
+      runtime.config.userId,
+    );
+    await runtime.dailyLossLimit.initializeFromDb((startMs, endMs) =>
+      userSignalRepo.sumClosedNetPnlInRange(
+        runtime.config.userId,
+        startMs,
+        endMs,
+      ),
+    );
+  }
+
   await reconciliation.start();
   orchestrator.start();
   log.info(

@@ -1,9 +1,9 @@
 import * as crypto from "crypto";
 import { type BinanceRestClient, BinanceApiError } from "./binanceRest.client";
-import type { ExecutionRecordRepository } from '../mongo/execution-record.repository';
-import type { ExecutionClaimRepository } from '../mongo/execution-claim.repository';
-import type { TelegramClient } from '../telegram/telegram.client';
-import { childLogger } from '../logging/logger';
+import type { ExecutionRecordRepository } from "../mongo/execution-record.repository";
+import type { ExecutionClaimRepository } from "../mongo/execution-claim.repository";
+import type { TelegramClient } from "../telegram/telegram.client";
+import { childLogger } from "../logging/logger";
 import {
   deriveLiquidityTradePlan,
   type WallSnapshots,
@@ -696,7 +696,18 @@ export class BinanceExecutionService {
   /** Engages the global halt. Idempotent — a second halt call just
    *  logs, doesn't overwrite the original reason (the FIRST problem
    *  is usually the one that matters most for diagnosis). */
-  private setHalt(reason: string): void {
+  /** Sep 8 2026 (Karo), multi-user adaptation -- made PUBLIC (was
+   *  private) so per-user startup-safety wiring (services/
+   *  startup-safety.ts) can halt THIS specific user's own instance
+   *  when validateForLiveStart() fails, without needing to crash the
+   *  whole process (the original single-account bot's own
+   *  process.exit(1) reaction is architecturally wrong here -- one
+   *  user's own invalid config/credentials must never stop "main" or
+   *  any other correctly-configured user). reconcileOnStartup() itself
+   *  already calls this internally on its own failure paths,
+   *  unchanged.
+   */
+  setHalt(reason: string): void {
     if (this.haltReason !== null) {
       log.error(
         { reason, existing: this.haltReason },
