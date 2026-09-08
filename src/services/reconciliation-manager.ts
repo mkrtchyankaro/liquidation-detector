@@ -96,7 +96,24 @@ export class ReconciliationManager {
    *  still runs per-tick for whatever IS cached as open -- that part
    *  is unchanged and correct (it's a real, necessary check against
    *  the authoritative exchange state, and is itself already
-   *  backoff-protected by ReconciliationHealthTracker/InFlightGuard). */
+   *  backoff-protected by ReconciliationHealthTracker/InFlightGuard).
+   *
+   *  CRITICAL FIX (Sep 8 2026, confirmed real production incident --
+   *  a single position sent 11+ duplicate "V5 CLOSE ... TP" Telegram
+   *  messages within one minute): once a position closed,
+   *  reconcileUserPosition() correctly reported it via Mongo/Telegram
+   *  -- but this class's OWN in-memory openCache still listed that
+   *  signalId as "open" for up to CACHE_REFRESH_MS (15s) longer, since
+   *  the cache only refreshes on its own slow timer, not per-tick.
+   *  EVERY bookTicker tick in that window (which can fire many times
+   *  per second) re-discovered the same, already-closed userSignal
+   *  from the stale cache and re-ran the ENTIRE reconcile-and-notify
+   *  flow again -- InFlightGuard only prevents truly CONCURRENT
+   *  re-entry, not this sequential re-triggering once each prior call
+   *  had already finished. reconcileUserPosition() now returns `true`
+   *  exactly when it just closed a position; on `true`, this method
+   *  immediately prunes that signalId from its OWN cache entry, so no
+   *  further tick within the same window can re-discover it. */
   async onTick(symbol: string, now: number): Promise<void> {
     for (const runtime of this.userRuntimes) {
       if (!runtime.config.enabled || !runtime.execution) continue;
@@ -112,13 +129,22 @@ export class ReconciliationManager {
         try {
           const globalSignal = await this.getGlobalSignal(userSignal.signalId);
           if (!globalSignal) continue;
-          await reconcileUserPosition(
+          const justClosed = await reconcileUserPosition(
             userSignal,
             globalSignal,
             runtime,
             userSignalRepo,
             now,
           );
+          if (justClosed) {
+            const stillCached = this.openCache.get(runtime.config.userId);
+            if (stillCached) {
+              this.openCache.set(
+                runtime.config.userId,
+                stillCached.filter((s) => s.signalId !== userSignal.signalId),
+              );
+            }
+          }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
           log.error(
