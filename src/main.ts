@@ -61,13 +61,6 @@ async function main(): Promise<void> {
   );
   log.info(`built ${userRuntimes.length} user runtime(s)`);
 
-  // Sep 8 2026 (Karo) -- startup-blocker index validation, same
-  // severity as liqwatch-bot's own execution-record/execution-claim
-  // ensureIndexes() (both already throw on failure; this block simply
-  // ensures they're actually CALLED, plus the two new v5_global_signals/
-  // v5_signals_<userId> indexes). If Mongo is disabled
-  // (mongoCfg.enabled=false), every ensureIndexes() call below is a
-  // safe no-op (its own collection accessor returns null first).
   if (mongoCfg.enabled) {
     await new GlobalSignalRepository(mongo).ensureIndexes();
     for (const runtime of userRuntimes) {
@@ -88,10 +81,6 @@ async function main(): Promise<void> {
     );
   }
 
-  // V5's own strategy engine -- SINGLE, global instance. Callback
-  // wiring below is the SAME pattern app.ts used (ATR/OI/baseline/P95/
-  // walls/flow all read from the SAME domain market-data stores this
-  // orchestrator itself owns).
   const orchestratorPlaceholder: { instance: MarketDataOrchestrator | null } = {
     instance: null,
   };
@@ -117,16 +106,6 @@ async function main(): Promise<void> {
             symbol,
           )
         : 0,
-    // Sep 8 2026 (Karo) -- CRITICAL FIX, found during a full manual
-    // audit: this was `null`, meaning EVERY trade-plan was computed
-    // with NO_WALLS (all zeros) -- the wall-cap-on-TP step in
-    // deriveLiquidityTradePlan() was therefore structurally NEVER
-    // active, a real trading-behavior difference from the old bot,
-    // not just a missing diagnostic. Restored, byte-identical logic
-    // to liqwatch-bot's own app.ts V5WaveService construction (same
-    // wall-tracker method calls, same ctx shape, same atAnchor=atEntry
-    // choice -- confirmed the ORIGINAL itself used the identical
-    // snapshot for both, not a new approximation).
     (symbol, _side) => {
       const wallTracker = orchestratorPlaceholder.instance?.wallTracker;
       const bidWall = wallTracker?.getLargestPersistentWall(symbol, "BID");
@@ -146,11 +125,6 @@ async function main(): Promise<void> {
       };
       return { atEntry: ctx, atAnchor: ctx, atSweepStart: null };
     },
-    // Sep 8 2026 (Karo) -- CRITICAL FIX, same audit: this was `null`,
-    // meaning every wave's own takerBuyUsd/takerSellUsd/takerImbalance
-    // forensic field was silently always null (AggressiveFlowService
-    // itself was never even constructed anywhere -- fixed in
-    // market-data-orchestrator.ts).
     (symbol, lookbackMs, now) =>
       orchestratorPlaceholder.instance?.aggressiveFlow.getRecentFlow(
         symbol,
@@ -163,12 +137,6 @@ async function main(): Promise<void> {
   const reconciliation = new ReconciliationManager(mongo, userRuntimes);
 
   const ws = new BinanceWsClient(binanceConfig);
-  // Sep 8 2026 (Karo) -- CRITICAL FIX: broadcasts system-wide alerts
-  // (currently: liq-feed-dead) to EVERY enabled-telegram user, since
-  // this affects everyone's own data equally, not any one user's own
-  // trade. Failures for one user's own chat never block delivery to
-  // any other -- matches the same isolation principle used
-  // everywhere else in this project.
   const liqFeedAlertTelegram = {
     sendMessage: async (text: string): Promise<void> => {
       for (const runtime of userRuntimes) {
@@ -199,25 +167,16 @@ async function main(): Promise<void> {
   );
   orchestratorPlaceholder.instance = orchestrator;
 
-  // Sep 8 2026 (Karo) -- ensures the new liq_raw_events TTL/symbol
-  // indexes (RawLiquidationEventRepository, wrapped by the
-  // orchestrator's own ensureIndexes()).
   await orchestrator.ensureIndexes();
 
-  // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
-  // app.ts "Restart safety — Phase A: ATR bootstrap from REST history"
-  // (found NEVER called anywhere in this project during a full manual
-  // audit -- atr-bootstrap.ts was copied but never wired). Without
-  // this, ATRTrackerService starts completely empty at every restart
-  // -- getAtrAbs() returns 0 for every symbol until enough LIVE 15m/5m
-  // candles close naturally (up to 15-20+ minutes), during which
-  // V5's own extremeDistanceAtr math (which DIVIDES by this value) is
-  // either NaN/Infinity or otherwise meaningless -- directly affects
-  // whether/how signals fire after every single restart. Pulls 100
-  // closed candles per (symbol, interval) via REST, runs BEFORE
-  // orchestrator.start() (which itself calls ws.subscribe()) so no
-  // live kline ever races the bootstrap -- identical ordering to the
-  // original.
+  // Sep 8 2026 (Karo) -- NEW, restart-survivability for the MAIN
+  // same-symbol lock (see MarketDataOrchestrator.hydrateMainLocks()'s
+  // own doc comment). MUST run before any WS ticks flow -- otherwise a
+  // liquidation event for an already-open MAIN symbol could slip
+  // through and start a second, duplicate watch before hydration
+  // finishes.
+  await orchestrator.hydrateMainLocks();
+
   const bootstrapPairs = pairsFor(symbols, ["15m", "5m"], 100);
   await bootstrapAtrFromRest(
     new BinanceRestClient(binanceConfig),
@@ -225,18 +184,6 @@ async function main(): Promise<void> {
     bootstrapPairs,
   );
 
-  // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
-  // "Step E" LiqAggregateOrchestrator, found NEVER wired anywhere in
-  // this project during a full manual audit (only the repository was
-  // copied, not the orchestrator that actually calls it). Without
-  // this, TWO things were silently broken: (1) no boot-time P95/
-  // percentile warm-up from historical data -- every restart started
-  // cold; (2) no ongoing writes to the SHARED liq_minute_aggregates
-  // collection -- contradicting the operator's own explicit
-  // requirement to keep writing to it. The old MARKET_DATA_WRITER
-  // gate (avoiding duplicate writers across THREE processes) does not
-  // apply -- this is the only process here, unconditionally the sole
-  // writer.
   const persistenceConfig = loadPersistenceConfig();
   const liqAggregateRepo = new LiqAggregateRepository(mongo, persistenceConfig);
   const liqAggregateOrchestrator = new LiqAggregateOrchestrator(
@@ -247,11 +194,6 @@ async function main(): Promise<void> {
   );
   await liqAggregateOrchestrator.warmup();
 
-  // Sep 8 2026 (Karo) -- CRITICAL FIX, same class of gap as above --
-  // WallAggregateOrchestrator was never wired either. No warmup for
-  // this one by design (walls are pure live-state, see the original
-  // class's own doc comment), but the periodic flush to the SHARED
-  // wall_minute_aggregates collection was equally silently missing.
   const wallPersistenceConfig = loadWallPersistenceConfig();
   const wallAggregateRepo = new WallAggregateRepository(
     mongo,
@@ -265,26 +207,8 @@ async function main(): Promise<void> {
   );
   await wallAggregateOrchestrator.ensureIndexes();
 
-  // Sep 8 2026 (Karo) -- starts the reconciliation cache's own
-  // periodic refresh (see ReconciliationManager's own doc comment for
-  // the OOM-crash this fixes). Must start BEFORE orchestrator.start()
-  // -- ws ticks begin flowing immediately once WS connects, and
-  // onTick() should never run against an empty, never-populated cache
-  // for longer than necessary.
-  // Sep 8 2026 (Karo) -- CRITICAL, ported from liqwatch-bot's own
-  // fail-fast startup validation + reconciliation (see
-  // startup-safety.ts's own doc comment for the exact real production
-  // incident this guards against). MUST run before any WS ticks flow
-  // -- a live-armed user's first-ever real order must never be placed
-  // before we've confirmed Binance's actual state matches what we
-  // expect.
   await runStartupSafetyChecks(userRuntimes, mongo, symbols);
 
-  // Sep 8 2026 (Karo) -- CRITICAL, ported from liqwatch-bot's own
-  // initializeDailyPnlFromDb() call in app.ts. Without this, a
-  // restart silently resets every user's own daily-loss counter to
-  // zero even if they'd already realized losses earlier that same
-  // day -- found during a full manual audit (defined, never called).
   for (const runtime of userRuntimes) {
     if (!runtime.config.enabled) continue;
     const userSignalRepo = new UserSignalRepository(
@@ -302,9 +226,6 @@ async function main(): Promise<void> {
 
   await reconciliation.start();
   orchestrator.start();
-  // Sep 8 2026 (Karo) -- starts the 60s flush timer, AFTER ws.start()
-  // (matching old app.ts's own ordering exactly -- "runs after WS so
-  // live data flow is never blocked by Mongo index creation").
   liqAggregateOrchestrator.start();
   wallAggregateOrchestrator.start();
   log.info(

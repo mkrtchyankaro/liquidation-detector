@@ -3,6 +3,7 @@ import { BinanceWsClient } from "../infrastructure/binance/binanceWs.client";
 import {
   V5WaveService,
   type V5TickOutcome,
+  type V5TradeCloseEvent,
 } from "../strategy/v5/v5-wave.service";
 import { OiTrackerService } from "../domain/liquidation/oi-tracker.service";
 import { LiquidationStore } from "../domain/liquidation/liquidation.store";
@@ -22,6 +23,7 @@ import type { ReconciliationManager } from "./reconciliation-manager";
 import type { MongoClientWrapper } from "../infrastructure/mongo/mongo.client";
 import { GlobalSignalRepository } from "../infrastructure/mongo/global-signal.repository";
 import { RawLiquidationEventRepository } from "../infrastructure/mongo/raw-liquidation-event.repository";
+import { formatV5CloseMessage } from "../infrastructure/telegram/signal.formatter";
 import { childLogger } from "../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "market-data-orchestrator" });
@@ -29,22 +31,36 @@ const log = childLogger({ mod: "market-data-orchestrator" });
 /**
  * Sep 8 2026 (Karo). WS subscribe options and per-stream routing are
  * REUSED, identical, from liqwatch-bot's own app.ts ws.subscribe()/
- * ws.on(...) block (see MIGRATION_NOTES.md for exact old-file line
- * references): kline[15m,5m] -> ATRTrackerService, aggTrade ->
- * (aggressive-flow, wired the same way), bookTicker -> V5WaveService.onTick()
- * + ReconciliationManager.onTick(), liquidation -> LiquidationStore +
+ * ws.on(...) block: kline[15m,5m] -> ATRTrackerService, aggTrade ->
+ * aggressive-flow, bookTicker -> V5WaveService.onTick() +
+ * ReconciliationManager.onTick(), liquidation -> LiquidationStore +
  * LiquidationStatsService + V5WaveService.onLiquidation(), orderbook ->
- * WallTrackerService. What's NEW: SIGNAL_CANDIDATE outcomes are mapped
- * to a GlobalSignalDoc and hand off to SignalDistributor, instead of
- * app.ts's own inline handleV5TickOutcome. ALSO NEW (Sep 8 2026,
- * research-data layer): 1m kline subscription (confirmed the old bot
- * never had this -- see the audit this was requested from), raw
- * liquidation-event archiving, and GLOBAL research-checkpoint
- * tracking. None of this changes V5's own strategy behavior -- 1m
- * candles are fed to CandleStore only, never to ATRTrackerService
- * (which only tracks 5m/15m/1h internally, confirmed by its own
- * isTracked() method -- 1m candles are silently ignored there by
- * construction, not by a new guard added here).
+ * WallTrackerService.
+ *
+ * Sep 8 2026 (Karo) -- MAIN/GLOBAL canonical lifecycle, restored + new
+ * feature (see the operator-requested audit this was built from,
+ * confirmed precisely what the old bot did vs never did):
+ *   1. RESTORED: V5WaveService.onPriceTickForTrades() is wired into
+ *      the bookTicker flow -- this is MAIN's OWN market-price-based
+ *      TP/SL close detection, confirmed present in the old app.ts
+ *      (handleV5Tick -> onPriceTickForTrades -> handleV5TradeClose ->
+ *      v5Repo.finalize(...) + telegram.sendMessage(...)) but NEVER
+ *      wired anywhere in this project until now -- meaning
+ *      GlobalSignalDoc.status stayed "SIGNAL" forever, for every
+ *      signal, permanently. Completely independent of any user's own
+ *      Binance reconciliation: this class never calls
+ *      V5WaveService.markTradeLive() on the shared instance, so
+ *      onPriceTickForTrades()'s own `if (trade.isLive) continue`
+ *      guard never skips a MAIN close for this reason -- confirmed via
+ *      that method's own source.
+ *   2. NEW FEATURE (confirmed the old bot never had this either, per
+ *      the same audit): mainSymbolLocks blocks a NEW canonical watch
+ *      from starting for a symbol that already has an OPEN MAIN
+ *      signal. Scoped ENTIRELY to this class's own in-memory state --
+ *      never reads or is affected by any UserSignalDoc (karo/artak's
+ *      own OPEN/CLOSED state never unlocks or blocks MAIN; see
+ *      reconcile-user-position.usecase.ts, which has no reference to
+ *      this class or to GlobalSignalRepository at all).
  */
 export class MarketDataOrchestrator {
   readonly liquidationStore = new LiquidationStore();
@@ -55,30 +71,21 @@ export class MarketDataOrchestrator {
   readonly tradeStore = new TradeStore();
   readonly orderbookStore = new OrderbookStore();
   readonly atrTracker = new ATRTrackerService();
-  /** Sep 8 2026 (Karo) -- REUSED, unchanged cadence/caching, from
-   *  liqwatch-bot's own market-data/oi-tracker.service.ts. Unlike
-   *  Funding (V3-Telegram-display-only, confirmed NEVER constructed
-   *  when V3_ENABLED=false, i.e. never on the currently-live V5-only
-   *  brother instance either), OI IS unconditionally constructed in
-   *  the old app.ts (oiTrackerForV4, before the V3_ENABLED gate) and
-   *  IS read by V5WaveService's own getOi callback -- diagnostic-only
-   *  (oiEnd/oiDeltaPct/btcContext.oiAtSignal fields, confirmed no
-   *  decision/gating logic branches on it), but genuinely part of
-   *  V5's proven runtime, so it is reproduced here. Auto-starts its
-   *  own 60s-refresh timer in its OWN constructor -- no separate
-   *  .start() call exists on this class (confirmed from source). */
   readonly oiTracker: OiTrackerService;
-  /** Sep 8 2026 (Karo) -- CRITICAL FIX: found NEVER constructed
-   *  anywhere in this project during a full manual audit. V5WaveService's
-   *  own getFlow callback (main.ts) reads from this via getRecentFlow()
-   *  -- without it, every wave's own takerBuyUsd/takerSellUsd/
-   *  takerImbalance forensic field was silently always null. */
   readonly aggressiveFlow = new AggressiveFlowService();
-  /** Sep 8 2026 (Karo) -- GLOBAL, in-memory, research-only (see
-   *  ResearchCheckpointTracker's own doc comment). Never per-user. */
   readonly researchCheckpoints = new ResearchCheckpointTracker();
   private readonly globalSignalRepo: GlobalSignalRepository;
   private readonly rawLiquidationEventRepo: RawLiquidationEventRepository;
+  /** Sep 8 2026 (Karo) -- NEW, MAIN/GLOBAL-only same-symbol lock. See
+   *  this class's own module doc comment for the full rationale. Keyed
+   *  by symbol alone (not symbol+side -- one canonical signal per
+   *  symbol, either side, at a time, matching the operator's own
+   *  framing: "XRP MAIN OPEN blocks another MAIN XRP signal", not
+   *  "XRP-LONG blocks only XRP-LONG"). */
+  private readonly mainSymbolLocks = new Set<string>();
+  private readonly broadcastTelegram: {
+    sendMessage: (text: string) => Promise<unknown>;
+  } | null;
 
   constructor(
     private readonly ws: BinanceWsClient,
@@ -91,51 +98,78 @@ export class MarketDataOrchestrator {
       typeof LiquidationStatsService
     >[0],
     wallTrackerConfig: ConstructorParameters<typeof WallTrackerService>[0],
-    /** Sep 8 2026 (Karo) -- CRITICAL FIX: LiqFeedWatchdogService's own
-     *  automatic Telegram alert ("🚨 LIQ FEED DEAD... bot likely needs
-     *  restart") NEVER actually sent anything until this fix -- it
-     *  previously defaulted to null (same class of bug as
-     *  BinanceExecutionService's own critical-alert wiring, found in
-     *  the same audit pass). System-wide event (affects every user
-     *  equally, not any one user's own trade), so this is optionally
-     *  a broadcast to every enabled-telegram user, not scoped to one. */
-    liqFeedAlertTelegram: {
+    /** Sep 8 2026 (Karo) -- broadcasts to every enabled-telegram user.
+     *  Used for BOTH the liq-feed-dead alert AND (new) MAIN close
+     *  notifications -- both are system-wide/strategy-wide events, not
+     *  scoped to one user, so the same broadcast mechanism serves
+     *  both. */
+    broadcastTelegram: {
       sendMessage: (text: string) => Promise<unknown>;
     } | null = null,
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
-    this.liqFeedWatchdog = new LiqFeedWatchdogService(
-      log,
-      liqFeedAlertTelegram,
-    );
-    // Auto-starts its own refresh cycle immediately (see field's own doc comment).
+    this.liqFeedWatchdog = new LiqFeedWatchdogService(log, broadcastTelegram);
     this.oiTracker = new OiTrackerService(symbols);
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
     this.rawLiquidationEventRepo = new RawLiquidationEventRepository(mongo);
+    this.broadcastTelegram = broadcastTelegram;
   }
 
-  /** Call once at startup, alongside every other repository's own
-   *  ensureIndexes(). Separate from the constructor since it's async
-   *  I/O, matching this project's own convention everywhere else. */
   async ensureIndexes(): Promise<void> {
     await this.rawLiquidationEventRepo.ensureIndexes();
+  }
+
+  /** Sep 8 2026 (Karo) -- NEW. Call once at startup, BEFORE
+   *  orchestrator.start() (ws ticks must never race this), so the
+   *  same-symbol MAIN lock survives a restart. Queries every
+   *  status="SIGNAL" (open) GlobalSignalDoc, locks that symbol, and
+   *  reconstructs V5WaveService's own in-memory activeTrades entry via
+   *  hydrateActiveTrade() so onPriceTickForTrades() can detect a
+   *  future close for it. Known, accepted limitation (documented, not
+   *  silently omitted): does NOT replay historical candles to check
+   *  "did this already cross TP/SL during the downtime" -- if price is
+   *  STILL beyond the TP/SL boundary once ticks resume, the very next
+   *  relevant tick closes it correctly (onPriceTickForTrades checks
+   *  the boundary unconditionally, not just "did it just cross"); the
+   *  only unrecovered edge case is price touching TP/SL DURING
+   *  downtime and moving back inside the range before the process
+   *  restarts -- accepted as rare and out of scope for this pass. */
+  async hydrateMainLocks(): Promise<void> {
+    const openDocs = await this.globalSignalRepo.findOpenMainSignals();
+    let hydrated = 0;
+    for (const doc of openDocs) {
+      if (doc.entry === null || doc.tp === null || doc.sl === null) continue;
+      this.mainSymbolLocks.add(doc.symbol);
+      this.v5.hydrateActiveTrade({
+        signalId: doc.signalId,
+        symbol: doc.symbol,
+        victim: doc.victim,
+        side: doc.side,
+        entry: doc.entry,
+        tp: doc.tp,
+        sl: doc.sl,
+        openedAt: doc.signalTs,
+        bestPrice: doc.entry,
+        worstPrice: doc.entry,
+        entryWaveNumber: doc.entryWaveNumber,
+        isLive: false,
+        binanceSlOrderId: null,
+        binanceTpOrderId: null,
+        positionQty: null,
+        notional: null,
+        riskUsd: null,
+      });
+      hydrated++;
+    }
+    log.info(
+      `[MAIN_LOCKS_HYDRATED] ${hydrated} open MAIN signal(s) restored from Mongo, symbols locked: [${[...this.mainSymbolLocks].join(", ")}]`,
+    );
   }
 
   start(): void {
     this.ws.subscribe({
       symbols: this.symbols,
-      // Sep 8 2026 (Karo) -- "1m" ADDED for the new research-data
-      // layer only (raw 1-minute price structure, for later
-      // liquidation-bar correlation). Confirmed via a full manual
-      // audit that the old bot NEVER subscribed to this at all (only
-      // REST-fetched 1m klines on-demand, once, for boot-time
-      // candle-replay -- see fetchKlinesSinceV5 in the old app.ts).
-      // "15m"/"5m" stay exactly as before -- V5's own ATR input is
-      // UNCHANGED (ATRTrackerService.isTracked() only accepts
-      // 5m/15m/1h; 1m candles reaching atrTracker.onCandle() below are
-      // filtered out THERE, by that pre-existing, unmodified method --
-      // not by a new guard added here).
       intervals: ["15m", "5m", "1m"],
       aggTrade: true,
       bookTicker: true,
@@ -148,13 +182,6 @@ export class MarketDataOrchestrator {
     this.ws.on("error", (err) => log.error({ err: err.message }, "[ws] error"));
 
     this.ws.on("kline", (c) => {
-      // Sep 8 2026 (Karo) -- atrTracker.onCandle() is called for EVERY
-      // interval now (not just "15m" as before), matching the old
-      // bot's own unconditional call shape exactly (its own
-      // ws.on("kline") handler called atrTracker.onCandle(c)
-      // unfiltered, relying on the SAME internal isTracked() gate this
-      // project already has). candleStore.ingest() already accepted
-      // any interval, unchanged.
       this.atrTracker.onCandle(c);
       this.candleStore.ingest(c);
     });
@@ -163,9 +190,6 @@ export class MarketDataOrchestrator {
       this.liqFeedWatchdog.recordEvent(l.symbol);
       this.liquidationStore.ingest(l);
       this.liquidationStats.ingest(l);
-      // Sep 8 2026 (Karo) -- NEW, research-data layer. Zero derivation
-      // (see RawLiquidationEventRepository's own doc comment) -- the
-      // SAME victim-side convention V5WaveService itself uses.
       void this.rawLiquidationEventRepo.insert({
         symbol: l.symbol,
         victim: l.side === "SELL" ? "LONG" : "SHORT",
@@ -173,6 +197,7 @@ export class MarketDataOrchestrator {
         quoteQty: l.quoteQty,
         timestamp: l.timestamp,
       });
+      if (this.mainSymbolLocks.has(l.symbol)) return;
       const outcomes = this.v5.onLiquidation(l);
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
     });
@@ -181,6 +206,8 @@ export class MarketDataOrchestrator {
       const mid = (b.bid + b.ask) / 2;
       const outcomes = this.v5.onTick(b.symbol, mid, b.timestamp);
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
+      const closes = this.v5.onPriceTickForTrades(b.symbol, mid, b.timestamp);
+      for (const close of closes) void this.handleMainTradeClose(close);
       void this.reconciliation.onTick(b.symbol, b.timestamp);
       this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
     });
@@ -198,11 +225,6 @@ export class MarketDataOrchestrator {
     this.ws.start();
   }
 
-  /** Sep 8 2026 (Karo) -- advances every active GLOBAL research
-   *  checkpoint watch for this symbol and persists whichever offsets
-   *  just completed. Deliberately separate from any per-user path --
-   *  see research-checkpoint.model.ts's own doc comment: this must
-   *  never depend on, or duplicate per user. */
   private tickResearchCheckpoints(
     symbol: string,
     price: number,
@@ -214,15 +236,66 @@ export class MarketDataOrchestrator {
     }
   }
 
-  /** Sep 8 2026 (Karo) -- atrAbs (absolute price units, not %) for
-   *  ATR-normalized checkpoint watches. Returns null when ATR isn't
-   *  warm yet for this symbol (registerWatch itself already refuses a
-   *  <=0 denominator, so this is a safe, honest null rather than a
-   *  fabricated fallback). */
   private atrAbsFor(symbol: string, referencePrice: number): number | null {
     const atrPct = this.atrTracker.getATR(symbol, "15m");
     if (!atrPct || !(atrPct > 0)) return null;
     return atrPct * referencePrice;
+  }
+
+  private async handleMainTradeClose(close: V5TradeCloseEvent): Promise<void> {
+    try {
+      const maxFavorableR =
+        close.trade.side === "LONG"
+          ? (close.trade.bestPrice - close.trade.entry) /
+            (close.trade.entry - close.trade.sl)
+          : (close.trade.entry - close.trade.bestPrice) /
+            (close.trade.sl - close.trade.entry);
+      const maxAdverseR =
+        close.trade.side === "LONG"
+          ? (close.trade.worstPrice - close.trade.entry) /
+            (close.trade.entry - close.trade.sl)
+          : (close.trade.entry - close.trade.worstPrice) /
+            (close.trade.sl - close.trade.entry);
+
+      await this.globalSignalRepo.finalizeMainClose(close.trade.signalId, {
+        status: close.outcome === "TP" ? "CLOSED_TP" : "CLOSED_SL",
+        closedAt: close.closeTs,
+        closePrice: close.closePrice,
+        maxFavorableR,
+        maxAdverseR,
+      });
+
+      this.mainSymbolLocks.delete(close.trade.symbol);
+      log.info(
+        `[MAIN_TRADE_CLOSED_${close.outcome}] ${close.trade.symbol} ${close.trade.side} signalId=${close.trade.signalId} entry=${close.trade.entry} close=${close.closePrice} -- symbol lock released`,
+      );
+
+      if (this.broadcastTelegram) {
+        try {
+          const message = formatV5CloseMessage(
+            close.trade.symbol,
+            close.trade.side,
+            close.outcome,
+            close.trade.entry,
+            close.closePrice,
+            close.trade.entryWaveNumber,
+          );
+          await this.broadcastTelegram.sendMessage(message);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log.error(
+            { err: msg, signalId: close.trade.signalId },
+            "[MAIN_CLOSE_TELEGRAM_FAILED]",
+          );
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId: close.trade.signalId },
+        "[MAIN_TRADE_CLOSE_UNHANDLED_ERROR]",
+      );
+    }
   }
 
   private async handleTickOutcome(outcome: V5TickOutcome): Promise<void> {
@@ -247,15 +320,6 @@ export class MarketDataOrchestrator {
       );
 
       if (!event) {
-        // Sep 8 2026 (Karo) -- EXHAUSTION_CANDIDATE research checkpoint:
-        // this layer reached the exhaustion-candidate moment (that's
-        // what produces a SIGNAL_CANDIDATE outcome in the first place)
-        // but evaluateSignal() itself rejected it (e.g.
-        // WAVE_CHRONOLOGY_INVALID, or the already-issued guard). ATR-
-        // normalized (no real SL exists for a rejected candidate).
-        // signalId reused from the watch so this stays correlated with
-        // whatever GlobalSignalDoc (if any) the episode eventually
-        // produces via its OWN terminal path.
         const atrAbs = this.atrAbsFor(outcome.watch.symbol, anchorPrice);
         if (atrAbs !== null) {
           const dirMul = outcome.watch.side === "LONG" ? 1 : -1;
@@ -268,8 +332,10 @@ export class MarketDataOrchestrator {
             { kind: "ATR", dirMul, denom: atrAbs },
           );
         }
-        return; // already-issued guard inside evaluateSignal -- safe no-op
+        return;
       }
+
+      const hasRealPlan = event.plan !== null;
 
       const globalSignal: GlobalSignalDoc = {
         signalId: event.signalId,
@@ -292,24 +358,6 @@ export class MarketDataOrchestrator {
         physics: event.plan
           ? {
               cumLiqUsd: event.totalEpisodePressure,
-              // Sep 8 2026 (Karo) -- CRITICAL FIX, the single most
-              // severe bug found in this entire project: this was
-              // hardcoded to 0. execute-for-user.usecase.ts reads
-              // globalSignal.physics.atrPct directly into its own
-              // pre-flight re-plan call (atr15mPct: ...?? 0) --
-              // deriveLiquidityTradePlan() REQUIRES atr15mPct > 0
-              // (Step "invalid-input" guard) or the WHOLE pre-flight
-              // check SKIPs the trade. Confirmed via a real production
-              // log: "[BINANCE_PRE_FLIGHT] decision=SKIP reason=plan
-              // invalid: invalid-input" -- this meant EVERY live
-              // execution, for EVERY user, was silently skipped since
-              // this project's first deploy, regardless of BTC-block/
-              // direction-disable/daily-loss-limit/anything else. Now
-              // reads the SAME live ATR(15m) value used everywhere
-              // else in this file (this.atrTracker.getATR(symbol,
-              // "15m")), matching what evaluateSignal() itself used
-              // internally (watch.atrAtStart / entryPrice) to compute
-              // this exact plan in the first place.
               atrPct: this.atrTracker.getATR(event.symbol, "15m") ?? 0,
               liqBaseline: event.plan.liqBaseline,
               liqStrengthRaw: event.plan.liqStrengthRaw,
@@ -335,29 +383,24 @@ export class MarketDataOrchestrator {
         btcSafetyStatus: event.btcSafetyStatus,
         btcIntendedSideAtSignalTime: event.btcIntendedSideAtSignalTime,
         rejectionReason: event.plan ? null : "plan-rejected",
-        status: "SIGNAL",
+        status: hasRealPlan ? "SIGNAL" : "REJECTED_PLAN",
+        closedAt: null,
+        closePrice: null,
+        maxFavorableR: null,
+        maxAdverseR: null,
         researchCheckpoints: [],
         createdAt: Date.now(),
       };
 
       await this.distributor.distribute(globalSignal, this.mongo);
 
-      // Sep 8 2026 (Karo) -- SIGNAL research checkpoint, R-normalized
-      // against the CANONICAL entry/SL (never any one user's actual
-      // fill -- see research-checkpoint.model.ts's own doc comment).
-      // Only registered when a real plan exists (entry/sl both
-      // non-null) -- a rejected plan ("plan-rejected") has no usable
-      // SL to normalize against, so it's simply not tracked here (the
-      // EXHAUSTION_CANDIDATE branch above already covers that case
-      // for evaluateSignal()-level rejections; a plan-rejected SIGNAL
-      // is a narrower, later-stage rejection this project accepts as
-      // untracked for now, rather than inventing a third fallback
-      // anchor).
       if (
-        event.plan &&
+        hasRealPlan &&
         globalSignal.entry !== null &&
         globalSignal.sl !== null
       ) {
+        this.mainSymbolLocks.add(event.symbol);
+
         const denom = Math.abs(globalSignal.entry - globalSignal.sl);
         const dirMul = event.side === "LONG" ? 1 : -1;
         this.researchCheckpoints.registerWatch(
@@ -368,6 +411,19 @@ export class MarketDataOrchestrator {
           globalSignal.entry,
           { kind: "R", dirMul, denom },
         );
+      } else {
+        const atrAbs = this.atrAbsFor(event.symbol, anchorPrice);
+        if (atrAbs !== null) {
+          const dirMul = event.side === "LONG" ? 1 : -1;
+          this.researchCheckpoints.registerWatch(
+            event.signalId,
+            event.symbol,
+            "EXHAUSTION_CANDIDATE",
+            event.signalTs,
+            anchorPrice,
+            { kind: "ATR", dirMul, denom: atrAbs },
+          );
+        }
       }
 
       this.v5.releaseWatch(outcome.watch.symbol, outcome.watch.victim);
@@ -426,21 +482,15 @@ export class MarketDataOrchestrator {
       btcIntendedSideAtSignalTime: null,
       rejectionReason: reason,
       status: reason as GlobalSignalDoc["status"],
+      closedAt: null,
+      closePrice: null,
+      maxFavorableR: null,
+      maxAdverseR: null,
       researchCheckpoints: [],
       createdAt: Date.now(),
     };
     await this.globalSignalRepo.insert(doc);
 
-    // Sep 8 2026 (Karo) -- EPISODE_END research checkpoint. This
-    // episode never even reached the exhaustion-candidate moment (or
-    // did, but that path already registered its own
-    // EXHAUSTION_CANDIDATE watch above -- registerWatch is a no-op if
-    // one already exists for this signalId, so no double-tracking).
-    // Anchored at the LAST known wave's own extreme price -- the best
-    // available "where did this episode actually end" reference when
-    // no live tick/price is otherwise passed into this method. Skipped
-    // entirely (no anchor) when waveHistory is empty (nothing to
-    // anchor to) or ATR isn't warm yet.
     const waves = doc.waveHistory as V5Wave[];
     const lastWave = waves.length > 0 ? waves[waves.length - 1] : null;
     if (lastWave) {

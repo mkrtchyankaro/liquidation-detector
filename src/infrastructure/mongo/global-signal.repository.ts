@@ -83,4 +83,50 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
       );
     }
   }
+
+  /** Sep 8 2026 (Karo) -- finalizes MAIN's OWN canonical close, set by
+   *  V5WaveService.onPriceTickForTrades() detecting a market-price TP/
+   *  SL touch -- completely independent of any user's own Binance
+   *  reconciliation (see reconcile-user-position.usecase.ts, which
+   *  never touches this collection at all). */
+  async finalizeMainClose(
+    signalId: string,
+    fields: {
+      status: "CLOSED_TP" | "CLOSED_SL";
+      closedAt: number;
+      closePrice: number;
+      maxFavorableR: number;
+      maxAdverseR: number;
+    },
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne({ signalId }, { $set: fields });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId },
+        "[GLOBAL_SIGNAL_FINALIZE_MAIN_CLOSE_FAILED]",
+      );
+    }
+  }
+
+  /** Sep 8 2026 (Karo) -- for restart-hydration of the MAIN same-
+   *  symbol lock (market-data-orchestrator.ts's own hydrateMainLocks()).
+   *  status="SIGNAL" is the ONLY "open" state -- see GlobalSignalDoc's
+   *  own doc comment for the full status-value breakdown. */
+  async findOpenMainSignals(): Promise<GlobalSignalDoc[]> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return [];
+      return (await col
+        .find({ status: "SIGNAL" })
+        .toArray()) as unknown as GlobalSignalDoc[];
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ err: msg }, "[GLOBAL_SIGNAL_FIND_OPEN_MAIN_FAILED]");
+      return [];
+    }
+  }
 }

@@ -82,12 +82,45 @@ export interface GlobalSignalDoc {
 
   rejectionReason: string | null;
 
-  /** Strategy-level outcome ONLY -- never OPEN/CLOSED_TP/CLOSED_SL
-   *  (those are per-user, in UserSignalDoc). "SIGNAL" means the
-   *  strategy produced a valid, executable plan and fanned it out;
-   *  every other value is a V5TerminalReason (episode ended without
-   *  ever producing an executable signal at all). */
-  status: V5TerminalReason | "SIGNAL";
+  /** Sep 8 2026 (Karo) -- REVISED (was: V5TerminalReason | "SIGNAL",
+   *  which incorrectly stored EVERY plan-rejected candidate as
+   *  "SIGNAL" too -- confirmed and reported during a full audit).
+   *    - "SIGNAL": a real, executable plan exists (entry/tp/sl all
+   *      non-null) and the strategy is now OPEN -- this is the ONLY
+   *      status this project's own same-symbol MAIN lock (see
+   *      market-data-orchestrator.ts's own mainSymbolLocks) and
+   *      startup-hydration treat as "locked/open".
+   *    - "CLOSED_TP" / "CLOSED_SL": MAIN's own canonical market-price
+   *      TP/SL was touched (V5WaveService.onPriceTickForTrades()) --
+   *      completely independent of any user's own Binance state, see
+   *      that method's own doc comment.
+   *    - "REJECTED_PLAN": evaluateSignal() produced a real event (the
+   *      episode DID reach candidate-evaluation) but deriveV5TradePlan()
+   *      itself rejected it (entry/tp/sl all null) -- distinct from
+   *      "SIGNAL" precisely because there is no executable trade here
+   *      at all, and distinct from a V5TerminalReason because this
+   *      candidate DID reach entry-evaluation (unlike an episode that
+   *      never became a candidate in the first place).
+   *    - every other value is a V5TerminalReason (episode ended
+   *      without ever reaching entry-evaluation at all). */
+  status:
+    | V5TerminalReason
+    | "SIGNAL"
+    | "CLOSED_TP"
+    | "CLOSED_SL"
+    | "REJECTED_PLAN";
+
+  /** Sep 8 2026 (Karo) -- MAIN's OWN canonical close facts, set ONLY
+   *  when status transitions to CLOSED_TP/CLOSED_SL via
+   *  onPriceTickForTrades(). Independent of, and never written by,
+   *  any user's own UserSignalDoc close (karo/artak's own Binance
+   *  reconciliation touches ONLY their own per-user collection --
+   *  see reconcile-user-position.usecase.ts, which never imports or
+   *  references GlobalSignalRepository at all). */
+  closedAt: number | null;
+  closePrice: number | null;
+  maxFavorableR: number | null;
+  maxAdverseR: number | null;
 
   /** Sep 8 2026 (Karo) -- GLOBAL research observations, NEVER
    *  per-user (see research-checkpoint.model.ts's own doc comment).
