@@ -26,7 +26,7 @@ export async function reconcileUserPosition(
   runtime: UserRuntime,
   userSignalRepo: { upsert(userId: string, doc: UserSignalDoc): Promise<void> },
   now: number,
-): Promise<boolean> {
+): Promise<{ closed: boolean; broadcastMessage: string | null }> {
   const result = await runtime.reconcileInFlight.run(
     userSignal.signalId,
     async () => {
@@ -43,7 +43,7 @@ export async function reconcileUserPosition(
   // for the same signalId was already in flight (InFlightGuard skipped
   // this one entirely) -- that other call, not this one, is
   // responsible for reporting whether it closed anything.
-  return result ?? false;
+  return result ?? { closed: false, broadcastMessage: null };
 }
 
 async function reconcileUserPositionImpl(
@@ -52,12 +52,12 @@ async function reconcileUserPositionImpl(
   runtime: UserRuntime,
   userSignalRepo: { upsert(userId: string, doc: UserSignalDoc): Promise<void> },
   now: number,
-): Promise<boolean> {
+): Promise<{ closed: boolean; broadcastMessage: string | null }> {
   const userId = runtime.config.userId;
-  if (!runtime.execution) return false;
+  if (!runtime.execution) return { closed: false, broadcastMessage: null };
 
   if (runtime.reconcileHealth.shouldSkipRetry(userSignal.signalId, now))
-    return false;
+    return { closed: false, broadcastMessage: null };
 
   let result: Awaited<
     ReturnType<typeof runtime.execution.reconcileLivePosition>
@@ -96,7 +96,7 @@ async function reconcileUserPositionImpl(
         );
       }
     }
-    return false;
+    return { closed: false, broadcastMessage: null };
   }
 
   if (runtime.reconcileHealth.recordSuccess(userSignal.signalId)) {
@@ -105,7 +105,7 @@ async function reconcileUserPositionImpl(
     );
   }
 
-  if (result.stillOpen) return false;
+  if (result.stillOpen) return { closed: false, broadcastMessage: null };
 
   let outcome: "TP" | "SL";
   let closePrice: number;
@@ -174,5 +174,15 @@ async function reconcileUserPositionImpl(
     globalSignal.entryWaveNumber,
   );
   await notifyUserClose(message, runtime);
-  return true;
+  // Sep 8 2026 (Karo) -- CRITICAL DESIGN FIX, operator-requested: close
+  // notifications used to reach ONLY the one user who actually had a
+  // real Binance position (karo) -- main/artak, who have no execution
+  // of their own, never saw ANY close message at all, even though they
+  // correctly received the matching ENTRY message earlier (entries are
+  // unconditionally broadcast to every enabled-telegram user; closes
+  // were not). The message itself is returned here so the caller
+  // (ReconciliationManager.onTick(), which alone has access to EVERY
+  // user's own runtime) can broadcast it identically -- this function
+  // still only ever reads/writes THIS ONE user's own execution state.
+  return { closed: true, broadcastMessage: message };
 }

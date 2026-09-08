@@ -129,20 +129,47 @@ export class ReconciliationManager {
         try {
           const globalSignal = await this.getGlobalSignal(userSignal.signalId);
           if (!globalSignal) continue;
-          const justClosed = await reconcileUserPosition(
+          const { closed, broadcastMessage } = await reconcileUserPosition(
             userSignal,
             globalSignal,
             runtime,
             userSignalRepo,
             now,
           );
-          if (justClosed) {
+          if (closed) {
             const stillCached = this.openCache.get(runtime.config.userId);
             if (stillCached) {
               this.openCache.set(
                 runtime.config.userId,
                 stillCached.filter((s) => s.signalId !== userSignal.signalId),
               );
+            }
+            // Sep 8 2026 (Karo) -- CRITICAL DESIGN FIX, operator-
+            // requested: close notifications used to reach ONLY the
+            // one user who actually had a real Binance position --
+            // every OTHER enabled-telegram user (who correctly
+            // received the matching ENTRY message earlier, since
+            // entries are unconditionally broadcast) never saw the
+            // close at all. Broadcasts the SAME message to every
+            // OTHER user's own telegram client here (the user whose
+            // position this actually was already got it directly,
+            // inside reconcileUserPositionImpl -- skipped here to
+            // avoid a literal double-send to that same runtime).
+            if (broadcastMessage) {
+              for (const other of this.userRuntimes) {
+                if (other.config.userId === runtime.config.userId) continue;
+                if (!other.telegram || !other.config.telegram?.enabled)
+                  continue;
+                try {
+                  await other.telegram.sendMessage(broadcastMessage);
+                } catch (err) {
+                  const msg = err instanceof Error ? err.message : String(err);
+                  log.error(
+                    { err: msg, userId: other.config.userId },
+                    "[CLOSE_BROADCAST_SEND_FAILED] -- isolated",
+                  );
+                }
+              }
             }
           }
         } catch (err) {

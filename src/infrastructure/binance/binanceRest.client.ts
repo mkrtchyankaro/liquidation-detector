@@ -1,9 +1,9 @@
 import axios, { type AxiosInstance, isAxiosError } from "axios";
 import crypto from "crypto";
-import type { BinanceConfig } from '../config/binance.config';
-import type { Candle, KlineInterval } from '../../shared/common.types';
+import type { BinanceConfig } from "../config/binance.config";
+import type { Candle, KlineInterval } from "../../shared/common.types";
 import type { BinanceRestKline } from "./binance.types";
-import { childLogger } from '../logging/logger';
+import { childLogger } from "../logging/logger";
 
 const log = childLogger({ mod: "binance-rest" });
 
@@ -81,9 +81,18 @@ export class BinanceRestClient {
     symbol: string,
     interval: KlineInterval,
     limit = 500,
+    /** Sep 8 2026 (Karo) -- optional, additive. Binance's own
+     *  /fapi/v1/klines endpoint already supports these; simply never
+     *  exposed here before. Used by tools/verify-binance.ts for
+     *  candle-history verification around a specific close time. */
+    startTime?: number,
+    endTime?: number,
   ): Promise<Candle[]> {
+    const params: Record<string, string | number> = { symbol, interval, limit };
+    if (startTime !== undefined) params.startTime = startTime;
+    if (endTime !== undefined) params.endTime = endTime;
     const res = await this.http.get<BinanceRestKline[]>("/fapi/v1/klines", {
-      params: { symbol, interval, limit },
+      params,
     });
     return res.data.map((k) => this.parseRestKline(symbol, interval, k));
   }
