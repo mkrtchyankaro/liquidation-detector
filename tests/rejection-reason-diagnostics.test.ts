@@ -71,9 +71,8 @@ scenario(
   "a wall-crushed TP produces the EXACT specific cancelReason ('tp-too-small'), not a generic placeholder",
   () => {
     const v5 = makeV5WithWall();
-    // Two events (min-2-events rule), one clearing P95, entry price
-    // essentially AT the tight ask wall (1.4331) -- matches the real
-    // XRP c90c8a88 pattern exactly.
+    // Wave 1 (never signal-eligible per the Wave1/Wave2 requirement) --
+    // completes at 1x UNIT recovery, no entry.
     v5.onLiquidation({
       symbol: "XRPUSDT",
       side: "SELL",
@@ -82,22 +81,41 @@ scenario(
       quoteQty: 5000,
       timestamp: 1000,
     });
+    v5.onTick("XRPUSDT", 1.4329, 1500);
+    const w1 = v5.onTick("XRPUSDT", 1.4332, 2000); // clear margin beyond UNIT=0.0002 (avoids float-precision boundary issues)
+    assert.strictEqual(w1.length, 0, "Wave 1 must complete with no outcome");
+
+    // Wave 2 -- min-2-events, hasP95Event, matches the real XRP
+    // c90c8a88 pattern exactly (entry essentially AT the tight ask wall).
+    v5.onLiquidation({
+      symbol: "XRPUSDT",
+      side: "SELL",
+      price: 1.433,
+      quantity: 3000,
+      quoteQty: 5000,
+      timestamp: 2100,
+    });
     v5.onLiquidation({
       symbol: "XRPUSDT",
       side: "SELL",
       price: 1.4329,
       quantity: 10,
       quoteQty: 20,
-      timestamp: 1050,
+      timestamp: 2150,
     });
 
-    const outcomes = v5.onTick("XRPUSDT", 1.4335, 2000); // clear margin beyond UNIT (avoids float-precision boundary issues)
+    const outcomes = v5.onTick("XRPUSDT", 1.4335, 3000); // clear margin beyond UNIT (avoids float-precision boundary issues)
     const candidate = outcomes.find((o) => o.kind === "SIGNAL_CANDIDATE");
     assert.ok(
       candidate,
-      "cascade must reach SIGNAL_CANDIDATE (min-2-events + hasP95Event + 1-UNIT recovery all satisfied)",
+      "Wave 2 must reach SIGNAL_CANDIDATE (min-2-events + hasP95Event + 1-UNIT recovery all satisfied)",
     );
     if (candidate?.kind !== "SIGNAL_CANDIDATE") return;
+    assert.strictEqual(
+      candidate.entryWave.waveNumber,
+      2,
+      "the signal-eligible wave must be Wave 2",
+    );
 
     // Explicit entryPrice=1.4331 -- essentially AT the tight ask wall
     // (matches the real XRP c90c8a88 pattern precisely), independent of
@@ -106,7 +124,7 @@ scenario(
       candidate.watch,
       candidate.entryWave,
       1.43305,
-      2100,
+      3100,
     );
     assert.ok(
       event,
@@ -137,15 +155,26 @@ scenario(
       quoteQty: 5000,
       timestamp: 1000,
     });
+    v5.onTick("XRPUSDT", 1.4329, 1500);
+    v5.onTick("XRPUSDT", 1.4332, 2000); // Wave 1 done, no entry
+
+    v5.onLiquidation({
+      symbol: "XRPUSDT",
+      side: "SELL",
+      price: 1.433,
+      quantity: 3000,
+      quoteQty: 5000,
+      timestamp: 2100,
+    });
     v5.onLiquidation({
       symbol: "XRPUSDT",
       side: "SELL",
       price: 1.4329,
       quantity: 10,
       quoteQty: 20,
-      timestamp: 1050,
+      timestamp: 2150,
     });
-    const outcomes = v5.onTick("XRPUSDT", 1.4335, 2000);
+    const outcomes = v5.onTick("XRPUSDT", 1.4335, 3000);
     const candidate = outcomes.find((o) => o.kind === "SIGNAL_CANDIDATE");
     if (candidate?.kind !== "SIGNAL_CANDIDATE") throw new Error("setup failed");
 
@@ -153,7 +182,7 @@ scenario(
       candidate.watch,
       candidate.entryWave,
       1.43305,
-      2100,
+      3100,
     )!;
     assert.ok(
       event.planDiagnostics,
@@ -237,16 +266,27 @@ scenario(
       quoteQty: 5000,
       timestamp: 1000,
     });
+    v5.onTick("ETHUSDT", 1990, 1500);
+    v5.onTick("ETHUSDT", 1993, 2000); // Wave 1 done, no entry
+
+    v5.onLiquidation({
+      symbol: "ETHUSDT",
+      side: "SELL",
+      price: 2000,
+      quantity: 2.5,
+      quoteQty: 5000,
+      timestamp: 2100,
+    });
     v5.onLiquidation({
       symbol: "ETHUSDT",
       side: "SELL",
       price: 1999,
       quantity: 0.01,
       quoteQty: 20,
-      timestamp: 1050,
+      timestamp: 2150,
     });
-    const outcomes = v5.onTick("ETHUSDT", 1990, 1500);
-    const outcomes2 = v5.onTick("ETHUSDT", 1993, 2000); // clear margin beyond UNIT=1
+    const outcomes = v5.onTick("ETHUSDT", 1990, 2500);
+    const outcomes2 = v5.onTick("ETHUSDT", 1993, 3000); // clear margin beyond UNIT=1
     const candidate =
       outcomes2.find((o) => o.kind === "SIGNAL_CANDIDATE") ??
       outcomes.find((o) => o.kind === "SIGNAL_CANDIDATE");
@@ -255,11 +295,12 @@ scenario(
       "setup must reach a real candidate",
     );
     if (candidate?.kind !== "SIGNAL_CANDIDATE") return;
+    assert.strictEqual(candidate.entryWave.waveNumber, 2);
     const event = v5.evaluateSignal(
       candidate.watch,
       candidate.entryWave,
       1991,
-      2100,
+      3100,
     )!;
     assert.ok(
       event.plan !== null,

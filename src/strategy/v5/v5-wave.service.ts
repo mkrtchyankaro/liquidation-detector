@@ -451,6 +451,37 @@ export class V5WaveService {
       existing.totalEpisodePressure += liq.quoteQty;
       existing.lastLiquidationTs = liq.timestamp;
 
+      const lastWave = existing.waves[existing.waves.length - 1]!;
+
+      // Sep 9 2026 (Karo), operator-designed Wave1/Wave2 requirement --
+      // Wave 1 has completed (1x UNIT recovery already reached, see
+      // onTick()) and NO Wave 2 has started yet: THIS event is the one
+      // that starts Wave 2. Mirrors the exact same fresh-start shape
+      // onLiquidation()'s own watch-creation branch above uses (fresh
+      // anchor at THIS event's own price, fresh liqEvents/hasP95Event
+      // -- a genuinely new wave, distinct price-structure, never
+      // inheriting Wave 1's own counts). totalEpisodePressure (already
+      // incremented above) keeps accumulating across BOTH waves
+      // unconditionally, unchanged from before -- only the PER-WAVE
+      // liqEvents/hasP95Event qualification restarts.
+      if (existing.waves.length === 1 && lastWave.state === "COMPLETED") {
+        const wave2 = this.newWave(
+          2,
+          liq.price,
+          liq.timestamp,
+          liq.quoteQty,
+          this.getOi(liq.symbol)?.contracts ?? null,
+        );
+        existing.waves.push(wave2);
+        const p95Now = this.getIndividualP95(liq.symbol, victim);
+        existing.hasP95Event = p95Now > 0 && liq.quoteQty >= p95Now;
+        log.info(
+          `[V5_WAVE2_STARTED] ${liq.symbol} ${victim} signalId=${existing.signalId} ` +
+            `firstEventUsd=${liq.quoteQty} anchorPrice=${liq.price} hasP95Event=${existing.hasP95Event}`,
+        );
+        return outcomes;
+      }
+
       // Sep 8 2026 (Karo), operator-corrected minimal-cascade model --
       // REPLACES the previous cumulative-vs-P95 comparison (removed
       // entirely). Latches true the FIRST time ANY individual event in
@@ -467,7 +498,7 @@ export class V5WaveService {
         }
       }
 
-      const cascade = existing.waves[0]!;
+      const cascade = lastWave;
       cascade.liqNotionalUsd += liq.quoteQty;
       cascade.liqEvents += 1;
       cascade.maxSingleEventUsd = Math.max(
@@ -548,89 +579,114 @@ export class V5WaveService {
           continue;
         }
 
-        const cascade = watch.waves[0]!;
-        if (cascade.state !== "ACTIVE") continue;
+        const currentWave = watch.waves[watch.waves.length - 1]!;
 
-        const isDeeper =
-          victim === "LONG"
-            ? mid < cascade.extremePrice
-            : mid > cascade.extremePrice;
-        if (isDeeper) {
-          cascade.extremePrice = mid;
-          cascade.extremeTs = ts;
-          cascade.maxRecoveryPrice = mid;
-        }
-        if (victim === "LONG" && mid > cascade.maxRecoveryPrice)
-          cascade.maxRecoveryPrice = mid;
-        if (victim === "SHORT" && mid < cascade.maxRecoveryPrice)
-          cascade.maxRecoveryPrice = mid;
-
-        // UNIT not warm yet -- cannot evaluate recovery. The cascade
-        // keeps accumulating (above); this symbol simply won't reach
-        // a completion decision until ATR(1m) is available.
-        if (watch.unitAtStart <= 0) continue;
-
-        const recoveryDistance = Math.abs(mid - cascade.extremePrice);
-        if (recoveryDistance < watch.unitAtStart) continue;
-
-        // Recovery has reached ~1 UNIT from the latest extreme: this
-        // cascade push is structurally finished. Seriousness is
-        // evaluated ONCE, here, against the CUMULATIVE total (not a
-        // single-event P95 requirement -- a real cascade may consist
-        // of many smaller, increasing events rather than one giant
-        // print, per explicit operator instruction).
-        cascade.state = "COMPLETED";
-        cascade.reclaimPrice = mid;
-        cascade.reclaimTs = ts;
-        cascade.recoveryPct = 100;
-
-        // Sep 8 2026 (Karo) -- taker-flow diagnostic, captured once at
-        // completion (matching the SAME getFlow callback the old
-        // multi-wave logic used per-wave; here, once for the whole
-        // cascade, lookback = the cascade's own anchor-to-extreme
-        // duration). Research-only, never gates the seriousness
-        // decision below.
-        if (this.getFlow) {
-          const lookbackMs = Math.max(
-            1000,
-            cascade.extremeTs - cascade.anchorTs,
-          );
-          const flow = this.getFlow(symbol, lookbackMs, ts);
-          if (flow) {
-            cascade.takerBuyUsd = flow.buyUsd;
-            cascade.takerSellUsd = flow.sellUsd;
-            const total = flow.buyUsd + flow.sellUsd;
-            cascade.takerImbalance =
-              total > 0 ? (flow.buyUsd - flow.sellUsd) / total : null;
+        if (currentWave.state === "ACTIVE") {
+          const isDeeper =
+            victim === "LONG"
+              ? mid < currentWave.extremePrice
+              : mid > currentWave.extremePrice;
+          if (isDeeper) {
+            currentWave.extremePrice = mid;
+            currentWave.extremeTs = ts;
+            currentWave.maxRecoveryPrice = mid;
           }
+          if (victim === "LONG" && mid > currentWave.maxRecoveryPrice)
+            currentWave.maxRecoveryPrice = mid;
+          if (victim === "SHORT" && mid < currentWave.maxRecoveryPrice)
+            currentWave.maxRecoveryPrice = mid;
+
+          // UNIT not warm yet -- cannot evaluate recovery. The wave
+          // keeps accumulating (above); this symbol simply won't reach
+          // a completion decision until ATR(1m) is available.
+          if (watch.unitAtStart <= 0) continue;
+
+          const recoveryDistance = Math.abs(mid - currentWave.extremePrice);
+          if (recoveryDistance < watch.unitAtStart) continue;
+
+          // Recovery has reached ~1 UNIT from the latest extreme: this
+          // wave is structurally finished.
+          currentWave.state = "COMPLETED";
+          currentWave.reclaimPrice = mid;
+          currentWave.reclaimTs = ts;
+          currentWave.recoveryPct = 100;
+
+          // Sep 9 2026 (Karo), operator-designed Wave1/Wave2 requirement
+          // -- Wave 1 (waves.length===1) can NEVER produce a signal
+          // decision here. It simply completes and waits: either a new
+          // same-victim liquidation starts Wave 2 (onLiquidation(),
+          // above), or price recovers a further 1x UNIT (2x UNIT total
+          // from Wave 1's own, now-fixed extreme) with no Wave 2 ever
+          // starting, checked in the CANCEL_NO_SECOND_WAVE branch below
+          // on a LATER tick. No signal-eligibility check of any kind
+          // happens for Wave 1 -- this is the entire point of the
+          // requirement ("waveCount < 2 -> ENTRY IS IMPOSSIBLE").
+          if (watch.waves.length === 1) {
+            log.info(
+              `[V5_WAVE1_COMPLETE] ${symbol} ${victim} signalId=${watch.signalId} extreme=${currentWave.extremePrice} -- no entry, awaiting Wave 2 (cancel at 2x UNIT with no Wave 2)`,
+            );
+            continue;
+          }
+
+          // Sep 8 2026 (Karo), operator-corrected minimal-cascade model
+          // -- UNCHANGED seriousness/signal-decision logic, now simply
+          // evaluated for Wave 2 (the only wave ever eligible to reach
+          // this point).
+          if (this.getFlow) {
+            const lookbackMs = Math.max(
+              1000,
+              currentWave.extremeTs - currentWave.anchorTs,
+            );
+            const flow = this.getFlow(symbol, lookbackMs, ts);
+            if (flow) {
+              currentWave.takerBuyUsd = flow.buyUsd;
+              currentWave.takerSellUsd = flow.sellUsd;
+              const total = flow.buyUsd + flow.sellUsd;
+              currentWave.takerImbalance =
+                total > 0 ? (flow.buyUsd - flow.sellUsd) / total : null;
+            }
+          }
+
+          if (watch.hasP95Event && currentWave.liqEvents > 1) {
+            outcomes.push({
+              kind: "SIGNAL_CANDIDATE",
+              watch,
+              entryWave: currentWave,
+            });
+          } else {
+            const waveHistory = watch.waves.map((w) => ({ ...w }));
+            outcomes.push({
+              kind: "TERMINAL_NON_SIGNAL",
+              event: { watch, reason: "CASCADE_NOT_SERIOUS", waveHistory },
+            });
+            this.watches.delete(key);
+            log.info(
+              `[V5_CASCADE_NOT_SERIOUS] ${symbol} ${victim} signalId=${watch.signalId} ` +
+                `cumulativeLiqUsd=${currentWave.liqNotionalUsd.toFixed(0)} hasP95Event=${watch.hasP95Event} liqEvents=${currentWave.liqEvents}`,
+            );
+          }
+          continue;
         }
 
-        // Sep 8 2026 (Karo), operator-corrected minimal-cascade model --
-        // seriousness is a pure boolean (hasP95Event, latched at the
-        // moment ANY individual event cleared P95 -- see onLiquidation()'s
-        // own doc comment), NOT a cumulative-vs-P95 comparison.
-        // Sep 9 2026 (Karo), operator-requested minimal correction --
-        // seriousness now requires BOTH hasP95Event AND at least 2
-        // liquidation events in the cascade (a single, isolated event
-        // -- even one that itself clears P95 -- is never sufficient
-        // on its own). UNIT logic, P95 logic, TP/SL, and every other
-        // behavior are completely unchanged.
-        if (watch.hasP95Event && cascade.liqEvents > 1) {
-          outcomes.push({
-            kind: "SIGNAL_CANDIDATE",
-            watch,
-            entryWave: cascade,
-          });
-        } else {
+        // currentWave.state === "COMPLETED" && watch.waves.length === 1:
+        // Wave 1 finished, no Wave 2 has started yet. Purely price-
+        // structure-based cancellation -- NO time-based timeout, per
+        // explicit operator instruction. Wave 1's own extreme is fixed
+        // (never extended further once completed, above) -- 2x UNIT is
+        // measured from that same, fixed point.
+        if (currentWave.state === "COMPLETED" && watch.waves.length === 1) {
+          if (watch.unitAtStart <= 0) continue;
+          const recoveryDistance = Math.abs(mid - currentWave.extremePrice);
+          if (recoveryDistance < 2 * watch.unitAtStart) continue;
+
           const waveHistory = watch.waves.map((w) => ({ ...w }));
           outcomes.push({
             kind: "TERMINAL_NON_SIGNAL",
-            event: { watch, reason: "CASCADE_NOT_SERIOUS", waveHistory },
+            event: { watch, reason: "CANCEL_NO_SECOND_WAVE", waveHistory },
           });
           this.watches.delete(key);
           log.info(
-            `[V5_CASCADE_NOT_SERIOUS] ${symbol} ${victim} signalId=${watch.signalId} ` +
-              `cumulativeLiqUsd=${cascade.liqNotionalUsd.toFixed(0)} hasP95Event=${watch.hasP95Event} liqEvents=${cascade.liqEvents}`,
+            `[V5_CANCEL_NO_SECOND_WAVE] ${symbol} ${victim} signalId=${watch.signalId} wave1Extreme=${currentWave.extremePrice} price=${mid}`,
           );
         }
       }

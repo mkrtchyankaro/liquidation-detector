@@ -199,7 +199,7 @@ scenario(
       "utf8",
     );
     assert.ok(
-      source.includes("cascade.liqEvents > 1"),
+      source.includes("currentWave.liqEvents > 1"),
       "min-2-events rule must remain exactly as implemented",
     );
     assert.ok(
