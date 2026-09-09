@@ -161,8 +161,8 @@ export class V5WaveService {
     private readonly getOi: (
       symbol: string,
     ) => { contracts: number; ts: number } | null,
-    private readonly getBaseline: (symbol: string) => number,
-    private readonly getIndividualP95: (symbol: string) => number,
+    private readonly getBaseline: (symbol: string, victim: Side) => number,
+    private readonly getIndividualP95: (symbol: string, victim: Side) => number,
     private readonly getWallContext:
       | ((symbol: string, side: Side) => WallSnapshots)
       | null = null,
@@ -389,7 +389,7 @@ export class V5WaveService {
           liq.quoteQty,
           this.getOi(liq.symbol)?.contracts ?? null,
         );
-        const p95AtStart = this.getIndividualP95(liq.symbol);
+        const p95AtStart = this.getIndividualP95(liq.symbol, victim);
         const watch: V5WatchState = {
           symbol: liq.symbol,
           side: victim,
@@ -433,7 +433,7 @@ export class V5WaveService {
       // EVENT's own arrival -- never re-checked retroactively, never
       // reset to false once true.
       if (!existing.hasP95Event) {
-        const p95Now = this.getIndividualP95(liq.symbol);
+        const p95Now = this.getIndividualP95(liq.symbol, victim);
         if (p95Now > 0 && liq.quoteQty >= p95Now) {
           existing.hasP95Event = true;
           log.info(
@@ -663,7 +663,7 @@ export class V5WaveService {
     if (watch.atrAtStart <= 0) {
       rejectionReason = "episode-missing-atr";
     } else {
-      const baseline = this.getBaseline(watch.symbol);
+      const baseline = this.getBaseline(watch.symbol, watch.victim);
       const atr15mPct = watch.atrAtStart / entryPrice;
       const result = deriveV5TradePlan({
         episodeTotalLiqUsd: watch.totalEpisodePressure,

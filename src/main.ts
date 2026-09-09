@@ -116,16 +116,24 @@ async function main(): Promise<void> {
     },
     (symbol) =>
       orchestratorPlaceholder.instance?.oiTracker.getCachedOI(symbol) ?? null,
-    (symbol) =>
-      orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin(
+    // Sep 9 2026 (Karo), operator-requested victim-side-specific
+    // regime, with safe fallback. rollingMedianLiqNotionalPerMinForVictim()
+    // (below) returns victim-specific baseline when there's enough
+    // victim-specific data, falling back to the EXISTING combined
+    // LONG+SHORT calculation otherwise -- see that method's own doc
+    // comment for the exact consistency guarantee with P95.
+    (symbol, victim) =>
+      orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMinForVictim(
         symbol,
+        victim,
         60,
-      ) ?? 0,
-    (symbol) =>
+      ).value ?? 0,
+    (symbol, victim) =>
       orchestratorPlaceholder.instance
         ? v5IndividualEventP95(
             orchestratorPlaceholder.instance.liquidationStats,
             symbol,
+            victim,
           )
         : 0,
     // Sep 8 2026 (Karo) -- CRITICAL FIX, found during a full manual

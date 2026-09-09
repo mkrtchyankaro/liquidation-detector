@@ -1,10 +1,10 @@
-import type { Liquidation } from '../../shared/common.types';
+import type { Liquidation } from "../../shared/common.types";
 import type {
   ObservabilityConfig,
   SymbolTier,
-} from '../../infrastructure/config/observability.config';
-import { percentile } from '../../shared/math';
-import { childLogger } from '../../infrastructure/logging/logger';
+} from "../../infrastructure/config/observability.config";
+import { percentile } from "../../shared/math";
+import { childLogger } from "../../infrastructure/logging/logger";
 
 /**
  * Who got force-closed by this liquidation.
@@ -111,6 +111,15 @@ interface SymbolState {
   notionalSamples: number[];
   notionalSampleIdx: number;
   totalSamples: number;
+  /** Sep 9 2026 (Karo), operator-requested victim-side-specific
+   *  regime. Separate ring buffers, SAME capacity/cycling convention
+   *  as notionalSamples above -- populated in ingest() alongside (not
+   *  instead of) the combined one, so BOTH regimes stay simultaneously
+   *  available and the combined one is never disturbed. */
+  notionalSamplesLong: number[];
+  notionalSampleIdxLong: number;
+  notionalSamplesShort: number[];
+  notionalSampleIdxShort: number;
   /** Sealed buckets queued for flush. Populated when ingest() seals a minute,
    *  drained by exportPendingFlushes()/markFlushed(). Capped by the persistence
    *  layer to prevent unbounded growth if Mongo is down. */
@@ -260,6 +269,28 @@ export class LiquidationStatsService {
       s.notionalSampleIdx = (s.notionalSampleIdx + 1) % this.cfg.sampleCapacity;
     }
     s.totalSamples += 1;
+
+    // Sep 9 2026 (Karo), operator-requested victim-side-specific
+    // regime. Populated ALONGSIDE (never instead of) the combined
+    // ring buffer above -- same capacity/cycling convention, per
+    // victim side.
+    if (victim === "LONG") {
+      if (s.notionalSamplesLong.length < this.cfg.sampleCapacity) {
+        s.notionalSamplesLong.push(notional);
+      } else {
+        s.notionalSamplesLong[s.notionalSampleIdxLong] = notional;
+        s.notionalSampleIdxLong =
+          (s.notionalSampleIdxLong + 1) % this.cfg.sampleCapacity;
+      }
+    } else {
+      if (s.notionalSamplesShort.length < this.cfg.sampleCapacity) {
+        s.notionalSamplesShort.push(notional);
+      } else {
+        s.notionalSamplesShort[s.notionalSampleIdxShort] = notional;
+        s.notionalSampleIdxShort =
+          (s.notionalSampleIdxShort + 1) % this.cfg.sampleCapacity;
+      }
+    }
   }
 
   /** Insert `liq` into the per-minute top-N heap if (a) top-N tracking is on
@@ -316,6 +347,37 @@ export class LiquidationStatsService {
     if (!s || s.notionalSamples.length < this.cfg.minSamplesForPercentiles)
       return 0;
     return percentile(s.notionalSamples, p);
+  }
+
+  /** Sep 9 2026 (Karo), operator-requested victim-side-specific
+   *  regime, with safe fallback. Uses the SAME
+   *  minSamplesForPercentiles threshold (30) to decide sufficiency --
+   *  this is the exact consistency-anchor that keeps this method and
+   *  rollingMedianLiqNotionalPerMinForVictim() below always agreeing
+   *  on which regime (victim-specific vs combined) applies for a
+   *  given (symbol, victim) at any moment, since both check the
+   *  identical condition against the identical underlying sample
+   *  count. Falls back to the EXISTING, unchanged notionalPercentile()
+   *  (combined LONG+SHORT) when victim-specific data is insufficient
+   *  -- never returns 0 just because the victim-specific side alone
+   *  is sparse, as long as the combined pool is warm. */
+  notionalPercentileForVictim(
+    symbol: string,
+    victim: LiqVictim,
+    p: number,
+  ): { value: number; isVictimSpecific: boolean } {
+    const s = this.state.get(symbol);
+    if (s) {
+      const victimSamples =
+        victim === "LONG" ? s.notionalSamplesLong : s.notionalSamplesShort;
+      if (victimSamples.length >= this.cfg.minSamplesForPercentiles) {
+        return { value: percentile(victimSamples, p), isVictimSpecific: true };
+      }
+    }
+    return {
+      value: this.notionalPercentile(symbol, victim, p),
+      isVictimSpecific: false,
+    };
   }
 
   /** Current in-progress 1m sum on the given victim side. */
@@ -459,6 +521,55 @@ export class LiquidationStatsService {
     return percentile(sums, 50);
   }
 
+  /** Sep 9 2026 (Karo), operator-requested victim-side-specific
+   *  regime, with safe fallback. Deliberately gated by the SAME
+   *  underlying condition as notionalPercentileForVictim() above
+   *  (per-victim INDIVIDUAL EVENT sample count >= minSamplesForPercentiles)
+   *  -- NOT by bucketsLong/bucketsShort's own length -- this is the
+   *  exact mechanism that guarantees P95 and liqBaseline always agree
+   *  on regime for the same (symbol, victim) at the same moment (the
+   *  operator's own explicit consistency requirement): if we don't
+   *  trust the victim-specific EVENT distribution enough for P95,
+   *  we also don't trust a victim-specific MINUTE-bucket median for
+   *  the same underlying reason (both ultimately reflect the same
+   *  "how much do we actually know about this victim side" question).
+   *  Falls back to the EXISTING, unchanged rollingMedianLiqNotionalPerMin()
+   *  (combined LONG+SHORT) when insufficient. */
+  rollingMedianLiqNotionalPerMinForVictim(
+    symbol: string,
+    victim: LiqVictim,
+    windowMinutes: number,
+  ): { value: number | null; isVictimSpecific: boolean } {
+    const s = this.state.get(symbol);
+    if (s) {
+      const victimSamples =
+        victim === "LONG" ? s.notionalSamplesLong : s.notionalSamplesShort;
+      if (victimSamples.length >= this.cfg.minSamplesForPercentiles) {
+        // Sep 9 2026 (Karo) -- deliberately gated ONLY by the primary
+        // condition above (never a secondary bucket-count check) --
+        // adding a second, independent gate here would risk this
+        // method disagreeing with notionalPercentileForVictim() on
+        // regime for the exact same (symbol, victim), breaking the
+        // operator's own explicit consistency requirement. In
+        // practice, >=30 individual victim-side events realistically
+        // implies several distinct minutes already exist; whatever
+        // bucket history is available is used as-is.
+        const buckets = victim === "LONG" ? s.bucketsLong : s.bucketsShort;
+        const n = Math.min(windowMinutes, buckets.length);
+        const start = buckets.length - n;
+        const sums = buckets.slice(start);
+        return {
+          value: sums.length > 0 ? percentile(sums, 50) : 0,
+          isVictimSpecific: true,
+        };
+      }
+    }
+    return {
+      value: this.rollingMedianLiqNotionalPerMin(symbol, windowMinutes),
+      isVictimSpecific: false,
+    };
+  }
+
   /** Rolling MEDIAN of per-minute liquidation EVENT COUNT (long+short
    *  combined), over the last `windowMinutes` sealed buckets. Returns
    *  null under the same cold-start condition as
@@ -558,6 +669,10 @@ export class LiquidationStatsService {
         notionalSamples: [],
         notionalSampleIdx: 0,
         totalSamples: 0,
+        notionalSamplesLong: [],
+        notionalSampleIdxLong: 0,
+        notionalSamplesShort: [],
+        notionalSampleIdxShort: 0,
         pendingFlush: [],
         hydrated: false,
       };

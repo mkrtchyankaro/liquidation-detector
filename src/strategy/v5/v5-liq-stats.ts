@@ -1,4 +1,5 @@
-import type { LiquidationStatsService } from '../../domain/liquidation/liquidation-stats.service';
+import type { LiquidationStatsService } from "../../domain/liquidation/liquidation-stats.service";
+import type { Side } from "../../shared/common.types";
 
 /**
  * Sep 7 2026, operator-approved (Karo) -- V5's STRICT qualification
@@ -8,18 +9,26 @@ import type { LiquidationStatsService } from '../../domain/liquidation/liquidati
  * blended function is left completely untouched -- other code paths
  * (V3, V4) still use it exactly as before.
  *
- * This is a thin, one-line wrapper around the SAME underlying,
- * already-public notionalPercentile() the blended function itself
- * calls internally -- no duplicated percentile logic, no new
- * statistics implementation. Explicitly always the LONG-side sample
- * distribution (matching thresholdLargeLiq()'s own choice, confirmed
- * from source), since the underlying service tracks one combined,
- * side-agnostic notional-size distribution per symbol.
+ * Sep 9 2026 (Karo), operator-requested victim-side-specific regime
+ * with safe fallback -- REPLACES the previous, always-"LONG",
+ * effectively side-agnostic single-line wrapper (confirmed via a full
+ * trace: the underlying service tracked one combined distribution
+ * regardless of which side-string was passed). Now delegates to
+ * LiquidationStatsService.notionalPercentileForVictim(), which
+ * returns victim-specific P95 when there is enough victim-specific
+ * data (>= minSamplesForPercentiles), falling back to the EXISTING
+ * combined LONG+SHORT distribution otherwise -- see that method's own
+ * doc comment for the exact consistency guarantee with the paired
+ * liqBaseline computation.
  *
  * Returns 0 if the symbol doesn't have enough warm samples yet
- * (matches notionalPercentile()'s own conservative fallback) --
- * callers must treat 0 as "not enough data yet", not a real threshold.
+ * (either regime) -- callers must treat 0 as "not enough data yet",
+ * not a real threshold.
  */
-export function v5IndividualEventP95(liqStats: LiquidationStatsService, symbol: string): number {
-  return liqStats.notionalPercentile(symbol, "LONG", 95);
+export function v5IndividualEventP95(
+  liqStats: LiquidationStatsService,
+  symbol: string,
+  victim: Side,
+): number {
+  return liqStats.notionalPercentileForVictim(symbol, victim, 95).value;
 }
