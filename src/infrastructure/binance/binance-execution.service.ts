@@ -30,8 +30,7 @@ export function planForSymbol(input: {
   w1ExtremePrice: number;
   w1LiqUsd: number;
   w2LiqUsd: number;
-  w2ExtremePrice: number;
-  unitAbs: number;
+  atr15mAbs: number;
   p95: number;
   dailyLiqPerMinBaseline: number;
 }): LiquidityPlanResult {
@@ -42,15 +41,14 @@ export function planForSymbol(input: {
     w1ExtremePrice: input.w1ExtremePrice,
     w1LiqUsd: input.w1LiqUsd,
     w2LiqUsd: input.w2LiqUsd,
-    w2ExtremePrice: input.w2ExtremePrice,
-    unitAbs: input.unitAbs,
+    atr15mAbs: input.atr15mAbs,
     p95: input.p95,
     dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
   });
   const zeroForensics = {
     intensityRaw: result.liquidityStrengthP95,
     intensity: result.liquidityStrength,
-    atr15mPct: 0,
+    atr15mPct: result.atr15mPct,
     rawTpPct: 0,
     wallAdjustedTpPct: 0,
     wallApplied: false,
@@ -64,14 +62,7 @@ export function planForSymbol(input: {
     finalSlPct: result.ok ? result.slPct : 0,
   };
   if (!result.ok) {
-    return {
-      ...zeroForensics,
-      ok: false,
-      cancelReason:
-        result.cancelReason === "invalid-input"
-          ? "invalid-input"
-          : "no-baseline",
-    };
+    return { ...zeroForensics, ok: false, cancelReason: "invalid-input" };
   }
   return {
     ...zeroForensics,
@@ -108,8 +99,7 @@ export interface ExecutionInput {
   w1ExtremePrice: number;
   w1LiqUsd: number;
   w2LiqUsd: number;
-  w2ExtremePrice: number;
-  unitAbs: number;
+  atr15mAbs: number;
   p95: number;
   dailyLiqPerMinBaseline: number;
   /** Aug 28 2026, operator-approved (Karo) -- MICRO's own compressed-
@@ -1479,8 +1469,7 @@ export class BinanceExecutionService {
         w1ExtremePrice: input.w1ExtremePrice,
         w1LiqUsd: input.w1LiqUsd,
         w2LiqUsd: input.w2LiqUsd,
-        w2ExtremePrice: input.w2ExtremePrice,
-        unitAbs: input.unitAbs,
+        atr15mAbs: input.atr15mAbs,
         p95: input.p95,
         dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
       });
@@ -1807,8 +1796,7 @@ export class BinanceExecutionService {
       w1ExtremePrice: input.w1ExtremePrice,
       w1LiqUsd: input.w1LiqUsd,
       w2LiqUsd: input.w2LiqUsd,
-      w2ExtremePrice: input.w2ExtremePrice,
-      unitAbs: input.unitAbs,
+      atr15mAbs: input.atr15mAbs,
       p95: input.p95,
       dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
     });
@@ -1817,7 +1805,7 @@ export class BinanceExecutionService {
     // distances divided by V3_MICRO_EXIT_DIVISOR) would be silently
     // DISCARDED here: the standard replan above completely ignores
     // input.stopLoss/takeProfit and RE-DERIVES fresh TP%/SL% from
-    // structural market conditions (w2ExtremePrice/unitAbs) -- since
+    // structural market conditions (w1AnchorPrice/w1ExtremePrice/atr15mAbs) -- since
     // MICRO passes the SAME structural context NORMAL used, that
     // re-derivation would silently regenerate NORMAL-SIZED TP/SL again
     // (confirmed real bug, operator's own finding). When fixedExitPct

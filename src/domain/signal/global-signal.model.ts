@@ -36,6 +36,7 @@ export interface GlobalSignalDoc {
   unitAtStart: number;
   p95AtEntry: number;
   dailyLiqPerMinBaselineAtEntry: number;
+  atr15mAtEntry: number;
 
   qualifyingEventUsd: number;
   qualifyingEventTs: number;
@@ -65,14 +66,13 @@ export interface GlobalSignalDoc {
     liquidityStrength: number;
     w2ToW1Ratio: number;
     exhaustionScore: number;
-    w1DisplacementUnits: number;
+    w1DisplacementAtr: number;
     absorptionRaw: number;
     absorptionScore: number;
     dynamicPhysicsScore: number;
     selectedRR: number;
-    dynamicK: number;
-    unitAbs: number;
-    slDeterminedBy: "structural" | "sizing-floor";
+    tpMultiplier: number;
+    slDeterminedBy: "physics" | "sizing-floor";
   } | null;
 
   btcContext: {
@@ -134,14 +134,13 @@ export interface GlobalSignalDoc {
     liquidityStrength: number;
     w2ToW1Ratio: number;
     exhaustionScore: number;
-    w1DisplacementUnits: number;
+    w1DisplacementAtr: number;
     absorptionRaw: number;
     absorptionScore: number;
     dynamicPhysicsScore: number;
     selectedRR: number;
-    dynamicK: number;
-    unitAbs: number;
-    slDeterminedBy: "structural" | "sizing-floor";
+    tpMultiplier: number;
+    slDeterminedBy: "physics" | "sizing-floor";
   } | null;
 
   /** Sep 8 2026 (Karo) -- REVISED (was: V5TerminalReason | "SIGNAL",

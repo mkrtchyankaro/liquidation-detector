@@ -1,10 +1,12 @@
 /**
  * Sep 9 2026 (Karo), operator-designed DYNAMIC liquidation-physics
- * trade plan. Proves every invariant requested by the operator's own
- * item 11: RR ladder discreteness, SL floor, TP=SL*RR exactly,
+ * trade plan -- SECOND REVISION (ATR15m as the bounded exit-distance
+ * ruler, UNIT reserved exclusively for W1/W2 entry geometry, TP
+ * derived first from physics then SL=TP/RR with a hard 0.20% floor).
+ * Proves every invariant requested by the operator: RR ladder
+ * discreteness, SL floor, TP=SL*RR exactly in EITHER branch,
  * exhaustion behavior, bounded huge-liquidation behavior, P95
- * semantics (individual-event, never conflated with cumulative
- * sums), LONG/SHORT symmetry.
+ * semantics, LONG/SHORT symmetry.
  */
 import * as assert from "assert";
 import {
@@ -12,6 +14,8 @@ import {
   RR_LADDER,
   SIZING_HARD_STOP_FLOOR_PCT,
   STRENGTH_MAX,
+  TP_MULT_MIN,
+  TP_MULT_MAX,
 } from "../src/domain/trading/liquidation-physics-trade-plan";
 
 let passed = 0;
@@ -40,11 +44,11 @@ scenario(
     const baseline = 3_000;
     for (let w1Mult = 0.5; w1Mult <= 50; w1Mult *= 1.7) {
       for (const w2Frac of [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0, 1.5]) {
-        for (const dispUnits of [0.2, 1, 3, 10]) {
+        for (const dispAtr of [0.05, 0.3, 1, 3]) {
           const w1Liq = p95 * w1Mult;
           const w2Liq = w1Liq * w2Frac;
-          const unitAbs = 1;
-          const w1Extreme = 100 - dispUnits * unitAbs;
+          const atr15mAbs = 1;
+          const w1Extreme = 100 - dispAtr * atr15mAbs;
           const result = deriveLiquidationPhysicsTradePlan({
             entry: 101,
             side: "LONG",
@@ -52,15 +56,14 @@ scenario(
             w1ExtremePrice: w1Extreme,
             w1LiqUsd: w1Liq,
             w2LiqUsd: w2Liq,
-            w2ExtremePrice: w1Extreme,
-            unitAbs,
+            atr15mAbs,
             p95,
             dailyLiqPerMinBaseline: baseline,
           });
           if (!result.ok) continue;
           assert.ok(
             RR_LADDER.includes(result.rr),
-            `rr=${result.rr} not on the ladder (w1Mult=${w1Mult} w2Frac=${w2Frac} dispUnits=${dispUnits})`,
+            `rr=${result.rr} not on the ladder (w1Mult=${w1Mult} w2Frac=${w2Frac} dispAtr=${dispAtr})`,
           );
         }
       }
@@ -75,11 +78,10 @@ scenario(
       entry: 101,
       side: "LONG",
       w1AnchorPrice: 100,
-      w1ExtremePrice: 99.999,
+      w1ExtremePrice: 99.99,
       w1LiqUsd: 1,
       w2LiqUsd: 1,
-      w2ExtremePrice: 99.999,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 1_000_000,
       dailyLiqPerMinBaseline: 1_000_000,
     });
@@ -92,8 +94,7 @@ scenario(
       w1ExtremePrice: 99.9999,
       w1LiqUsd: 100_000_000,
       w2LiqUsd: 0,
-      w2ExtremePrice: 99.9999,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 100,
       dailyLiqPerMinBaseline: 100,
     });
@@ -104,7 +105,7 @@ scenario(
 // ─── SL floor ────────────────────────────────────────────────────────
 
 scenario(
-  "SL is NEVER below the 0.20% execution-mechanics floor, even for a tiny structural risk",
+  "SL is NEVER below the 0.20% execution-mechanics floor, even for a weak setup with tiny ATR15m",
   () => {
     const result = deriveLiquidationPhysicsTradePlan({
       entry: 100,
@@ -113,8 +114,7 @@ scenario(
       w1ExtremePrice: 99.99,
       w1LiqUsd: 5000,
       w2LiqUsd: 4900,
-      w2ExtremePrice: 99.99,
-      unitAbs: 0.02,
+      atr15mAbs: 0.02,
       p95: 5000,
       dailyLiqPerMinBaseline: 4000,
     });
@@ -128,7 +128,7 @@ scenario(
 );
 
 scenario(
-  "SL genuinely exceeds the 0.20% floor for a large-UNIT case -- floor is a no-op there",
+  "SL genuinely exceeds the 0.20% floor for a strong setup with large ATR15m -- floor is a no-op there",
   () => {
     const result = deriveLiquidationPhysicsTradePlan({
       entry: 103,
@@ -136,9 +136,8 @@ scenario(
       w1AnchorPrice: 103,
       w1ExtremePrice: 100,
       w1LiqUsd: 200_000,
-      w2LiqUsd: 20_000,
-      w2ExtremePrice: 100,
-      unitAbs: 3,
+      w2LiqUsd: 5_000,
+      atr15mAbs: 3,
       p95: 10_000,
       dailyLiqPerMinBaseline: 3_000,
     });
@@ -146,41 +145,66 @@ scenario(
     if (!result.ok) return;
     assert.ok(
       result.slPct > SIZING_HARD_STOP_FLOOR_PCT,
-      `slPct=${result.slPct} should genuinely exceed the floor in this large-UNIT case`,
+      `slPct=${result.slPct} should genuinely exceed the floor in this large-ATR/strong-score case`,
     );
+    assert.strictEqual(result.slDeterminedBy, "physics");
   },
 );
 
-// ─── TP = SL x RR, always exactly ───────────────────────────────────
+// ─── TP = SL x RR, always exactly, in EITHER branch ─────────────────
 
 scenario(
-  "TP always equals EXACTLY finalSL x selectedRR -- swept across many scenarios",
+  "TP always equals EXACTLY finalSL x selectedRR -- swept across many scenarios, including floor-determined cases",
   () => {
     const p95 = 8_000;
     for (const w1Mult of [1, 5, 20]) {
       for (const w2Frac of [0.1, 0.5, 0.9]) {
-        for (const unitAbs of [0.1, 1, 5]) {
+        for (const atr15mAbs of [0.05, 1, 5]) {
           const w1Liq = p95 * w1Mult;
           const result = deriveLiquidationPhysicsTradePlan({
-            entry: 100 + unitAbs,
+            entry: 100,
             side: "LONG",
             w1AnchorPrice: 100,
-            w1ExtremePrice: 100 - unitAbs,
+            w1ExtremePrice: 100 - atr15mAbs,
             w1LiqUsd: w1Liq,
             w2LiqUsd: w1Liq * w2Frac,
-            w2ExtremePrice: 100 - unitAbs,
-            unitAbs,
+            atr15mAbs,
             p95,
             dailyLiqPerMinBaseline: 2_500,
           });
           if (!result.ok) continue;
           assert.ok(
             Math.abs(result.tpPct - result.slPct * result.rr) < 1e-9,
-            `w1Mult=${w1Mult} w2Frac=${w2Frac} unitAbs=${unitAbs}: tpPct=${result.tpPct} slPct*rr=${result.slPct * result.rr}`,
+            `w1Mult=${w1Mult} w2Frac=${w2Frac} atr15mAbs=${atr15mAbs}: tpPct=${result.tpPct} slPct*rr=${result.slPct * result.rr}`,
           );
         }
       }
     }
+  },
+);
+
+scenario(
+  "when the floor determines SL, TP is RECOMPUTED as floor x selectedRR -- never left as the original, smaller physics-implied TP",
+  () => {
+    const result = deriveLiquidationPhysicsTradePlan({
+      entry: 100,
+      side: "LONG",
+      w1AnchorPrice: 100.01,
+      w1ExtremePrice: 99.99,
+      w1LiqUsd: 5000,
+      w2LiqUsd: 4900,
+      atr15mAbs: 0.02,
+      p95: 5000,
+      dailyLiqPerMinBaseline: 4000,
+    });
+    assert.ok(result.ok);
+    if (!result.ok) return;
+    assert.strictEqual(result.slDeterminedBy, "sizing-floor");
+    assert.ok(Math.abs(result.slPct - SIZING_HARD_STOP_FLOOR_PCT) < 1e-12);
+    assert.ok(
+      Math.abs(result.tpPct - SIZING_HARD_STOP_FLOOR_PCT * result.rr) < 1e-9,
+      "TP must be floor x rr exactly, not the smaller raw physics-implied TP",
+    );
   },
 );
 
@@ -196,16 +220,29 @@ scenario(
       w1ExtremePrice: 100,
       w1LiqUsd: 50_000_000,
       w2LiqUsd: 100,
-      w2ExtremePrice: 100,
-      unitAbs: 0.5,
+      atr15mAbs: 0.5,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
     });
     assert.ok(result.ok);
     if (!result.ok) return;
+    // True overall ceiling: either the raw physics cap (TP_MULT_MAX x
+    // atr15mPct) OR the floor-override cap (SIZING_FLOOR x RR_MAX,
+    // reached only when the floor determines SL and TP is recomputed as
+    // floor x rr to preserve TP=SL*RR exactly) -- whichever is larger.
+    // Either way, this remains a small, bounded fraction of price, never
+    // an "explosion".
+    const trueCeiling = Math.max(
+      TP_MULT_MAX * result.atr15mPct,
+      SIZING_HARD_STOP_FLOOR_PCT * RR_LADDER[RR_LADDER.length - 1]!,
+    );
     assert.ok(
-      result.tpPct < 0.05,
-      `even an astronomically large liquidation must not exceed a 5% TP -- got ${result.tpPct * 100}%`,
+      result.tpPct <= trueCeiling + 1e-9,
+      `TP must never exceed the true ceiling -- got tpPct=${result.tpPct}, ceiling=${trueCeiling}`,
+    );
+    assert.ok(
+      result.tpPct < 0.01,
+      `even in the worst case, TP must stay well under 1% -- got ${result.tpPct * 100}%`,
     );
     assert.strictEqual(
       result.rr,
@@ -225,8 +262,7 @@ scenario(
       w1ExtremePrice: 99,
       w1LiqUsd: 1_000_000,
       w2LiqUsd: 100_000,
-      w2ExtremePrice: 99,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
     });
@@ -237,8 +273,7 @@ scenario(
       w1ExtremePrice: 99,
       w1LiqUsd: 1_000_000_000,
       w2LiqUsd: 100_000_000,
-      w2ExtremePrice: 99,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
     });
@@ -262,8 +297,7 @@ scenario(
       side: "LONG" as const,
       w1AnchorPrice: 100,
       w1ExtremePrice: 99,
-      w2ExtremePrice: 99,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
     };
@@ -304,8 +338,7 @@ scenario("W2Liq > W1Liq is clamped -- exhaustion never goes negative", () => {
     w1ExtremePrice: 99,
     w1LiqUsd: 10_000,
     w2LiqUsd: 50_000,
-    w2ExtremePrice: 99,
-    unitAbs: 1,
+    atr15mAbs: 1,
     p95: 5_000,
     dailyLiqPerMinBaseline: 2_000,
   });
@@ -321,7 +354,7 @@ scenario("W2Liq > W1Liq is clamped -- exhaustion never goes negative", () => {
 // ─── P95 semantics -- individual-event, never conflated with cumulative ─
 
 scenario(
-  "P95 is treated as an INDIVIDUAL-EVENT threshold, never compared against the cumulative episode sum -- structural proof from the function BODY (not doc-comments, which legitimately explain what to avoid)",
+  "P95 is treated as an INDIVIDUAL-EVENT threshold, never compared against the cumulative episode sum -- structural proof from the function BODY",
   () => {
     const fs = require("fs") as typeof import("fs");
     const source = fs.readFileSync(
@@ -350,8 +383,7 @@ scenario(
       side: "LONG" as const,
       w1AnchorPrice: 100,
       w1ExtremePrice: 99,
-      w2ExtremePrice: 99,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
       w1LiqUsd: 40_000,
@@ -374,15 +406,36 @@ scenario(
   },
 );
 
+// ─── UNIT is never referenced anywhere in this module ────────────────
+
+scenario(
+  "structural: UNIT is NEVER an input to this module at all -- exclusively an entry-geometry concept, owned by v5-wave.service.ts",
+  () => {
+    const fs = require("fs") as typeof import("fs");
+    const source = fs.readFileSync(
+      require.resolve("../src/domain/trading/liquidation-physics-trade-plan.ts"),
+      "utf8",
+    );
+    assert.ok(
+      !source.includes("unitAbs"),
+      "this module must never accept or reference a UNIT input",
+    );
+    assert.ok(
+      !source.toLowerCase().includes("w2extremeprice"),
+      "this module must never take Wave 2's own extreme price -- entry geometry is not its concern",
+    );
+    assert.ok(
+      source.includes("atr15mAbs"),
+      "the distance ruler must be ATR15m, explicitly",
+    );
+  },
+);
+
 // ─── LONG/SHORT symmetry ─────────────────────────────────────────────
 
 scenario(
   "LONG and SHORT with mirrored geometry produce identical slPct/tpPct/rr magnitudes",
   () => {
-    // Same entry-price MAGNITUDE (100) for both, so structuralRiskPct's
-    // own denominator is identical -- a genuinely fair, symmetric
-    // comparison (mirroring LONG's displacement below vs SHORT's
-    // displacement above the same center).
     const longResult = deriveLiquidationPhysicsTradePlan({
       entry: 100,
       side: "LONG",
@@ -390,8 +443,7 @@ scenario(
       w1ExtremePrice: 98,
       w1LiqUsd: 60_000,
       w2LiqUsd: 15_000,
-      w2ExtremePrice: 98,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
     });
@@ -402,8 +454,7 @@ scenario(
       w1ExtremePrice: 102,
       w1LiqUsd: 60_000,
       w2LiqUsd: 15_000,
-      w2ExtremePrice: 102,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
     });
@@ -425,7 +476,7 @@ scenario(
 // ─── Invalid input handling ───────────────────────────────────────────
 
 scenario(
-  "invalid input (zero/negative entry, UNIT, P95, or W1Liq) is rejected with a specific cancelReason",
+  "invalid input (zero/negative entry, ATR15m, P95, or W1Liq) is rejected with a specific cancelReason",
   () => {
     const base = {
       entry: 100,
@@ -434,14 +485,13 @@ scenario(
       w1ExtremePrice: 99,
       w1LiqUsd: 10_000,
       w2LiqUsd: 5_000,
-      w2ExtremePrice: 99,
-      unitAbs: 1,
+      atr15mAbs: 1,
       p95: 5_000,
       dailyLiqPerMinBaseline: 2_000,
     };
     for (const bad of [
       { entry: 0 },
-      { unitAbs: 0 },
+      { atr15mAbs: 0 },
       { p95: 0 },
       { w1LiqUsd: 0 },
     ]) {

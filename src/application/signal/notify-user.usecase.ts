@@ -59,13 +59,12 @@ function toV5SignalEventShape(doc: GlobalSignalDoc): V5SignalEvent {
           liquidityStrength: doc.physics.liquidityStrength,
           w2ToW1Ratio: doc.physics.w2ToW1Ratio,
           exhaustionScore: doc.physics.exhaustionScore,
-          w1DisplacementUnits: doc.physics.w1DisplacementUnits,
+          w1DisplacementAtr: doc.physics.w1DisplacementAtr,
           absorptionRaw: doc.physics.absorptionRaw,
           absorptionScore: doc.physics.absorptionScore,
           dynamicPhysicsScore: doc.physics.dynamicPhysicsScore,
           selectedRR: doc.physics.selectedRR,
-          dynamicK: doc.physics.dynamicK,
-          unitAbs: doc.physics.unitAbs,
+          tpMultiplier: doc.physics.tpMultiplier,
           slDeterminedBy: doc.physics.slDeterminedBy,
         }
       : null;

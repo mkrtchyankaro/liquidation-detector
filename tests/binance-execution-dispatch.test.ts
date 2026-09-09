@@ -3,10 +3,12 @@
  * per-symbol dispatch branch exists.
  *
  * Sep 9 2026 (Karo), operator-designed DYNAMIC liquidation-physics
- * rewrite -- planForSymbol() now calls deriveLiquidationPhysicsTradePlan()
- * (W1/W2 own liq+geometry, UNIT, P95, dailyLiqPerMinBaseline),
- * REPLACING the previous fixed-K structural call this file used to
- * test. Updated to the new signature.
+ * rewrite -- SECOND REVISION (ATR15m as the bounded exit-distance
+ * ruler, UNIT reserved exclusively for W1/W2 entry geometry, TP
+ * derived first from physics then SL=TP/RR with a hard 0.20% floor).
+ * planForSymbol() now calls deriveLiquidationPhysicsTradePlan() with
+ * w1AnchorPrice/w1ExtremePrice/w1LiqUsd/w2LiqUsd/atr15mAbs/p95/
+ * dailyLiqPerMinBaseline -- no w2ExtremePrice, no unitAbs.
  */
 import * as assert from "assert";
 import { planForSymbol } from "../src/infrastructure/binance/binance-execution.service";
@@ -29,7 +31,7 @@ function scenario(name: string, fn: () => void): void {
 console.log("Running binance-execution planForSymbol tests...\n");
 
 scenario(
-  "planForSymbol reaches a VALID plan for a realistic V5-scale signal (SOLUSDT, dynamic liquidation-physics geometry)",
+  "planForSymbol reaches a VALID plan for a realistic V5-scale signal (SOLUSDT, ATR15m-ruler liquidation-physics geometry)",
   () => {
     const result = planForSymbol({
       entry: 102.725,
@@ -39,8 +41,7 @@ scenario(
       w1ExtremePrice: 102.4,
       w1LiqUsd: 150_000,
       w2LiqUsd: 50_000,
-      w2ExtremePrice: 102.4,
-      unitAbs: 0.325,
+      atr15mAbs: 0.5,
       p95: 38_166,
       dailyLiqPerMinBaseline: 5_000,
     });
@@ -63,8 +64,7 @@ scenario(
       w1ExtremePrice: 102.4,
       w1LiqUsd: 150_000,
       w2LiqUsd: 50_000,
-      w2ExtremePrice: 102.4,
-      unitAbs: 0.325,
+      atr15mAbs: 0.5,
       p95: 0,
       dailyLiqPerMinBaseline: 5_000,
     });
@@ -81,8 +81,7 @@ scenario(
       w1ExtremePrice: 100,
       w1LiqUsd: 100_000,
       w2LiqUsd: 30_000,
-      w2ExtremePrice: 100,
-      unitAbs: 0.6,
+      atr15mAbs: 0.6,
       p95: 30_000,
       dailyLiqPerMinBaseline: 4_000,
     };
@@ -105,18 +104,17 @@ scenario(
 );
 
 scenario(
-  "planForSymbol's own TP is EXACTLY slPct x rr -- proves the new dynamic physics formula, not any old path, is what actually runs here",
+  "planForSymbol's own TP is EXACTLY slPct x rr -- proves the new ATR15m-ruler physics formula, not any old path, is what actually runs here",
   () => {
     const result = planForSymbol({
-      entry: 100.6,
+      entry: 100.5,
       side: "LONG",
       symbol: "SOLUSDT",
-      w1AnchorPrice: 101,
+      w1AnchorPrice: 100.5,
       w1ExtremePrice: 100,
       w1LiqUsd: 500_000,
       w2LiqUsd: 50_000,
-      w2ExtremePrice: 100,
-      unitAbs: 0.6,
+      atr15mAbs: 0.5,
       p95: 30_000,
       dailyLiqPerMinBaseline: 4_000,
     });
@@ -160,8 +158,7 @@ scenario(
       "w1ExtremePrice",
       "w1LiqUsd",
       "w2LiqUsd",
-      "w2ExtremePrice",
-      "unitAbs",
+      "atr15mAbs",
       "p95",
       "dailyLiqPerMinBaseline",
     ]) {
@@ -178,7 +175,7 @@ scenario(
 );
 
 scenario(
-  "structural: no old TP/SL execution path remains reachable -- deriveStructuralTradePlan/deriveLiquidityTradePlan/deriveV5TradePlan are never called from binance-execution.service.ts",
+  "structural: no old TP/SL execution path remains reachable -- fixed-K structural formula, Hybrid-C/intensity formula, and the old V5 wrapper are never called from binance-execution.service.ts",
   () => {
     const fs = require("fs") as typeof import("fs");
     const source = fs.readFileSync(
@@ -199,7 +196,22 @@ scenario(
     );
     assert.ok(
       source.includes("deriveLiquidationPhysicsTradePlan("),
-      "the new dynamic physics formula must be what actually runs",
+      "the ATR15m-ruler dynamic physics formula must be what actually runs",
+    );
+  },
+);
+
+scenario(
+  "structural: UNIT is never threaded into this file's own planForSymbol()/ExecutionInput at all",
+  () => {
+    const fs = require("fs") as typeof import("fs");
+    const source = fs.readFileSync(
+      require.resolve("../src/infrastructure/binance/binance-execution.service.ts"),
+      "utf8",
+    );
+    assert.ok(
+      !source.includes("unitAbs"),
+      "unitAbs must never appear in this file -- UNIT is exclusively an entry-geometry concept owned by v5-wave.service.ts",
     );
   },
 );

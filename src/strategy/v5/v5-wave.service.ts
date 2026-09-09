@@ -68,6 +68,14 @@ export interface V5SignalEvent {
    *  same new physics" requirement for both pre-flight and post-fill). */
   p95AtEntry: number;
   dailyLiqPerMinBaselineAtEntry: number;
+  /** Sep 9 2026 (Karo), operator-designed liquidation-physics rewrite
+   *  (ATR15m as the bounded exit-distance ruler) -- the EXACT
+   *  watch.atrAtStart (ATR15m, absolute price units) evaluateSignal()
+   *  itself used, persisted so BinanceExecutionService's own post-fill
+   *  replan reproduces the IDENTICAL physics (never a later, separately
+   *  re-fetched ATR15m value that could have drifted since signal
+   *  time). */
+  atr15mAtEntry: number;
   totalEpisodePressure: number;
   qualifyingEventUsd: number;
   qualifyingEventTs: number;
@@ -115,14 +123,13 @@ export interface V5SignalEvent {
     liquidityStrength: number;
     w2ToW1Ratio: number;
     exhaustionScore: number;
-    w1DisplacementUnits: number;
+    w1DisplacementAtr: number;
     absorptionRaw: number;
     absorptionScore: number;
     dynamicPhysicsScore: number;
     selectedRR: number;
-    dynamicK: number;
-    unitAbs: number;
-    slDeterminedBy: "structural" | "sizing-floor";
+    tpMultiplier: number;
+    slDeterminedBy: "physics" | "sizing-floor";
   } | null;
   rejectionReason: string | null;
   /** Sep 9 2026 (Karo), operator-requested diagnostics-only fix --
@@ -159,14 +166,13 @@ export interface V5SignalEvent {
     liquidityStrength: number;
     w2ToW1Ratio: number;
     exhaustionScore: number;
-    w1DisplacementUnits: number;
+    w1DisplacementAtr: number;
     absorptionRaw: number;
     absorptionScore: number;
     dynamicPhysicsScore: number;
     selectedRR: number;
-    dynamicK: number;
-    unitAbs: number;
-    slDeterminedBy: "structural" | "sizing-floor";
+    tpMultiplier: number;
+    slDeterminedBy: "physics" | "sizing-floor";
   } | null;
   btcContext: { priceAtSignal: number | null; oiAtSignal: number | null };
   liq24hContext: { dayLiqTotalUsd: number; dayLiqEvents: number } | null;
@@ -829,8 +835,7 @@ export class V5WaveService {
         w1ExtremePrice: w1.extremePrice,
         w1LiqUsd: w1.liqNotionalUsd,
         w2LiqUsd: entryWave.liqNotionalUsd,
-        w2ExtremePrice: entryWave.extremePrice,
-        unitAbs: watch.unitAtStart,
+        atr15mAbs: watch.atrAtStart,
         p95: p95AtEntry,
         dailyLiqPerMinBaseline: dailyLiqPerMinBaselineAtEntry,
       });
@@ -856,13 +861,12 @@ export class V5WaveService {
         liquidityStrength: result.liquidityStrength,
         w2ToW1Ratio: result.w2ToW1Ratio,
         exhaustionScore: result.exhaustionScore,
-        w1DisplacementUnits: result.w1DisplacementUnits,
+        w1DisplacementAtr: result.w1DisplacementAtr,
         absorptionRaw: result.absorptionRaw,
         absorptionScore: result.absorptionScore,
         dynamicPhysicsScore: result.dynamicPhysicsScore,
         selectedRR: result.selectedRR,
-        dynamicK: result.dynamicK,
-        unitAbs: result.unitAbs,
+        tpMultiplier: result.tpMultiplier,
         slDeterminedBy: result.slDeterminedBy,
       };
       if (result.ok) {
@@ -891,13 +895,12 @@ export class V5WaveService {
           liquidityStrength: result.liquidityStrength,
           w2ToW1Ratio: result.w2ToW1Ratio,
           exhaustionScore: result.exhaustionScore,
-          w1DisplacementUnits: result.w1DisplacementUnits,
+          w1DisplacementAtr: result.w1DisplacementAtr,
           absorptionRaw: result.absorptionRaw,
           absorptionScore: result.absorptionScore,
           dynamicPhysicsScore: result.dynamicPhysicsScore,
           selectedRR: result.selectedRR,
-          dynamicK: result.dynamicK,
-          unitAbs: result.unitAbs,
+          tpMultiplier: result.tpMultiplier,
           slDeterminedBy: result.slDeterminedBy,
         };
       } else {
@@ -923,6 +926,7 @@ export class V5WaveService {
       unitAtStart: watch.unitAtStart,
       p95AtEntry,
       dailyLiqPerMinBaselineAtEntry,
+      atr15mAtEntry: watch.atrAtStart,
       totalEpisodePressure: watch.totalEpisodePressure,
       qualifyingEventUsd: watch.qualifyingEventUsd,
       qualifyingEventTs: watch.qualifyingEventTs,

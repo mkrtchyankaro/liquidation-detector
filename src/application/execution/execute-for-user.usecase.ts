@@ -128,8 +128,7 @@ export async function executeForUser(
       w1ExtremePrice: w1?.extremePrice ?? globalSignal.entry,
       w1LiqUsd: w1?.liqNotionalUsd ?? 0,
       w2LiqUsd: w2?.liqNotionalUsd ?? 0,
-      w2ExtremePrice: w2?.extremePrice ?? globalSignal.entry,
-      unitAbs: globalSignal.unitAtStart,
+      atr15mAbs: globalSignal.atr15mAtEntry,
       p95: globalSignal.p95AtEntry,
       dailyLiqPerMinBaseline: globalSignal.dailyLiqPerMinBaselineAtEntry,
     });
