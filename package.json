@@ -9,7 +9,7 @@
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
     "typecheck": "tsc --noEmit",
-    "test": "npm run test:v5-wave && npm run test:in-flight-guard && npm run test:reconciliation-health && npm run test:execution-dispatch && npm run test:signal-distributor && npm run test:multi-user && npm run test:user-id && npm run test:per-user-binance && npm run test:btc-block && npm run test:direction-disable && npm run test:research-checkpoint && npm run test:research-data-layer && npm run test:atr-1m-isolation && npm run test:duplicate-close-fix && npm run test:main-close-lifecycle && npm run test:main-symbol-lock && npm run test:rejected-plan-status && npm run test:main-telegram-isolation && npm run test:liquidation-stats-victim-specific && npm run test:liquidation-stats-context && npm run test:rejection-reason-diagnostics && npm run test:telegram-routing-isolation && npm run test:duplicate-close-early-prune",
+    "test": "npm run test:v5-wave && npm run test:in-flight-guard && npm run test:reconciliation-health && npm run test:execution-dispatch && npm run test:signal-distributor && npm run test:multi-user && npm run test:user-id && npm run test:per-user-binance && npm run test:btc-block && npm run test:direction-disable && npm run test:research-checkpoint && npm run test:research-data-layer && npm run test:atr-1m-isolation && npm run test:duplicate-close-fix && npm run test:main-close-lifecycle && npm run test:main-symbol-lock && npm run test:rejected-plan-status && npm run test:main-telegram-isolation && npm run test:liquidation-stats-victim-specific && npm run test:liquidation-stats-context && npm run test:rejection-reason-diagnostics && npm run test:telegram-routing-isolation && npm run test:duplicate-close-early-prune && npm run test:strategy-uses-combined-stats",
     "test:v5-wave": "tsx tests/v5-wave.test.ts",
     "test:in-flight-guard": "tsx tests/in-flight-guard.test.ts",
     "test:reconciliation-health": "tsx tests/reconciliation-health.test.ts",
@@ -33,6 +33,7 @@
     "test:rejection-reason-diagnostics": "tsx tests/rejection-reason-diagnostics.test.ts",
     "test:telegram-routing-isolation": "tsx tests/telegram-routing-isolation.test.ts",
     "test:duplicate-close-early-prune": "tsx tests/duplicate-close-early-prune.test.ts",
+    "test:strategy-uses-combined-stats": "tsx tests/strategy-uses-combined-stats.test.ts",
     "show-signal": "tsx src/tools/show-signal.ts"
   },
   "engines": {

@@ -116,18 +116,27 @@ async function main(): Promise<void> {
     },
     (symbol) =>
       orchestratorPlaceholder.instance?.oiTracker.getCachedOI(symbol) ?? null,
-    // Sep 9 2026 (Karo), operator-requested victim-side-specific
-    // regime, with safe fallback. rollingMedianLiqNotionalPerMinForVictim()
-    // (below) returns victim-specific baseline when there's enough
-    // victim-specific data, falling back to the EXISTING combined
-    // LONG+SHORT calculation otherwise -- see that method's own doc
-    // comment for the exact consistency guarantee with P95.
-    (symbol, victim) =>
-      orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMinForVictim(
+    // Sep 9 2026 (Karo), operator-requested RESTORE -- REVERTS to the
+    // ORIGINAL, production-proven combined LONG+SHORT rolling median
+    // (bucketsLong[i]+bucketsShort[i], last 60 sealed activity
+    // buckets), matching the OLD liqwatch-bot's own
+    // rollingMedianLiqNotionalPerMin() exactly (confirmed byte-
+    // identical via direct old-code trace). The victim-specific regime
+    // (rollingMedianLiqNotionalPerMinForVictim(), added later) is KEPT,
+    // fully intact, for diagnostics/research (see
+    // GlobalSignalDoc.liquidationStatsContext) -- it is simply no
+    // longer called from here, so it can never influence the trade-
+    // plan. Real production evidence (XRPUSDT, signalId
+    // 313f105e-43da-41fb-8275-78c6b534174e): the victim-specific
+    // SHORT-only median collapsed to $8.1 vs the combined $1064.6
+    // (131x smaller) over the same 60 real buckets, purely because
+    // LONG-side liquidations dominated that window -- a median over a
+    // systematically rarer side is not a safe strategy input.
+    (symbol) =>
+      orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin(
         symbol,
-        victim,
         60,
-      ).value ?? 0,
+      ) ?? 0,
     (symbol, victim) =>
       orchestratorPlaceholder.instance
         ? v5IndividualEventP95(
