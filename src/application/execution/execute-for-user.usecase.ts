@@ -108,6 +108,12 @@ export async function executeForUser(
   const positionQty = riskUsd / slDistance;
   const positionSizeUsdt = positionQty * globalSignal.entry;
 
+  const w1 = globalSignal.waveHistory[0];
+  const w2 =
+    globalSignal.waveHistory.find(
+      (w) => w.waveNumber === globalSignal.entryWaveNumber,
+    ) ?? globalSignal.waveHistory[globalSignal.waveHistory.length - 1];
+
   try {
     const execResult = await runtime.execution.run({
       symbol: globalSignal.symbol,
@@ -118,13 +124,14 @@ export async function executeForUser(
       riskUsd,
       positionSizeUsdt,
       signalId: globalSignal.signalId,
-      w2ExtremePrice:
-        (
-          globalSignal.waveHistory.find(
-            (w) => w.waveNumber === globalSignal.entryWaveNumber,
-          ) ?? globalSignal.waveHistory[globalSignal.waveHistory.length - 1]
-        )?.extremePrice ?? globalSignal.entry,
+      w1AnchorPrice: w1?.anchorPrice ?? globalSignal.entry,
+      w1ExtremePrice: w1?.extremePrice ?? globalSignal.entry,
+      w1LiqUsd: w1?.liqNotionalUsd ?? 0,
+      w2LiqUsd: w2?.liqNotionalUsd ?? 0,
+      w2ExtremePrice: w2?.extremePrice ?? globalSignal.entry,
       unitAbs: globalSignal.unitAtStart,
+      p95: globalSignal.p95AtEntry,
+      dailyLiqPerMinBaseline: globalSignal.dailyLiqPerMinBaselineAtEntry,
     });
 
     if (execResult.status === "SUCCESS") {

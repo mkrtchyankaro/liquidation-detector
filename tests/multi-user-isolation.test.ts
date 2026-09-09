@@ -77,6 +77,8 @@ function makeGlobalSignal(signalId: string): GlobalSignalDoc {
     exhaustionLayerLiqUsd: null,
     exhaustionLayerWaveNumber: null,
     unitAtStart: 1,
+    p95AtEntry: 1000,
+    dailyLiqPerMinBaselineAtEntry: 500,
     qualifyingEventUsd: 50_000,
     qualifyingEventTs: Date.now(),
     p95AtQualification: 40_000,

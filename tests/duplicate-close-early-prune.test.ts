@@ -100,6 +100,8 @@ function baseGlobalSignal(): GlobalSignalDoc {
     exhaustionLayerLiqUsd: 100000,
     exhaustionLayerWaveNumber: 1,
     unitAtStart: 1,
+    p95AtEntry: 1000,
+    dailyLiqPerMinBaselineAtEntry: 500,
     qualifyingEventUsd: 100,
     qualifyingEventTs: 1,
     p95AtQualification: 90,

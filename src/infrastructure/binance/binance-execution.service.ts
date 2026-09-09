@@ -5,47 +5,56 @@ import type { ExecutionClaimRepository } from "../mongo/execution-claim.reposito
 import type { TelegramClient } from "../telegram/telegram.client";
 import { childLogger } from "../logging/logger";
 import { type LiquidityPlanResult } from "../../domain/trading/trade-plan";
-import { deriveStructuralTradePlan } from "../../domain/trading/structural-trade-plan";
+import { deriveLiquidationPhysicsTradePlan } from "../../domain/trading/liquidation-physics-trade-plan";
 
 const log = childLogger({ mod: "binance-execution" });
 
-/** Sep 9 2026 (Karo), operator-designed structural SL/TP rewrite --
- *  REPLACES the previous deriveLiquidityTradePlan() (liquidation-
- *  intensity/Hybrid-C-cap) call here. CRITICAL FIX: this function is
- *  the pre-flight AND post-fill REPLAN path (see both call-sites
- *  below) -- it runs on every real execution, independent of
- *  evaluateSignal()'s own already-migrated trade-plan. Before this
- *  fix, a fill-price-slippage-triggered replan would have silently
- *  recomputed TP/SL using the OLD, now-removed formula, even though
- *  the signal's own ORIGINAL plan was already structural -- the exact
- *  gap the operator's own review caught. Returns a LiquidityPlanResult-
- *  shaped object (the SAME discriminated-union type every existing
- *  downstream consumer in this file already expects) so this remains
- *  a minimal, surgical swap -- zero-filled forensics fields that no
- *  longer apply (intensityRaw, wallApplied, slCapApplied, etc.),
- *  mirroring the EXACT SAME pattern this file's own MICRO
- *  fixedExitPct branch already uses below for the identical reason. */
+/** Sep 9 2026 (Karo), operator-designed DYNAMIC liquidation-physics
+ *  rewrite -- REPLACES the previous FIXED K=0.4/RR=2.2
+ *  the fixed-K structural formula call here (itself a replacement for
+ *  the even-older Hybrid-C intensity formula). This
+ *  function is the pre-flight AND post-fill REPLAN path (see both
+ *  call-sites below) -- it must use EXACTLY the same physics as
+ *  evaluateSignal()'s own original plan, per the operator's own
+ *  explicit requirement, so a fill-price-slippage-triggered replan
+ *  can never silently diverge onto old/different geometry. Returns a
+ *  LiquidityPlanResult-shaped object (the SAME discriminated-union
+ *  type every existing downstream consumer in this file already
+ *  expects) so this remains a minimal, surgical swap -- zero-filled
+ *  forensics fields that no longer apply. */
 export function planForSymbol(input: {
   entry: number;
   side: "LONG" | "SHORT";
   symbol: string;
+  w1AnchorPrice: number;
+  w1ExtremePrice: number;
+  w1LiqUsd: number;
+  w2LiqUsd: number;
   w2ExtremePrice: number;
   unitAbs: number;
+  p95: number;
+  dailyLiqPerMinBaseline: number;
 }): LiquidityPlanResult {
-  const result = deriveStructuralTradePlan({
+  const result = deriveLiquidationPhysicsTradePlan({
     entry: input.entry,
     side: input.side,
+    w1AnchorPrice: input.w1AnchorPrice,
+    w1ExtremePrice: input.w1ExtremePrice,
+    w1LiqUsd: input.w1LiqUsd,
+    w2LiqUsd: input.w2LiqUsd,
     w2ExtremePrice: input.w2ExtremePrice,
     unitAbs: input.unitAbs,
+    p95: input.p95,
+    dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
   });
   const zeroForensics = {
-    intensityRaw: 0,
-    intensity: 0,
+    intensityRaw: result.liquidityStrengthP95,
+    intensity: result.liquidityStrength,
     atr15mPct: 0,
     rawTpPct: 0,
     wallAdjustedTpPct: 0,
     wallApplied: false,
-    rrCandidate: result.rrTarget,
+    rrCandidate: result.selectedRR,
     slCapApplied: false,
     slCapValue: 0,
     profitWallNotionalAtEntry: 0,
@@ -84,22 +93,28 @@ export interface ExecutionInput {
   riskUsd: number;
   positionSizeUsdt: number;
   signalId: string;
-  /** Sep 9 2026 (Karo), operator-designed structural SL/TP -- the
-   *  EXACT SAME values (entry wave's own extreme, frozen UNIT) that
-   *  evaluateSignal() originally used to plan this signal. Frozen at
-   *  signal time (GlobalSignalDoc.waveHistory / unitAtStart), not
-   *  re-fetched here: BinanceExecutionService has no market-data
-   *  dependencies, and reusing the frozen context keeps the post-fill
-   *  replan measuring the same structural geometry the strategy
-   *  actually evaluated, rather than a different market moment.
-   *  REPLACES the previous cumLiq/liqBaseline/atr15mPct/walls inputs
-   *  (the old liquidation-intensity formula's own inputs) -- see
-   *  planForSymbol()'s own doc comment above for the full context. */
+  /** Sep 9 2026 (Karo), operator-designed DYNAMIC liquidation-physics
+   *  plan -- the EXACT SAME values (Wave 1's own anchor/extreme/liq,
+   *  Wave 2's own liq/extreme, frozen UNIT, P95-at-entry,
+   *  dailyLiqPerMinBaseline-at-entry) that evaluateSignal() originally
+   *  used to plan this signal. Frozen at signal time
+   *  (GlobalSignalDoc.waveHistory / unitAtStart / p95AtEntry /
+   *  dailyLiqPerMinBaselineAtEntry), not re-fetched here --
+   *  BinanceExecutionService has no market-data dependencies, and
+   *  reusing the frozen context keeps the post-fill replan measuring
+   *  the exact same physics the strategy actually evaluated, rather
+   *  than a different market moment. */
+  w1AnchorPrice: number;
+  w1ExtremePrice: number;
+  w1LiqUsd: number;
+  w2LiqUsd: number;
   w2ExtremePrice: number;
   unitAbs: number;
+  p95: number;
+  dailyLiqPerMinBaseline: number;
   /** Aug 28 2026, operator-approved (Karo) -- MICRO's own compressed-
    *  exit override. When present, SKIPS the standard post-fill replan
-   *  (deriveLiquidityTradePlan() re-derivation from cumLiq/liqBaseline/
+   *  (the old formula's own re-derivation from cumLiq/liqBaseline/
    *  atr15mPct/walls) entirely -- instead computes SL/TP directly as
    *  fixed PERCENTAGE DISTANCES from the actual fill price. This is
    *  the ONLY way MICRO's own compressed TP/SL (NORMAL's own distances
@@ -1433,8 +1448,8 @@ export class BinanceExecutionService {
     // Uses the CURRENT EXECUTABLE price (best ask for LONG/BUY, best
     // bid for SHORT/SELL — the price the MARKET order would actually
     // cross at, NOT the strategy's planned/mid entry) to re-run the
-    // SAME planner (planForSymbol -> deriveStructuralTradePlan — zero
-    // duplication) used for both the original pre-fill plan and the
+    // SAME planner (planForSymbol -> deriveLiquidationPhysicsTradePlan —
+    // zero duplication) used for both the original pre-fill plan and the
     // post-fill replan below. If the trade is already invalid AT THE EXECUTABLE PRICE —
     // geometry floors, or RR below the execution-layer floor — skip
     // sending the MARKET order entirely: zero round-trip fee, nothing
@@ -1460,8 +1475,14 @@ export class BinanceExecutionService {
         entry: executablePrice,
         side: input.side,
         symbol: plan.symbol,
+        w1AnchorPrice: input.w1AnchorPrice,
+        w1ExtremePrice: input.w1ExtremePrice,
+        w1LiqUsd: input.w1LiqUsd,
+        w2LiqUsd: input.w2LiqUsd,
         w2ExtremePrice: input.w2ExtremePrice,
         unitAbs: input.unitAbs,
+        p95: input.p95,
+        dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
       });
       const deviationPct =
         ((executablePrice - plan.entryRounded) / plan.entryRounded) * 100;
@@ -1752,7 +1773,7 @@ export class BinanceExecutionService {
     // whether the STRATEGY still likes this trade at the price it
     // actually got filled at.
     //
-    // Fix: re-run the exact same planner (deriveLiquidityTradePlan —
+    // Fix: re-run the exact same planner (planForSymbol —
     // same formulas, same thresholds, zero duplication, imported from
     // ../strategy-v2/trade-plan) with the ACTUAL fill price substituted
     // for entry, reusing the FROZEN cumLiq/liqBaseline/atr15mPct/walls
@@ -1782,8 +1803,14 @@ export class BinanceExecutionService {
       entry: actualEntry,
       side: input.side,
       symbol: plan.symbol,
+      w1AnchorPrice: input.w1AnchorPrice,
+      w1ExtremePrice: input.w1ExtremePrice,
+      w1LiqUsd: input.w1LiqUsd,
+      w2LiqUsd: input.w2LiqUsd,
       w2ExtremePrice: input.w2ExtremePrice,
       unitAbs: input.unitAbs,
+      p95: input.p95,
+      dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
     });
     // Aug 28 2026, operator-approved (Karo) -- CRITICAL FIX. Without
     // this override, MICRO's own compressed TP/SL (NORMAL's own
@@ -1841,7 +1868,7 @@ export class BinanceExecutionService {
     // Two independent floors, deliberately kept separate:
     //   replan.ok            — the STRATEGY's own geometry floors
     //                          (MIN_TP_PCT, MIN_SL_PCT, RR_MIN inside
-    //                          deriveLiquidityTradePlan).
+    //                          planForSymbol/deriveLiquidationPhysicsTradePlan).
     //   this.minRRAfterFill  — the EXECUTION layer's own, independently
     //                          env-configurable safety floor
     //                          (BINANCE_MIN_RR_AFTER_FILL). Currently

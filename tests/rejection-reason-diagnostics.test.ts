@@ -9,13 +9,15 @@
  *     the trade-plan already computes internally, on the REJECTED
  *     path specifically
  *
- * Sep 9 2026 (Karo), operator-requested structural SL/TP rewrite --
- * the original wall-crushed-TP scenarios this file used to test no
- * longer apply (the new structural formula has no wall-cap concept at
- * all -- see structural-trade-plan.ts). Replaced with the new
- * formula's own only possible rejection path (degenerate/invalid
- * structural inputs), preserving this file's own original purpose
- * (specific-reason passthrough, not a generic placeholder).
+ * Sep 9 2026 (Karo), operator-designed DYNAMIC liquidation-physics
+ * rewrite -- the previous "entry lands exactly on softExitPrice"
+ * degenerate scenario assumed the OLD fixed K=0.4 model, no longer
+ * reachable (dynamicK is now itself derived from the scenario's own
+ * liquidityStrength/exhaustion/absorption, so a hand-picked entry
+ * price no longer reliably lands on softExitPrice). Replaced with a
+ * clean, reliable invalid-input trigger (P95 unavailable) that
+ * exercises the SAME rejectionReason/planDiagnostics passthrough this
+ * file's own original purpose is about.
  */
 import * as assert from "assert";
 import * as fs from "fs";
@@ -58,13 +60,13 @@ const NO_WALL = {
   atSweepStart: null,
 };
 
-function makeV5(unit = 1): V5WaveService {
+function makeV5(unit = 1, p95Getter: () => number = () => 1000): V5WaveService {
   return new V5WaveService(
     () => 500,
     () => unit,
     () => null,
     () => 1000,
-    () => 1000,
+    p95Getter,
     () => NO_WALL,
   );
 }
@@ -72,16 +74,14 @@ function makeV5(unit = 1): V5WaveService {
 console.log("Running rejection-reason/diagnostics tests...\n");
 
 scenario(
-  "degenerate structural input (entry lands exactly on softExitPrice) produces the EXACT specific cancelReason ('structural-risk-non-positive'), not a generic placeholder",
+  "invalid structural input (P95 unavailable, zero) produces the EXACT specific cancelReason ('invalid-input'), not a generic placeholder",
   () => {
-    // UNIT going to exactly 0 mid-episode is not a realistic live
-    // scenario (unitAtStart is frozen once, at episode start, and
-    // onTick's own `if (watch.unitAtStart <= 0) continue` guard
-    // prevents ANY completion decision while it's non-positive) -- this
-    // test exists purely to exercise deriveStructuralTradePlan()'s own
-    // defensive "invalid-input" path end-to-end through evaluateSignal(),
-    // proving the SPECIFIC reason string reaches rejectionReason.
-    const v5 = makeV5(1);
+    // P95 must stay a NORMAL, real value while the cascade itself
+    // qualifies (min-2-events + hasP95Event both gate on p95 > 0) --
+    // only flips to 0 right before evaluateSignal() is called, isolating
+    // the invalid-input trigger to the trade-plan step specifically.
+    let p95Live = 1000;
+    const v5 = makeV5(1, () => p95Live);
     v5.onLiquidation({
       symbol: "ETHUSDT",
       side: "SELL",
@@ -116,19 +116,11 @@ scenario(
       outcomes.find((o) => o.kind === "SIGNAL_CANDIDATE");
     if (candidate?.kind !== "SIGNAL_CANDIDATE") throw new Error("setup failed");
 
-    // Directly force a degenerate entry price EQUAL to the watch's own
-    // unitAtStart-derived extreme, so structuralRiskPct works out to
-    // exactly 0 -- the ONLY other rejection path
-    // deriveStructuralTradePlan() has (invalid-input requires entry<=0
-    // or unitAbs<=0, neither reachable via evaluateSignal() in practice
-    // -- structural-risk-non-positive is the realistic one to exercise
-    // here).
-    const degenerateEntry =
-      candidate.entryWave.extremePrice + 0.4 * candidate.watch.unitAtStart;
+    p95Live = 0; // NOW switch, right before the trade-plan step
     const event = v5.evaluateSignal(
       candidate.watch,
       candidate.entryWave,
-      degenerateEntry,
+      1991,
       3100,
     );
     assert.ok(
@@ -138,20 +130,21 @@ scenario(
     assert.strictEqual(
       event!.plan,
       null,
-      "structural-risk-non-positive must fail the trade-plan",
+      "invalid-input (p95=0) must fail the trade-plan",
     );
     assert.strictEqual(
       event!.rejectionReason,
-      "structural-risk-non-positive",
+      "invalid-input",
       "the EXACT specific cancelReason must be exposed, not 'plan-rejected' or any other generic placeholder",
     );
   },
 );
 
 scenario(
-  "planDiagnostics is populated on the REJECTED path, with the real structural forensics visible",
+  "planDiagnostics is populated on the REJECTED path, with the real physics forensics visible",
   () => {
-    const v5 = makeV5(1);
+    let p95Live = 1000;
+    const v5 = makeV5(1, () => p95Live);
     v5.onLiquidation({
       symbol: "ETHUSDT",
       side: "SELL",
@@ -186,12 +179,11 @@ scenario(
       outcomes.find((o) => o.kind === "SIGNAL_CANDIDATE");
     if (candidate?.kind !== "SIGNAL_CANDIDATE") throw new Error("setup failed");
 
-    const degenerateEntry =
-      candidate.entryWave.extremePrice + 0.4 * candidate.watch.unitAtStart;
+    p95Live = 0;
     const event = v5.evaluateSignal(
       candidate.watch,
       candidate.entryWave,
-      degenerateEntry,
+      1991,
       3100,
     )!;
     assert.ok(
@@ -201,11 +193,6 @@ scenario(
     assert.ok(
       event.planDiagnostics!.atr15mPct > 0,
       "atr15mPct must be a real, non-zero forensic value",
-    );
-    assert.strictEqual(
-      event.planDiagnostics!.structuralRiskPct,
-      0,
-      "structuralRiskPct must reflect the exact degenerate 0-distance that caused the rejection",
     );
   },
 );

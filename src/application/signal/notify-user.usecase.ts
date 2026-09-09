@@ -54,6 +54,19 @@ function toV5SignalEventShape(doc: GlobalSignalDoc): V5SignalEvent {
           structuralRiskPct: doc.physics.structuralRiskPct,
           sizingRiskPct: doc.physics.sizingRiskPct,
           hardStopRiskPct: doc.physics.hardStopRiskPct,
+          liquidityStrengthP95: doc.physics.liquidityStrengthP95,
+          liquidityStrength24h: doc.physics.liquidityStrength24h,
+          liquidityStrength: doc.physics.liquidityStrength,
+          w2ToW1Ratio: doc.physics.w2ToW1Ratio,
+          exhaustionScore: doc.physics.exhaustionScore,
+          w1DisplacementUnits: doc.physics.w1DisplacementUnits,
+          absorptionRaw: doc.physics.absorptionRaw,
+          absorptionScore: doc.physics.absorptionScore,
+          dynamicPhysicsScore: doc.physics.dynamicPhysicsScore,
+          selectedRR: doc.physics.selectedRR,
+          dynamicK: doc.physics.dynamicK,
+          unitAbs: doc.physics.unitAbs,
+          slDeterminedBy: doc.physics.slDeterminedBy,
         }
       : null;
   return { ...(doc as unknown as V5SignalEvent), plan };

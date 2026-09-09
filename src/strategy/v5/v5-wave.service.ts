@@ -16,8 +16,7 @@ import {
   v5ShortEnabled,
   v5BtcMode,
 } from "./v5.config";
-import { deriveStructuralTradePlan } from "../../domain/trading/structural-trade-plan";
-import { INTENSITY_MAX } from "../../domain/trading/trade-plan";
+import { deriveLiquidationPhysicsTradePlan } from "../../domain/trading/liquidation-physics-trade-plan";
 import { evaluateBtcOpposingWatchSafe } from "./btc-opposing-watch";
 import type { WallSnapshots } from "../../domain/trading/trade-plan";
 import { childLogger } from "../../infrastructure/logging/logger";
@@ -60,6 +59,15 @@ export interface V5SignalEvent {
    *  re-derive the SAME structural plan at the actual fill price,
    *  never falling back to the old liquidation-intensity formula. */
   unitAtStart: number;
+  /** Sep 9 2026 (Karo), operator-designed dynamic liquidation-physics
+   *  plan -- the EXACT p95/dailyLiqPerMinBaseline values used at
+   *  entry-evaluation time, persisted so BinanceExecutionService's
+   *  own post-fill replan can reproduce the IDENTICAL physics
+   *  (never re-fetching live stats, which could have drifted since
+   *  signal time -- matching the operator's own explicit "exactly the
+   *  same new physics" requirement for both pre-flight and post-fill). */
+  p95AtEntry: number;
+  dailyLiqPerMinBaselineAtEntry: number;
   totalEpisodePressure: number;
   qualifyingEventUsd: number;
   qualifyingEventTs: number;
@@ -102,17 +110,30 @@ export interface V5SignalEvent {
     structuralRiskPct: number;
     sizingRiskPct: number;
     hardStopRiskPct: number;
+    liquidityStrengthP95: number;
+    liquidityStrength24h: number;
+    liquidityStrength: number;
+    w2ToW1Ratio: number;
+    exhaustionScore: number;
+    w1DisplacementUnits: number;
+    absorptionRaw: number;
+    absorptionScore: number;
+    dynamicPhysicsScore: number;
+    selectedRR: number;
+    dynamicK: number;
+    unitAbs: number;
+    slDeterminedBy: "structural" | "sizing-floor";
   } | null;
   rejectionReason: string | null;
   /** Sep 9 2026 (Karo), operator-requested diagnostics-only fix --
-   *  REUSES (never reimplements) the SAME StructuralTradePlanForensics
-   *  deriveStructuralTradePlan() already returns on BOTH its ok=true
-   *  and ok=false branches (see structural-trade-plan.ts's own
-   *  StructuralTradePlanResult union) -- these numbers already existed
-   *  as local variables and were previously discarded on rejection.
-   *  Populated whenever deriveStructuralTradePlan() was actually
-   *  called (i.e. NOT for the earlier "episode-missing-atr" early-exit,
-   *  where no plan computation ever ran at all -- null there).
+   *  REUSES (never reimplements) the SAME LiquidationPhysicsDiagnostics
+   *  deriveLiquidationPhysicsTradePlan() already returns on BOTH its
+   *  ok=true and ok=false branches (see liquidation-physics-trade-plan.ts's
+   *  own LiquidationPhysicsResult union) -- these numbers already
+   *  existed as local variables and were previously discarded on
+   *  rejection. Populated whenever deriveLiquidationPhysicsTradePlan()
+   *  was actually called (i.e. NOT for the earlier "episode-missing-atr"
+   *  early-exit, where no plan computation ever ran at all -- null there).
    *  liqBaseline is the caller's own input to that call, included
    *  alongside for
    *  completeness since the operator explicitly asked for it too. */
@@ -133,6 +154,19 @@ export interface V5SignalEvent {
     structuralRiskPct: number;
     sizingRiskPct: number;
     hardStopRiskPct: number;
+    liquidityStrengthP95: number;
+    liquidityStrength24h: number;
+    liquidityStrength: number;
+    w2ToW1Ratio: number;
+    exhaustionScore: number;
+    w1DisplacementUnits: number;
+    absorptionRaw: number;
+    absorptionScore: number;
+    dynamicPhysicsScore: number;
+    selectedRR: number;
+    dynamicK: number;
+    unitAbs: number;
+    slDeterminedBy: "structural" | "sizing-floor";
   } | null;
   btcContext: { priceAtSignal: number | null; oiAtSignal: number | null };
   liq24hContext: { dayLiqTotalUsd: number; dayLiqEvents: number } | null;
@@ -762,6 +796,8 @@ export class V5WaveService {
       oiAtSignal: btcOiSnap?.contracts ?? null,
     };
     const liq24hContext = this.get24hStats(watch.symbol, entryTs);
+    const p95AtEntry = this.getIndividualP95(watch.symbol, watch.victim);
+    const dailyLiqPerMinBaselineAtEntry = liq24hContext.dayLiqTotalUsd / 1440;
     const wallContext = this.getWallContext
       ? this.getWallContext(watch.symbol, watch.side)
       : NO_WALLS;
@@ -775,43 +811,59 @@ export class V5WaveService {
     } else {
       const baseline = this.getBaseline(watch.symbol, watch.victim);
       const atr15mPct = watch.atrAtStart / entryPrice;
+      const w1 = watch.waves[0]!;
 
-      // Sep 9 2026 (Karo), operator-designed structural SL/TP --
-      // REPLACES the previous liquidation-intensity/Hybrid-C-cap-
-      // derived formula for actual sl/tp/rr. intensityRaw/intensity
-      // are STILL computed here, unchanged formula (sqrt(cumLiq/
-      // baseline), clamped to INTENSITY_MAX) -- purely informational
-      // signal-confidence context now (liqStrength/liqStrengthRaw on
-      // the persisted plan), never feeding sl/tp/rr. See
-      // structural-trade-plan.ts's own doc comment for the full
-      // design and the operator's own first-principles reasoning.
-      const cumLiq = watch.totalEpisodePressure;
-      const intensityRaw = baseline > 0 ? Math.sqrt(cumLiq / baseline) : 0;
-      const intensity = Math.min(intensityRaw, INTENSITY_MAX);
-
-      const result = deriveStructuralTradePlan({
+      // Sep 9 2026 (Karo), operator-designed DYNAMIC liquidation-
+      // physics trade plan -- REPLACES the previous FIXED K=0.4/RR=2.2
+      // structural plan. See liquidation-physics-trade-plan.ts's own
+      // doc comment for the full three-component design (strength,
+      // exhaustion, absorption) and every constant's own justification.
+      // CRITICAL: w1LiqUsd/w1AnchorPrice/w1ExtremePrice are Wave 1's
+      // OWN values (watch.waves[0]), NEVER watch.totalEpisodePressure
+      // (the whole-episode cumulative sum) -- and p95 is the
+      // INDIVIDUAL-EVENT threshold, never conflated with either sum.
+      const result = deriveLiquidationPhysicsTradePlan({
         entry: entryPrice,
         side: watch.side,
+        w1AnchorPrice: w1.anchorPrice,
+        w1ExtremePrice: w1.extremePrice,
+        w1LiqUsd: w1.liqNotionalUsd,
+        w2LiqUsd: entryWave.liqNotionalUsd,
         w2ExtremePrice: entryWave.extremePrice,
         unitAbs: watch.unitAtStart,
+        p95: p95AtEntry,
+        dailyLiqPerMinBaseline: dailyLiqPerMinBaselineAtEntry,
       });
       planDiagnostics = {
-        intensityRaw,
-        intensity,
+        intensityRaw: result.liquidityStrengthP95,
+        intensity: result.liquidityStrength,
         atr15mPct,
         liqBaseline: baseline,
         rawTpPct: 0,
         wallAdjustedTpPct: 0,
         wallApplied: false,
-        rrCandidate: result.rrTarget,
+        rrCandidate: result.selectedRR,
         slCapApplied: false,
         slCapValue: 0,
         finalTpPct: result.ok ? result.tpPct : 0,
         finalSlPct: result.ok ? result.slPct : 0,
-        structuralSoftExitPrice: result.softExitPrice,
-        structuralRiskPct: result.structuralRiskPct,
-        sizingRiskPct: result.ok ? result.sizingRiskPct : 0,
-        hardStopRiskPct: result.ok ? result.hardStopRiskPct : 0,
+        structuralSoftExitPrice: 0,
+        structuralRiskPct: 0,
+        sizingRiskPct: 0,
+        hardStopRiskPct: 0,
+        liquidityStrengthP95: result.liquidityStrengthP95,
+        liquidityStrength24h: result.liquidityStrength24h,
+        liquidityStrength: result.liquidityStrength,
+        w2ToW1Ratio: result.w2ToW1Ratio,
+        exhaustionScore: result.exhaustionScore,
+        w1DisplacementUnits: result.w1DisplacementUnits,
+        absorptionRaw: result.absorptionRaw,
+        absorptionScore: result.absorptionScore,
+        dynamicPhysicsScore: result.dynamicPhysicsScore,
+        selectedRR: result.selectedRR,
+        dynamicK: result.dynamicK,
+        unitAbs: result.unitAbs,
+        slDeterminedBy: result.slDeterminedBy,
       };
       if (result.ok) {
         plan = {
@@ -819,21 +871,34 @@ export class V5WaveService {
           tp: result.tp,
           sl: result.sl,
           rr: result.rr,
-          liqStrengthRaw: intensityRaw,
-          liqStrength: intensity,
+          liqStrengthRaw: result.liquidityStrengthP95,
+          liqStrength: result.liquidityStrength,
           liqBaseline: baseline,
           physicsTPPct: result.tpPct,
           wallAdjustedTpPct: result.tpPct,
           wallApplied: false,
-          rrCandidate: result.rrTarget,
+          rrCandidate: result.selectedRR,
           slCapApplied: false,
           slCapValue: 0,
           finalTpPct: result.tpPct,
           finalSlPct: result.slPct,
-          structuralSoftExitPrice: result.softExitPrice,
-          structuralRiskPct: result.structuralRiskPct,
-          sizingRiskPct: result.sizingRiskPct,
-          hardStopRiskPct: result.hardStopRiskPct,
+          structuralSoftExitPrice: 0,
+          structuralRiskPct: 0,
+          sizingRiskPct: 0,
+          hardStopRiskPct: 0,
+          liquidityStrengthP95: result.liquidityStrengthP95,
+          liquidityStrength24h: result.liquidityStrength24h,
+          liquidityStrength: result.liquidityStrength,
+          w2ToW1Ratio: result.w2ToW1Ratio,
+          exhaustionScore: result.exhaustionScore,
+          w1DisplacementUnits: result.w1DisplacementUnits,
+          absorptionRaw: result.absorptionRaw,
+          absorptionScore: result.absorptionScore,
+          dynamicPhysicsScore: result.dynamicPhysicsScore,
+          selectedRR: result.selectedRR,
+          dynamicK: result.dynamicK,
+          unitAbs: result.unitAbs,
+          slDeterminedBy: result.slDeterminedBy,
         };
       } else {
         rejectionReason = result.cancelReason;
@@ -856,6 +921,8 @@ export class V5WaveService {
       exhaustionLayerLiqUsd: entryWave.liqNotionalUsd,
       exhaustionLayerWaveNumber: entryWave.waveNumber,
       unitAtStart: watch.unitAtStart,
+      p95AtEntry,
+      dailyLiqPerMinBaselineAtEntry,
       totalEpisodePressure: watch.totalEpisodePressure,
       qualifyingEventUsd: watch.qualifyingEventUsd,
       qualifyingEventTs: watch.qualifyingEventTs,
