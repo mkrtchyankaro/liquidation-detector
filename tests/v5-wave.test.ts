@@ -100,10 +100,10 @@ scenario(
 );
 
 scenario(
-  "recovery ~1 UNIT from latest extreme + cumulative >= P95 -> SIGNAL_CANDIDATE",
+  "recovery ~1 UNIT + a single event that itself was >= P95 -> SIGNAL_CANDIDATE (hasP95Event)",
   () => {
     const v5 = makeV5(1, 1000);
-    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 1200, 1000)); // cumulative already >= P95
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 1200, 1000)); // this ONE event itself clears P95=1000
     v5.onTick("ETHUSDT", 1990, 1500); // extreme deepens to 1990
     const outcomes = v5.onTick("ETHUSDT", 1990 + UNIT, 2000); // recovers exactly 1 UNIT
     assert.strictEqual(outcomes.length, 1);
@@ -112,7 +112,7 @@ scenario(
 );
 
 scenario(
-  "recovery ~1 UNIT + cumulative < P95 -> CASCADE_NOT_SERIOUS (terminal, watch released)",
+  "recovery ~1 UNIT + a single event that never reached P95 -> CASCADE_NOT_SERIOUS (terminal, watch released)",
   () => {
     const v5 = makeV5(1, 1000);
     v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 50, 1000)); // well below P95
@@ -127,6 +127,66 @@ scenario(
       v5.getWatch("ETHUSDT", "LONG"),
       null,
       "watch must be released after a terminal outcome",
+    );
+  },
+);
+
+scenario(
+  "operator-corrected model: MANY small events whose CUMULATIVE total exceeds P95, but NO SINGLE event ever does, must NOT trigger SIGNAL_CANDIDATE -- this is the exact distinction from the earlier (rejected) cumulative-vs-P95 design",
+  () => {
+    const v5 = makeV5(1, 1000);
+    // 10 events of 150 each = 1500 cumulative (>> P95=1000), but every
+    // single event is well under P95 individually.
+    for (let i = 0; i < 10; i++) {
+      v5.onLiquidation(liq("ETHUSDT", "SELL", 2000 - i, 150, 1000 + i * 10));
+    }
+    const watch = v5.getWatch("ETHUSDT", "LONG")!;
+    assert.strictEqual(
+      watch.totalEpisodePressure,
+      1500,
+      "small events must still accumulate normally for the trade-plan",
+    );
+    assert.strictEqual(
+      watch.hasP95Event,
+      false,
+      "no individual event ever reached P95, so hasP95Event must stay false despite the large cumulative total",
+    );
+
+    v5.onTick("ETHUSDT", 1985, 1500);
+    const outcomes = v5.onTick("ETHUSDT", 1985 + UNIT, 2000);
+    assert.strictEqual(outcomes[0]!.kind, "TERMINAL_NON_SIGNAL");
+    if (outcomes[0]!.kind === "TERMINAL_NON_SIGNAL") {
+      assert.strictEqual(
+        outcomes[0].event.reason,
+        "CASCADE_NOT_SERIOUS",
+        "a large CUMULATIVE total alone must never satisfy seriousness -- only a genuine single-event P95 clearance does",
+      );
+    }
+  },
+);
+
+scenario(
+  "hasP95Event latches true on a LATER event, not just the first -- and never resets once true, even as more small events follow",
+  () => {
+    const v5 = makeV5(1, 1000);
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 50, 1000)); // small, hasP95Event stays false
+    let watch = v5.getWatch("ETHUSDT", "LONG")!;
+    assert.strictEqual(watch.hasP95Event, false);
+
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 1998, 1500, 1100)); // THIS one clears P95
+    watch = v5.getWatch("ETHUSDT", "LONG")!;
+    assert.strictEqual(
+      watch.hasP95Event,
+      true,
+      "a later, qualifying event must latch hasP95Event true",
+    );
+
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 1995, 20, 1200)); // another tiny event afterward
+    watch = v5.getWatch("ETHUSDT", "LONG")!;
+    assert.strictEqual(
+      watch.hasP95Event,
+      true,
+      "hasP95Event must never reset to false once latched true",
     );
   },
 );

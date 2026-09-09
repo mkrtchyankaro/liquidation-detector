@@ -389,6 +389,7 @@ export class V5WaveService {
           liq.quoteQty,
           this.getOi(liq.symbol)?.contracts ?? null,
         );
+        const p95AtStart = this.getIndividualP95(liq.symbol);
         const watch: V5WatchState = {
           symbol: liq.symbol,
           side: victim,
@@ -401,7 +402,11 @@ export class V5WaveService {
           totalEpisodePressure: liq.quoteQty,
           qualifyingEventUsd: liq.quoteQty,
           qualifyingEventTs: liq.timestamp,
-          p95AtQualification: this.getIndividualP95(liq.symbol),
+          p95AtQualification: p95AtStart,
+          // Sep 8 2026 (Karo), operator-corrected -- checked against
+          // THIS event's own arrival, using P95 AT THAT MOMENT (same
+          // convention as every subsequent event's own check below).
+          hasP95Event: p95AtStart > 0 && liq.quoteQty >= p95AtStart,
           lastLiquidationTs: liq.timestamp,
           signalIssued: false,
           tradeActive: false,
@@ -413,13 +418,29 @@ export class V5WaveService {
         this.watches.set(key, watch);
         log.info(
           `[V5_CASCADE_STARTED] ${liq.symbol} ${victim} signalId=${signalId} ` +
-            `firstEventUsd=${liq.quoteQty} anchorPrice=${liq.price} unit=${watch.unitAtStart}`,
+            `firstEventUsd=${liq.quoteQty} anchorPrice=${liq.price} unit=${watch.unitAtStart} hasP95Event=${watch.hasP95Event}`,
         );
         return outcomes;
       }
 
       existing.totalEpisodePressure += liq.quoteQty;
       existing.lastLiquidationTs = liq.timestamp;
+
+      // Sep 8 2026 (Karo), operator-corrected minimal-cascade model --
+      // REPLACES the previous cumulative-vs-P95 comparison (removed
+      // entirely). Latches true the FIRST time ANY individual event in
+      // this cascade clears P95, checked against P95's value AT THIS
+      // EVENT's own arrival -- never re-checked retroactively, never
+      // reset to false once true.
+      if (!existing.hasP95Event) {
+        const p95Now = this.getIndividualP95(liq.symbol);
+        if (p95Now > 0 && liq.quoteQty >= p95Now) {
+          existing.hasP95Event = true;
+          log.info(
+            `[V5_P95_EVENT_SEEN] ${liq.symbol} ${victim} signalId=${existing.signalId} eventUsd=${liq.quoteQty} p95=${p95Now}`,
+          );
+        }
+      }
 
       const cascade = existing.waves[0]!;
       cascade.liqNotionalUsd += liq.quoteQty;
@@ -559,8 +580,11 @@ export class V5WaveService {
           }
         }
 
-        const p95 = this.getIndividualP95(symbol);
-        if (p95 > 0 && cascade.liqNotionalUsd >= p95) {
+        // Sep 8 2026 (Karo), operator-corrected minimal-cascade model --
+        // seriousness is a pure boolean (hasP95Event, latched at the
+        // moment ANY individual event cleared P95 -- see onLiquidation()'s
+        // own doc comment), NOT a cumulative-vs-P95 comparison.
+        if (watch.hasP95Event) {
           outcomes.push({
             kind: "SIGNAL_CANDIDATE",
             watch,
@@ -575,7 +599,7 @@ export class V5WaveService {
           this.watches.delete(key);
           log.info(
             `[V5_CASCADE_NOT_SERIOUS] ${symbol} ${victim} signalId=${watch.signalId} ` +
-              `cumulativeLiqUsd=${cascade.liqNotionalUsd.toFixed(0)} p95=${p95.toFixed(0)}`,
+              `cumulativeLiqUsd=${cascade.liqNotionalUsd.toFixed(0)} hasP95Event=false`,
           );
         }
       }

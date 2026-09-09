@@ -287,6 +287,21 @@ export interface V5WatchState {
   qualifyingEventTs: number;
   p95AtQualification: number;
 
+  /** Sep 8 2026 (Karo), operator-corrected minimal-cascade model --
+   *  REPLACES the previous "cumulative liquidation >= P95" comparison
+   *  (mixed a single-event percentile distribution with a cumulative-
+   *  sum quantity, mathematically loosening the seriousness bar in a
+   *  way that wasn't the operator's actual intent). Set true the
+   *  FIRST time any individual liquidation event within this cascade
+   *  satisfies `event.quoteQty >= current P95`, checked at that
+   *  event's own arrival against the P95 value AT THAT MOMENT. Once
+   *  true, stays true for the life of the watch. Small events before/
+   *  after the qualifying one still accumulate normally into
+   *  totalEpisodePressure/liqNotionalUsd for the eventual trade-plan
+   *  -- this flag ONLY gates SIGNAL_CANDIDATE vs CASCADE_NOT_SERIOUS
+   *  at 1-UNIT recovery. */
+  hasP95Event: boolean;
+
   /** Sep 7 2026 (Karo) -- live-architecture inactivity tracking
    *  (wall-clock milliseconds, not a per-minute-tick counter -- the
    *  offline replay's minute-loop convention doesn't apply to a live,
