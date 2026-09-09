@@ -134,28 +134,39 @@ scenario(
       v5ConstructorStart,
       v5ConstructorEnd,
     );
+    // Whitespace/line-wrap-agnostic: a formatter (prettier, editor
+    // auto-wrap) may legitimately split a long call across multiple
+    // lines, or keep it on one -- \s* (zero or more) between tokens
+    // handles both without assuming either shape.
     assert.ok(
-      v5ConstructorArgs.includes("rollingMedianLiqNotionalPerMin(symbol, 60)"),
+      /rollingMedianLiqNotionalPerMin\s*\(\s*symbol\s*,\s*60/.test(
+        v5ConstructorArgs,
+      ),
       "the strategy's own getBaseline callback must call the combined method",
     );
-    // Checks the actual CALLBACK LINE specifically (not the surrounding
+    // Checks the actual CALLBACK CALL specifically (not the surrounding
     // doc-comment, which legitimately references the victim-specific
     // method BY NAME for explanatory purposes) -- the real guarantee is
-    // that the executable callback line itself never invokes it.
-    const getBaselineCallbackLine = v5ConstructorArgs
-      .split("\n")
-      .find((line) =>
-        line.includes(
-          "orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin",
-        ),
-      );
-    assert.ok(
-      getBaselineCallbackLine,
-      "the getBaseline callback's own executable line must exist",
+    // that the executable callback itself never invokes it.
+    const callbackStart = v5ConstructorArgs.indexOf(
+      "orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin",
     );
     assert.ok(
-      !getBaselineCallbackLine!.includes("ForVictim"),
-      "the executable getBaseline callback line itself must NEVER call the victim-specific method",
+      callbackStart > -1,
+      "the getBaseline callback's own executable call must exist",
+    );
+    const afterCallbackStart = v5ConstructorArgs.slice(callbackStart);
+    const callbackCallEnd = afterCallbackStart.indexOf(
+      ",",
+      afterCallbackStart.indexOf("?? 0"),
+    );
+    const callbackCall = afterCallbackStart.slice(
+      0,
+      callbackCallEnd > -1 ? callbackCallEnd : undefined,
+    );
+    assert.ok(
+      !callbackCall.includes("ForVictim"),
+      "the executable getBaseline callback call itself must NEVER call the victim-specific method",
     );
   },
 );
