@@ -50,6 +50,10 @@ function toV5SignalEventShape(doc: GlobalSignalDoc): V5SignalEvent {
           slCapValue: doc.physics.slCapValue,
           finalTpPct: doc.physics.finalTpPct,
           finalSlPct: doc.physics.finalSlPct,
+          structuralSoftExitPrice: doc.physics.structuralSoftExitPrice,
+          structuralRiskPct: doc.physics.structuralRiskPct,
+          sizingRiskPct: doc.physics.sizingRiskPct,
+          hardStopRiskPct: doc.physics.hardStopRiskPct,
         }
       : null;
   return { ...(doc as unknown as V5SignalEvent), plan };

@@ -16,7 +16,8 @@ import {
   v5ShortEnabled,
   v5BtcMode,
 } from "./v5.config";
-import { deriveV5TradePlan } from "./v5-trade-plan";
+import { deriveStructuralTradePlan } from "../../domain/trading/structural-trade-plan";
+import { INTENSITY_MAX } from "../../domain/trading/trade-plan";
 import { evaluateBtcOpposingWatchSafe } from "./btc-opposing-watch";
 import type { WallSnapshots } from "../../domain/trading/trade-plan";
 import { childLogger } from "../../infrastructure/logging/logger";
@@ -52,6 +53,13 @@ export interface V5SignalEvent {
   dominantLayerWaveNumber: number | null;
   exhaustionLayerLiqUsd: number | null;
   exhaustionLayerWaveNumber: number | null;
+  /** Sep 9 2026 (Karo), operator-designed structural SL/TP -- frozen
+   *  UNIT (absolute price units, watch.unitAtStart), persisted so
+   *  BinanceExecutionService's own post-fill replan (a real, later,
+   *  separate process with no access to the live V5WatchState) can
+   *  re-derive the SAME structural plan at the actual fill price,
+   *  never falling back to the old liquidation-intensity formula. */
+  unitAtStart: number;
   totalEpisodePressure: number;
   qualifyingEventUsd: number;
   qualifyingEventTs: number;
@@ -79,18 +87,34 @@ export interface V5SignalEvent {
     slCapValue: number;
     finalTpPct: number;
     finalSlPct: number;
+    /** Sep 9 2026 (Karo), operator-designed structural SL/TP -- see
+     *  structural-trade-plan.ts's own doc comment for the full design.
+     *  `sl` above is the HARD-STOP price (max(structuralRiskPct,
+     *  0.20%) from entry) -- this is what position-sizing and the real
+     *  exchange order use, unchanged from every existing consumer's
+     *  own perspective. `structuralSoftExitPrice` is the TIGHTER,
+     *  app-side invalidation price (W2extreme +/- 0.4xUNIT) -- live
+     *  monitoring/exiting there is a separate, future concern; this
+     *  field only exposes the correct price. liqStrength/liqStrengthRaw/
+     *  liqBaseline above remain purely informational (setup
+     *  confidence) -- they no longer feed sl/tp/rr at all. */
+    structuralSoftExitPrice: number;
+    structuralRiskPct: number;
+    sizingRiskPct: number;
+    hardStopRiskPct: number;
   } | null;
   rejectionReason: string | null;
   /** Sep 9 2026 (Karo), operator-requested diagnostics-only fix --
-   *  REUSES (never reimplements) the SAME LiquidityPlanForensics
-   *  deriveV5TradePlan() already returns on BOTH its ok=true and
-   *  ok=false branches (see trade-plan.ts's own LiquidityPlanResult
-   *  union) -- these numbers already existed as local variables and
-   *  were previously discarded on rejection. Populated whenever
-   *  deriveV5TradePlan() was actually called (i.e. NOT for the
-   *  earlier "episode-missing-atr" early-exit, where no plan
-   *  computation ever ran at all -- null there). liqBaseline is the
-   *  caller's own input to that call, included alongside for
+   *  REUSES (never reimplements) the SAME StructuralTradePlanForensics
+   *  deriveStructuralTradePlan() already returns on BOTH its ok=true
+   *  and ok=false branches (see structural-trade-plan.ts's own
+   *  StructuralTradePlanResult union) -- these numbers already existed
+   *  as local variables and were previously discarded on rejection.
+   *  Populated whenever deriveStructuralTradePlan() was actually
+   *  called (i.e. NOT for the earlier "episode-missing-atr" early-exit,
+   *  where no plan computation ever ran at all -- null there).
+   *  liqBaseline is the caller's own input to that call, included
+   *  alongside for
    *  completeness since the operator explicitly asked for it too. */
   planDiagnostics: {
     intensityRaw: number;
@@ -105,6 +129,10 @@ export interface V5SignalEvent {
     slCapValue: number;
     finalTpPct: number;
     finalSlPct: number;
+    structuralSoftExitPrice: number;
+    structuralRiskPct: number;
+    sizingRiskPct: number;
+    hardStopRiskPct: number;
   } | null;
   btcContext: { priceAtSignal: number | null; oiAtSignal: number | null };
   liq24hContext: { dayLiqTotalUsd: number; dayLiqEvents: number } | null;
@@ -747,32 +775,43 @@ export class V5WaveService {
     } else {
       const baseline = this.getBaseline(watch.symbol, watch.victim);
       const atr15mPct = watch.atrAtStart / entryPrice;
-      const result = deriveV5TradePlan({
-        episodeTotalLiqUsd: watch.totalEpisodePressure,
-        atr15mPct,
-        liqBaseline: baseline,
+
+      // Sep 9 2026 (Karo), operator-designed structural SL/TP --
+      // REPLACES the previous liquidation-intensity/Hybrid-C-cap-
+      // derived formula for actual sl/tp/rr. intensityRaw/intensity
+      // are STILL computed here, unchanged formula (sqrt(cumLiq/
+      // baseline), clamped to INTENSITY_MAX) -- purely informational
+      // signal-confidence context now (liqStrength/liqStrengthRaw on
+      // the persisted plan), never feeding sl/tp/rr. See
+      // structural-trade-plan.ts's own doc comment for the full
+      // design and the operator's own first-principles reasoning.
+      const cumLiq = watch.totalEpisodePressure;
+      const intensityRaw = baseline > 0 ? Math.sqrt(cumLiq / baseline) : 0;
+      const intensity = Math.min(intensityRaw, INTENSITY_MAX);
+
+      const result = deriveStructuralTradePlan({
         entry: entryPrice,
         side: watch.side,
-        walls: wallContext,
+        w2ExtremePrice: entryWave.extremePrice,
+        unitAbs: watch.unitAtStart,
       });
-      // Sep 9 2026 (Karo) -- REUSES the SAME LiquidityPlanForensics
-      // fields `result` already carries on BOTH branches (ok=true and
-      // ok=false) -- no reimplementation, just persistence of numbers
-      // that already existed as local variables here and were
-      // previously discarded on rejection.
       planDiagnostics = {
-        intensityRaw: result.intensityRaw,
-        intensity: result.intensity,
-        atr15mPct: result.atr15mPct,
+        intensityRaw,
+        intensity,
+        atr15mPct,
         liqBaseline: baseline,
-        rawTpPct: result.rawTpPct,
-        wallAdjustedTpPct: result.wallAdjustedTpPct,
-        wallApplied: result.wallApplied,
-        rrCandidate: result.rrCandidate,
-        slCapApplied: result.slCapApplied,
-        slCapValue: result.slCapValue,
-        finalTpPct: result.finalTpPct,
-        finalSlPct: result.finalSlPct,
+        rawTpPct: 0,
+        wallAdjustedTpPct: 0,
+        wallApplied: false,
+        rrCandidate: result.rrTarget,
+        slCapApplied: false,
+        slCapValue: 0,
+        finalTpPct: result.ok ? result.tpPct : 0,
+        finalSlPct: result.ok ? result.slPct : 0,
+        structuralSoftExitPrice: result.softExitPrice,
+        structuralRiskPct: result.structuralRiskPct,
+        sizingRiskPct: result.ok ? result.sizingRiskPct : 0,
+        hardStopRiskPct: result.ok ? result.hardStopRiskPct : 0,
       };
       if (result.ok) {
         plan = {
@@ -780,17 +819,21 @@ export class V5WaveService {
           tp: result.tp,
           sl: result.sl,
           rr: result.rr,
-          liqStrengthRaw: result.intensityRaw,
-          liqStrength: result.intensity,
+          liqStrengthRaw: intensityRaw,
+          liqStrength: intensity,
           liqBaseline: baseline,
-          physicsTPPct: result.rawTpPct,
-          wallAdjustedTpPct: result.wallAdjustedTpPct,
-          wallApplied: result.wallApplied,
-          rrCandidate: result.rrCandidate,
-          slCapApplied: result.slCapApplied,
-          slCapValue: result.slCapValue,
-          finalTpPct: result.finalTpPct,
-          finalSlPct: result.finalSlPct,
+          physicsTPPct: result.tpPct,
+          wallAdjustedTpPct: result.tpPct,
+          wallApplied: false,
+          rrCandidate: result.rrTarget,
+          slCapApplied: false,
+          slCapValue: 0,
+          finalTpPct: result.tpPct,
+          finalSlPct: result.slPct,
+          structuralSoftExitPrice: result.softExitPrice,
+          structuralRiskPct: result.structuralRiskPct,
+          sizingRiskPct: result.sizingRiskPct,
+          hardStopRiskPct: result.hardStopRiskPct,
         };
       } else {
         rejectionReason = result.cancelReason;
@@ -812,6 +855,7 @@ export class V5WaveService {
       dominantLayerWaveNumber: watch.dominantLayerWaveNumber,
       exhaustionLayerLiqUsd: entryWave.liqNotionalUsd,
       exhaustionLayerWaveNumber: entryWave.waveNumber,
+      unitAtStart: watch.unitAtStart,
       totalEpisodePressure: watch.totalEpisodePressure,
       qualifyingEventUsd: watch.qualifyingEventUsd,
       qualifyingEventTs: watch.qualifyingEventTs,

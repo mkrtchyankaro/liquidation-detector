@@ -33,6 +33,7 @@ export interface GlobalSignalDoc {
   dominantLayerWaveNumber: number | null;
   exhaustionLayerLiqUsd: number | null;
   exhaustionLayerWaveNumber: number | null;
+  unitAtStart: number;
 
   qualifyingEventUsd: number;
   qualifyingEventTs: number;
@@ -53,6 +54,10 @@ export interface GlobalSignalDoc {
     finalTpPct: number;
     finalSlPct: number;
     actualRR: number;
+    structuralSoftExitPrice: number;
+    structuralRiskPct: number;
+    sizingRiskPct: number;
+    hardStopRiskPct: number;
   } | null;
 
   btcContext: {
@@ -105,6 +110,10 @@ export interface GlobalSignalDoc {
     slCapValue: number;
     finalTpPct: number;
     finalSlPct: number;
+    structuralSoftExitPrice: number;
+    structuralRiskPct: number;
+    sizingRiskPct: number;
+    hardStopRiskPct: number;
   } | null;
 
   /** Sep 8 2026 (Karo) -- REVISED (was: V5TerminalReason | "SIGNAL",

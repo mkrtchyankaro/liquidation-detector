@@ -41,6 +41,7 @@ function baseSignal(side: "LONG" | "SHORT"): GlobalSignalDoc {
     dominantLayerWaveNumber: null,
     exhaustionLayerLiqUsd: null,
     exhaustionLayerWaveNumber: null,
+    unitAtStart: 1,
     qualifyingEventUsd: 0,
     qualifyingEventTs: 0,
     p95AtQualification: 0,

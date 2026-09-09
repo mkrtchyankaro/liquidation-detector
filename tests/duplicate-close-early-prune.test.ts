@@ -99,6 +99,7 @@ function baseGlobalSignal(): GlobalSignalDoc {
     dominantLayerWaveNumber: null,
     exhaustionLayerLiqUsd: 100000,
     exhaustionLayerWaveNumber: 1,
+    unitAtStart: 1,
     qualifyingEventUsd: 100,
     qualifyingEventTs: 1,
     p95AtQualification: 90,

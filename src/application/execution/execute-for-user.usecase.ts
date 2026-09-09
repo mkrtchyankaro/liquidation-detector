@@ -118,44 +118,13 @@ export async function executeForUser(
       riskUsd,
       positionSizeUsdt,
       signalId: globalSignal.signalId,
-      cumLiq: globalSignal.totalEpisodePressure,
-      liqBaseline: globalSignal.physics?.liqBaseline ?? 0,
-      atr15mPct: globalSignal.physics?.atrPct ?? 0,
-      walls: globalSignal.wallContext
-        ? {
-            atEntry: {
-              ...globalSignal.wallContext,
-              topBidPersistent: false,
-              topAskPersistent: false,
-            },
-            atAnchor: {
-              ...globalSignal.wallContext,
-              topBidPersistent: false,
-              topAskPersistent: false,
-            },
-            atSweepStart: null,
-          }
-        : {
-            atEntry: {
-              topBidNotional: 0,
-              topAskNotional: 0,
-              topBidPrice: 0,
-              topAskPrice: 0,
-              imbalance: 0,
-              topBidPersistent: false,
-              topAskPersistent: false,
-            },
-            atAnchor: {
-              topBidNotional: 0,
-              topAskNotional: 0,
-              topBidPrice: 0,
-              topAskPrice: 0,
-              imbalance: 0,
-              topBidPersistent: false,
-              topAskPersistent: false,
-            },
-            atSweepStart: null,
-          },
+      w2ExtremePrice:
+        (
+          globalSignal.waveHistory.find(
+            (w) => w.waveNumber === globalSignal.entryWaveNumber,
+          ) ?? globalSignal.waveHistory[globalSignal.waveHistory.length - 1]
+        )?.extremePrice ?? globalSignal.entry,
+      unitAbs: globalSignal.unitAtStart,
     });
 
     if (execResult.status === "SUCCESS") {
