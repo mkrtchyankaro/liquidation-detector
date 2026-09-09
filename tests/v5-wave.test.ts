@@ -100,14 +100,17 @@ scenario(
 );
 
 scenario(
-  "recovery ~1 UNIT + a single event that itself was >= P95 -> SIGNAL_CANDIDATE (hasP95Event)",
+  "recovery ~1 UNIT + a single event that itself was >= P95, but ONLY one event total -> CASCADE_NOT_SERIOUS (min-2-events rule)",
   () => {
     const v5 = makeV5(1, 1000);
-    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 1200, 1000)); // this ONE event itself clears P95=1000
-    v5.onTick("ETHUSDT", 1990, 1500); // extreme deepens to 1990
-    const outcomes = v5.onTick("ETHUSDT", 1990 + UNIT, 2000); // recovers exactly 1 UNIT
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 1200, 1000)); // this ONE event clears P95, but it's the ONLY event
+    v5.onTick("ETHUSDT", 1990, 1500);
+    const outcomes = v5.onTick("ETHUSDT", 1990 + UNIT, 2000);
     assert.strictEqual(outcomes.length, 1);
-    assert.strictEqual(outcomes[0]!.kind, "SIGNAL_CANDIDATE");
+    assert.strictEqual(outcomes[0]!.kind, "TERMINAL_NON_SIGNAL");
+    if (outcomes[0]!.kind === "TERMINAL_NON_SIGNAL") {
+      assert.strictEqual(outcomes[0].event.reason, "CASCADE_NOT_SERIOUS");
+    }
   },
 );
 
@@ -192,6 +195,42 @@ scenario(
 );
 
 scenario(
+  "Sep 9 2026 (Karo), operator-requested min-2-events rule -- ONE event + P95 + 1 UNIT recovery -> NO SIGNAL",
+  () => {
+    const v5 = makeV5(1, 1000);
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 5000, 1000)); // single event, WAY above P95=1000
+    v5.onTick("ETHUSDT", 1990, 1500);
+    const outcomes = v5.onTick("ETHUSDT", 1990 + UNIT, 2000); // full 1-UNIT recovery
+    assert.strictEqual(outcomes.length, 1);
+    assert.strictEqual(
+      outcomes[0]!.kind,
+      "TERMINAL_NON_SIGNAL",
+      "a single event, no matter how large or how far above P95, must never signal alone",
+    );
+    if (outcomes[0]!.kind === "TERMINAL_NON_SIGNAL") {
+      assert.strictEqual(outcomes[0].event.reason, "CASCADE_NOT_SERIOUS");
+    }
+  },
+);
+
+scenario(
+  "Sep 9 2026 (Karo), operator-requested min-2-events rule -- TWO events + P95 + 1 UNIT recovery -> existing signal behavior continues (SIGNAL_CANDIDATE)",
+  () => {
+    const v5 = makeV5(1, 1000);
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 5000, 1000)); // 1st event, already clears P95 alone
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 1999, 10, 1050)); // 2nd event, tiny, just needs to EXIST
+    v5.onTick("ETHUSDT", 1990, 1500);
+    const outcomes = v5.onTick("ETHUSDT", 1990 + UNIT, 2000);
+    assert.strictEqual(outcomes.length, 1);
+    assert.strictEqual(
+      outcomes[0]!.kind,
+      "SIGNAL_CANDIDATE",
+      "with 2 events (eventCount>1) and hasP95Event=true, the exact same 1-UNIT recovery must now signal",
+    );
+  },
+);
+
+scenario(
   "recovery LESS than 1 UNIT never triggers any outcome -- cascade keeps tracking",
   () => {
     const v5 = makeV5(1, 1000);
@@ -233,7 +272,8 @@ scenario(
   "entryWaveNumber is always 1 -- no W1/W2/W3 segmentation in the minimal model",
   () => {
     const v5 = makeV5(1, 1000);
-    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 1200, 1000));
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 2000, 1200, 1000)); // clears P95=1000 individually
+    v5.onLiquidation(liq("ETHUSDT", "SELL", 1998, 50, 1050)); // 2nd event, satisfies min-2-events
     v5.onTick("ETHUSDT", 1990, 1500);
     const outcomes = v5.onTick("ETHUSDT", 1990 + UNIT, 2000);
     assert.strictEqual(outcomes[0]!.kind, "SIGNAL_CANDIDATE");
@@ -247,7 +287,8 @@ scenario(
   "SHORT victim (BUY liquidation) mirrors LONG victim correctly -- extreme deepens UPWARD, recovers DOWNWARD",
   () => {
     const v5 = makeV5(1, 1000);
-    v5.onLiquidation(liq("ETHUSDT", "BUY", 2000, 1200, 1000));
+    v5.onLiquidation(liq("ETHUSDT", "BUY", 2000, 1200, 1000)); // clears P95 individually
+    v5.onLiquidation(liq("ETHUSDT", "BUY", 2002, 50, 1050)); // 2nd event
     const watch = v5.getWatch("ETHUSDT", "SHORT")!;
     assert.strictEqual(watch.victim, "SHORT");
     v5.onTick("ETHUSDT", 2010, 1500); // deeper = HIGHER for a short-victim cascade

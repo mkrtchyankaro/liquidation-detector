@@ -584,7 +584,13 @@ export class V5WaveService {
         // seriousness is a pure boolean (hasP95Event, latched at the
         // moment ANY individual event cleared P95 -- see onLiquidation()'s
         // own doc comment), NOT a cumulative-vs-P95 comparison.
-        if (watch.hasP95Event) {
+        // Sep 9 2026 (Karo), operator-requested minimal correction --
+        // seriousness now requires BOTH hasP95Event AND at least 2
+        // liquidation events in the cascade (a single, isolated event
+        // -- even one that itself clears P95 -- is never sufficient
+        // on its own). UNIT logic, P95 logic, TP/SL, and every other
+        // behavior are completely unchanged.
+        if (watch.hasP95Event && cascade.liqEvents > 1) {
           outcomes.push({
             kind: "SIGNAL_CANDIDATE",
             watch,
@@ -599,7 +605,7 @@ export class V5WaveService {
           this.watches.delete(key);
           log.info(
             `[V5_CASCADE_NOT_SERIOUS] ${symbol} ${victim} signalId=${watch.signalId} ` +
-              `cumulativeLiqUsd=${cascade.liqNotionalUsd.toFixed(0)} hasP95Event=false`,
+              `cumulativeLiqUsd=${cascade.liqNotionalUsd.toFixed(0)} hasP95Event=${watch.hasP95Event} liqEvents=${cascade.liqEvents}`,
           );
         }
       }
