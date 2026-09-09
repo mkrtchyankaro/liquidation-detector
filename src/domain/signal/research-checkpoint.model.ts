@@ -16,7 +16,14 @@ export type ResearchCheckpointAnchor =
   | "SIGNAL" // a real signal fired (status="SIGNAL") -- anchored at the canonical entry
   | "EPISODE_END"; // episode terminated without ever reaching an exhaustion-candidate at all (e.g. W1_EXTREME_TOO_SMALL, single-event, inactivity/safety-timeout)
 
-export type ResearchCheckpointOffset = "30s" | "1m" | "5m" | "15m" | "60m";
+export type ResearchCheckpointOffset =
+  | "30s"
+  | "1m"
+  | "3m"
+  | "5m"
+  | "15m"
+  | "30m"
+  | "60m";
 
 export interface ResearchCheckpoint {
   offsetLabel: ResearchCheckpointOffset;

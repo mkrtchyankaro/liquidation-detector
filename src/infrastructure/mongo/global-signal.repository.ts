@@ -1,5 +1,8 @@
 import type { MongoClientWrapper } from "./mongo.client";
-import type { GlobalSignalDoc } from "../../domain/signal/global-signal.model";
+import type {
+  GlobalSignalDoc,
+  UnitResearchCandidateDoc,
+} from "../../domain/signal/global-signal.model";
 import type { GlobalSignalRepositoryPort } from "../../application/ports";
 import { childLogger } from "../logging/logger";
 
@@ -80,6 +83,65 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
       log.error(
         { err: msg, signalId },
         "[GLOBAL_SIGNAL_APPEND_CHECKPOINT_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+   *  comparison. Writes ONE shadow candidate's own terminal (entry or
+   *  no-entry) summary via $set on unitResearch.<label>. upsert:true --
+   *  a shadow candidate (3m or 5m UNIT) can genuinely reach its own
+   *  terminal state BEFORE OR AFTER production's own 1m-UNIT episode
+   *  does (that is precisely the timing difference this whole
+   *  experiment measures), so the production doc may not exist yet.
+   *  KNOWN, ACCEPTED LIMITATION: in that race, this creates a partial
+   *  document (signalId + unitResearch.<label> only) that production's
+   *  own later insert does not currently merge into -- a rare, non-
+   *  critical research-data-completeness gap, not a production-safety
+   *  concern (this method never runs on the production entry/execution
+   *  path in either order). */
+  async setUnitResearchCandidate(
+    signalId: string,
+    label: "atr3m" | "atr5m",
+    candidate: UnitResearchCandidateDoc,
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        { $set: { [`unitResearch.${label}`]: candidate } },
+        { upsert: true },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, label },
+        "[GLOBAL_SIGNAL_SET_UNIT_RESEARCH_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  /** Sep 9 2026 (Karo) -- appends ONE MFE/MAE checkpoint to a shadow
+   *  candidate's own checkpoints array, mirroring appendCheckpoint()'s
+   *  own $push pattern exactly. */
+  async appendUnitResearchCheckpoint(
+    signalId: string,
+    label: "atr3m" | "atr5m",
+    checkpoint: UnitResearchCandidateDoc["checkpoints"][number],
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        { $push: { [`unitResearch.${label}.checkpoints`]: checkpoint } },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, label },
+        "[GLOBAL_SIGNAL_APPEND_UNIT_RESEARCH_CHECKPOINT_FAILED] -- non-fatal",
       );
     }
   }

@@ -4,7 +4,10 @@ import type {
   V5Wave1Diagnostics,
   V5TerminalReason,
 } from "../../strategy/v5/v5-wave.model";
-import type { ResearchCheckpointGroup } from "./research-checkpoint.model";
+import type {
+  ResearchCheckpointGroup,
+  ResearchCheckpoint,
+} from "./research-checkpoint.model";
 
 /**
  * Sep 8 2026 (Karo). Split from liqwatch-bot's own single, mixed
@@ -224,5 +227,60 @@ export interface GlobalSignalDoc {
    *  fully populated for episodes still in progress. */
   researchCheckpoints: ResearchCheckpointGroup[];
 
+  /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+   *  comparison. NEVER read by any production entry/execution/Telegram
+   *  path -- see unit-research-shadow.service.ts's own doc comment for
+   *  the full isolation guarantee. Filled in progressively, over time,
+   *  by the shadow trackers (entry/no-entry summary written as soon as
+   *  the shadow episode reaches a terminal state; checkpoints appended
+   *  as each of the shadow's own [30s,1m,3m,5m,15m,30m] offsets
+   *  completes) -- absent/partial until then, exactly like
+   *  researchCheckpoints above. */
+  unitResearch: {
+    atr3m: UnitResearchCandidateDoc | null;
+    atr5m: UnitResearchCandidateDoc | null;
+  } | null;
+
   createdAt: number;
+}
+
+/** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+ *  comparison. One candidate's own full record -- includes enough raw
+ *  values (unitAbs, W1/W2 anchor/extreme/liq, entry price/time) to
+ *  independently reconstruct the shadow calculation later, per the
+ *  operator's own explicit requirement. */
+export interface UnitResearchCandidateDoc {
+  readonly unitAbs: number;
+  readonly entered: boolean;
+  /** Present only when entered=true. */
+  readonly entryPrice: number | null;
+  readonly entryTs: number | null;
+  readonly delayVsProductionMs: number | null;
+  /** Present only when entered=false. */
+  readonly noEntryReason:
+    | "CANCEL_NO_SECOND_WAVE"
+    | "CASCADE_NOT_SERIOUS"
+    | "EPISODE_EXPIRED"
+    | null;
+  readonly w1: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+  } | null;
+  readonly w2: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+  } | null;
+  /** Same current production TP/SL function, evaluated at this
+   *  candidate's OWN hypothetical entry -- present only when
+   *  entered=true. Never used for anything but later comparison. */
+  readonly planSlPct: number | null;
+  readonly planTpPct: number | null;
+  readonly planRr: number | null;
+  /** R-normalized MFE/MAE at each of [30s,1m,3m,5m,15m,30m] -- appended
+   *  incrementally as each offset completes, via the SAME
+   *  ResearchCheckpointTracker/ResearchCheckpoint shape production's
+   *  own researchCheckpoints already uses (see research-checkpoint.model.ts). */
+  readonly checkpoints: ResearchCheckpoint[];
 }

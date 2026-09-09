@@ -272,7 +272,13 @@ async function main(): Promise<void> {
   // new engine would be unable to evaluate ANY recovery/completion
   // decision (onTick's own `if (watch.unitAtStart <= 0) continue`
   // guard) until enough live 1m candles closed naturally.
-  const bootstrapPairs = pairsFor(symbols, ["15m", "5m", "1m"], 100);
+  // Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+  // comparison -- "3m" added, matching the operator's own "~67 periods"
+  // spec (67 x 3min ~= 201min lookback, roughly matching 1m(100min)/
+  // 5m(100min)'s own already-existing bootstrap depth). Exclusively
+  // consumed by the shadow unit-research service; no existing
+  // production code path reads ATR(3m) at all.
+  const bootstrapPairs = pairsFor(symbols, ["15m", "5m", "3m", "1m"], 100);
   await bootstrapAtrFromRest(
     new BinanceRestClient(binanceConfig),
     orchestrator.atrTracker,

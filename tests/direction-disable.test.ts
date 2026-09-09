@@ -45,6 +45,7 @@ function baseSignal(side: "LONG" | "SHORT"): GlobalSignalDoc {
     p95AtEntry: 1000,
     dailyLiqPerMinBaselineAtEntry: 500,
     atr15mAtEntry: 5,
+    unitResearch: null,
     qualifyingEventUsd: 0,
     qualifyingEventTs: 0,
     p95AtQualification: 0,

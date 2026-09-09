@@ -6,8 +6,10 @@ import type {
 } from "./research-checkpoint.model";
 
 /** Fixed, sparse offsets -- deliberately NOT per-tick. See this
- *  file's own module doc comment. */
-const OFFSETS_MS: ReadonlyArray<{
+ *  file's own module doc comment. This is the DEFAULT set, used by
+ *  every EXISTING call-site that constructs this class without an
+ *  explicit `offsets` argument -- unchanged from before. */
+const DEFAULT_OFFSETS_MS: ReadonlyArray<{
   label: ResearchCheckpointOffset;
   ms: number;
 }> = [
@@ -55,6 +57,28 @@ interface Watch {
  */
 export class ResearchCheckpointTracker {
   private readonly watches = new Map<string, Watch>(); // keyed by signalId -- one watch per episode, by design (see registerWatch)
+  private readonly offsets: ReadonlyArray<{
+    label: ResearchCheckpointOffset;
+    ms: number;
+  }>;
+
+  /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+   *  comparison -- `offsets` is a NEW, OPTIONAL constructor parameter,
+   *  defaulting to DEFAULT_OFFSETS_MS (byte-identical to this class's
+   *  own previous, hardcoded behavior). Every EXISTING call-site
+   *  (production's own research-checkpoint tracking) constructs this
+   *  class with zero arguments and is completely unaffected. The
+   *  shadow unit-research service passes its own explicit
+   *  [30s,1m,3m,5m,15m,30m] offset set -- a SEPARATE instance, never
+   *  touching this default. */
+  constructor(
+    offsets: ReadonlyArray<{
+      label: ResearchCheckpointOffset;
+      ms: number;
+    }> = DEFAULT_OFFSETS_MS,
+  ) {
+    this.offsets = offsets;
+  }
 
   /** Registers a new watch. Silently ignored (never throws) if a
    *  watch for this signalId already exists (one watch per episode by
@@ -123,10 +147,10 @@ export class ResearchCheckpointTracker {
       if (price < w.worstPrice) w.worstPrice = price;
 
       while (
-        w.nextOffsetIdx < OFFSETS_MS.length &&
-        elapsed >= OFFSETS_MS[w.nextOffsetIdx]!.ms
+        w.nextOffsetIdx < this.offsets.length &&
+        elapsed >= this.offsets[w.nextOffsetIdx]!.ms
       ) {
-        const offset = OFFSETS_MS[w.nextOffsetIdx]!;
+        const offset = this.offsets[w.nextOffsetIdx]!;
         // Sep 8 2026 (Karo) -- bestPrice/worstPrice above are literal
         // (direction-agnostic) max/min. "Favorable" depends on
         // dirMul: for a LONG-convention watch (dirMul=+1) favorable
@@ -154,7 +178,7 @@ export class ResearchCheckpointTracker {
           normalization: w.normalization.kind,
         };
         w.nextOffsetIdx += 1;
-        const done = w.nextOffsetIdx >= OFFSETS_MS.length;
+        const done = w.nextOffsetIdx >= this.offsets.length;
         out.push({
           signalId,
           group: {

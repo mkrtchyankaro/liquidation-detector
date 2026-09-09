@@ -16,7 +16,17 @@ import { OrderbookStore } from "../domain/market/orderbook.store";
 import { ATRTrackerService } from "../domain/market/atr-tracker.service";
 import { AggressiveFlowService } from "../domain/liquidation/aggressive-flow.service";
 import { ResearchCheckpointTracker } from "../domain/signal/research-checkpoint-tracker";
-import type { GlobalSignalDoc } from "../domain/signal/global-signal.model";
+import {
+  UnitResearchShadowService,
+  type ShadowEntryEvent,
+  type ShadowNoEntryEvent,
+} from "../domain/research/unit-research-shadow.service";
+import type {
+  GlobalSignalDoc,
+  UnitResearchCandidateDoc,
+} from "../domain/signal/global-signal.model";
+import type { Side, Liquidation } from "../shared/common.types";
+import { deriveLiquidationPhysicsTradePlan } from "../domain/trading/liquidation-physics-trade-plan";
 import type { V5Wave } from "../strategy/v5/v5-wave.model";
 import type { SignalDistributor } from "./signal-distributor";
 import type { ReconciliationManager } from "./reconciliation-manager";
@@ -79,6 +89,41 @@ export class MarketDataOrchestrator {
   readonly oiTracker: OiTrackerService;
   readonly aggressiveFlow = new AggressiveFlowService();
   readonly researchCheckpoints = new ResearchCheckpointTracker();
+  /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+   *  comparison. TWO fully independent shadow-tracker instances (one
+   *  per candidate UNIT, 3m and 5m) + TWO fully independent
+   *  ResearchCheckpointTracker instances (custom [30s,1m,3m,5m,15m,30m]
+   *  offsets, per the operator's own explicit spec, via the new,
+   *  optional `offsets` constructor parameter -- the EXISTING
+   *  `this.researchCheckpoints` instance above is completely untouched,
+   *  still using its own DEFAULT offsets). Fed via new, ADDITIVE calls
+   *  in start()'s own liquidation/bookTicker handlers, always AFTER the
+   *  existing production v5.onLiquidation()/v5.onTick() calls -- never
+   *  before, never read by anything else. See
+   *  unit-research-shadow.service.ts's own doc comment for the full
+   *  isolation guarantee. */
+  private readonly shadow3m = new UnitResearchShadowService((symbol, victim) =>
+    this.liquidationStats.notionalPercentile(symbol, victim, 95),
+  );
+  private readonly shadow5m = new UnitResearchShadowService((symbol, victim) =>
+    this.liquidationStats.notionalPercentile(symbol, victim, 95),
+  );
+  private readonly shadowCheckpoints3m = new ResearchCheckpointTracker([
+    { label: "30s", ms: 30_000 },
+    { label: "1m", ms: 60_000 },
+    { label: "3m", ms: 3 * 60_000 },
+    { label: "5m", ms: 5 * 60_000 },
+    { label: "15m", ms: 15 * 60_000 },
+    { label: "30m", ms: 30 * 60_000 },
+  ]);
+  private readonly shadowCheckpoints5m = new ResearchCheckpointTracker([
+    { label: "30s", ms: 30_000 },
+    { label: "1m", ms: 60_000 },
+    { label: "3m", ms: 3 * 60_000 },
+    { label: "5m", ms: 5 * 60_000 },
+    { label: "15m", ms: 15 * 60_000 },
+    { label: "30m", ms: 30 * 60_000 },
+  ]);
   private readonly globalSignalRepo: GlobalSignalRepository;
   private readonly rawLiquidationEventRepo: RawLiquidationEventRepository;
   /** Sep 8 2026 (Karo) -- NEW, MAIN/GLOBAL-only same-symbol lock. See
@@ -190,7 +235,15 @@ export class MarketDataOrchestrator {
   start(): void {
     this.ws.subscribe({
       symbols: this.symbols,
-      intervals: ["15m", "5m", "1m"],
+      // Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-
+      // timeframe comparison -- "3m" ADDED to the live WS-kline
+      // subscription so ATRTrackerService can maintain a continuously-
+      // warm ATR(3m), exclusively for the shadow unit-research service
+      // (unit-research-shadow.service.ts). Adding a NEW stream here
+      // cannot alter behavior for any EXISTING interval's own data --
+      // each (symbol, interval) pair is independently keyed throughout
+      // this codebase.
+      intervals: ["15m", "5m", "3m", "1m"],
       aggTrade: true,
       bookTicker: true,
       depth: true,
@@ -218,8 +271,14 @@ export class MarketDataOrchestrator {
         timestamp: l.timestamp,
       });
       if (this.mainSymbolLocks.has(l.symbol)) return;
+      const victimForShadow: Side = l.side === "SELL" ? "LONG" : "SHORT";
+      const wasTrackedBeforeProduction = this.wasProductionWatchTracked(
+        l.symbol,
+        victimForShadow,
+      );
       const outcomes = this.v5.onLiquidation(l);
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
+      this.feedUnitResearchShadowAfter(l, wasTrackedBeforeProduction);
     });
 
     this.ws.on("bookTicker", (b) => {
@@ -230,6 +289,7 @@ export class MarketDataOrchestrator {
       for (const close of closes) void this.handleMainTradeClose(close);
       void this.reconciliation.onTick(b.symbol, b.timestamp);
       this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
+      this.tickUnitResearchShadow(b.symbol, mid, b.timestamp);
     });
 
     this.ws.on("orderbook", (snap) => {
@@ -253,6 +313,195 @@ export class MarketDataOrchestrator {
     const completed = this.researchCheckpoints.onTick(symbol, price, now);
     for (const c of completed) {
       void this.globalSignalRepo.appendCheckpoint(c.signalId, c.group);
+    }
+  }
+
+  /** Sep 9 2026 (Karo) -- companion to feedUnitResearchShadow(), called
+   *  BEFORE this.v5.onLiquidation() runs (captures whether a watch
+   *  already existed) so the AFTER-side can tell "new episode" from
+   *  "existing episode, accumulate". Kept as two small methods rather
+   *  than one, matching exactly where each must run relative to the
+   *  production call. */
+  private wasProductionWatchTracked(symbol: string, victim: Side): boolean {
+    return this.v5.getWatch(symbol, victim) !== null;
+  }
+
+  private feedUnitResearchShadowAfter(
+    l: Liquidation,
+    wasTrackedBefore: boolean,
+  ): void {
+    const victim: Side = l.side === "SELL" ? "LONG" : "SHORT";
+    if (!wasTrackedBefore) {
+      const newWatch = this.v5.getWatch(l.symbol, victim);
+      if (!newWatch) return; // production itself declined to track this event (e.g. BTC EXCLUDE mode) -- shadow mirrors that by doing nothing too
+      const unit3m = this.atrTracker.getATR(l.symbol, "3m");
+      if (unit3m !== null && unit3m > 0) {
+        this.shadow3m.startEpisode(
+          l.symbol,
+          victim,
+          newWatch.signalId,
+          unit3m,
+          l.price,
+          l.timestamp,
+          l.quoteQty,
+          l.timestamp,
+        );
+      }
+      const unit5m = this.atrTracker.getATR(l.symbol, "5m");
+      if (unit5m !== null && unit5m > 0) {
+        this.shadow5m.startEpisode(
+          l.symbol,
+          victim,
+          newWatch.signalId,
+          unit5m,
+          l.price,
+          l.timestamp,
+          l.quoteQty,
+          l.timestamp,
+        );
+      }
+      return;
+    }
+    this.shadow3m.onLiquidation(l, victim);
+    this.shadow5m.onLiquidation(l, victim);
+  }
+
+  /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+   *  comparison. Called ONCE per bookTicker tick, ALWAYS AFTER
+   *  this.v5.onTick() has already run. Ticks BOTH shadow candidates,
+   *  for BOTH victims -- their own onTick() is a complete no-op for any
+   *  symbol/victim pair with no active shadow episode, so this is cheap
+   *  and side-effect-free for the vast majority of ticks. Persists a
+   *  terminal (entry or no-entry) event the moment one occurs, and
+   *  registers the shadow's own MFE/MAE checkpoint-watch on entry --
+   *  reusing the EXACT SAME ResearchCheckpointTracker/GlobalSignalRepository
+   *  machinery production's own researchCheckpoints already uses, via a
+   *  SEPARATE tracker instance and a SEPARATE persisted field
+   *  (unitResearch), never touching researchCheckpoints itself. */
+  private tickUnitResearchShadow(
+    symbol: string,
+    mid: number,
+    ts: number,
+  ): void {
+    for (const victim of ["LONG", "SHORT"] as const) {
+      this.handleShadowTick(
+        "atr3m",
+        this.shadow3m,
+        this.shadowCheckpoints3m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
+      this.handleShadowTick(
+        "atr5m",
+        this.shadow5m,
+        this.shadowCheckpoints5m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
+    }
+    const completed3m = this.shadowCheckpoints3m.onTick(symbol, mid, ts);
+    for (const c of completed3m)
+      void this.globalSignalRepo.appendUnitResearchCheckpoint(
+        c.signalId,
+        "atr3m",
+        c.checkpoint,
+      );
+    const completed5m = this.shadowCheckpoints5m.onTick(symbol, mid, ts);
+    for (const c of completed5m)
+      void this.globalSignalRepo.appendUnitResearchCheckpoint(
+        c.signalId,
+        "atr5m",
+        c.checkpoint,
+      );
+  }
+
+  private handleShadowTick(
+    label: "atr3m" | "atr5m",
+    shadow: UnitResearchShadowService,
+    checkpoints: ResearchCheckpointTracker,
+    symbol: string,
+    victim: Side,
+    mid: number,
+    ts: number,
+  ): void {
+    const result = shadow.onTick(symbol, victim, mid, ts);
+    if (!result) return;
+    if ("entryPrice" in result) {
+      const entry = result as ShadowEntryEvent;
+      const prodWatch = this.v5.getWatch(symbol, victim);
+      const prodEntryTs: number | null = null; // production's own entry price/time is not observable from a released/consumed watch here -- delay is computed downstream from the persisted signalTs instead, at report time
+      const planResult = deriveLiquidationPhysicsTradePlan({
+        entry: entry.entryPrice,
+        side: entry.side,
+        w1AnchorPrice: entry.w1.anchorPrice,
+        w1ExtremePrice: entry.w1.extremePrice,
+        w1LiqUsd: entry.w1.liqUsd,
+        w2LiqUsd: entry.w2.liqUsd,
+        atr15mAbs: this.atrTracker.getATR(symbol, "15m") ?? 0,
+        p95: this.liquidationStats.notionalPercentile(symbol, victim, 95),
+        dailyLiqPerMinBaseline: 0,
+      });
+      const doc: UnitResearchCandidateDoc = {
+        unitAbs: entry.unitAbs,
+        entered: true,
+        entryPrice: entry.entryPrice,
+        entryTs: entry.entryTs,
+        delayVsProductionMs:
+          prodEntryTs !== null ? entry.entryTs - prodEntryTs : null,
+        noEntryReason: null,
+        w1: entry.w1,
+        w2: entry.w2,
+        planSlPct: planResult.ok ? planResult.slPct : null,
+        planTpPct: planResult.ok ? planResult.tpPct : null,
+        planRr: planResult.ok ? planResult.rr : null,
+        checkpoints: [],
+      };
+      void this.globalSignalRepo.setUnitResearchCandidate(
+        entry.signalId,
+        label,
+        doc,
+      );
+      const denom = planResult.ok
+        ? planResult.slPct * entry.entryPrice
+        : entry.unitAbs;
+      checkpoints.registerWatch(
+        `${entry.signalId}:${label}`,
+        symbol,
+        "SIGNAL",
+        entry.entryTs,
+        entry.entryPrice,
+        {
+          kind: "R",
+          dirMul: entry.side === "LONG" ? 1 : -1,
+          denom: denom > 0 ? denom : entry.unitAbs,
+        },
+      );
+      void prodWatch; // reserved for future delay-vs-production wiring; not required for this pass's own core comparison
+    } else {
+      const noEntry = result as ShadowNoEntryEvent;
+      const doc: UnitResearchCandidateDoc = {
+        unitAbs: noEntry.unitAbs,
+        entered: false,
+        entryPrice: null,
+        entryTs: null,
+        delayVsProductionMs: null,
+        noEntryReason: noEntry.reason,
+        w1: noEntry.w1,
+        w2: null,
+        planSlPct: null,
+        planTpPct: null,
+        planRr: null,
+        checkpoints: [],
+      };
+      void this.globalSignalRepo.setUnitResearchCandidate(
+        noEntry.signalId,
+        label,
+        doc,
+      );
     }
   }
 
@@ -448,6 +697,7 @@ export class MarketDataOrchestrator {
         maxAdverseR: null,
         liquidationStatsContext,
         researchCheckpoints: [],
+        unitResearch: null,
         createdAt: Date.now(),
       };
 
@@ -552,6 +802,7 @@ export class MarketDataOrchestrator {
       maxAdverseR: null,
       liquidationStatsContext: null,
       researchCheckpoints: [],
+      unitResearch: null,
       createdAt: Date.now(),
     };
     await this.globalSignalRepo.insert(doc);

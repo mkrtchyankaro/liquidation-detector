@@ -103,6 +103,7 @@ function baseSignal(overrides: Partial<GlobalSignalDoc> = {}): GlobalSignalDoc {
     p95AtEntry: 1000,
     dailyLiqPerMinBaselineAtEntry: 500,
     atr15mAtEntry: 5,
+    unitResearch: null,
     qualifyingEventUsd: 100,
     qualifyingEventTs: Date.now(),
     p95AtQualification: 90,

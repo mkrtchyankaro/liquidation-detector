@@ -368,11 +368,23 @@ export class ATRTrackerService {
     // V5WatchState.unitAtStart's own doc comment) -- completely
     // separate from the EXISTING 5m/15m/1h usage (ATR15m still sizes
     // the trade-plan's own TP/SL, unchanged).
+    // Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+    // comparison -- "3m" ADDED. Used EXCLUSIVELY by the shadow
+    // unit-research service (unit-research-shadow.service.ts) as one of
+    // two additional, non-production UNIT candidates (3m/5m) being
+    // compared against the real, production 1m UNIT. "5m" itself needed
+    // NO new tracking here -- it was ALREADY continuously live-tracked
+    // (see the list below) for other, pre-existing purposes, so the
+    // shadow service simply reads the SAME already-warm ATR(5m) value.
+    // Zero production behavior is affected by this addition: no
+    // existing caller of getATR()/getRollingMedianATR() ever requests
+    // "3m", so this is a pure, side-effect-free extension.
     return (
       interval === "5m" ||
       interval === "15m" ||
       interval === "1h" ||
-      interval === "1m"
+      interval === "1m" ||
+      interval === "3m"
     );
   }
 

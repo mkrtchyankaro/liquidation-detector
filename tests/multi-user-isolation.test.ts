@@ -80,6 +80,7 @@ function makeGlobalSignal(signalId: string): GlobalSignalDoc {
     p95AtEntry: 1000,
     dailyLiqPerMinBaselineAtEntry: 500,
     atr15mAtEntry: 5,
+    unitResearch: null,
     qualifyingEventUsd: 50_000,
     qualifyingEventTs: Date.now(),
     p95AtQualification: 40_000,
