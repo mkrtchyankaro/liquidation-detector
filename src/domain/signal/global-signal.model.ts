@@ -82,6 +82,31 @@ export interface GlobalSignalDoc {
 
   rejectionReason: string | null;
 
+  /** Sep 9 2026 (Karo), operator-requested diagnostics-only fix --
+   *  mirrors V5SignalEvent.planDiagnostics exactly (see that field's
+   *  own doc comment in v5-wave.service.ts). Reuses the SAME
+   *  LiquidityPlanForensics deriveV5TradePlan() already computes on
+   *  both its ok=true and ok=false branches -- no reimplementation.
+   *  Populated for both status="SIGNAL" and status="REJECTED_PLAN"
+   *  (same construction site as `physics` above), null for every
+   *  other status (episodes that never reached entry-evaluation, or
+   *  the rare "episode-missing-atr" early-exit where no plan
+   *  computation ever ran at all). */
+  planDiagnostics: {
+    intensityRaw: number;
+    intensity: number;
+    atr15mPct: number;
+    liqBaseline: number;
+    rawTpPct: number;
+    wallAdjustedTpPct: number;
+    wallApplied: boolean;
+    rrCandidate: number;
+    slCapApplied: boolean;
+    slCapValue: number;
+    finalTpPct: number;
+    finalSlPct: number;
+  } | null;
+
   /** Sep 8 2026 (Karo) -- REVISED (was: V5TerminalReason | "SIGNAL",
    *  which incorrectly stored EVERY plan-rejected candidate as
    *  "SIGNAL" too -- confirmed and reported during a full audit).

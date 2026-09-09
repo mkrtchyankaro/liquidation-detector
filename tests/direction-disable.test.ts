@@ -61,6 +61,7 @@ function baseSignal(side: "LONG" | "SHORT"): GlobalSignalDoc {
     maxFavorableR: null,
     maxAdverseR: null,
     liquidationStatsContext: null,
+    planDiagnostics: null,
     researchCheckpoints: [],
     createdAt: Date.now(),
   };

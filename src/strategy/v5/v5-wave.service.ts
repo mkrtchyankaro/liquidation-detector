@@ -81,6 +81,31 @@ export interface V5SignalEvent {
     finalSlPct: number;
   } | null;
   rejectionReason: string | null;
+  /** Sep 9 2026 (Karo), operator-requested diagnostics-only fix --
+   *  REUSES (never reimplements) the SAME LiquidityPlanForensics
+   *  deriveV5TradePlan() already returns on BOTH its ok=true and
+   *  ok=false branches (see trade-plan.ts's own LiquidityPlanResult
+   *  union) -- these numbers already existed as local variables and
+   *  were previously discarded on rejection. Populated whenever
+   *  deriveV5TradePlan() was actually called (i.e. NOT for the
+   *  earlier "episode-missing-atr" early-exit, where no plan
+   *  computation ever ran at all -- null there). liqBaseline is the
+   *  caller's own input to that call, included alongside for
+   *  completeness since the operator explicitly asked for it too. */
+  planDiagnostics: {
+    intensityRaw: number;
+    intensity: number;
+    atr15mPct: number;
+    liqBaseline: number;
+    rawTpPct: number;
+    wallAdjustedTpPct: number;
+    wallApplied: boolean;
+    rrCandidate: number;
+    slCapApplied: boolean;
+    slCapValue: number;
+    finalTpPct: number;
+    finalSlPct: number;
+  } | null;
   btcContext: { priceAtSignal: number | null; oiAtSignal: number | null };
   liq24hContext: { dayLiqTotalUsd: number; dayLiqEvents: number } | null;
   wallContext: {
@@ -658,6 +683,7 @@ export class V5WaveService {
       : NO_WALLS;
 
     let plan: V5SignalEvent["plan"] = null;
+    let planDiagnostics: V5SignalEvent["planDiagnostics"] = null;
     let rejectionReason: string | null = null;
 
     if (watch.atrAtStart <= 0) {
@@ -673,6 +699,25 @@ export class V5WaveService {
         side: watch.side,
         walls: wallContext,
       });
+      // Sep 9 2026 (Karo) -- REUSES the SAME LiquidityPlanForensics
+      // fields `result` already carries on BOTH branches (ok=true and
+      // ok=false) -- no reimplementation, just persistence of numbers
+      // that already existed as local variables here and were
+      // previously discarded on rejection.
+      planDiagnostics = {
+        intensityRaw: result.intensityRaw,
+        intensity: result.intensity,
+        atr15mPct: result.atr15mPct,
+        liqBaseline: baseline,
+        rawTpPct: result.rawTpPct,
+        wallAdjustedTpPct: result.wallAdjustedTpPct,
+        wallApplied: result.wallApplied,
+        rrCandidate: result.rrCandidate,
+        slCapApplied: result.slCapApplied,
+        slCapValue: result.slCapValue,
+        finalTpPct: result.finalTpPct,
+        finalSlPct: result.finalSlPct,
+      };
       if (result.ok) {
         plan = {
           entry: entryPrice,
@@ -727,6 +772,7 @@ export class V5WaveService {
       btcIntendedSideAtSignalTime: btcVictim,
       plan,
       rejectionReason,
+      planDiagnostics,
       btcContext,
       liq24hContext,
       wallContext: wallContext.atEntry,
