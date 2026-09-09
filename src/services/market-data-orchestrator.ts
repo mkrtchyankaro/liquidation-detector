@@ -357,6 +357,23 @@ export class MarketDataOrchestrator {
 
       const hasRealPlan = event.plan !== null;
 
+      // Sep 9 2026 (Karo), operator-requested diagnostics/research-
+      // only context -- REUSES getVictimStatsSnapshot() as-is (see its
+      // own doc comment). Computed here, once, for BOTH victim sides
+      // -- never fed back into event/plan/qualification, which were
+      // already fully decided before this line runs.
+      const liquidationStatsContext = {
+        currentVictim: event.victim,
+        long: this.liquidationStats.getVictimStatsSnapshot(
+          event.symbol,
+          "LONG",
+        ),
+        short: this.liquidationStats.getVictimStatsSnapshot(
+          event.symbol,
+          "SHORT",
+        ),
+      };
+
       const globalSignal: GlobalSignalDoc = {
         signalId: event.signalId,
         symbol: event.symbol,
@@ -408,6 +425,7 @@ export class MarketDataOrchestrator {
         closePrice: null,
         maxFavorableR: null,
         maxAdverseR: null,
+        liquidationStatsContext,
         researchCheckpoints: [],
         createdAt: Date.now(),
       };
@@ -506,6 +524,7 @@ export class MarketDataOrchestrator {
       closePrice: null,
       maxFavorableR: null,
       maxAdverseR: null,
+      liquidationStatsContext: null,
       researchCheckpoints: [],
       createdAt: Date.now(),
     };

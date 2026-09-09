@@ -122,6 +122,37 @@ export interface GlobalSignalDoc {
   maxFavorableR: number | null;
   maxAdverseR: number | null;
 
+  /** Sep 9 2026 (Karo), operator-requested diagnostics/research-only
+   *  context -- REUSES LiquidationStatsService.getVictimStatsSnapshot()
+   *  exactly as-is (see that method's own doc comment). Populated ONLY
+   *  for outcomes that reached entry-evaluation (status="SIGNAL" or
+   *  "REJECTED_PLAN" -- same construction site as `physics` above),
+   *  never for a TERMINAL_NON_SIGNAL episode that never got that far
+   *  (null there, matching `physics`'s own convention). The opposite
+   *  (non-current) victim side's own values are stored here PURELY for
+   *  later historical analysis -- they are NEVER read by any
+   *  qualification/P95-gate/intensity/TP-SL/UNIT/BTC-block/execution
+   *  logic anywhere in this project; only THIS doc's own `entry`/`tp`/
+   *  `sl`/`physics` fields (already computed from the CURRENT victim's
+   *  own regime, unaffected by this field's existence) drive the real
+   *  trade. Telegram output is intentionally unchanged -- this is a
+   *  persisted-record-only enrichment. */
+  liquidationStatsContext: {
+    currentVictim: Side;
+    long: {
+      p95: number;
+      baselinePerMin: number | null;
+      sampleCount: number;
+      source: "VICTIM_SPECIFIC" | "COMBINED_FALLBACK";
+    };
+    short: {
+      p95: number;
+      baselinePerMin: number | null;
+      sampleCount: number;
+      source: "VICTIM_SPECIFIC" | "COMBINED_FALLBACK";
+    };
+  } | null;
+
   /** Sep 8 2026 (Karo) -- GLOBAL research observations, NEVER
    *  per-user (see research-checkpoint.model.ts's own doc comment).
    *  Grouped by anchor since a single episode has exactly ONE anchor

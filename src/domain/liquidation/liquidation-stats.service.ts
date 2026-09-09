@@ -570,6 +570,53 @@ export class LiquidationStatsService {
     };
   }
 
+  /** Sep 9 2026 (Karo), operator-requested diagnostics/research-only
+   *  snapshot -- REUSES notionalPercentileForVictim()/
+   *  rollingMedianLiqNotionalPerMinForVictim() (above) exactly as-is,
+   *  no second/parallel calculation, no new strategy-relevant state.
+   *  Deliberately named "Snapshot" (not tied to any decision) --
+   *  callers must never feed this into qualification/TP-SL/intensity
+   *  logic; it exists purely to be persisted for later historical
+   *  analysis of both victim sides' own P95/baseline context at
+   *  signal time (see GlobalSignalDoc.liquidationStatsContext's own
+   *  doc comment). Source (VICTIM_SPECIFIC vs COMBINED_FALLBACK) is
+   *  read from p95's own isVictimSpecific -- by construction (see
+   *  both methods' own doc comments) baseline always agrees with P95
+   *  on regime for the same (symbol, victim), so one flag correctly
+   *  describes both fields here. */
+  getVictimStatsSnapshot(
+    symbol: string,
+    victim: LiqVictim,
+  ): {
+    p95: number;
+    baselinePerMin: number | null;
+    sampleCount: number;
+    source: "VICTIM_SPECIFIC" | "COMBINED_FALLBACK";
+  } {
+    const p95Result = this.notionalPercentileForVictim(symbol, victim, 95);
+    const baselineResult = this.rollingMedianLiqNotionalPerMinForVictim(
+      symbol,
+      victim,
+      60,
+    );
+    const s = this.state.get(symbol);
+    const source: "VICTIM_SPECIFIC" | "COMBINED_FALLBACK" =
+      p95Result.isVictimSpecific ? "VICTIM_SPECIFIC" : "COMBINED_FALLBACK";
+    const sampleCount = s
+      ? source === "VICTIM_SPECIFIC"
+        ? victim === "LONG"
+          ? s.notionalSamplesLong.length
+          : s.notionalSamplesShort.length
+        : s.totalSamples
+      : 0;
+    return {
+      p95: p95Result.value,
+      baselinePerMin: baselineResult.value,
+      sampleCount,
+      source,
+    };
+  }
+
   /** Rolling MEDIAN of per-minute liquidation EVENT COUNT (long+short
    *  combined), over the last `windowMinutes` sealed buckets. Returns
    *  null under the same cold-start condition as

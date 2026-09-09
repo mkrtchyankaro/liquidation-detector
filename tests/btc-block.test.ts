@@ -59,6 +59,7 @@ function baseSignal(overrides: Partial<GlobalSignalDoc>): GlobalSignalDoc {
     closePrice: null,
     maxFavorableR: null,
     maxAdverseR: null,
+    liquidationStatsContext: null,
     researchCheckpoints: [],
     createdAt: Date.now(),
     ...overrides,
