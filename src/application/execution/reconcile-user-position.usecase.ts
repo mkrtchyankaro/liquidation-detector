@@ -26,6 +26,20 @@ export async function reconcileUserPosition(
   runtime: UserRuntime,
   userSignalRepo: { upsert(userId: string, doc: UserSignalDoc): Promise<void> },
   now: number,
+  /** Sep 9 2026 (Karo), operator-requested -- reproduces the OLD,
+   *  proven liqwatch-bot pattern (the old strategy engine's own
+   *  synchronous active-trade removal, confirmed via direct
+   *  old-code trace to run SYNCHRONOUSLY, IMMEDIATELY upon Binance
+   *  confirming closed -- BEFORE any DB write or Telegram send). Called
+   *  synchronously the MOMENT this function determines the position is
+   *  genuinely closed, before building the DB doc and before
+   *  notifyUserClose(). The caller (ReconciliationManager) uses this to
+   *  remove the signal from its own openCache immediately, closing the
+   *  exact gap that let a second, LATER (not concurrent -- InFlightGuard
+   *  already covers concurrent) onTick() invocation still find this
+   *  signal "open" and run the entire reconcile-confirm-notify chain a
+   *  second time. */
+  onConfirmedClosed: (signalId: string) => void,
 ): Promise<{ closed: boolean; broadcastMessage: string | null }> {
   const result = await runtime.reconcileInFlight.run(
     userSignal.signalId,
@@ -36,6 +50,7 @@ export async function reconcileUserPosition(
         runtime,
         userSignalRepo,
         now,
+        onConfirmedClosed,
       );
     },
   );
@@ -52,6 +67,7 @@ async function reconcileUserPositionImpl(
   runtime: UserRuntime,
   userSignalRepo: { upsert(userId: string, doc: UserSignalDoc): Promise<void> },
   now: number,
+  onConfirmedClosed: (signalId: string) => void,
 ): Promise<{ closed: boolean; broadcastMessage: string | null }> {
   const userId = runtime.config.userId;
   if (!runtime.execution) return { closed: false, broadcastMessage: null };
@@ -106,6 +122,16 @@ async function reconcileUserPositionImpl(
   }
 
   if (result.stillOpen) return { closed: false, broadcastMessage: null };
+
+  // Sep 9 2026 (Karo), operator-requested -- reproduces the OLD, proven
+  // liqwatch-bot pattern EXACTLY: the moment Binance confirms the
+  // position is closed, remove it from open-tracking SYNCHRONOUSLY,
+  // BEFORE any DB write or Telegram send (matching the old strategy
+  // engine's own synchronous active-trade removal, which the direct
+  // old-code trace confirmed runs before the DB-finalize/Telegram-send
+  // steps). This is what makes idempotency ATOMIC with confirmation,
+  // rather than a separate, later, caller-side step.
+  onConfirmedClosed(userSignal.signalId);
 
   let outcome: "TP" | "SL";
   let closePrice: number;

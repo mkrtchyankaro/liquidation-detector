@@ -129,21 +129,38 @@ export class ReconciliationManager {
         try {
           const globalSignal = await this.getGlobalSignal(userSignal.signalId);
           if (!globalSignal) continue;
+          // Sep 9 2026 (Karo), operator-requested -- reproduces the OLD,
+          // proven liqwatch-bot pattern exactly (V5WaveService.closeTrade()'s
+          // own synchronous activeTrades.delete(), confirmed via direct
+          // old-code trace to run BEFORE any DB write or Telegram send).
+          // This callback fires SYNCHRONOUSLY, inside reconcileUserPosition(),
+          // the MOMENT Binance confirms the position closed -- closing the
+          // gap that let a LATER (not concurrent -- InFlightGuard already
+          // covers concurrent) onTick() invocation still find this signal
+          // "open" and run the entire reconcile-confirm-notify chain again.
+          const pruneFromCache = (signalId: string): void => {
+            const stillCached = this.openCache.get(runtime.config.userId);
+            if (stillCached) {
+              this.openCache.set(
+                runtime.config.userId,
+                stillCached.filter((s) => s.signalId !== signalId),
+              );
+            }
+          };
           const { closed, broadcastMessage } = await reconcileUserPosition(
             userSignal,
             globalSignal,
             runtime,
             userSignalRepo,
             now,
+            pruneFromCache,
           );
           if (closed) {
-            const stillCached = this.openCache.get(runtime.config.userId);
-            if (stillCached) {
-              this.openCache.set(
-                runtime.config.userId,
-                stillCached.filter((s) => s.signalId !== userSignal.signalId),
-              );
-            }
+            // Sep 9 2026 (Karo) -- defensive safety-net only; the real
+            // removal already happened synchronously above, via
+            // pruneFromCache(), before any DB/Telegram I/O. Filtering an
+            // already-pruned array is a harmless no-op.
+            pruneFromCache(userSignal.signalId);
             // Sep 8 2026 (Karo) -- CRITICAL DESIGN FIX, operator-
             // requested: close notifications used to reach ONLY the
             // one user who actually had a real Binance position --
