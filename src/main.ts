@@ -103,6 +103,17 @@ async function main(): Promise<void> {
         null;
       return atrPct ? atrPct * referencePrice : 0;
     },
+    // Sep 8 2026 (Karo), operator-designed minimal-cascade model --
+    // NEW, ATR(1m)-based structural UNIT, completely separate from
+    // the ATR15m callback above (which still ONLY sizes the trade-
+    // plan's own TP/SL). See V5WatchState.unitAtStart's own doc
+    // comment.
+    (symbol, referencePrice) => {
+      const atr1mPct =
+        orchestratorPlaceholder.instance?.atrTracker.getATR(symbol, "1m") ??
+        null;
+      return atr1mPct ? atr1mPct * referencePrice : 0;
+    },
     (symbol) =>
       orchestratorPlaceholder.instance?.oiTracker.getCachedOI(symbol) ?? null,
     (symbol) =>
@@ -237,7 +248,14 @@ async function main(): Promise<void> {
   // orchestrator.start() (which itself calls ws.subscribe()) so no
   // live kline ever races the bootstrap -- identical ordering to the
   // original.
-  const bootstrapPairs = pairsFor(symbols, ["15m", "5m"], 100);
+  // Sep 8 2026 (Karo) -- "1m" ADDED to the bootstrap pairs alongside
+  // 15m/5m. Previously 1m was research-only (fine to warm up
+  // naturally); now it is ALSO the new minimal-cascade model's own
+  // UNIT (V5WatchState.unitAtStart) -- without bootstrapping it, the
+  // new engine would be unable to evaluate ANY recovery/completion
+  // decision (onTick's own `if (watch.unitAtStart <= 0) continue`
+  // guard) until enough live 1m candles closed naturally.
+  const bootstrapPairs = pairsFor(symbols, ["15m", "5m", "1m"], 100);
   await bootstrapAtrFromRest(
     new BinanceRestClient(binanceConfig),
     orchestrator.atrTracker,

@@ -1,5 +1,5 @@
-import type { Candle, KlineInterval } from '../../shared/common.types';
-import { atr as wilderAtr } from '../../shared/indicators';
+import type { Candle, KlineInterval } from "../../shared/common.types";
+import { atr as wilderAtr } from "../../shared/indicators";
 
 /**
  * ATR Tracker — Stage A foundation.
@@ -362,7 +362,18 @@ export class ATRTrackerService {
     // Patch A: 1h for trend filter.
     // Patch C-quality: 5m for reclaim quality confirmation (close + body + volume).
     // 15m for swing range; 5m for ATR/structure (existing).
-    return interval === "5m" || interval === "15m" || interval === "1h";
+    // Sep 8 2026 (Karo), operator-designed minimal-cascade model --
+    // "1m" ADDED. Used ONLY as the new UNIT/structural-ruler for
+    // liquidation-wave recovery/completion detection (see
+    // V5WatchState.unitAtStart's own doc comment) -- completely
+    // separate from the EXISTING 5m/15m/1h usage (ATR15m still sizes
+    // the trade-plan's own TP/SL, unchanged).
+    return (
+      interval === "5m" ||
+      interval === "15m" ||
+      interval === "1h" ||
+      interval === "1m"
+    );
   }
 
   private keyFor(symbol: string, interval: KlineInterval): string {

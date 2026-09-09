@@ -1,11 +1,12 @@
 /**
- * Sep 8 2026 (Karo). Proves "1m candles are received without altering
- * ATR15m semantics" directly against ATRTrackerService itself --
- * confirms (a) 15m ATR is computed identically whether or not 1m
- * candles are ALSO fed into the same tracker instance, and (b)
- * ATRTrackerService never tracks "1m" as its own interval at all
- * (isTracked() only accepts 5m/15m/1h, unmodified by this project's
- * new research-data layer).
+ * Sep 8 2026 (Karo). Originally proved "1m candles are received
+ * without altering ATR15m semantics" back when 1m was research-only.
+ * Sep 8 2026 (Karo), operator-designed minimal-cascade model -- 1m IS
+ * now intentionally tracked (it's the new structural UNIT), so the
+ * FIRST test below was updated to match; the important invariant this
+ * file still proves is that 15m stays byte-identical regardless of
+ * 1m activity -- the new UNIT computation must never leak into or
+ * distort the EXISTING trade-plan's own ATR15m-based sizing.
  */
 import * as assert from "assert";
 import { ATRTrackerService } from "../src/domain/market/atr-tracker.service";
@@ -70,11 +71,16 @@ function make1mCandle(i: number, price: number): Candle {
 console.log("Running 1m/ATR15m isolation tests...\n");
 
 scenario(
-  "1m candles are silently ignored by ATRTrackerService -- getATR('1m') is always null, never tracked",
+  "1m ATR IS now tracked (Sep 8 2026, operator-designed minimal-cascade model -- '1m' intentionally added to isTracked(), used as the new structural UNIT). This test previously asserted the OPPOSITE (1m always null); that assumption is now outdated by design, not a regression -- the important invariant (checked by the next test) is that 15m stays fully isolated regardless.",
   () => {
     const atr = new ATRTrackerService();
     for (let i = 0; i < 10; i++) atr.onCandle(make1mCandle(i, 2465 + i));
-    assert.strictEqual(atr.getATR("ETHUSDT", "1m"), null);
+    // 4+ closed 1m candles -> a real, non-null ATR value now, by design.
+    assert.notStrictEqual(
+      atr.getATR("ETHUSDT", "1m"),
+      null,
+      "1m ATR should now be tracked, per the new minimal-cascade UNIT requirement",
+    );
   },
 );
 

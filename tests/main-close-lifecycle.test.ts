@@ -27,7 +27,8 @@ function scenario(name: string, fn: () => void): void {
 
 function makeV5(): V5WaveService {
   return new V5WaveService(
-    () => 1, // getAtrAbs -- unused by onPriceTickForTrades
+    () => 1, // getAtrAbs (ATR15m) -- unused by onPriceTickForTrades
+    () => 1, // getUnit1mAbs -- unused by onPriceTickForTrades (only onLiquidation/onTick use it)
     () => null, // getOi
     () => 1000, // getBaseline
     () => 100, // getIndividualP95

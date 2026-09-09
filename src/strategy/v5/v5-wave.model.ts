@@ -1,4 +1,4 @@
-import type { Side } from '../../shared/common.types';
+import type { Side } from "../../shared/common.types";
 
 /**
  * V5 Liquidation Wave-Chain model (Sep 7 2026, replacing V4's fixed
@@ -162,6 +162,7 @@ export type V5TerminalReason =
   | "WAVE_CHRONOLOGY_INVALID" // Sep 7 2026, operator-requested (Karo) -- hard runtime invariant guard: anchorTs<=extremeTs<=reclaimTs (and extremeTs<=recovery50/75AtTs<=reclaimTs when set) failed at the moment of reclaim. Persistence/entry is REFUSED rather than trusting corrupted chronology -- see V5WaveService's own validateWaveChronology().
   | "EPISODE_EXPIRED_INACTIVITY" // no qualifying liquidation activity for the configured quiet window
   | "EPISODE_EXPIRED_SAFETY_TIMEOUT" // the large, diagnostic-only safety valve -- never a quality filter
+  | "CASCADE_NOT_SERIOUS" // Sep 8 2026 (Karo), operator-designed minimal-cascade model -- price recovered ~1 UNIT from the cascade's own extreme (the push is structurally finished), but the cascade's own CUMULATIVE liquidation notional never reached the P95-equivalent seriousness bar. Distinct from EPISODE_EXPIRED_* (those are pure time/inactivity valves) -- this is a genuine "the push finished, but it was never serious enough" outcome.
   | "BTC_BLOCK_NO_ENTRY" // Sep 8 2026, operator-approved (Karo) -- V5_BTC_BLOCK=true: BTC's own wave-chain reached a genuine entry-trigger, but BTC itself never trades -- it exists purely as a directional filter for other symbols (see v5BtcBlockEnabled()'s own doc comment). Persisted, never silently discarded.
   | "BTC_BLOCK_SAME_SIDE"; // Sep 8 2026, operator-approved (Karo) -- V5_BTC_BLOCK=true: an ALT's own entry-trigger fired, but BTC currently has an active, unresolved SAME-SIDE setup (not opposing -- see v5BtcBlockEnabled()'s own doc comment for the exact truth-table). Persisted, never silently discarded.
 
@@ -225,7 +226,13 @@ export interface V5Wave1Diagnostics {
    *  things actually happened, so extremeToRecoveryMs/recoveryPctAtEntry
    *  below are never misread as "W1 itself became the entry" when it
    *  didn't. */
-  concludedReason: "RECLAIMED_AS_ENTRY" | "SUPERSEDED_TO_W2" | "DISCARDED_TOO_SMALL" | "TERMINATED_SINGLE_EVENT" | "COMPLETED_AS_DOMINANT" | "STILL_ACTIVE_AT_EPISODE_TIMEOUT";
+  concludedReason:
+    | "RECLAIMED_AS_ENTRY"
+    | "SUPERSEDED_TO_W2"
+    | "DISCARDED_TOO_SMALL"
+    | "TERMINATED_SINGLE_EVENT"
+    | "COMPLETED_AS_DOMINANT"
+    | "STILL_ACTIVE_AT_EPISODE_TIMEOUT";
   concludedTs: number;
   /** Time from W1's own extreme to whatever concludedTs above is
    *  (its own reclaim, the liquidation that superseded it, the
@@ -250,6 +257,17 @@ export interface V5WatchState {
   createdAt: number;
 
   atrAtStart: number;
+
+  /** Sep 8 2026 (Karo), operator-designed minimal-cascade model --
+   *  frozen, pre-episode ATR(1m) in absolute price units. This is the
+   *  STRUCTURAL ruler ("UNIT") for recovery/completion detection --
+   *  completely separate from atrAtStart above (ATR15m, still used
+   *  ONLY for the trade-plan's own TP/SL sizing, unchanged). Frozen
+   *  at the very first liquidation event (episode/watch creation),
+   *  never recomputed afterward -- avoids the reflexivity problem
+   *  where the cascade's own volatility could inflate its own
+   *  threshold mid-episode. */
+  unitAtStart: number;
 
   /** Full wave chain, in order. waves[waves.length-1] is always the
    *  live/current wave while the watch is still active. */
