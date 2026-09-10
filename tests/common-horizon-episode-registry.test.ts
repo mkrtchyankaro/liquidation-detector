@@ -1,15 +1,14 @@
 /**
- * Sep 10 2026 (Karo), operator-reported CRITICAL FIX. Proves the
- * ownership invariant CommonHorizonEpisodeRegistry enforces, with REAL
- * UnitResearchShadowService instances (not source-inspection) -- this
- * is the actual fix for the production bug where the same symbol
- * accumulated multiple, independent episode IDs while earlier
- * candidates were still TRACKING.
+ * Sep 10 2026 (Karo), operator-reported CRITICAL FIX + operator-
+ * requested lifecycle correction (symbol-level, not symbol+victim-
+ * level, ownership). Proves the ownership invariant
+ * CommonHorizonEpisodeRegistry enforces, with REAL
+ * UnitResearchShadowService instances (not source-inspection).
  */
 import * as assert from "assert";
 import { UnitResearchShadowService } from "../src/domain/research/unit-research-shadow.service";
 import { CommonHorizonEpisodeRegistry } from "../src/domain/research/common-horizon-episode-registry";
-import type { Liquidation } from "../src/shared/common.types";
+import type { Liquidation, Side } from "../src/shared/common.types";
 
 let passed = 0;
 let failed = 0;
@@ -62,54 +61,56 @@ function makeHarness(openWinners: Set<string> = new Set()) {
 
 /** Feeds ONE liquidation event through the SAME decision-flow
  *  market-data-orchestrator.ts's own feedCommonHorizonCompetition()
- *  uses: resolve() first, then route-or-start accordingly. */
+ *  uses: resolve() first, then route/ignore/start accordingly.
+ *  Returns the resolution itself for assertions. */
 function feed(
   h: ReturnType<typeof makeHarness>,
   symbol: string,
-  victim: "LONG" | "SHORT",
+  victim: Side,
   price: number,
   quoteQty: number,
   ts: number,
-): { signalId: string; episodeStartTs: number; isNew: boolean } {
+) {
   const side = victim === "LONG" ? "SELL" : "BUY";
   const l = liq(symbol, side, price, quoteQty, ts);
   const resolved = h.registry.resolve(symbol, victim, ts, h.makeSignalId);
-  if (!resolved.isNew) {
+  if (resolved.action === "ignore") return resolved;
+  if (resolved.action === "route") {
     h.shadow1m.onLiquidation(l, victim);
     h.shadow3m.onLiquidation(l, victim);
     h.shadow5m.onLiquidation(l, victim);
-  } else {
-    h.shadow1m.startEpisode(
-      symbol,
-      victim,
-      resolved.signalId,
-      1,
-      price,
-      resolved.episodeStartTs,
-      quoteQty,
-      resolved.episodeStartTs,
-    );
-    h.shadow3m.startEpisode(
-      symbol,
-      victim,
-      resolved.signalId,
-      2,
-      price,
-      resolved.episodeStartTs,
-      quoteQty,
-      resolved.episodeStartTs,
-    );
-    h.shadow5m.startEpisode(
-      symbol,
-      victim,
-      resolved.signalId,
-      3,
-      price,
-      resolved.episodeStartTs,
-      quoteQty,
-      resolved.episodeStartTs,
-    );
+    return resolved;
   }
+  h.shadow1m.startEpisode(
+    symbol,
+    victim,
+    resolved.signalId,
+    1,
+    price,
+    resolved.episodeStartTs,
+    quoteQty,
+    resolved.episodeStartTs,
+  );
+  h.shadow3m.startEpisode(
+    symbol,
+    victim,
+    resolved.signalId,
+    2,
+    price,
+    resolved.episodeStartTs,
+    quoteQty,
+    resolved.episodeStartTs,
+  );
+  h.shadow5m.startEpisode(
+    symbol,
+    victim,
+    resolved.signalId,
+    3,
+    price,
+    resolved.episodeStartTs,
+    quoteQty,
+    resolved.episodeStartTs,
+  );
   return resolved;
 }
 
@@ -122,20 +123,22 @@ scenario(
   () => {
     const h = makeHarness();
     const first = feed(h, "ETHUSDT", "LONG", 2000, 5000, 1000);
-    assert.strictEqual(first.isNew, true);
+    assert.strictEqual(first.action, "start");
+    if (first.action !== "start") return;
 
     for (let i = 0; i < 10; i++) {
       const r = feed(h, "ETHUSDT", "LONG", 2000 - i, 100, 1000 + i * 10);
       assert.strictEqual(
-        r.isNew,
-        false,
-        `event #${i} must be routed into the EXISTING episode, not start a new one`,
+        r.action,
+        "route",
+        `event #${i} must be ROUTED into the EXISTING episode, not start a new one`,
       );
-      assert.strictEqual(
-        r.signalId,
-        first.signalId,
-        "signalId must stay the SAME across all these events",
-      );
+      if (r.action === "route")
+        assert.strictEqual(
+          r.signalId,
+          first.signalId,
+          "signalId must stay the SAME across all these events",
+        );
     }
   },
 );
@@ -147,12 +150,9 @@ scenario(
   () => {
     const h = makeHarness();
     const first = feed(h, "ETHUSDT", "LONG", 2000, 5000, 1000);
-    assert.strictEqual(first.isNew, true);
+    assert.strictEqual(first.action, "start");
+    if (first.action !== "start") return;
 
-    // Wave 1's own extreme=2000, unitAbs=1: first tick to 2001 completes
-    // Wave 1 (1x recovery); a SEPARATE, subsequent tick is needed to then
-    // cross the 2x-UNIT cancellation threshold (2002) -- the state machine
-    // checks 1x-completion and 2x-cancellation on different ticks by design.
     h.shadow1m.onTick("ETHUSDT", "LONG", 2001, 1500);
     h.shadow1m.onTick("ETHUSDT", "LONG", 2003, 2000); // now >= 2x -> CANCEL
     assert.strictEqual(
@@ -173,11 +173,12 @@ scenario(
 
     const second = feed(h, "ETHUSDT", "LONG", 2001, 200, 3000);
     assert.strictEqual(
-      second.isNew,
-      false,
+      second.action,
+      "route",
       "the symbol must STILL be occupied by the existing episode -- 1m being terminal alone is not enough",
     );
-    assert.strictEqual(second.signalId, first.signalId);
+    if (second.action === "route")
+      assert.strictEqual(second.signalId, first.signalId);
   },
 );
 
@@ -189,6 +190,7 @@ scenario(
     const openWinners = new Set<string>();
     const h = makeHarness(openWinners);
     const first = feed(h, "ETHUSDT", "LONG", 2000, 5000, 1000);
+    if (first.action !== "start") throw new Error("setup failed");
 
     h.shadow1m.onTick("ETHUSDT", "LONG", 2001, 1500);
     h.shadow1m.onTick("ETHUSDT", "LONG", 2010, 2000);
@@ -204,11 +206,12 @@ scenario(
 
     const second = feed(h, "ETHUSDT", "LONG", 2001, 200, 5000);
     assert.strictEqual(
-      second.isNew,
-      false,
+      second.action,
+      "route",
       "an OPEN winner must keep the symbol occupied even though every candidate is individually terminal",
     );
-    assert.strictEqual(second.signalId, first.signalId);
+    if (second.action === "route")
+      assert.strictEqual(second.signalId, first.signalId);
   },
 );
 
@@ -220,6 +223,7 @@ scenario(
     const openWinners = new Set<string>();
     const h = makeHarness(openWinners);
     const first = feed(h, "ETHUSDT", "LONG", 2000, 5000, 1000);
+    if (first.action !== "start") throw new Error("setup failed");
 
     h.shadow1m.onTick("ETHUSDT", "LONG", 2001, 1500);
     h.shadow1m.onTick("ETHUSDT", "LONG", 2010, 2000);
@@ -230,15 +234,16 @@ scenario(
 
     const second = feed(h, "ETHUSDT", "LONG", 2001, 200, 5000);
     assert.strictEqual(
-      second.isNew,
-      true,
+      second.action,
+      "start",
       "a fully-terminal episode (no open winner) must allow a fresh one to start",
     );
-    assert.notStrictEqual(
-      second.signalId,
-      first.signalId,
-      "the fresh episode must get its own, NEW signalId",
-    );
+    if (second.action === "start")
+      assert.notStrictEqual(
+        second.signalId,
+        first.signalId,
+        "the fresh episode must get its own, NEW signalId",
+      );
   },
 );
 
@@ -249,6 +254,7 @@ scenario(
   () => {
     const h = makeHarness();
     const resolved = feed(h, "ETHUSDT", "LONG", 2000, 5000, 12345);
+    if (resolved.action !== "start") throw new Error("setup failed");
     const peek1 = h.shadow1m.peekWatch("ETHUSDT", "LONG");
     const peek3 = h.shadow3m.peekWatch("ETHUSDT", "LONG");
     const peek5 = h.shadow5m.peekWatch("ETHUSDT", "LONG");
@@ -267,16 +273,86 @@ scenario(
     const h = makeHarness();
     const eth = feed(h, "ETHUSDT", "LONG", 2000, 5000, 1000);
     const sol = feed(h, "SOLUSDT", "LONG", 100, 5000, 1000);
-    assert.strictEqual(eth.isNew, true);
-    assert.strictEqual(sol.isNew, true);
+    assert.strictEqual(eth.action, "start");
+    assert.strictEqual(sol.action, "start");
+    if (eth.action !== "start" || sol.action !== "start") return;
     assert.notStrictEqual(eth.signalId, sol.signalId);
 
     const ethAgain = feed(h, "ETHUSDT", "LONG", 1999, 100, 2000);
     const solAgain = feed(h, "SOLUSDT", "LONG", 99, 100, 2000);
-    assert.strictEqual(ethAgain.isNew, false);
-    assert.strictEqual(ethAgain.signalId, eth.signalId);
-    assert.strictEqual(solAgain.isNew, false);
-    assert.strictEqual(solAgain.signalId, sol.signalId);
+    assert.strictEqual(ethAgain.action, "route");
+    assert.strictEqual(solAgain.action, "route");
+    if (ethAgain.action === "route")
+      assert.strictEqual(ethAgain.signalId, eth.signalId);
+    if (solAgain.action === "route")
+      assert.strictEqual(solAgain.signalId, sol.signalId);
+  },
+);
+
+// ─── 7. Operator-requested: opposite-victim liquidation on the SAME symbol ─
+
+scenario(
+  "active LONG-victim DOGE episode + incoming SHORT-victim DOGE liquidation => still exactly ONE DOGE episode (the SHORT event is ignored, never starts a second episode, never becomes Wave 2 for the LONG episode)",
+  () => {
+    const h = makeHarness();
+    const longEpisode = feed(h, "DOGEUSDT", "LONG", 0.085, 5000, 1000);
+    assert.strictEqual(longEpisode.action, "start");
+    if (longEpisode.action !== "start") return;
+
+    // An OPPOSITE-victim (SHORT) liquidation arrives for the SAME symbol
+    // while the LONG episode is still active.
+    const shortAttempt = h.registry.resolve(
+      "DOGEUSDT",
+      "SHORT",
+      2000,
+      h.makeSignalId,
+    );
+    assert.strictEqual(
+      shortAttempt.action,
+      "ignore",
+      "the opposite-victim event must be IGNORED, not start a second episode",
+    );
+
+    // The SHORT-victim shadow watches must never have been touched --
+    // no Wave 2, no new watch, nothing.
+    assert.strictEqual(
+      h.shadow1m.peekWatch("DOGEUSDT", "SHORT"),
+      null,
+      "no SHORT-victim watch must ever exist",
+    );
+    assert.strictEqual(h.shadow3m.peekWatch("DOGEUSDT", "SHORT"), null);
+    assert.strictEqual(h.shadow5m.peekWatch("DOGEUSDT", "SHORT"), null);
+
+    // The ORIGINAL LONG episode must be completely unaffected -- still
+    // exactly the same, single active episode for DOGEUSDT.
+    const longStillActive = h.registry.resolve(
+      "DOGEUSDT",
+      "LONG",
+      3000,
+      h.makeSignalId,
+    );
+    assert.strictEqual(
+      longStillActive.action,
+      "route",
+      "the original LONG episode must be untouched and still active",
+    );
+    if (longStillActive.action === "route")
+      assert.strictEqual(longStillActive.signalId, longEpisode.signalId);
+
+    // A SECOND opposite-victim attempt is ALSO ignored -- not just the first.
+    const shortAgain = h.registry.resolve(
+      "DOGEUSDT",
+      "SHORT",
+      4000,
+      h.makeSignalId,
+    );
+    assert.strictEqual(shortAgain.action, "ignore");
+
+    assert.strictEqual(
+      h.registry.isActive("DOGEUSDT"),
+      true,
+      "exactly one DOGE episode (the LONG one) must be active throughout",
+    );
   },
 );
 
@@ -298,6 +374,10 @@ scenario(
       "must delegate to the registry's own resolve()",
     );
     assert.ok(
+      body.includes('"ignore"'),
+      "must handle the ignore action (opposite-victim, symbol already occupied)",
+    );
+    assert.ok(
       !body.includes("this.v5.getWatch("),
       "must never source signalId/episodeStartTs from V5's own watch anymore",
     );
@@ -305,7 +385,7 @@ scenario(
 );
 
 scenario(
-  "structural: snapshotCommonHorizonPhase() reads signalId from the SAME registry (currentSignalId()), never from V5's own watch",
+  "structural: snapshotCommonHorizonPhase() reads the owning signalId from the SAME registry (current()), never from V5's own watch",
   () => {
     const fs = require("fs") as typeof import("fs");
     const source = fs.readFileSync(
@@ -316,12 +396,31 @@ scenario(
     assert.ok(idx > -1);
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
     assert.ok(
-      body.includes("commonHorizonEpisodes.currentSignalId("),
-      "must read the owning signalId from the registry",
+      body.includes("commonHorizonEpisodes.current("),
+      "must read the owning episode from the registry's own current()",
     );
     assert.ok(
       !body.includes("this.v5.getWatch("),
       "must never fall back to V5's own watch for the signalId join",
+    );
+  },
+);
+
+scenario(
+  "structural: CommonHorizonEpisodeRegistry's own ownership map is keyed by symbol alone, not symbol+victim",
+  () => {
+    const fs = require("fs") as typeof import("fs");
+    const source = fs.readFileSync(
+      require.resolve("../src/domain/research/common-horizon-episode-registry.ts"),
+      "utf8",
+    );
+    assert.ok(
+      source.includes("this.ownership.get(symbol)"),
+      "ownership lookups must be keyed by symbol alone",
+    );
+    assert.ok(
+      !source.includes("this.key(symbol"),
+      "no symbol+victim composite-key helper should remain in use",
     );
   },
 );

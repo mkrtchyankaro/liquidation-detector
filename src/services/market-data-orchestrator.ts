@@ -557,7 +557,18 @@ export class MarketDataOrchestrator {
       randomUUID,
     );
 
-    if (!resolved.isNew) {
+    if (resolved.action === "ignore") {
+      // An episode already owns this symbol under the OPPOSITE victim.
+      // Must not start a second, simultaneous episode on the same
+      // symbol, and must not be treated as this liquidation starting
+      // Wave 2 for the existing episode either -- simply drop it for
+      // research purposes (there is no active same-victim watch for
+      // this event to fall into: onLiquidation() is deliberately never
+      // called here).
+      return;
+    }
+
+    if (resolved.action === "route") {
       this.competitionShadow1m.onLiquidation(l, victim);
       this.competitionShadow3m.onLiquidation(l, victim);
       this.competitionShadow5m.onLiquidation(l, victim);
@@ -770,11 +781,16 @@ export class MarketDataOrchestrator {
     // cycling watch. See feedUnitResearchShadowAfter()'s own doc comment
     // for why the earlier v5.getWatch()-based join was the root cause of
     // the episode-splitting corruption bug this fix addresses.
-    const ownerSignalId = this.commonHorizonEpisodes.currentSignalId(
-      symbol,
-      victim,
-    );
-    if (!ownerSignalId) return;
+    // Sep 10 2026 (Karo), operator-requested lifecycle correction --
+    // ownership is keyed by symbol alone now; the episode's own
+    // ORIGINAL victim is stored inside it. peek being non-null for
+    // THIS victim already implies it matches the episode's own
+    // victim (a shadow watch only exists under the episode's own
+    // original victim-key), but the check is kept explicit and
+    // defensive rather than assumed.
+    const owner = this.commonHorizonEpisodes.current(symbol);
+    if (!owner || owner.victim !== victim) return;
+    const ownerSignalId = owner.signalId;
     const snapKey = `${ownerSignalId}:${label}`;
     const last = this.commonHorizonLastSnapshot.get(snapKey);
     if (last && last.phase === peek.phase && ts - last.ts < 15_000) return;
