@@ -425,5 +425,92 @@ scenario(
   },
 );
 
+// ─── Sep 10 2026 surgical fix: symbol/side/signalTs via $setOnInsert ────
+
+scenario(
+  "structural: setUnitCompetitionCandidate()/setUnitCompetitionWinner() write symbol/side/signalTs via $setOnInsert, NEVER $set -- a hard guarantee against overwriting production's own canonical values",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/infrastructure/mongo/global-signal.repository.ts"),
+      "utf8",
+    );
+    const candidateIdx = source.indexOf("async setUnitCompetitionCandidate(");
+    const candidateBody = source.slice(
+      candidateIdx,
+      source.indexOf("\n  async appendUnitCompetitionCheckpoint", candidateIdx),
+    );
+    assert.ok(
+      candidateBody.includes(
+        "$setOnInsert: { symbol: meta.symbol, side: meta.side, signalTs: meta.signalTs }",
+      ),
+      "setUnitCompetitionCandidate must write metadata via $setOnInsert",
+    );
+    assert.ok(
+      !/\$set:\s*\{\s*symbol/.test(candidateBody),
+      "symbol must never appear inside a plain $set in this method",
+    );
+
+    const winnerIdx = source.indexOf("async setUnitCompetitionWinner(");
+    const winnerBody = source.slice(
+      winnerIdx,
+      source.indexOf("\n  async setUnitCompetitionWinnerResult", winnerIdx),
+    );
+    assert.ok(
+      winnerBody.includes(
+        "$setOnInsert: { symbol: meta.symbol, side: meta.side, signalTs: meta.signalTs }",
+      ),
+      "setUnitCompetitionWinner must write metadata via $setOnInsert",
+    );
+    assert.ok(
+      !/\$set:\s*\{\s*symbol/.test(winnerBody),
+      "symbol must never appear inside a plain $set in this method",
+    );
+  },
+);
+
+scenario(
+  "structural: the production tick-handler's own outcome loop is UNCHANGED -- still fire-and-forget (void), no await added to solve the reporting race",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    assert.ok(
+      source.includes(
+        "for (const outcome of outcomes) void this.handleTickOutcome(outcome);",
+      ),
+      "production's own outcome-loop must remain exactly fire-and-forget, byte-identical to before this fix",
+    );
+  },
+);
+
+scenario(
+  "structural: the new meta (symbol/side/signalTs) passed to setUnitCompetitionCandidate/setUnitCompetitionWinner is sourced ONLY from the shadow event's own already-known fields (symbol/entry.side/victim/episodeStartTs) -- never reconstructed, guessed, or re-derived",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const handleTickIdx = source.indexOf("private handleCompetitionTick");
+    const handleTickBody = source.slice(
+      handleTickIdx,
+      source.indexOf(
+        "\n  private setCompetitionCandidateStatus",
+        handleTickIdx,
+      ),
+    );
+    assert.ok(
+      handleTickBody.includes(
+        "{ symbol, side: entry.side, signalTs: entry.episodeStartTs }",
+      ),
+    );
+    assert.ok(
+      handleTickBody.includes(
+        "{ symbol, side: victim, signalTs: noEntry.episodeStartTs }",
+      ),
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

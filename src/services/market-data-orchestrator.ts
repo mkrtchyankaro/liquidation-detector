@@ -670,6 +670,7 @@ export class MarketDataOrchestrator {
         entry.signalId,
         label,
         doc,
+        { symbol, side: entry.side, signalTs: entry.episodeStartTs },
       );
       this.setCompetitionCandidateStatus(
         entry.signalId,
@@ -746,6 +747,7 @@ export class MarketDataOrchestrator {
         noEntry.signalId,
         label,
         doc,
+        { symbol, side: victim, signalTs: noEntry.episodeStartTs },
       );
       this.setCompetitionCandidateStatus(noEntry.signalId, label, {
         status: "CANCEL",
@@ -832,6 +834,7 @@ export class MarketDataOrchestrator {
       signalId,
       candidate,
       entryTs,
+      { symbol, side, signalTs: entryTs - durationMs },
     );
 
     if (!this.mainTelegram) return;

@@ -153,18 +153,39 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
    *  instead. upsert:true for the exact same race-tolerance reason
    *  (candidates of different UNIT-timeframes resolve at different
    *  wall-clock times, independent of when/whether the production
-   *  signal doc itself has been created yet). */
+   *  signal doc itself has been created yet).
+   *
+   *  Sep 10 2026 (Karo), operator-requested surgical fix -- also
+   *  writes symbol/side/signalTs via $setOnInsert (NEVER $set): these
+   *  values are mathematically guaranteed identical to production's
+   *  own canonical values (same liquidation event, same victim-
+   *  computation expression, same episode-start moment -- see
+   *  market-data-orchestrator.ts's own call-site for the exact
+   *  sourcing), but $setOnInsert is used regardless, as a hard,
+   *  structural guarantee: if production's own canonical write has
+   *  ALREADY created this document first, this call can NEVER touch
+   *  symbol/side/signalTs again, no matter what. Purely additive
+   *  metadata for the monitoring script's own display -- read by
+   *  nothing else in this codebase. */
   async setUnitCompetitionCandidate(
     signalId: string,
     candidate: "atr1m" | "atr3m" | "atr5m",
     doc: UnitCompetitionCandidateDoc,
+    meta: { symbol: string; side: "LONG" | "SHORT"; signalTs: number },
   ): Promise<void> {
     try {
       const col = await this.mongo.globalSignals();
       if (!col) return;
       await col.updateOne(
         { signalId },
-        { $set: { [`unitCompetitionResearch.${candidate}`]: doc } },
+        {
+          $set: { [`unitCompetitionResearch.${candidate}`]: doc },
+          $setOnInsert: {
+            symbol: meta.symbol,
+            side: meta.side,
+            signalTs: meta.signalTs,
+          },
+        },
         { upsert: true },
       );
     } catch (err) {
@@ -207,11 +228,13 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
    *  lifecycle. Sets the winner fields exactly once (the caller's own
    *  logic guarantees this is only invoked on the FIRST PASS for a
    *  given episode). upsert:true, same race-tolerance reasoning as
-   *  setUnitCompetitionCandidate() above. */
+   *  setUnitCompetitionCandidate() above. Same $setOnInsert treatment
+   *  for symbol/side/signalTs, same reasoning. */
   async setUnitCompetitionWinner(
     signalId: string,
     winnerCandidate: "atr1m" | "atr3m" | "atr5m",
     winnerEntryTs: number,
+    meta: { symbol: string; side: "LONG" | "SHORT"; signalTs: number },
   ): Promise<void> {
     try {
       const col = await this.mongo.globalSignals();
@@ -222,6 +245,11 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
           $set: {
             "unitCompetitionResearch.winnerCandidate": winnerCandidate,
             "unitCompetitionResearch.winnerEntryTs": winnerEntryTs,
+          },
+          $setOnInsert: {
+            symbol: meta.symbol,
+            side: meta.side,
+            signalTs: meta.signalTs,
           },
         },
         { upsert: true },
