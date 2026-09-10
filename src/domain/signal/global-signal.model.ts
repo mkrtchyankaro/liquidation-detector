@@ -37,6 +37,19 @@ export interface GlobalSignalDoc {
    *  (the entire existing V5 signal path). */
   cascadeId: string | null;
   timeframe: "1m" | "3m" | "5m" | null;
+  /** Sep 10 2026 (Karo), operator-requested production lifecycle
+   *  stabilization. True ONLY for the ONE candidate-signal (across an
+   *  entire cascade, 1m/3m/5m) that actually became MAIN's own real,
+   *  executed position -- i.e. distribute() actually ran for it
+   *  (mainSymbolLocks was NOT already held when it reached SIGNAL_READY).
+   *  The OTHER candidates from the SAME cascade may still independently
+   *  reach SIGNAL_READY and get their own GlobalSignalDoc persisted
+   *  (for later comparison), but with isMainExecuted=false -- they were
+   *  NEVER installed into V5WaveService's own close-tracking and never
+   *  held mainSymbolLocks. Always true for the legacy, non-cascade V5
+   *  path (there is only ever one canonical watch per symbol there, so
+   *  every real signal it produces IS the executed one). */
+  isMainExecuted: boolean;
 
   waveHistory: V5Wave[];
   w1Diagnostics: V5Wave1Diagnostics | null;

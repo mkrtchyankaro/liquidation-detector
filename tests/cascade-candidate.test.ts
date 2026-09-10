@@ -655,7 +655,7 @@ scenario(
 );
 
 scenario(
-  "structural: the TP/SL formula's own w1/w2 inputs are the PREVIOUS completed wave and the TRIGGERING wave -- e.g. W1 100k/W2 150k/W3 220k/W4 180k signalling at W4 feeds w1=W3, w2=W4, never waveHistory[0]/last unconditionally",
+  "structural: SL/TP is CONSTANT (0.30%/0.70%), never derived from the physics formula, w1AnchorPrice/w1LiqUsd/w2LiqUsd inputs are gone; previousWave/triggerWave are still correctly identified as the PREVIOUS completed wave and the TRIGGERING wave, used only for diagnostics now",
   () => {
     const source = fs.readFileSync(
       require.resolve("../src/services/market-data-orchestrator.ts"),
@@ -673,13 +673,16 @@ scenario(
       "previousWave must be the wave immediately BEFORE the triggering one, not waveHistory[0]",
     );
     assert.ok(
-      body.includes("w1AnchorPrice: previousWave.anchorPrice") &&
-        body.includes("w1LiqUsd: previousWave.liqUsd"),
-      "the formula's own w1 input must come from previousWave",
+      body.includes("CASCADE_FIXED_SL_PCT = 0.003"),
+      "SL must be the constant 0.30%",
     );
     assert.ok(
-      body.includes("w2LiqUsd: triggerWave.liqUsd"),
-      "the formula's own w2 input must come from triggerWave",
+      body.includes("CASCADE_FIXED_TP_PCT = 0.007"),
+      "TP must be the constant 0.70%",
+    );
+    assert.ok(
+      !body.includes("deriveLiquidationPhysicsTradePlan("),
+      "the physics formula must NEVER be called for cascade-signal execution in this phase",
     );
   },
 );

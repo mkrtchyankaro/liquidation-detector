@@ -82,6 +82,7 @@ function makeGlobalSignal(signalId: string): GlobalSignalDoc {
     atr15mAtEntry: 5,
     cascadeId: null,
     timeframe: null,
+    isMainExecuted: true,
     unitResearch: null,
     unitCompetitionResearch: null,
     commonHorizonResearch: null,

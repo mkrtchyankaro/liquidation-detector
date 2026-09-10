@@ -969,6 +969,7 @@ export class V5WaveService {
     if (plan) {
       watch.tradeActive = true;
       this.activeTrades.set(watch.signalId, {
+        timeframe: null, // legacy, non-cascade V5 path -- see V5ActiveTrade's own doc comment
         signalId: watch.signalId,
         symbol: watch.symbol,
         victim: watch.victim,
@@ -1113,8 +1114,13 @@ export class V5WaveService {
     positionQty: number | null;
     notional: number | null;
     riskUsd: number | null;
+    /** Sep 10 2026 (Karo), operator-requested -- ADDITIVE, optional
+     *  (defaults to null so every EXISTING call-site is unaffected).
+     *  See V5ActiveTrade's own doc comment. */
+    timeframe?: "1m" | "3m" | "5m" | null;
   }): void {
     this.activeTrades.set(p.signalId, {
+      timeframe: p.timeframe ?? null,
       signalId: p.signalId,
       symbol: p.symbol,
       victim: p.victim,

@@ -177,6 +177,7 @@ function buildCascadeSignalDoc(planOk: boolean): GlobalSignalDoc {
     entryWaveNumber: triggerWave.waveNumber,
     cascadeId: "casc-test",
     timeframe: "3m",
+    isMainExecuted: true,
     waveHistory,
     w1Diagnostics: null,
     totalEpisodePressure: totalLiq,

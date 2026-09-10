@@ -532,4 +532,12 @@ export interface V5ActiveTrade {
   positionQty: number | null;
   notional: number | null;
   riskUsd: number | null;
+  /** Sep 10 2026 (Karo), operator-requested -- ADDITIVE. The real,
+   *  persisted cascade candidate timeframe that produced this trade,
+   *  carried WITH the trade itself (never re-derived from the parent
+   *  cascade at close-time, since the cascade may already be CLOSED
+   *  by then -- see market-data-orchestrator.ts's own
+   *  handleCascadeSignalReady()/handleMainTradeClose()). Null for the
+   *  legacy, non-cascade V5 path. */
+  timeframe: "1m" | "3m" | "5m" | null;
 }

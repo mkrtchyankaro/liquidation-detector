@@ -267,8 +267,28 @@ export class MarketDataOrchestrator {
   async hydrateMainLocks(): Promise<void> {
     const openDocs = await this.globalSignalRepo.findOpenMainSignals();
     let hydrated = 0;
+    let skippedComparisonOnly = 0;
     for (const doc of openDocs) {
       if (doc.entry === null || doc.tp === null || doc.sl === null) continue;
+      // Sep 10 2026 (Karo), operator-requested production lifecycle
+      // stabilization -- a single cascade can leave MULTIPLE
+      // status="SIGNAL" documents (1m/3m/5m each independently
+      // reaching SIGNAL_READY), but only ONE of them (isMainExecuted)
+      // is MAIN's own real, executed position; the others are
+      // comparison-only records that never held mainSymbolLocks or a
+      // real position, and must NOT be re-installed into V5WaveService's
+      // own close-tracking on restart (doing so would falsely occupy
+      // the symbol/signalId and could fire a spurious close). Treated
+      // as executed if EXPLICITLY true, OR if the field is simply
+      // absent (doc.isMainExecuted === undefined) -- for backward
+      // compatibility with signals persisted before this field existed,
+      // where every status="SIGNAL" doc genuinely WAS the real,
+      // executed one (the old, pre-cascade V5 path never had a
+      // comparison-only concept). Only an EXPLICIT `false` is skipped.
+      if (doc.isMainExecuted === false) {
+        skippedComparisonOnly++;
+        continue;
+      }
       this.mainSymbolLocks.add(doc.symbol);
       this.v5.hydrateActiveTrade({
         signalId: doc.signalId,
@@ -288,11 +308,12 @@ export class MarketDataOrchestrator {
         positionQty: null,
         notional: null,
         riskUsd: null,
+        timeframe: doc.timeframe,
       });
       hydrated++;
     }
     log.info(
-      `[MAIN_LOCKS_HYDRATED] ${hydrated} open MAIN signal(s) restored from Mongo, symbols locked: [${[...this.mainSymbolLocks].join(", ")}]`,
+      `[MAIN_LOCKS_HYDRATED] ${hydrated} open MAIN signal(s) restored from Mongo (${skippedComparisonOnly} comparison-only cascade signal(s) correctly skipped), symbols locked: [${[...this.mainSymbolLocks].join(", ")}]`,
     );
   }
 
@@ -892,42 +913,58 @@ export class MarketDataOrchestrator {
       // weakening-wave pair, not the episode's own very first wave.
       const triggerWave = event.waveHistory[event.waveHistory.length - 1]!;
       const previousWave = event.waveHistory[event.waveHistory.length - 2]!;
-      const firstWave = event.waveHistory[0]!; // the TRUE episode-start wave -- used ONLY for qualifyingEvent* below, never for the formula inputs
+      const firstWave = event.waveHistory[0]!; // the TRUE episode-start wave -- used ONLY for qualifyingEvent* below
       const atr15mAbs = this.atrTracker.getATR(event.symbol, "15m") ?? 0;
       const baseline =
         this.liquidationStats.rollingMedianLiqNotionalPerMin(
           event.symbol,
           60,
         ) ?? 0;
-      // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- the
-      // "dominant layer" (largest single wave by liquidation total) is
-      // genuinely derivable from the full cascade wave history, unlike
-      // the OLD path's own dominantLayerLiqUsd (which is left null for
-      // cascade signals otherwise, matching what the Telegram formatter
-      // showed as "Wave null" before this fix).
       const dominantWave = event.waveHistory.reduce(
         (best, w) => (w.liqUsd > best.liqUsd ? w : best),
         event.waveHistory[0]!,
       );
 
-      const plan = deriveLiquidationPhysicsTradePlan({
-        entry: event.entryPrice,
-        side: event.side,
-        w1AnchorPrice: previousWave.anchorPrice,
-        w1ExtremePrice: previousWave.extremePrice,
-        w1LiqUsd: previousWave.liqUsd,
-        w2LiqUsd: triggerWave.liqUsd,
-        atr15mAbs,
-        p95: this.liquidationStats.notionalPercentile(
-          event.symbol,
-          event.victim,
-          95,
-        ),
-        dailyLiqPerMinBaseline: baseline,
-      });
+      // Sep 10 2026 (Karo), operator-requested production stabilization
+      // -- CONSTANT TP/SL for this observation phase, per the
+      // operator's own explicit instruction: the existing physics
+      // formula (deriveLiquidationPhysicsTradePlan) is deliberately NOT
+      // called for cascade-produced execution during this phase. No
+      // ATR/liquidation-strength/RR-ladder/Hybrid/sizing-floor logic is
+      // involved -- exactly SL=0.30%, TP=0.70%, RR=0.70/0.30=2.333333,
+      // for every 1m/3m/5m candidate, every symbol, unconditionally.
+      const CASCADE_FIXED_SL_PCT = 0.003;
+      const CASCADE_FIXED_TP_PCT = 0.007;
+      const entry = event.entryPrice;
+      const sl =
+        event.side === "LONG"
+          ? entry * (1 - CASCADE_FIXED_SL_PCT)
+          : entry * (1 + CASCADE_FIXED_SL_PCT);
+      const tp =
+        event.side === "LONG"
+          ? entry * (1 + CASCADE_FIXED_TP_PCT)
+          : entry * (1 - CASCADE_FIXED_TP_PCT);
+      const rr = CASCADE_FIXED_TP_PCT / CASCADE_FIXED_SL_PCT;
+      const plan = {
+        ok: true as const,
+        entry,
+        sl,
+        tp,
+        slPct: CASCADE_FIXED_SL_PCT,
+        tpPct: CASCADE_FIXED_TP_PCT,
+        rr,
+      };
 
       const signalId = randomUUID();
       const totalLiq = event.waveHistory.reduce((sum, w) => sum + w.liqUsd, 0);
+
+      // Sep 10 2026 (Karo), operator-requested production lifecycle
+      // stabilization -- decided HERE, ONCE, BEFORE the doc is built,
+      // and reused for BOTH the persisted isMainExecuted field AND the
+      // actual distribute()/lock/activeTrade-install decision below,
+      // so there is never a race between "what we said we'd do" and
+      // "what we actually did".
+      const willExecuteAsMain = !this.mainSymbolLocks.has(event.symbol);
 
       const globalSignal: GlobalSignalDoc = {
         signalId,
@@ -964,52 +1001,66 @@ export class MarketDataOrchestrator {
           event.victim,
           95,
         ),
-        physics: plan.ok
-          ? {
-              cumLiqUsd: totalLiq,
-              atrPct: atr15mAbs,
-              liqBaseline: baseline,
-              liqStrengthRaw: plan.liquidityStrengthP95,
-              liqStrength: plan.liquidityStrength,
-              physicsTPPct: plan.tpPct,
-              wallAdjustedTpPct: plan.tpPct,
-              wallApplied: false,
-              rrCandidate: plan.selectedRR,
-              slCapApplied: false,
-              slCapValue: 0,
-              finalTpPct: plan.tpPct,
-              finalSlPct: plan.slPct,
-              actualRR: plan.rr,
-              structuralSoftExitPrice: 0,
-              structuralRiskPct: 0,
-              sizingRiskPct: 0,
-              hardStopRiskPct: 0,
-              liquidityStrengthP95: plan.liquidityStrengthP95,
-              liquidityStrength24h: plan.liquidityStrength24h,
-              liquidityStrength: plan.liquidityStrength,
-              w2ToW1Ratio: plan.w2ToW1Ratio,
-              exhaustionScore: plan.exhaustionScore,
-              w1DisplacementAtr: plan.w1DisplacementAtr,
-              absorptionRaw: plan.absorptionRaw,
-              absorptionScore: plan.absorptionScore,
-              dynamicPhysicsScore: plan.dynamicPhysicsScore,
-              selectedRR: plan.selectedRR,
-              tpMultiplier: plan.tpMultiplier,
-              slDeterminedBy: plan.slDeterminedBy,
-            }
-          : null,
+        physics: {
+          // Sep 10 2026 (Karo), operator-requested production
+          // stabilization -- constant-TP/SL phase. Only the fields
+          // that are GENUINELY meaningful under a fixed SL/TP are
+          // populated with real values (finalTpPct/finalSlPct/actualRR,
+          // cumLiqUsd/atrPct/liqBaseline -- these are simple, real
+          // context, not physics-derived). Every OLD-physics-formula-
+          // specific diagnostic (liqStrength, exhaustionScore,
+          // absorptionScore, dynamicPhysicsScore, w2ToW1Ratio, etc.) is
+          // explicitly 0/false -- NOT faked, NOT computed in this
+          // phase, and the Telegram formatter's own "Physics
+          // (episode-total-based)" line is suppressed for cascade
+          // signals (see signal.formatter.ts) so these zeros are never
+          // displayed as if they were real.
+          cumLiqUsd: totalLiq,
+          atrPct: atr15mAbs,
+          liqBaseline: baseline,
+          liqStrengthRaw: 0,
+          liqStrength: 0,
+          physicsTPPct: plan.tpPct,
+          wallAdjustedTpPct: plan.tpPct,
+          wallApplied: false,
+          rrCandidate: plan.rr,
+          slCapApplied: false,
+          slCapValue: 0,
+          finalTpPct: plan.tpPct,
+          finalSlPct: plan.slPct,
+          actualRR: plan.rr,
+          structuralSoftExitPrice: 0,
+          structuralRiskPct: 0,
+          sizingRiskPct: 0,
+          hardStopRiskPct: 0,
+          liquidityStrengthP95: 0,
+          liquidityStrength24h: 0,
+          liquidityStrength: 0,
+          w2ToW1Ratio:
+            previousWave.liqUsd > 0
+              ? triggerWave.liqUsd / previousWave.liqUsd
+              : 0,
+          exhaustionScore: 0,
+          w1DisplacementAtr: 0,
+          absorptionRaw: 0,
+          absorptionScore: 0,
+          dynamicPhysicsScore: 0,
+          selectedRR: plan.rr,
+          tpMultiplier: 0,
+          slDeterminedBy: "physics",
+        },
         btcContext: null,
         liq24hContext: null,
         wallContext: null,
-        entry: plan.ok ? plan.entry : null,
-        tp: plan.ok ? plan.tp : null,
-        sl: plan.ok ? plan.sl : null,
-        rr: plan.ok ? plan.rr : null,
+        entry: plan.entry,
+        tp: plan.tp,
+        sl: plan.sl,
+        rr: plan.rr,
         btcSafetyStatus: "UNKNOWN",
         btcIntendedSideAtSignalTime: null,
-        rejectionReason: plan.ok ? null : plan.cancelReason,
+        rejectionReason: null,
         planDiagnostics: null,
-        status: plan.ok ? "SIGNAL" : "REJECTED_PLAN",
+        status: "SIGNAL",
         closedAt: null,
         closePrice: null,
         maxFavorableR: null,
@@ -1021,21 +1072,15 @@ export class MarketDataOrchestrator {
         commonHorizonResearch: null,
         cascadeId: event.cascadeId,
         timeframe: event.timeframe,
+        isMainExecuted: willExecuteAsMain,
         createdAt: Date.now(),
       };
 
       await this.globalSignalRepo.insert(globalSignal);
       log.info(
-        `[CASCADE_CANDIDATE_SIGNAL] ${event.symbol} ${event.side} timeframe=${event.timeframe} cascadeId=${event.cascadeId} signalId=${signalId} waves=${event.waveHistory.length} plan=${plan.ok ? "ok" : `rejected:${plan.cancelReason}`}`,
+        `[CASCADE_CANDIDATE_SIGNAL] ${event.symbol} ${event.side} timeframe=${event.timeframe} cascadeId=${event.cascadeId} signalId=${signalId} waves=${event.waveHistory.length} entry=${plan.entry} sl=${plan.sl} tp=${plan.tp} rr=${plan.rr.toFixed(2)} willExecuteAsMain=${willExecuteAsMain}`,
       );
 
-      // Sep 10 2026 (Karo), operator-requested restart-safe persistence
-      // -- this candidate is now terminal (SIGNAL-READY was reached,
-      // regardless of whether the TP/SL plan itself was accepted or
-      // rejected -- either way this candidate does not retry or resume
-      // after a restart), so mark it terminal in v5_active_cascades
-      // immediately, and check whether the parent cascade is now fully
-      // closed.
       const terminalDoc: CascadeCandidateStateDoc = {
         timeframe: event.timeframe,
         phase: "TERMINAL_SIGNAL",
@@ -1060,20 +1105,62 @@ export class MarketDataOrchestrator {
         event.entryTs,
       );
 
-      if (!plan.ok || globalSignal.entry === null || globalSignal.sl === null)
-        return;
-
-      // mainSymbolLocks -- the EXISTING, UNCHANGED real-position lock.
-      // Never held/released by this new cascade path directly; only
-      // ever read here, to decide whether a REAL distribution
-      // (Telegram/Binance) is safe. If MAIN already has an open
-      // position for this symbol, this candidate's own result stays
-      // persisted (above) for comparison, but is never distributed --
-      // guaranteeing MAIN can never hold two simultaneous real
-      // positions on the same symbol.
-      if (this.mainSymbolLocks.has(event.symbol)) return;
+      // Sep 10 2026 (Karo), operator-requested production lifecycle
+      // stabilization. mainSymbolLocks continues to gate the ENTIRE
+      // distribute() call, exactly as before this fix -- if MAIN
+      // already holds an open real position for this symbol, this
+      // candidate's own comparison record stays persisted (above,
+      // always), but distribute() is skipped entirely (no per-user
+      // Telegram/execution fan-out at all for this candidate), the
+      // SAME conservative behavior as before. This deliberately avoids
+      // a NEW, unverified risk: karo/artak/friend's own independent
+      // execution is unrelated to mainSymbolLocks, so distributing a
+      // comparison-only cascade-signal to them would open THEIR own
+      // real positions too, for a candidate that was never meant to be
+      // executable -- out of scope for this fix, not requested.
+      //
+      // THE ROOT-CAUSE FIX for cascade-signals staying stuck in
+      // status="SIGNAL" forever: a cascade-produced trade was NEVER
+      // previously installed into V5WaveService's own activeTrades map
+      // at all, so onPriceTickForTrades() (MAIN's own canonical TP/SL-
+      // touch detector) never knew it existed, so it could never
+      // close, ever. hydrateActiveTrade() -- the SAME method restart-
+      // hydration already uses -- is reused here to install it live,
+      // the moment it becomes MAIN's own real, executed position.
+      if (!willExecuteAsMain) return;
       await this.distributor.distribute(globalSignal, this.mongo);
       this.mainSymbolLocks.add(event.symbol);
+      this.v5.hydrateActiveTrade({
+        signalId,
+        symbol: event.symbol,
+        victim: event.victim,
+        side: event.side,
+        entry: plan.entry,
+        tp: plan.tp,
+        sl: plan.sl,
+        openedAt: event.entryTs,
+        bestPrice: plan.entry,
+        worstPrice: plan.entry,
+        entryWaveNumber: triggerWave.waveNumber,
+        isLive: false,
+        binanceSlOrderId: null,
+        binanceTpOrderId: null,
+        positionQty: null,
+        notional: null,
+        riskUsd: null,
+        timeframe: event.timeframe,
+      });
+
+      const denom = Math.abs(plan.entry - plan.sl);
+      const dirMul = event.side === "LONG" ? 1 : -1;
+      this.researchCheckpoints.registerWatch(
+        signalId,
+        event.symbol,
+        "SIGNAL",
+        event.entryTs,
+        plan.entry,
+        { kind: "R", dirMul, denom },
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(
@@ -1909,6 +1996,8 @@ export class MarketDataOrchestrator {
             close.trade.entry,
             close.closePrice,
             close.trade.entryWaveNumber,
+            close.trade.timeframe,
+            close.trade.signalId,
           );
           await this.mainTelegram.sendMessage(message);
         } catch (err) {
@@ -1981,11 +2070,12 @@ export class MarketDataOrchestrator {
 
       const globalSignal: GlobalSignalDoc = {
         signalId: event.signalId,
+        cascadeId: null,
+        timeframe: null,
+        isMainExecuted: true,
         symbol: event.symbol,
         side: event.side,
         victim: event.victim,
-        cascadeId: null,
-        timeframe: null,
         signalTs: event.signalTs,
         entryPrice: event.entryPrice,
         entryWaveNumber: event.entryWaveNumber,
@@ -2134,6 +2224,7 @@ export class MarketDataOrchestrator {
       side: watch.side,
       cascadeId: null,
       timeframe: null,
+      isMainExecuted: false,
       victim: watch.victim,
       signalTs: watch.createdAt,
       entryPrice: 0,

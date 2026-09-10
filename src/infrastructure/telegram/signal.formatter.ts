@@ -111,7 +111,14 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
     );
   }
 
-  if (event.plan) {
+  // Sep 10 2026 (Karo), operator-requested production stabilization --
+  // this diagnostic line is genuinely meaningless for a cascade signal
+  // during the constant-TP/SL phase (no physics formula runs at all,
+  // so liqStrength/physicsTP would just be zeros -- "Do not fake
+  // missing values"). Suppressed entirely for cascade signals
+  // (timeframe !== null); the legacy V5 path renders it exactly as
+  // before, unaffected.
+  if (event.plan && event.timeframe === null) {
     lines.push("");
     lines.push(
       `Physics (episode-total-based): liqStrength=${event.plan.liqStrength.toFixed(2)} (raw ${event.plan.liqStrengthRaw.toFixed(2)}) ` +
@@ -156,18 +163,29 @@ export function formatV5CloseMessage(
   entry: number,
   closePrice: number,
   entryWaveNumber: number,
+  // Sep 10 2026 (Karo), operator-requested -- ADDITIVE, optional
+  // (default null/undefined keeps every EXISTING call-site's own
+  // output byte-identical). Sourced from the trade's OWN persisted
+  // data (V5ActiveTrade.timeframe/signalId), carried with the trade
+  // itself since its own creation -- NEVER re-derived from the parent
+  // cascade at close-time, since the cascade may already be CLOSED by
+  // then (see market-data-orchestrator.ts's own handleCascadeSignalReady()/
+  // handleMainTradeClose()).
+  timeframe?: "1m" | "3m" | "5m" | null,
+  signalId?: string,
 ): string {
   const emoji = outcome === "TP" ? "✅" : "❌";
   const pnlPct =
     side === "LONG"
       ? (closePrice - entry) / entry
       : (entry - closePrice) / entry;
-  return (
-    `${emoji} V5 CLOSE ${symbol} ${side} ${outcome}\n` +
-    `Entry: ${entry} → Exit: ${closePrice}\n` +
-    `PnL: ${(pnlPct * 100).toFixed(2)}%\n` +
-    `Entered on Wave ${entryWaveNumber}`
-  );
+  const lines = [`${emoji} V5 CLOSE ${symbol} ${side} ${outcome}`];
+  if (timeframe) lines.push(`Candidate: ${timeframe}`);
+  lines.push(`Entry: ${entry} → Exit: ${closePrice}`);
+  lines.push(`PnL: ${(pnlPct * 100).toFixed(2)}%`);
+  lines.push(`Entered on Wave ${entryWaveNumber}`);
+  if (signalId) lines.push(`SignalId: ${signalId}`);
+  return lines.join("\n");
 }
 
 function formatUsd(n: number): string {
