@@ -1,4 +1,4 @@
-import type { V5SignalEvent } from '../../strategy/v5/v5-wave.service';
+import type { V5SignalEvent } from "../../strategy/v5/v5-wave.service";
 
 /**
  * Sep 7 2026, operator-approved (Karo) -- V5's own Telegram formatter.
@@ -31,11 +31,20 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
   const lines: string[] = [];
   const executed = event.plan !== null;
   const emoji = executed ? "🟢" : "🟡";
-  lines.push(`${emoji} V5 ${executed ? "ENTRY" : "SIGNAL (not executed)"} ${event.symbol} ${event.side} · ${time}`);
+  lines.push(
+    `${emoji} V5 ${executed ? "ENTRY" : "SIGNAL (not executed)"} ${event.symbol} ${event.side} · ${time}`,
+  );
+  // Sep 10 2026 (Karo), operator-requested -- ADDITIVE, ONE line, ONLY
+  // for a cascade-produced signal (timeframe !== null). A legacy,
+  // non-cascade signal (timeframe === null) renders EXACTLY as before,
+  // completely unaffected -- no line added, no format change.
+  if (event.timeframe !== null) lines.push(`Candidate: ${event.timeframe}`);
 
   if (event.plan) {
-    const tpPct = (Math.abs(event.plan.tp - event.plan.entry) / event.plan.entry) * 100;
-    const slPct = (Math.abs(event.plan.entry - event.plan.sl) / event.plan.entry) * 100;
+    const tpPct =
+      (Math.abs(event.plan.tp - event.plan.entry) / event.plan.entry) * 100;
+    const slPct =
+      (Math.abs(event.plan.entry - event.plan.sl) / event.plan.entry) * 100;
     lines.push(`Entry: ${event.plan.entry}`);
     lines.push(`SL: ${event.plan.sl.toFixed(6)} (-${slPct.toFixed(2)}%)`);
     lines.push(`TP: ${event.plan.tp.toFixed(6)} (+${tpPct.toFixed(2)}%)`);
@@ -51,7 +60,9 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
     if (slDistance > 0) {
       const positionQty = riskUsd / slDistance;
       const notionalUsdt = positionQty * event.plan.entry;
-      lines.push(`Risk: $${riskUsd} (position size: $${notionalUsdt.toFixed(0)})`);
+      lines.push(
+        `Risk: $${riskUsd} (position size: $${notionalUsdt.toFixed(0)})`,
+      );
     }
   } else {
     lines.push(`Entry (reference only): ${event.entryPrice}`);
@@ -59,16 +70,26 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
   }
 
   lines.push("");
-  const entryWaveRecord = event.waveHistory.find((w) => w.waveNumber === event.entryWaveNumber);
+  const entryWaveRecord = event.waveHistory.find(
+    (w) => w.waveNumber === event.entryWaveNumber,
+  );
   lines.push(
     `V5 Chain: reclaimed on Wave ${event.entryWaveNumber} of ${event.waveHistory.length} ` +
       `(trigger: ${entryWaveRecord?.selectedRecoveryPct ?? "?"}% recovery, extremeDistanceAtr=${entryWaveRecord?.extremeDistanceAtr.toFixed(3) ?? "?"})`,
   );
-  lines.push(`Qualifying event: $${formatUsd(event.qualifyingEventUsd)} (P95 at qualification: $${formatUsd(event.p95AtQualification)})`);
-  lines.push(`Episode total liquidity: $${formatUsd(event.totalEpisodePressure)}`);
-  lines.push(`Dominant layer: $${formatUsd(event.dominantLayerLiqUsd ?? 0)} (Wave ${event.dominantLayerWaveNumber}) → Exhaustion layer: $${formatUsd(event.exhaustionLayerLiqUsd ?? 0)} (Wave ${event.exhaustionLayerWaveNumber})`);
+  lines.push(
+    `Qualifying event: $${formatUsd(event.qualifyingEventUsd)} (P95 at qualification: $${formatUsd(event.p95AtQualification)})`,
+  );
+  lines.push(
+    `Episode total liquidity: $${formatUsd(event.totalEpisodePressure)}`,
+  );
+  lines.push(
+    `Dominant layer: $${formatUsd(event.dominantLayerLiqUsd ?? 0)} (Wave ${event.dominantLayerWaveNumber}) → Exhaustion layer: $${formatUsd(event.exhaustionLayerLiqUsd ?? 0)} (Wave ${event.exhaustionLayerWaveNumber})`,
+  );
   for (const w of event.waveHistory) {
-    lines.push(`  W${w.waveNumber}: anchor=${w.anchorPrice} → extreme=${w.extremePrice} → reclaim=${w.reclaimPrice ?? "—"}  ($${formatUsd(w.liqNotionalUsd)})`);
+    lines.push(
+      `  W${w.waveNumber}: anchor=${w.anchorPrice} → extreme=${w.extremePrice} → reclaim=${w.reclaimPrice ?? "—"}  ($${formatUsd(w.liqNotionalUsd)})`,
+    );
   }
 
   if (event.plan) {
@@ -90,7 +111,9 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
   // V5_BTC_BLOCK=false), this is the ONLY way to see what
   // BROTHER/FRIEND did/would have done with the identical signal.
   if (event.symbol !== "BTCUSDT") {
-    const wouldBlock = event.btcIntendedSideAtSignalTime !== null && event.btcIntendedSideAtSignalTime === event.side;
+    const wouldBlock =
+      event.btcIntendedSideAtSignalTime !== null &&
+      event.btcIntendedSideAtSignalTime === event.side;
     lines.push("");
     lines.push(
       wouldBlock
@@ -99,7 +122,9 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
     );
   } else {
     lines.push("");
-    lines.push(`BTC_BLOCK would apply here: YES, unconditionally (BTC itself never trades when V5_BTC_BLOCK=true)`);
+    lines.push(
+      `BTC_BLOCK would apply here: YES, unconditionally (BTC itself never trades when V5_BTC_BLOCK=true)`,
+    );
   }
 
   return lines.join("\n");
@@ -114,7 +139,10 @@ export function formatV5CloseMessage(
   entryWaveNumber: number,
 ): string {
   const emoji = outcome === "TP" ? "✅" : "❌";
-  const pnlPct = side === "LONG" ? (closePrice - entry) / entry : (entry - closePrice) / entry;
+  const pnlPct =
+    side === "LONG"
+      ? (closePrice - entry) / entry
+      : (entry - closePrice) / entry;
   return (
     `${emoji} V5 CLOSE ${symbol} ${side} ${outcome}\n` +
     `Entry: ${entry} → Exit: ${closePrice}\n` +

@@ -351,5 +351,60 @@ scenario(
   },
 );
 
+// ─── Operator-requested: Candidate-timeframe line ──────────────────────
+
+for (const tf of ["1m", "3m", "5m"] as const) {
+  scenario(
+    `a cascade signal with timeframe="${tf}" shows "Candidate: ${tf}" in the Telegram message`,
+    () => {
+      const doc = { ...buildCascadeSignalDoc(true), timeframe: tf };
+      const event = toV5SignalEventShape(doc);
+      const message = formatV5EntryMessage(event);
+      assert.ok(
+        message.includes(`Candidate: ${tf}`),
+        `must show the real, persisted timeframe (${tf}), never a different/inferred one`,
+      );
+    },
+  );
+}
+
+scenario(
+  "a legacy, non-cascade signal (timeframe=null) shows NO Candidate line at all -- the existing V5 format is completely unaffected",
+  () => {
+    const doc = {
+      ...buildCascadeSignalDoc(true),
+      timeframe: null,
+      cascadeId: null,
+    };
+    const event = toV5SignalEventShape(doc);
+    const message = formatV5EntryMessage(event);
+    assert.ok(
+      !message.includes("Candidate:"),
+      "a legacy signal must never show a Candidate line",
+    );
+  },
+);
+
+scenario(
+  "the Candidate line appears immediately after the title line, before Entry/SL/TP -- matching the operator's own requested placement",
+  () => {
+    const doc = { ...buildCascadeSignalDoc(true), timeframe: "3m" as const };
+    const event = toV5SignalEventShape(doc);
+    const message = formatV5EntryMessage(event);
+    const lines = message.split("\n");
+    const titleIdx = lines.findIndex((l) => l.includes("V5 ENTRY"));
+    const candidateIdx = lines.findIndex((l) => l.includes("Candidate:"));
+    const entryIdx = lines.findIndex((l) => l.startsWith("Entry:"));
+    assert.ok(
+      titleIdx >= 0 && candidateIdx === titleIdx + 1,
+      "Candidate line must come immediately after the title line",
+    );
+    assert.ok(
+      candidateIdx < entryIdx,
+      "Candidate line must come before the Entry line",
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

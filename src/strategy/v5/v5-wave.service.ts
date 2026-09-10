@@ -46,6 +46,15 @@ export interface V5SignalEvent {
   signalTs: number;
   entryPrice: number;
   entryWaveNumber: number;
+  /** Sep 10 2026 (Karo), operator-requested -- ADDITIVE. The real
+   *  persisted cascadeId/timeframe (GlobalSignalDoc's own fields,
+   *  see notify-user.usecase.ts's own toV5SignalEventShape(), which
+   *  spreads the whole document through). Both null for any legacy,
+   *  non-cascade signal -- the EXISTING V5 Telegram format is
+   *  completely unaffected for those (see formatV5EntryMessage()'s
+   *  own doc comment for the exact, conditional display rule). */
+  cascadeId: string | null;
+  timeframe: "1m" | "3m" | "5m" | null;
   waveHistory: V5Wave[];
   w1Diagnostics: V5Wave1Diagnostics | null;
   dominantLayerLiqUsd: number | null;
@@ -911,6 +920,8 @@ export class V5WaveService {
     const waveHistory = watch.waves.map((w) => ({ ...w }));
     const event: V5SignalEvent = {
       signalId: watch.signalId,
+      cascadeId: null,
+      timeframe: null,
       symbol: watch.symbol,
       side: watch.side,
       victim: watch.victim,

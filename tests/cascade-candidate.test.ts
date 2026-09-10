@@ -204,7 +204,87 @@ scenario(
   },
 );
 
-console.log("\nRunning cascade-registry tests...\n");
+// ─── One-event wave preservation (operator-reported check) ────────────
+
+scenario(
+  "a wave with exactly ONE liquidation event is a real wave, kept in waveHistory, completes normally, and participates in the W1/W2/W3 comparison",
+  () => {
+    const c = new CascadeCandidateService();
+    c.startCascade(
+      "ETHUSDT",
+      "LONG",
+      "casc-1",
+      "1m",
+      1,
+      2000,
+      1000,
+      50_000,
+      1000,
+    ); // W1: exactly 1 event, $50k
+    const peekAfterStart = c.peekWatch("ETHUSDT", "LONG")!;
+    assert.strictEqual(
+      peekAfterStart.waveHistory[0]!.liqEvents,
+      1,
+      "Wave 1 must show exactly 1 event, never discarded/zeroed",
+    );
+    assert.strictEqual(peekAfterStart.waveHistory[0]!.liqUsd, 50_000);
+
+    c.onTick("ETHUSDT", "LONG", 2001, 2000); // Wave 1 completes -- must NOT be dropped for having 1 event
+    const peekAfterW1 = c.peekWatch("ETHUSDT", "LONG")!;
+    assert.strictEqual(
+      peekAfterW1.waveHistory.length,
+      1,
+      "the one-event Wave 1 must remain in waveHistory after completing",
+    );
+    assert.strictEqual(peekAfterW1.waveHistory[0]!.liqEvents, 1);
+
+    // Wave 2, ALSO exactly one event, weaker than Wave 1 -- must
+    // participate in the comparison normally and reach SIGNAL_READY.
+    c.onLiquidation(liq("ETHUSDT", "SELL", 2000, 30_000, 2500), "LONG"); // single event, $30k
+    const peekAfterW2Start = c.peekWatch("ETHUSDT", "LONG")!;
+    assert.strictEqual(
+      peekAfterW2Start.waveHistory[1]!.liqEvents,
+      1,
+      "Wave 2 must ALSO show exactly 1 event, never discarded",
+    );
+
+    const result = c.onTick("ETHUSDT", "LONG", 2001, 3000); // Wave 2 completes: 30k <= 50k -> SIGNAL_READY
+    assert.ok(
+      result && "entryPrice" in result,
+      "a one-event-per-wave cascade must still reach SIGNAL_READY normally",
+    );
+    const signal = result as any;
+    assert.strictEqual(signal.waveHistory.length, 2);
+    assert.strictEqual(
+      signal.waveHistory[0].liqEvents,
+      1,
+      "the persisted, final waveHistory must still show Wave 1's real event count (1)",
+    );
+    assert.strictEqual(
+      signal.waveHistory[1].liqEvents,
+      1,
+      "the persisted, final waveHistory must still show Wave 2's real event count (1)",
+    );
+  },
+);
+
+scenario(
+  "structural: no minimum-event-count check exists anywhere in cascade-candidate.service.ts -- liqEvents is only ever set/incremented, never compared or gated",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/domain/cascade/cascade-candidate.service.ts"),
+      "utf8",
+    );
+    assert.ok(
+      !/liqEvents\s*[<>=!]=?\s*\d/.test(source),
+      "liqEvents must never be compared against any threshold",
+    );
+    assert.ok(
+      !source.includes("minEvents") && !source.includes("MIN_EVENTS"),
+      "no min-event-count concept must exist",
+    );
+  },
+);
 
 function makeRegistry() {
   const c1m = new CascadeCandidateService();
@@ -215,6 +295,8 @@ function makeRegistry() {
   const makeId = () => `casc-${++idCounter}`;
   return { c1m, c3m, c5m, registry, makeId };
 }
+
+console.log("\nRunning cascade-registry tests...\n");
 
 // ─── One cascade per symbol, regardless of victim ──────────────────────
 
