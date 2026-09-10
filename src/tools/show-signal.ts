@@ -118,6 +118,9 @@ export function printGlobalReport(doc: GlobalSignalDoc): void {
   console.log("GLOBAL V5 SIGNAL (v5_global_signals)");
   console.log("=".repeat(50));
   console.log(`Signal ID:    ${doc.signalId}`);
+  console.log(
+    `Cascade ID:   ${doc.cascadeId ?? "n/a (not from the multi-timeframe cascade flow)"}${doc.timeframe ? `  (${doc.timeframe} candidate -- jump with: npx tsx scripts/show-cascade.ts --id ${doc.cascadeId})` : ""}`,
+  );
   console.log(`Symbol:       ${doc.symbol}`);
   console.log(`Side:         ${doc.side}`);
   console.log(`Signal Time:  ${fmtTs(doc.signalTs)}`);
