@@ -21,6 +21,36 @@ const log = childLogger({ mod: "cascade-repository" });
 export class CascadeRepository {
   constructor(private readonly mongo: MongoClientWrapper) {}
 
+  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- root cause
+   *  of the duplicate-cascade-document race condition (confirmed in
+   *  production: the same cascadeId appearing as TWO separate Mongo
+   *  documents, with different candidate states, after the three
+   *  concurrent 1m/3m/5m upsertCandidateState() calls raced each
+   *  other's own check-then-insert). A UNIQUE index on cascadeId turns
+   *  a losing racer's own insert attempt into a hard duplicate-key
+   *  error instead of a silently-created second document -- combined
+   *  with feedCascade() now awaiting these calls SEQUENTIALLY (see its
+   *  own doc comment in market-data-orchestrator.ts) rather than
+   *  firing all three concurrently, the race is eliminated at BOTH the
+   *  application layer (no longer concurrent) and the data layer (even
+   *  if a race somehow still occurred, Mongo itself would now refuse
+   *  the second document). Idempotent, safe to call every boot --
+   *  never throws, matching every other repository's own
+   *  ensureIndexes() convention in this project. */
+  async ensureIndexes(): Promise<boolean> {
+    try {
+      const col = await this.mongo.activeCascades();
+      if (!col) return false;
+      await col.createIndex({ cascadeId: 1 }, { unique: true });
+      await col.createIndex({ symbol: 1, status: 1 });
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error({ err: msg }, "[CASCADE_ENSURE_INDEXES_FAILED]");
+      return false;
+    }
+  }
+
   /** Called on EVERY meaningful state transition for a still-ACTIVE
    *  candidate (cascade start, a new wave starting, a wave completing)
    *  -- upserts the WHOLE cascade document's own candidates.<timeframe>
@@ -69,6 +99,45 @@ export class CascadeRepository {
         { upsert: true },
       );
     } catch (err) {
+      // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- defensive
+      // retry for the rare case where the unique cascadeId index (see
+      // ensureIndexes() above) rejects this upsert's own insert-attempt
+      // as a duplicate-key error (code 11000): another concurrent call
+      // for the SAME cascadeId won the race and already created the
+      // document. Retrying as a PLAIN update (no upsert) applies this
+      // candidate's own $set to that now-existing document instead of
+      // silently dropping the update. Every other error remains
+      // non-fatal, logged, and swallowed, matching this project's own
+      // established Mongo-write convention.
+      const isDuplicateKey =
+        typeof err === "object" &&
+        err !== null &&
+        "code" in err &&
+        (err as { code: unknown }).code === 11000;
+      if (isDuplicateKey) {
+        try {
+          const col = await this.mongo.activeCascades();
+          if (col)
+            await col.updateOne(
+              { cascadeId },
+              {
+                $set: {
+                  [`candidates.${candidate.timeframe}`]: candidate,
+                  lastUpdatedTs: now,
+                },
+              },
+            );
+          return;
+        } catch (retryErr) {
+          const retryMsg =
+            retryErr instanceof Error ? retryErr.message : String(retryErr);
+          log.error(
+            { err: retryMsg, cascadeId, timeframe: candidate.timeframe },
+            "[CASCADE_UPSERT_DUPLICATE_KEY_RETRY_FAILED] -- non-fatal",
+          );
+          return;
+        }
+      }
       const msg = err instanceof Error ? err.message : String(err);
       log.error(
         { err: msg, cascadeId, timeframe: candidate.timeframe },

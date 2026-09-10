@@ -257,6 +257,10 @@ export class MarketDataOrchestrator {
 
   async ensureIndexes(): Promise<void> {
     await this.rawLiquidationEventRepo.ensureIndexes();
+    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- unique
+    // index on cascadeId, see CascadeRepository.ensureIndexes()'s own
+    // doc comment for the duplicate-cascade-document race it fixes.
+    await this.cascadeRepo.ensureIndexes();
   }
 
   async hydrateMainLocks(): Promise<void> {
@@ -380,7 +384,7 @@ export class MarketDataOrchestrator {
       // ONLY the real-position-creation step inside
       // handleCascadeSignalReady() below, exactly as it already does
       // for the existing V5 signal path.
-      this.feedCascade(l, victimForShadow);
+      void this.feedCascade(l, victimForShadow);
       if (this.mainSymbolLocks.has(l.symbol)) return;
       const wasTrackedBeforeProduction = this.wasProductionWatchTracked(
         l.symbol,
@@ -469,13 +473,28 @@ export class MarketDataOrchestrator {
    *  candidate has no active watch (never started, or already
    *  terminal -- terminal persistence is handled separately by
    *  persistTerminalCandidate() below). */
-  private persistActiveCandidateSnapshot(
+  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- now async
+   *  and AWAITED by feedCascade() below (was previously a fire-and-
+   *  forget `void` call). Root-cause fix for the duplicate-cascade-
+   *  document race condition: when a cascade first starts, all three
+   *  candidates' own FIRST upsertCandidateState() call for that
+   *  cascadeId is a genuine Mongo insert (via $setOnInsert) -- firing
+   *  all three concurrently let them race each other's own check-then-
+   *  insert, occasionally producing two separate documents for the
+   *  SAME cascadeId. Returning a Promise here lets feedCascade() await
+   *  each candidate's own write SEQUENTIALLY instead, so only the
+   *  FIRST call ever performs the actual insert; the second and third
+   *  always see an already-existing document and cleanly $set their
+   *  own candidate sub-field on it. Combined with the new unique index
+   *  on cascadeId (see CascadeRepository.ensureIndexes()) as a second,
+   *  data-layer defense. */
+  private async persistActiveCandidateSnapshot(
     symbol: string,
     victim: Side,
     candidate: CascadeCandidateService,
     timeframe: "1m" | "3m" | "5m",
     now: number,
-  ): void {
+  ): Promise<void> {
     const state = candidate.exportState(symbol, victim);
     if (!state) return;
     const currentWave = state.waves[state.waves.length - 1];
@@ -491,7 +510,7 @@ export class MarketDataOrchestrator {
       signalId: null,
       lastUpdatedTs: now,
     };
-    void this.cascadeRepo.upsertCandidateState(
+    await this.cascadeRepo.upsertCandidateState(
       state.cascadeId,
       symbol,
       victim,
@@ -501,7 +520,17 @@ export class MarketDataOrchestrator {
     );
   }
 
-  private feedCascade(l: Liquidation, victim: Side): void {
+  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- now async;
+   *  every persistActiveCandidateSnapshot() call below is AWAITED
+   *  SEQUENTIALLY (1m, then 3m, then 5m), never fired concurrently, to
+   *  eliminate the duplicate-cascade-document race at its source. See
+   *  persistActiveCandidateSnapshot()'s own doc comment above for the
+   *  full root-cause explanation. Called via `void this.feedCascade(...)`
+   *  at its own call-site in start()'s liquidation handler -- fire-and-
+   *  forget from THAT caller's perspective (matching this project's
+   *  own established convention for Mongo-write-triggering handlers),
+   *  but internally fully sequential. */
+  private async feedCascade(l: Liquidation, victim: Side): Promise<void> {
     const resolved = this.cascadeRegistry.resolve(
       l.symbol,
       victim,
@@ -515,21 +544,21 @@ export class MarketDataOrchestrator {
       this.cascadeCandidate1m.onLiquidation(l, victim);
       this.cascadeCandidate3m.onLiquidation(l, victim);
       this.cascadeCandidate5m.onLiquidation(l, victim);
-      this.persistActiveCandidateSnapshot(
+      await this.persistActiveCandidateSnapshot(
         l.symbol,
         victim,
         this.cascadeCandidate1m,
         "1m",
         l.timestamp,
       );
-      this.persistActiveCandidateSnapshot(
+      await this.persistActiveCandidateSnapshot(
         l.symbol,
         victim,
         this.cascadeCandidate3m,
         "3m",
         l.timestamp,
       );
-      this.persistActiveCandidateSnapshot(
+      await this.persistActiveCandidateSnapshot(
         l.symbol,
         victim,
         this.cascadeCandidate5m,
@@ -567,7 +596,7 @@ export class MarketDataOrchestrator {
         l.quoteQty,
         resolved.cascadeStartTs,
       );
-      this.persistActiveCandidateSnapshot(
+      await this.persistActiveCandidateSnapshot(
         l.symbol,
         victim,
         this.cascadeCandidate1m,
@@ -587,7 +616,7 @@ export class MarketDataOrchestrator {
         l.quoteQty,
         resolved.cascadeStartTs,
       );
-      this.persistActiveCandidateSnapshot(
+      await this.persistActiveCandidateSnapshot(
         l.symbol,
         victim,
         this.cascadeCandidate3m,
@@ -607,7 +636,7 @@ export class MarketDataOrchestrator {
         l.quoteQty,
         resolved.cascadeStartTs,
       );
-      this.persistActiveCandidateSnapshot(
+      await this.persistActiveCandidateSnapshot(
         l.symbol,
         victim,
         this.cascadeCandidate5m,
