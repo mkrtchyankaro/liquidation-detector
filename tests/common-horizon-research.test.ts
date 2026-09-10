@@ -100,7 +100,7 @@ scenario(
       require.resolve("../src/domain/market/atr-tracker.service.ts"),
       "utf8",
     );
-    const idx = source.indexOf("getATR(symbol:");
+    const idx = source.indexOf("\n  getATR(");
     assert.ok(idx > -1, "getATR must be defined");
     const getAtrBody = source.slice(idx, source.indexOf("\n  /**", idx + 10));
     assert.ok(
@@ -158,7 +158,7 @@ scenario(
       require.resolve("../src/domain/market/atr-tracker.service.ts"),
       "utf8",
     );
-    const onCandleIdx = source.indexOf("onCandle(c: Candle)");
+    const onCandleIdx = source.indexOf("\n  onCandle(");
     assert.ok(onCandleIdx > -1, "onCandle must be defined");
     const onCandleBody = source.slice(
       onCandleIdx,
@@ -182,7 +182,7 @@ scenario(
       require.resolve("../src/services/market-data-orchestrator.ts"),
       "utf8",
     );
-    const idx = source.indexOf("commonHorizonAtrReady(symbol: string)");
+    const idx = source.indexOf("private commonHorizonAtrReady(");
     assert.ok(idx > -1, "commonHorizonAtrReady must be defined");
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
     // Robust against line-wrapping: check the KEY PIECES are all present,
@@ -211,8 +211,15 @@ scenario(
       require.resolve("../src/services/market-data-orchestrator.ts"),
       "utf8",
     );
-    const idx = source.indexOf("feedUnitResearchShadowAfter(l:");
-    assert.ok(idx > -1, "feedUnitResearchShadowAfter must be defined");
+    // "private feedUnitResearchShadowAfter" is unique -- the other two
+    // occurrences of this name in the file are comment references
+    // without the "private" prefix, so this robustly finds the ACTUAL
+    // declaration regardless of how its own parameter list is wrapped.
+    const idx = source.indexOf("private feedUnitResearchShadowAfter");
+    assert.ok(
+      idx > -1,
+      "feedUnitResearchShadowAfter's own declaration must exist",
+    );
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
     const gateIdx = body.indexOf("commonHorizonAtrReady(");
     const startIdx = body.indexOf("competitionShadow1m.startEpisode(");
