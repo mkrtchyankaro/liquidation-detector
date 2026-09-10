@@ -1163,7 +1163,26 @@ export class MarketDataOrchestrator {
       // hydration already uses -- is reused here to install it live,
       // the moment it becomes MAIN's own real, executed position.
       if (!willExecuteAsMain) return;
-      await this.distributor.distribute(globalSignal, this.mongo);
+      // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- mainTelegramSent
+      // is now checked and PROMINENTLY logged if false, so a silent MAIN
+      // ENTRY-Telegram failure (network blip, Telegram API outage) is
+      // never invisible again -- this is exactly the second, previously-
+      // undetected source of the "CLOSE exists but ENTER was never seen"
+      // class of bug (the first, restart-hydration-filter source, was
+      // already fixed separately -- see hydrateMainLocks() above). The
+      // trade is STILL installed/tracked below regardless (a real,
+      // executing position must never go untracked just because its own
+      // notification failed) -- this fix restores VISIBILITY, it does
+      // not change execution behavior.
+      const { mainTelegramSent } = await this.distributor.distribute(
+        globalSignal,
+        this.mongo,
+      );
+      if (!mainTelegramSent) {
+        log.error(
+          `[CASCADE_MAIN_ENTRY_TELEGRAM_MISSING] ${event.symbol} ${event.side} timeframe=${event.timeframe} cascadeId=${event.cascadeId} signalId=${signalId} -- MAIN's own ENTRY notification FAILED to send, but this trade IS still being installed into active TP/SL tracking below and WILL eventually produce a CLOSE notification -- manual awareness needed for this signalId`,
+        );
+      }
       this.mainSymbolLocks.add(event.symbol);
       this.v5.hydrateActiveTrade({
         signalId,

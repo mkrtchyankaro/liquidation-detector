@@ -64,14 +64,27 @@ export class SignalDistributor {
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
   }
 
+  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- returns
+   *  whether MAIN's own ENTRY Telegram genuinely succeeded, so the
+   *  caller (market-data-orchestrator.ts's own handleCascadeSignalReady())
+   *  can detect and prominently log the specific case where a real,
+   *  installed/tracked trade's own ENTRY notification silently failed
+   *  (per-user Telegram-send failures are already isolated/caught
+   *  below and never throw, so distribute() itself always completes
+   *  normally even when MAIN's own send failed -- without this return
+   *  value, that failure was completely invisible to the caller). The
+   *  trade is STILL installed/tracked either way (a real, executing
+   *  position must never go untracked just because its own
+   *  notification failed) -- this is visibility, not a new gate. */
   async distribute(
     globalSignal: GlobalSignalDoc,
     mongo: MongoClientWrapper,
-  ): Promise<void> {
+  ): Promise<{ mainTelegramSent: boolean }> {
     await this.globalSignalRepo.insert(globalSignal);
 
-    if (globalSignal.status !== "SIGNAL") return;
+    if (globalSignal.status !== "SIGNAL") return { mainTelegramSent: false };
 
+    let mainTelegramSent = false;
     for (const runtime of this.userRuntimes) {
       if (!runtime.config.enabled) continue;
       const userSignalRepo = new UserSignalRepository(
@@ -121,6 +134,7 @@ export class SignalDistributor {
           "[DISTRIBUTE_TELEGRAM_FAILED] -- isolated",
         );
       }
+      if (runtime.config.userId === "main") mainTelegramSent = telegramSent;
 
       try {
         await executeForUser(
@@ -141,6 +155,7 @@ export class SignalDistributor {
         );
       }
     }
+    return { mainTelegramSent };
   }
 
   /** Shared by both block-reasons above -- persists a forensic,

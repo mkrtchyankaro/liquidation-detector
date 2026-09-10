@@ -357,6 +357,50 @@ async function main(): Promise<void> {
     },
   );
 
+  await scenario(
+    "operator-reported CRITICAL FIX (second source of 'CLOSE exists but ENTER was never seen'): handleCascadeSignalReady() captures distribute()'s own mainTelegramSent and prominently logs when MAIN's own ENTRY notification silently failed",
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/market-data-orchestrator.ts"),
+        "utf8",
+      );
+      const idx = source.indexOf("private async handleCascadeSignalReady(");
+      const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+      assert.ok(
+        body.includes(
+          "const { mainTelegramSent } = await this.distributor.distribute(",
+        ),
+        "must capture distribute()'s own return value",
+      );
+      assert.ok(
+        body.includes("if (!mainTelegramSent)"),
+        "must check for a failed MAIN ENTRY send",
+      );
+      assert.ok(
+        body.includes("CASCADE_MAIN_ENTRY_TELEGRAM_MISSING"),
+        "must prominently log this specific failure mode",
+      );
+    },
+  );
+
+  await scenario(
+    'structural: SignalDistributor.distribute() returns mainTelegramSent, tracked specifically for userId==="main"',
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/signal-distributor.ts"),
+        "utf8",
+      );
+      assert.ok(
+        source.includes("Promise<{ mainTelegramSent: boolean }>"),
+        "distribute() must return this shape",
+      );
+      assert.ok(
+        source.includes('runtime.config.userId === "main"'),
+        "must specifically track the main user's own send-result",
+      );
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }
