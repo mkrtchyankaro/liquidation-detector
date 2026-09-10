@@ -34,10 +34,23 @@ interface Args {
   limit: number;
   symbol: string | null;
   state: "PASS" | "FAIL_NO_VALID_RR" | "STRUCTURAL_CANCEL" | "TRACKING" | null;
+  side: "LONG" | "SHORT" | null;
+  /** Center of a time-window search, ms epoch -- parsed from
+   *  --around "YYYY-MM-DD HH:MM" (interpreted as UTC, matching how
+   *  every timestamp in this report is already displayed). */
+  aroundTs: number | null;
+  windowMinutes: number;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { limit: 20, symbol: null, state: null };
+  const args: Args = {
+    limit: 20,
+    symbol: null,
+    state: null,
+    side: null,
+    aroundTs: null,
+    windowMinutes: 5,
+  };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--limit" && argv[i + 1])
       args.limit = Math.max(1, parseInt(argv[++i]!, 10) || 20);
@@ -45,6 +58,19 @@ function parseArgs(argv: string[]): Args {
       args.symbol = argv[++i]!.toUpperCase();
     else if (argv[i] === "--state" && argv[i + 1])
       args.state = argv[++i] as Args["state"];
+    else if (argv[i] === "--side" && argv[i + 1])
+      args.side = argv[++i]!.toUpperCase() as Args["side"];
+    else if (argv[i] === "--around" && argv[i + 1]) {
+      // Accept "YYYY-MM-DD HH:MM" (space) or the ISO "YYYY-MM-DDTHH:MM"
+      // form -- both parsed as UTC, matching this report's own display.
+      const raw = argv[++i]!.trim();
+      const iso = raw.includes("T") ? raw : raw.replace(" ", "T");
+      const withZone = iso.endsWith("Z") ? iso : `${iso}Z`;
+      const parsed = Date.parse(withZone);
+      args.aroundTs = Number.isNaN(parsed) ? null : parsed;
+    } else if (argv[i] === "--window-minutes" && argv[i + 1]) {
+      args.windowMinutes = Math.max(1, parseInt(argv[++i]!, 10) || 5);
+    }
   }
   return args;
 }
@@ -181,6 +207,13 @@ function candidateState(
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
+  if (process.argv.includes("--around") && args.aroundTs === null) {
+    console.error(
+      'Could not parse --around. Use "YYYY-MM-DD HH:MM" (UTC), e.g. --around "2026-09-08 15:24"',
+    );
+    process.exit(1);
+  }
+
   const uri = process.env.MONGO_URI;
   if (!uri) {
     console.error("MONGO_URI is not set in the environment.");
@@ -196,12 +229,24 @@ async function main(): Promise<void> {
       commonHorizonResearch: { $ne: null },
     };
     if (args.symbol) query.symbol = args.symbol;
+    if (args.side) query.side = args.side;
+    if (args.aroundTs !== null) {
+      const windowMs = args.windowMinutes * 60_000;
+      query.signalTs = {
+        $gte: args.aroundTs - windowMs,
+        $lte: args.aroundTs + windowMs,
+      };
+    }
 
     // READ-ONLY: exactly one find(), sorted/limited -- no writes anywhere in this file.
+    // When --around is given, a much higher effective cap is used (the
+    // time-window itself is the real filter) so a genuine match near the
+    // edge of a busy window is never silently cut off by the default
+    // --limit=20.
     const docs = await col
       .find(query)
       .sort({ signalTs: -1 })
-      .limit(args.limit)
+      .limit(args.aroundTs !== null ? Math.max(args.limit, 200) : args.limit)
       .toArray();
 
     const filtered = args.state
