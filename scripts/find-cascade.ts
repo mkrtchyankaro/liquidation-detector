@@ -48,7 +48,7 @@ function candidateLine(label: "1m" | "3m" | "5m", doc: CascadeDoc): string {
   if (c.phase === "TERMINAL_SIGNAL")
     return `${label}: SIGNAL${c.signalId ? ` (${c.signalId})` : ""}`;
   if (c.phase === "TERMINAL_CANCEL")
-    return `${label}: CANCEL (${c.terminalReason ?? "structural"})`;
+    return `${label}: CANCEL (${c.terminalReasonText ?? c.terminalReason ?? "structural"})`;
   // ACTIVE
   return `${label}: WAITING_W${c.currentWaveNumber ?? "?"}`;
 }

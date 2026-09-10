@@ -102,6 +102,18 @@ export interface CascadeCancelEvent {
   readonly cascadeStartTs: number;
   readonly reason: "CANCEL_NO_NEXT_WAVE";
   readonly waveHistory: readonly WaveSummary[];
+  /** Sep 10 2026 (Karo), operator-requested -- exact diagnostics
+   *  proving WHY this specific cancellation happened, captured at the
+   *  precise moment of cancellation (never re-derived/approximated
+   *  later). The wave that was last COMPLETED before this cancellation
+   *  (its own extreme is the 2x-UNIT recovery anchor). */
+  readonly lastCompletedWaveNumber: number;
+  readonly waveExtreme: number;
+  readonly frozenUnitAbs: number;
+  readonly cancelPrice: number;
+  readonly cancelTs: number;
+  readonly recoveryDistance: number;
+  readonly recoveryUnits: number;
 }
 
 export type CascadePhase = "WAITING_WAVE_RECOVERY" | "WAITING_NEXT_WAVE";
@@ -269,6 +281,13 @@ export class CascadeCandidateService {
       cascadeStartTs: watch.createdAt,
       reason: "CANCEL_NO_NEXT_WAVE",
       waveHistory: this.historyOf(watch),
+      lastCompletedWaveNumber: currentWave.waveNumber,
+      waveExtreme: currentWave.extremePrice,
+      frozenUnitAbs: watch.unitAbs,
+      cancelPrice: mid,
+      cancelTs: ts,
+      recoveryDistance,
+      recoveryUnits: recoveryDistance / watch.unitAbs,
     };
   }
 

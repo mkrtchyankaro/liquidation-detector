@@ -31,6 +31,7 @@ import {
 import { CascadeRegistry } from "../domain/cascade/cascade-registry";
 import { CascadeRepository } from "../infrastructure/mongo/cascade.repository";
 import type { CascadeCandidateStateDoc } from "../domain/cascade/cascade.model";
+import { terminalReasonText } from "../domain/cascade/cascade.model";
 import type {
   GlobalSignalDoc,
   UnitResearchCandidateDoc,
@@ -529,7 +530,12 @@ export class MarketDataOrchestrator {
       currentExtreme: currentWave?.extremePrice ?? null,
       terminalStatus: null,
       terminalReason: null,
+      terminalReasonText: null,
+      cancelPrice: null,
+      recoveryDistance: null,
+      recoveryUnits: null,
       signalId: null,
+      terminalAt: null,
       lastUpdatedTs: now,
     };
     await this.cascadeRepo.upsertCandidateState(
@@ -755,15 +761,20 @@ export class MarketDataOrchestrator {
       void this.handleCascadeSignalReady(result as CascadeSignalReadyEvent);
     } else {
       const cancel = result as CascadeCancelEvent;
-      log.info(
-        `[CASCADE_CANDIDATE_CANCEL] ${cancel.symbol} ${cancel.victim} timeframe=${cancel.timeframe} cascadeId=${cancel.cascadeId} waves=${cancel.waveHistory.length} reason=${cancel.reason}`,
-      );
       const finalWave = cancel.waveHistory[cancel.waveHistory.length - 1];
+      const reasonText = terminalReasonText(
+        cancel.reason,
+        cancel.recoveryUnits,
+      );
+      log.info(
+        `[CASCADE_CANDIDATE_CANCEL] ${cancel.symbol} ${cancel.victim} timeframe=${cancel.timeframe} cascadeId=${cancel.cascadeId} waves=${cancel.waveHistory.length} reason=${cancel.reason} (${reasonText}) waveExtreme=${cancel.waveExtreme} cancelPrice=${cancel.cancelPrice} recoveryUnits=${cancel.recoveryUnits.toFixed(3)}`,
+      );
       const doc: CascadeCandidateStateDoc = {
         timeframe: cancel.timeframe,
         phase: "TERMINAL_CANCEL",
-        frozenUnitAbs: null,
-        currentWaveNumber: finalWave?.waveNumber ?? null,
+        frozenUnitAbs: cancel.frozenUnitAbs,
+        currentWaveNumber:
+          finalWave?.waveNumber ?? cancel.lastCompletedWaveNumber,
         // Every wave in a terminal event's own waveHistory has, by
         // construction, already completed (the terminal condition
         // itself is only ever evaluated once the final wave has
@@ -772,10 +783,15 @@ export class MarketDataOrchestrator {
           ...w,
           state: "COMPLETED" as const,
         })),
-        currentExtreme: finalWave?.extremePrice ?? null,
+        currentExtreme: cancel.waveExtreme,
         terminalStatus: "CANCEL",
         terminalReason: cancel.reason,
+        terminalReasonText: reasonText,
+        cancelPrice: cancel.cancelPrice,
+        recoveryDistance: cancel.recoveryDistance,
+        recoveryUnits: cancel.recoveryUnits,
         signalId: null,
+        terminalAt: cancel.cancelTs,
         lastUpdatedTs: ts,
       };
       void this.cascadeRepo.markCandidateTerminal(
@@ -1093,7 +1109,12 @@ export class MarketDataOrchestrator {
         currentExtreme: triggerWave.extremePrice,
         terminalStatus: "SIGNAL",
         terminalReason: null,
+        terminalReasonText: null,
+        cancelPrice: null,
+        recoveryDistance: null,
+        recoveryUnits: null,
         signalId,
+        terminalAt: event.entryTs,
         lastUpdatedTs: event.entryTs,
       };
       void this.cascadeRepo.markCandidateTerminal(

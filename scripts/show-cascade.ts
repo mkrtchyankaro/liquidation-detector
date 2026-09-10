@@ -124,7 +124,17 @@ async function printCandidate(
   }
 
   if (c.phase === "TERMINAL_CANCEL") {
-    console.log(`  CANCEL reason: ${c.terminalReason ?? "n/a"}`);
+    console.log(
+      `  CANCEL reason: ${c.terminalReason ?? "n/a"}${c.terminalReasonText ? ` (${c.terminalReasonText})` : ""}`,
+    );
+    if (c.cancelPrice !== null) {
+      console.log(
+        `    waveExtreme=${c.currentExtreme}  frozenUnit=${c.frozenUnitAbs}  cancelPrice=${c.cancelPrice}`,
+      );
+      console.log(
+        `    recoveryDistance=${c.recoveryDistance}  recoveryUnits=${c.recoveryUnits?.toFixed(3)}`,
+      );
+    }
     console.log("");
   }
 
