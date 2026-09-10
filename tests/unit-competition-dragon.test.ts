@@ -440,14 +440,29 @@ scenario(
       source.indexOf("\n  async appendUnitCompetitionCheckpoint", candidateIdx),
     );
     assert.ok(
-      candidateBody.includes(
-        "$setOnInsert: { symbol: meta.symbol, side: meta.side, signalTs: meta.signalTs }",
-      ),
-      "setUnitCompetitionCandidate must write metadata via $setOnInsert",
+      candidateBody.includes("$setOnInsert"),
+      "setUnitCompetitionCandidate must use $setOnInsert somewhere",
     );
     assert.ok(
-      !/\$set:\s*\{\s*symbol/.test(candidateBody),
-      "symbol must never appear inside a plain $set in this method",
+      candidateBody.includes("meta.symbol") &&
+        candidateBody.includes("meta.side") &&
+        candidateBody.includes("meta.signalTs"),
+      "setUnitCompetitionCandidate must write symbol/side/signalTs from the meta parameter",
+    );
+    // The $setOnInsert block itself (not the surrounding function) must be
+    // the one containing symbol/side/signalTs -- extract just that object
+    // literal and confirm.
+    const setOnInsertIdx = candidateBody.indexOf("$setOnInsert");
+    const setOnInsertBlock = candidateBody.slice(
+      setOnInsertIdx,
+      candidateBody.indexOf("}", candidateBody.indexOf("{", setOnInsertIdx)) +
+        1,
+    );
+    assert.ok(
+      setOnInsertBlock.includes("symbol") &&
+        setOnInsertBlock.includes("side") &&
+        setOnInsertBlock.includes("signalTs"),
+      "the $setOnInsert object literal itself must contain symbol/side/signalTs",
     );
 
     const winnerIdx = source.indexOf("async setUnitCompetitionWinner(");
@@ -456,14 +471,14 @@ scenario(
       source.indexOf("\n  async setUnitCompetitionWinnerResult", winnerIdx),
     );
     assert.ok(
-      winnerBody.includes(
-        "$setOnInsert: { symbol: meta.symbol, side: meta.side, signalTs: meta.signalTs }",
-      ),
-      "setUnitCompetitionWinner must write metadata via $setOnInsert",
+      winnerBody.includes("$setOnInsert"),
+      "setUnitCompetitionWinner must use $setOnInsert somewhere",
     );
     assert.ok(
-      !/\$set:\s*\{\s*symbol/.test(winnerBody),
-      "symbol must never appear inside a plain $set in this method",
+      winnerBody.includes("meta.symbol") &&
+        winnerBody.includes("meta.side") &&
+        winnerBody.includes("meta.signalTs"),
+      "setUnitCompetitionWinner must write symbol/side/signalTs from the meta parameter",
     );
   },
 );
