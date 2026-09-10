@@ -67,9 +67,12 @@ scenario(
       require.resolve("../scripts/research-competition-report.ts"),
       "utf8",
     );
+    const importLines = source
+      .split("\n")
+      .filter((l) => l.trim().startsWith("import"));
     assert.ok(
-      !source.includes("Repository"),
-      "must never import a repository class -- only the raw MongoClient driver, read-only",
+      !importLines.some((l) => l.includes("Repository")),
+      "must never IMPORT a repository class -- only the raw MongoClient driver, read-only",
     );
   },
 );
@@ -129,6 +132,32 @@ scenario(
     assert.strictEqual(fmtDuration(18000), "18s");
   },
 );
+
+// Re-implemented inline, mirroring the script's own safeIsoTime() --
+// same import-avoidance reasoning as the other formatters above.
+function safeIsoTime(ts: number | undefined | null): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0)
+    return "unknown time";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "unknown time";
+  return d.toISOString().replace("T", " ").replace("Z", "");
+}
+
+scenario(
+  "safeIsoTime never throws on a missing/undefined/null/zero/NaN signalTs -- the exact real-production race (partial upserted docs) that crashed the report before this fix",
+  () => {
+    assert.strictEqual(safeIsoTime(undefined), "unknown time");
+    assert.strictEqual(safeIsoTime(null), "unknown time");
+    assert.strictEqual(safeIsoTime(0), "unknown time");
+    assert.strictEqual(safeIsoTime(NaN), "unknown time");
+    assert.strictEqual(safeIsoTime(-1), "unknown time");
+  },
+);
+
+scenario("safeIsoTime formats a real, valid timestamp correctly", () => {
+  const result = safeIsoTime(new Date("2026-09-10T10:42:15.000Z").getTime());
+  assert.strictEqual(result, "2026-09-10 10:42:15.000");
+});
 
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

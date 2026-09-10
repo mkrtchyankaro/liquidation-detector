@@ -74,6 +74,22 @@ function fmtDuration(ms: number | null): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+/** Sep 10 2026 (Karo) -- defensive against the KNOWN, ACCEPTED
+ *  upsert-race limitation documented on GlobalSignalRepository's own
+ *  setUnitCompetitionCandidate()/setUnitCompetitionWinner(): a shadow
+ *  candidate's own dragon-result can be persisted (upsert:true)
+ *  BEFORE production's own main signal doc exists yet, producing a
+ *  genuinely PARTIAL document -- signalId + unitCompetitionResearch
+ *  only, missing signalTs/symbol/side entirely. This report must
+ *  display such episodes usefully, never crash on them. */
+function safeIsoTime(ts: number | undefined | null): string {
+  if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0)
+    return "unknown time";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "unknown time";
+  return d.toISOString().replace("T", " ").replace("Z", "");
+}
+
 function verdictLine(
   label: string,
   c: UnitCompetitionCandidateDoc | null,
@@ -87,9 +103,7 @@ function verdictLine(
   }
   if (c.verdict === "STRUCTURAL_CANCEL") {
     lines.push(`${label}  \u26A0\uFE0F STRUCTURAL_CANCEL`);
-    lines.push(
-      `    Episode start: ${new Date(c.episodeStartTs).toISOString()}`,
-    );
+    lines.push(`    Episode start: ${safeIsoTime(c.episodeStartTs)}`);
     if (c.frozenAtrPct > 0)
       lines.push(`    ATR (frozen): ${fmtPct(c.frozenAtrPct)}`);
     return lines;
@@ -209,7 +223,7 @@ async function main(): Promise<void> {
       const uc = doc.unitCompetitionResearch!;
       console.log("=".repeat(60));
       console.log(
-        `${doc.symbol} ${doc.side} | ${new Date(doc.signalTs).toISOString().replace("T", " ").replace("Z", "")}`,
+        `${doc.symbol ?? "UNKNOWN_SYMBOL"} ${doc.side ?? "?"} | ${safeIsoTime(doc.signalTs)}`,
       );
       console.log(`Episode: ${doc.signalId}`);
       console.log("");
