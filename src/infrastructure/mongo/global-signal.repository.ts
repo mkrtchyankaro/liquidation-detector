@@ -91,17 +91,7 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
 
   /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
    *  comparison. Writes ONE shadow candidate's own terminal (entry or
-   *  no-entry) summary via $set on unitResearch.<label>. upsert:true --
-   *  a shadow candidate (3m or 5m UNIT) can genuinely reach its own
-   *  terminal state BEFORE OR AFTER production's own 1m-UNIT episode
-   *  does (that is precisely the timing difference this whole
-   *  experiment measures), so the production doc may not exist yet.
-   *  KNOWN, ACCEPTED LIMITATION: in that race, this creates a partial
-   *  document (signalId + unitResearch.<label> only) that production's
-   *  own later insert does not currently merge into -- a rare, non-
-   *  critical research-data-completeness gap, not a production-safety
-   *  concern (this method never runs on the production entry/execution
-   *  path in either order). */
+   *  no-entry) summary. */
   async setUnitResearchCandidate(
     signalId: string,
     label: "atr3m" | "atr5m",
@@ -125,8 +115,7 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
   }
 
   /** Sep 9 2026 (Karo) -- appends ONE MFE/MAE checkpoint to a shadow
-   *  candidate's own checkpoints array, mirroring appendCheckpoint()'s
-   *  own $push pattern exactly. */
+   *  candidate's own checkpoints array. */
   async appendUnitResearchCheckpoint(
     signalId: string,
     label: "atr3m" | "atr5m",
@@ -149,25 +138,9 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
   }
 
   /** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit
-   *  "dragon" competition -- SAME pattern as setUnitResearchCandidate()
-   *  above, writing into the SEPARATE unitCompetitionResearch field
-   *  instead. upsert:true for the exact same race-tolerance reason
-   *  (candidates of different UNIT-timeframes resolve at different
-   *  wall-clock times, independent of when/whether the production
-   *  signal doc itself has been created yet).
-   *
-   *  Sep 10 2026 (Karo), operator-requested surgical fix -- also
-   *  writes symbol/side/signalTs via $setOnInsert (NEVER $set): these
-   *  values are mathematically guaranteed identical to production's
-   *  own canonical values (same liquidation event, same victim-
-   *  computation expression, same episode-start moment -- see
-   *  market-data-orchestrator.ts's own call-site for the exact
-   *  sourcing), but $setOnInsert is used regardless, as a hard,
-   *  structural guarantee: if production's own canonical write has
-   *  ALREADY created this document first, this call can NEVER touch
-   *  symbol/side/signalTs again, no matter what. Purely additive
-   *  metadata for the monitoring script's own display -- read by
-   *  nothing else in this codebase. */
+   *  "dragon" competition -- $setOnInsert for symbol/side/signalTs
+   *  (race-tolerant, never overwrites production's own canonical
+   *  values), plain $set for the candidate doc itself. */
   async setUnitCompetitionCandidate(
     signalId: string,
     candidate: "atr1m" | "atr3m" | "atr5m",
@@ -198,8 +171,6 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
     }
   }
 
-  /** Sep 10 2026 (Karo) -- appends ONE MFE/MAE checkpoint to a dragon
-   *  candidate's own checkpoints array (PASS-verdict candidates only). */
   async appendUnitCompetitionCheckpoint(
     signalId: string,
     candidate: "atr1m" | "atr3m" | "atr5m",
@@ -225,12 +196,6 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
     }
   }
 
-  /** Sep 10 2026 (Karo), operator-requested MAIN-only Telegram research
-   *  lifecycle. Sets the winner fields exactly once (the caller's own
-   *  logic guarantees this is only invoked on the FIRST PASS for a
-   *  given episode). upsert:true, same race-tolerance reasoning as
-   *  setUnitCompetitionCandidate() above. Same $setOnInsert treatment
-   *  for symbol/side/signalTs, same reasoning. */
   async setUnitCompetitionWinner(
     signalId: string,
     winnerCandidate: "atr1m" | "atr3m" | "atr5m",
@@ -264,8 +229,6 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
     }
   }
 
-  /** Sep 10 2026 (Karo) -- records the winner's own final TP/SL outcome,
-   *  once the hypothetical position actually closes. */
   async setUnitCompetitionWinnerResult(
     signalId: string,
     result: "TP" | "SL",
@@ -287,19 +250,8 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
   }
 
   /** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
-   *  Wilder-ATR experiment ("common-horizon-4h-v1"). GENUINELY SEPARATE
-   *  field from unitCompetitionResearch -- same $setOnInsert pattern for
-   *  symbol/side/signalTs (identical reasoning: values are guaranteed
-   *  identical to production's own canonical values by construction,
-   *  $setOnInsert used regardless as a hard, structural guarantee), and
-   *  the version tag is ALSO written via $setOnInsert -- once a document
-   *  is created under one version, it can never be silently switched to
-   *  a different version string later. Full candidate doc (phase-
-   *  snapshot fields while TRACKING, terminal fields once resolved) is
-   *  written via a plain $set -- this data is genuinely live-only,
-   *  written EXCLUSIVELY by this research path, so no cross-write race
-   *  with production exists here (unlike symbol/side/signalTs, which
-   *  production's own canonical doc also independently knows). */
+   *  Wilder-ATR experiment ("common-horizon-4h-v1"). Same $setOnInsert
+   *  pattern for symbol/side/signalTs + the version tag. */
   async setCommonHorizonCandidate(
     signalId: string,
     candidate: "atr1m" | "atr3m" | "atr5m",

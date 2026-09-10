@@ -22,6 +22,14 @@ import {
   type ShadowNoEntryEvent,
 } from "../domain/research/unit-research-shadow.service";
 import { CommonHorizonEpisodeRegistry } from "../domain/research/common-horizon-episode-registry";
+import {
+  CascadeCandidateService,
+  type CascadeSignalReadyEvent,
+  type CascadeCancelEvent,
+} from "../domain/cascade/cascade-candidate.service";
+import { CascadeRegistry } from "../domain/cascade/cascade-registry";
+import { CascadeRepository } from "../infrastructure/mongo/cascade.repository";
+import type { CascadeCandidateStateDoc } from "../domain/cascade/cascade.model";
 import type {
   GlobalSignalDoc,
   UnitResearchCandidateDoc,
@@ -98,19 +106,6 @@ export class MarketDataOrchestrator {
   readonly oiTracker: OiTrackerService;
   readonly aggressiveFlow = new AggressiveFlowService();
   readonly researchCheckpoints = new ResearchCheckpointTracker();
-  /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
-   *  comparison. TWO fully independent shadow-tracker instances (one
-   *  per candidate UNIT, 3m and 5m) + TWO fully independent
-   *  ResearchCheckpointTracker instances (custom [30s,1m,3m,5m,15m,30m]
-   *  offsets, per the operator's own explicit spec, via the new,
-   *  optional `offsets` constructor parameter -- the EXISTING
-   *  `this.researchCheckpoints` instance above is completely untouched,
-   *  still using its own DEFAULT offsets). Fed via new, ADDITIVE calls
-   *  in start()'s own liquidation/bookTicker handlers, always AFTER the
-   *  existing production v5.onLiquidation()/v5.onTick() calls -- never
-   *  before, never read by anything else. See
-   *  unit-research-shadow.service.ts's own doc comment for the full
-   *  isolation guarantee. */
   private readonly shadow3m = new UnitResearchShadowService((symbol, victim) =>
     this.liquidationStats.notionalPercentile(symbol, victim, 95),
   );
@@ -133,16 +128,6 @@ export class MarketDataOrchestrator {
     { label: "15m", ms: 15 * 60_000 },
     { label: "30m", ms: 30 * 60_000 },
   ]);
-  /** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit
-   *  "dragon" competition -- COMPLETELY SEPARATE state from
-   *  shadow3m/shadow5m above (which serve the EARLIER unitResearch
-   *  experiment). THREE independent shadow instances (1m/3m/5m, all
-   *  three -- unlike the earlier experiment, "1m" here is ALSO run as
-   *  its own, genuinely independent shadow, never reading production's
-   *  own live-mutating watch, for a true, symmetric 3-way comparison).
-   *  Fed via new, ADDITIVE calls in start()'s own handlers, always
-   *  AFTER production -- see feedUnitResearchShadowAfter()/
-   *  tickUnitResearchShadow() below, extended to also drive these. */
   private readonly competitionShadow1m = new UnitResearchShadowService(
     (symbol, victim) =>
       this.liquidationStats.notionalPercentile(symbol, victim, 95),
@@ -179,18 +164,6 @@ export class MarketDataOrchestrator {
     { label: "15m", ms: 15 * 60_000 },
     { label: "30m", ms: 30 * 60_000 },
   ]);
-  /** Sep 10 2026 (Karo), operator-requested MAIN-only Telegram research
-   *  lifecycle for the dragon competition. `competitionCandidateStatus`
-   *  tracks each candidate's own latest-known status per episode
-   *  (signalId), purely so the ENTRY message's own "Candidates:" block
-   *  can show what every candidate is doing AT winner-declaration time
-   *  -- read-only bookkeeping, never influences the competition or
-   *  production in any way. `competitionWinners` tracks the ONE open
-   *  hypothetical winner-position per episode, watched on every
-   *  subsequent tick purely to detect a TP/SL touch for the CLOSE
-   *  message -- a plain price-comparison, structurally identical in
-   *  spirit to (but completely separate state from) MAIN's own
-   *  onPriceTickForTrades() canonical-close check. */
   private readonly competitionCandidateStatus = new Map<
     string,
     Map<
@@ -215,14 +188,32 @@ export class MarketDataOrchestrator {
     }
   >();
   private readonly globalSignalRepo: GlobalSignalRepository;
+  private readonly cascadeRepo: CascadeRepository;
   private readonly rawLiquidationEventRepo: RawLiquidationEventRepository;
-  /** Sep 8 2026 (Karo) -- NEW, MAIN/GLOBAL-only same-symbol lock. See
-   *  this class's own module doc comment for the full rationale. Keyed
-   *  by symbol alone (not symbol+side -- one canonical signal per
-   *  symbol, either side, at a time, matching the operator's own
-   *  framing: "XRP MAIN OPEN blocks another MAIN XRP signal", not
-   *  "XRP-LONG blocks only XRP-LONG"). */
   private readonly mainSymbolLocks = new Set<string>();
+  /** Sep 10 2026 (Karo), operator-requested production V5 multi-
+   *  timeframe cascade lifecycle. PURELY ADDITIVE -- three independent
+   *  candidate state machines (1m/3m/5m, frozen common-horizon UNITs)
+   *  + a symbol-level registry gating "one active cascade per symbol".
+   *  Fed via feedCascade() below, called ADDITIVELY from the SAME
+   *  liquidation handler that already exists in start() -- nothing
+   *  existing is removed or rewired. Each candidate's own signal-ready
+   *  result flows into the EXISTING V5 production signal path
+   *  (handleTickOutcome-adjacent persistence/distribute/
+   *  mainSymbolLocks, all UNCHANGED) via handleCascadeSignalReady()
+   *  below -- mainSymbolLocks itself (above) is never touched by this
+   *  addition; it continues to mean exactly what it always has (real
+   *  MAIN Binance-position-overlap safety), completely independent of
+   *  cascadeRegistry (which only governs whether a new COMPARISON
+   *  cascade may start, never whether MAIN may hold a real position). */
+  private readonly cascadeCandidate1m = new CascadeCandidateService();
+  private readonly cascadeCandidate3m = new CascadeCandidateService();
+  private readonly cascadeCandidate5m = new CascadeCandidateService();
+  private readonly cascadeRegistry = new CascadeRegistry(
+    this.cascadeCandidate1m,
+    this.cascadeCandidate3m,
+    this.cascadeCandidate5m,
+  );
   private readonly mainTelegram: {
     sendMessage: (text: string) => Promise<unknown>;
   } | null;
@@ -238,45 +229,12 @@ export class MarketDataOrchestrator {
       typeof LiquidationStatsService
     >[0],
     wallTrackerConfig: ConstructorParameters<typeof WallTrackerService>[0],
-    /** Sep 8 2026 (Karo) -- broadcasts to every enabled-telegram user.
-     *  Used ONLY for the liq-feed-dead alert (a genuine system-wide
-     *  event affecting every user's own data equally). NOT used for
-     *  MAIN close anymore -- see mainTelegram below for that. */
     broadcastTelegram: {
       sendMessage: (text: string) => Promise<unknown>;
     } | null = null,
-    /** Sep 8 2026 (Karo) -- CRITICAL FIX, operator-corrected
-     *  architecture: MAIN's own ENTRY/CLOSE must use ONLY MAIN's own
-     *  dedicated Telegram configuration (the "main" user's own
-     *  telegram.chatIds), never a broadcast to every user. MAIN's own
-     *  ENTRY already achieved this correctly (SignalDistributor's own
-     *  per-user notifyUser() loop naturally uses each user's own
-     *  config, "main" included) -- this parameter fixes the ONE place
-     *  that didn't: handleMainTradeClose() used to reuse the generic
-     *  broadcastTelegram (every enabled user), incorrectly turning
-     *  MAIN's own close into a de facto broadcast. A user's own
-     *  telegram.chatIds MAY intentionally list multiple chat ids
-     *  (fan-out for THAT one runtime) -- that is a property of the
-     *  "main" user's own config, not of this mechanism. */
     mainTelegram: {
       sendMessage: (text: string) => Promise<unknown>;
     } | null = null,
-    /** Sep 10 2026 (Karo), operator-requested -- temporarily disables
-     *  ONLY the production V5 signal-creation consequence (the single
-     *  this.distributor.distribute() call below, which persists a
-     *  GlobalSignalDoc with status=SIGNAL, sends every enabled user's
-     *  own Telegram ENTRY, and triggers Binance execution, all
-     *  together). Defaults to true (enabled) -- must be EXPLICITLY
-     *  passed false to disable, so every EXISTING call-site is
-     *  unaffected unless main.ts is updated to pass it. V5WaveService's
-     *  own state machine (onLiquidation/onTick/Wave1/Wave2) keeps
-     *  running completely unchanged either way -- the
-     *  common-horizon-4h-v1 research's own episode-start detection
-     *  depends on observing that state machine, so it MUST keep
-     *  running for research to keep working. This flag only ever gates
-     *  the production SIGNAL's own downstream consequences, never the
-     *  underlying strategy computation itself. No code is deleted --
-     *  this is a single, reversible early-return. */
     private readonly productionSignalsEnabled: boolean = true,
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
@@ -284,29 +242,23 @@ export class MarketDataOrchestrator {
     this.liqFeedWatchdog = new LiqFeedWatchdogService(log, broadcastTelegram);
     this.oiTracker = new OiTrackerService(symbols);
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
+    this.cascadeRepo = new CascadeRepository(mongo);
     this.rawLiquidationEventRepo = new RawLiquidationEventRepository(mongo);
     this.mainTelegram = mainTelegram;
+    // Sep 10 2026 (Karo), operator-requested: feedUnitResearchShadowAfter()
+    // and tickUnitResearchShadow() are DISCONNECTED from live event
+    // processing (their own call-sites in start() are commented out) --
+    // neither method is deleted, per the operator's own explicit
+    // instruction. This line exists ONLY to satisfy the unused-method
+    // typecheck without calling either method or removing any code.
+    void this.feedUnitResearchShadowAfter;
+    void this.tickUnitResearchShadow;
   }
 
   async ensureIndexes(): Promise<void> {
     await this.rawLiquidationEventRepo.ensureIndexes();
   }
 
-  /** Sep 8 2026 (Karo) -- NEW. Call once at startup, BEFORE
-   *  orchestrator.start() (ws ticks must never race this), so the
-   *  same-symbol MAIN lock survives a restart. Queries every
-   *  status="SIGNAL" (open) GlobalSignalDoc, locks that symbol, and
-   *  reconstructs V5WaveService's own in-memory activeTrades entry via
-   *  hydrateActiveTrade() so onPriceTickForTrades() can detect a
-   *  future close for it. Known, accepted limitation (documented, not
-   *  silently omitted): does NOT replay historical candles to check
-   *  "did this already cross TP/SL during the downtime" -- if price is
-   *  STILL beyond the TP/SL boundary once ticks resume, the very next
-   *  relevant tick closes it correctly (onPriceTickForTrades checks
-   *  the boundary unconditionally, not just "did it just cross"); the
-   *  only unrecovered edge case is price touching TP/SL DURING
-   *  downtime and moving back inside the range before the process
-   *  restarts -- accepted as rare and out of scope for this pass. */
   async hydrateMainLocks(): Promise<void> {
     const openDocs = await this.globalSignalRepo.findOpenMainSignals();
     let hydrated = 0;
@@ -339,17 +291,57 @@ export class MarketDataOrchestrator {
     );
   }
 
+  /** Sep 10 2026 (Karo), operator-requested restart-safe persistence
+   *  for the production V5 multi-timeframe cascade lifecycle. Call
+   *  once at startup, BEFORE orchestrator.start() (same ordering
+   *  requirement as hydrateMainLocks() -- WS ticks must never race
+   *  this). Loads every persisted status="ACTIVE" cascade document and
+   *  rebuilds CascadeRegistry's own ownership + each candidate's own
+   *  exact internal state (frozen UNIT, full wave history including
+   *  each wave's own ACTIVE/COMPLETED state, current extreme, current
+   *  phase) via restoreWatch() -- a candidate whose own persisted
+   *  phase is already TERMINAL_SIGNAL/TERMINAL_CANCEL is intentionally
+   *  NOT restored into the live state machine (it produced its own
+   *  final result already; there is nothing to resume), but its own
+   *  terminal fact is what keeps the OTHER, still-active candidates'
+   *  own cascade correctly blocked from a fresh start until they too
+   *  finish. */
+  async hydrateActiveCascades(): Promise<void> {
+    const activeCascades = await this.cascadeRepo.findActiveCascades();
+    let restoredCandidates = 0;
+    for (const doc of activeCascades) {
+      this.cascadeRegistry.restoreOwnership(
+        doc.symbol,
+        doc.cascadeId,
+        doc.startedAt,
+        doc.victimSide,
+      );
+      for (const [timeframe, service] of [
+        ["1m", this.cascadeCandidate1m],
+        ["3m", this.cascadeCandidate3m],
+        ["5m", this.cascadeCandidate5m],
+      ] as const) {
+        const candidateDoc = doc.candidates[timeframe];
+        if (candidateDoc.phase !== "ACTIVE") continue;
+        if (candidateDoc.frozenUnitAbs === null) continue;
+        service.restoreWatch(doc.symbol, doc.victimSide, {
+          cascadeId: doc.cascadeId,
+          timeframe,
+          unitAbs: candidateDoc.frozenUnitAbs,
+          waves: candidateDoc.waveHistory,
+          createdAt: doc.startedAt,
+        });
+        restoredCandidates++;
+      }
+    }
+    log.info(
+      `[CASCADES_HYDRATED] ${activeCascades.length} active cascade(s), ${restoredCandidates} candidate(s) resumed from Mongo, symbols locked: [${activeCascades.map((c) => c.symbol).join(", ")}]`,
+    );
+  }
+
   start(): void {
     this.ws.subscribe({
       symbols: this.symbols,
-      // Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-
-      // timeframe comparison -- "3m" ADDED to the live WS-kline
-      // subscription so ATRTrackerService can maintain a continuously-
-      // warm ATR(3m), exclusively for the shadow unit-research service
-      // (unit-research-shadow.service.ts). Adding a NEW stream here
-      // cannot alter behavior for any EXISTING interval's own data --
-      // each (symbol, interval) pair is independently keyed throughout
-      // this codebase.
       intervals: ["15m", "5m", "3m", "1m"],
       aggTrade: true,
       bookTicker: true,
@@ -377,15 +369,39 @@ export class MarketDataOrchestrator {
         quoteQty: l.quoteQty,
         timestamp: l.timestamp,
       });
-      if (this.mainSymbolLocks.has(l.symbol)) return;
       const victimForShadow: Side = l.side === "SELL" ? "LONG" : "SHORT";
+      // Sep 10 2026 (Karo), operator-requested production V5 multi-
+      // timeframe cascade lifecycle -- PURELY ADDITIVE call, placed
+      // BEFORE the mainSymbolLocks early-return below so cascade-
+      // tracking for THIS symbol is never paused just because MAIN
+      // happens to already hold a real, open position for it (e.g.
+      // from an earlier-signaling candidate) -- mainSymbolLocks itself
+      // is completely untouched by this call; it continues to gate
+      // ONLY the real-position-creation step inside
+      // handleCascadeSignalReady() below, exactly as it already does
+      // for the existing V5 signal path.
+      this.feedCascade(l, victimForShadow);
+      if (this.mainSymbolLocks.has(l.symbol)) return;
       const wasTrackedBeforeProduction = this.wasProductionWatchTracked(
         l.symbol,
         victimForShadow,
       );
       const outcomes = this.v5.onLiquidation(l);
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
-      this.feedUnitResearchShadowAfter(l, wasTrackedBeforeProduction);
+      void wasTrackedBeforeProduction; // no longer consumed -- its only reader (feedUnitResearchShadowAfter) is disconnected below; kept computed, untouched, not deleted
+      // Sep 10 2026 (Karo), operator-requested: old research (unitResearch
+      // shadow3m/shadow5m + the earlier dragon competition) DISCONNECTED
+      // from live liquidation processing -- this call, which fed live
+      // events into that state machine, is intentionally never made
+      // anymore. The methods/classes/fields themselves are left
+      // completely untouched (per the operator's own explicit "do not
+      // delete now" instruction) -- simply never invoked, so old
+      // research can no longer create/update state, influence signal
+      // decisions, send its own Telegram messages, declare winners, or
+      // persist new results. The NEW cascade engine (feedCascade()
+      // above) is now the ONLY 1m/3m/5m candidate lifecycle receiving
+      // live liquidation events for this purpose.
+      // this.feedUnitResearchShadowAfter(l, wasTrackedBeforeProduction);
     });
 
     this.ws.on("bookTicker", (b) => {
@@ -396,7 +412,15 @@ export class MarketDataOrchestrator {
       for (const close of closes) void this.handleMainTradeClose(close);
       void this.reconciliation.onTick(b.symbol, b.timestamp);
       this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
-      this.tickUnitResearchShadow(b.symbol, mid, b.timestamp);
+      // Sep 10 2026 (Karo), operator-requested: DISCONNECTED, same
+      // rationale as feedUnitResearchShadowAfter() above -- this call
+      // fed live bookTicker ticks into the old research state machine
+      // (wave-completion checks, dragon evaluation, winner-touch
+      // checks, research Telegram). Left commented, not deleted.
+      // this.tickUnitResearchShadow(b.symbol, mid, b.timestamp);
+      // Sep 10 2026 (Karo), operator-requested production V5 multi-
+      // timeframe cascade lifecycle -- PURELY ADDITIVE.
+      this.tickCascade(b.symbol, mid, b.timestamp);
     });
 
     this.ws.on("orderbook", (snap) => {
@@ -423,24 +447,480 @@ export class MarketDataOrchestrator {
     }
   }
 
-  /** Sep 9 2026 (Karo) -- companion to feedUnitResearchShadow(), called
-   *  BEFORE this.v5.onLiquidation() runs (captures whether a watch
-   *  already existed) so the AFTER-side can tell "new episode" from
-   *  "existing episode, accumulate". Kept as two small methods rather
-   *  than one, matching exactly where each must run relative to the
-   *  production call. */
   private wasProductionWatchTracked(symbol: string, victim: Side): boolean {
     return this.v5.getWatch(symbol, victim) !== null;
   }
 
-  /** Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1
-   *  research -- readiness gate. Returns true ONLY when all three
-   *  Wilder-ATR periods (1m/240, 3m/80, 5m/48) are already warm for
-   *  this symbol. Research NEVER starts an episode with missing/partial
-   *  ATR state -- a liquidation arriving before bootstrap completes
-   *  simply gets skipped for research entirely (production itself is
-   *  completely unaffected either way -- this gate exists purely for
-   *  research data-quality). */
+  /** Sep 10 2026 (Karo), operator-requested production V5 multi-
+   *  timeframe cascade lifecycle. Called on EVERY liquidation event,
+   *  PURELY ADDITIVE, completely decoupled from V5's own watch-
+   *  lifecycle and from mainSymbolLocks. Delegates the "is there
+   *  already an active cascade for this symbol" ownership decision to
+   *  cascadeRegistry (see cascade-registry.ts's own doc comment) --
+   *  routes into the three EXISTING candidates if one is active under
+   *  the SAME victim, ignores an opposite-victim event while one is
+   *  active, or starts a genuinely fresh cascade (all three frozen
+   *  common-horizon UNITs) if none is active. */
+  /** Sep 10 2026 (Karo), operator-requested restart-safe persistence.
+   *  Exports the given candidate's own current, still-ACTIVE state and
+   *  upserts it into v5_active_cascades -- called after every
+   *  meaningful state transition (cascade start, a wave starting/
+   *  completing, an extreme deepening). A complete no-op if the
+   *  candidate has no active watch (never started, or already
+   *  terminal -- terminal persistence is handled separately by
+   *  persistTerminalCandidate() below). */
+  private persistActiveCandidateSnapshot(
+    symbol: string,
+    victim: Side,
+    candidate: CascadeCandidateService,
+    timeframe: "1m" | "3m" | "5m",
+    now: number,
+  ): void {
+    const state = candidate.exportState(symbol, victim);
+    if (!state) return;
+    const currentWave = state.waves[state.waves.length - 1];
+    const doc: CascadeCandidateStateDoc = {
+      timeframe,
+      phase: "ACTIVE",
+      frozenUnitAbs: state.unitAbs,
+      currentWaveNumber: currentWave?.waveNumber ?? null,
+      waveHistory: state.waves,
+      currentExtreme: currentWave?.extremePrice ?? null,
+      terminalStatus: null,
+      terminalReason: null,
+      signalId: null,
+      lastUpdatedTs: now,
+    };
+    void this.cascadeRepo.upsertCandidateState(
+      state.cascadeId,
+      symbol,
+      victim,
+      state.createdAt,
+      doc,
+      now,
+    );
+  }
+
+  private feedCascade(l: Liquidation, victim: Side): void {
+    const resolved = this.cascadeRegistry.resolve(
+      l.symbol,
+      victim,
+      l.timestamp,
+      randomUUID,
+    );
+
+    if (resolved.action === "ignore") return;
+
+    if (resolved.action === "route") {
+      this.cascadeCandidate1m.onLiquidation(l, victim);
+      this.cascadeCandidate3m.onLiquidation(l, victim);
+      this.cascadeCandidate5m.onLiquidation(l, victim);
+      this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate1m,
+        "1m",
+        l.timestamp,
+      );
+      this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate3m,
+        "3m",
+        l.timestamp,
+      );
+      this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate5m,
+        "5m",
+        l.timestamp,
+      );
+      return;
+    }
+
+    if (!this.commonHorizonAtrReady(l.symbol)) return;
+    const unit1m = this.atrTracker.getWilderATR(
+      l.symbol,
+      "1m",
+      COMMON_HORIZON_PERIODS.atr1m,
+    );
+    const unit3m = this.atrTracker.getWilderATR(
+      l.symbol,
+      "3m",
+      COMMON_HORIZON_PERIODS.atr3m,
+    );
+    const unit5m = this.atrTracker.getWilderATR(
+      l.symbol,
+      "5m",
+      COMMON_HORIZON_PERIODS.atr5m,
+    );
+    if (unit1m !== null && unit1m > 0) {
+      this.cascadeCandidate1m.startCascade(
+        l.symbol,
+        victim,
+        resolved.cascadeId,
+        "1m",
+        unit1m,
+        l.price,
+        resolved.cascadeStartTs,
+        l.quoteQty,
+        resolved.cascadeStartTs,
+      );
+      this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate1m,
+        "1m",
+        l.timestamp,
+      );
+    }
+    if (unit3m !== null && unit3m > 0) {
+      this.cascadeCandidate3m.startCascade(
+        l.symbol,
+        victim,
+        resolved.cascadeId,
+        "3m",
+        unit3m,
+        l.price,
+        resolved.cascadeStartTs,
+        l.quoteQty,
+        resolved.cascadeStartTs,
+      );
+      this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate3m,
+        "3m",
+        l.timestamp,
+      );
+    }
+    if (unit5m !== null && unit5m > 0) {
+      this.cascadeCandidate5m.startCascade(
+        l.symbol,
+        victim,
+        resolved.cascadeId,
+        "5m",
+        unit5m,
+        l.price,
+        resolved.cascadeStartTs,
+        l.quoteQty,
+        resolved.cascadeStartTs,
+      );
+      this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate5m,
+        "5m",
+        l.timestamp,
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested production V5 multi-
+   *  timeframe cascade lifecycle. Called on EVERY bookTicker tick,
+   *  PURELY ADDITIVE. Ticks all three candidates for BOTH victims --
+   *  each candidate's own onTick() is a complete no-op when it has no
+   *  active watch for that symbol/victim, so this is cheap for the
+   *  vast majority of ticks. A signal-ready result flows into the
+   *  EXISTING V5 signal path (handleCascadeSignalReady()); a cancel
+   *  result is diagnostic-only (logged, no further action). */
+  private tickCascade(symbol: string, mid: number, ts: number): void {
+    for (const victim of ["LONG", "SHORT"] as const) {
+      this.handleCascadeTick(
+        "1m",
+        this.cascadeCandidate1m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
+      this.handleCascadeTick(
+        "3m",
+        this.cascadeCandidate3m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
+      this.handleCascadeTick(
+        "5m",
+        this.cascadeCandidate5m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested restart-safe persistence.
+   *  Tracks the last-persisted (waveCount, extremePrice) per candidate
+   *  watch, so persistActiveCandidateSnapshot() is only actually called
+   *  (a real Mongo write) when something meaningful has changed since
+   *  the last tick -- avoids writing on every single bookTicker tick
+   *  for a symbol with an active cascade. */
+  private readonly cascadeLastPersistedSnapshot = new Map<
+    string,
+    { waveCount: number; extremePrice: number }
+  >();
+
+  private handleCascadeTick(
+    timeframe: "1m" | "3m" | "5m",
+    candidate: CascadeCandidateService,
+    symbol: string,
+    victim: Side,
+    mid: number,
+    ts: number,
+  ): void {
+    const result = candidate.onTick(symbol, victim, mid, ts);
+    if (!result) {
+      const state = candidate.exportState(symbol, victim);
+      if (state) {
+        const currentWave = state.waves[state.waves.length - 1]!;
+        const snapKey = `${state.cascadeId}:${timeframe}`;
+        const last = this.cascadeLastPersistedSnapshot.get(snapKey);
+        if (
+          !last ||
+          last.waveCount !== state.waves.length ||
+          last.extremePrice !== currentWave.extremePrice
+        ) {
+          this.cascadeLastPersistedSnapshot.set(snapKey, {
+            waveCount: state.waves.length,
+            extremePrice: currentWave.extremePrice,
+          });
+          this.persistActiveCandidateSnapshot(
+            symbol,
+            victim,
+            candidate,
+            timeframe,
+            ts,
+          );
+        }
+      }
+      return;
+    }
+    if ("entryPrice" in result) {
+      void this.handleCascadeSignalReady(result as CascadeSignalReadyEvent);
+    } else {
+      const cancel = result as CascadeCancelEvent;
+      log.info(
+        `[CASCADE_CANDIDATE_CANCEL] ${cancel.symbol} ${cancel.victim} timeframe=${cancel.timeframe} cascadeId=${cancel.cascadeId} waves=${cancel.waveHistory.length} reason=${cancel.reason}`,
+      );
+      const finalWave = cancel.waveHistory[cancel.waveHistory.length - 1];
+      const doc: CascadeCandidateStateDoc = {
+        timeframe: cancel.timeframe,
+        phase: "TERMINAL_CANCEL",
+        frozenUnitAbs: null,
+        currentWaveNumber: finalWave?.waveNumber ?? null,
+        // Every wave in a terminal event's own waveHistory has, by
+        // construction, already completed (the terminal condition
+        // itself is only ever evaluated once the final wave has
+        // reached COMPLETED) -- safe to map unconditionally.
+        waveHistory: cancel.waveHistory.map((w) => ({
+          ...w,
+          state: "COMPLETED" as const,
+        })),
+        currentExtreme: finalWave?.extremePrice ?? null,
+        terminalStatus: "CANCEL",
+        terminalReason: cancel.reason,
+        signalId: null,
+        lastUpdatedTs: ts,
+      };
+      void this.cascadeRepo.markCandidateTerminal(
+        cancel.cascadeId,
+        cancel.symbol,
+        cancel.victim,
+        cancel.cascadeStartTs,
+        doc,
+        ts,
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested production V5 multi-
+   *  timeframe cascade lifecycle. Connects a candidate's own signal-
+   *  ready result into the EXISTING, UNCHANGED V5 production signal
+   *  path: the SAME deriveLiquidationPhysicsTradePlan() TP/SL formula
+   *  (no redesign, per the operator's own explicit instruction), the
+   *  SAME GlobalSignalDoc shape (plus the two new, additive cascadeId/
+   *  timeframe fields), the SAME distributor.distribute() fan-out. The
+   *  candidate's own final (signal-triggering) wave and its own first
+   *  wave feed the SAME w1/w2 formula-inputs the existing V5 signal
+   *  path already uses -- this is a mapping choice for THIS pass only
+   *  (TP/SL redesign is explicitly out of scope here).
+   *
+   *  mainSymbolLocks (the EXISTING, UNCHANGED same-symbol real-position
+   *  lock) is respected EXACTLY as the existing V5 signal path already
+   *  respects it: the candidate's own signal doc is ALWAYS persisted
+   *  (so every candidate's own result is available for later
+   *  comparison, per the operator's own explicit requirement), but
+   *  distribute() -- the ONLY step that can trigger a real Binance
+   *  order or a Telegram ENTRY -- is skipped entirely if MAIN already
+   *  holds an open real position for this symbol. This guarantees MAIN
+   *  can NEVER hold two simultaneous real positions on the same
+   *  symbol, regardless of how many candidates independently reach
+   *  signal-ready. */
+  private async handleCascadeSignalReady(
+    event: CascadeSignalReadyEvent,
+  ): Promise<void> {
+    try {
+      // Sep 10 2026 (Karo), operator-corrected mapping -- the TWO waves
+      // that actually caused THIS signal decision (previous completed
+      // wave -> w1 input, the weakening/triggering wave -> w2 input),
+      // NOT waveHistory[0]/waveHistory[last] unconditionally. For a
+      // normal W1->W2 signal these are the same thing (W1, W2); for a
+      // longer cascade (e.g. W1 100k, W2 150k, W3 220k, W4 180k ->
+      // SIGNAL_READY at W4), the pair fed into the UNCHANGED formula is
+      // W3 (w1 input) and W4 (w2 input) -- the local strong-wave/
+      // weakening-wave pair, not the episode's own very first wave.
+      const triggerWave = event.waveHistory[event.waveHistory.length - 1]!;
+      const previousWave = event.waveHistory[event.waveHistory.length - 2]!;
+      const firstWave = event.waveHistory[0]!; // the TRUE episode-start wave -- used ONLY for qualifyingEvent* below, never for the formula inputs
+
+      const plan = deriveLiquidationPhysicsTradePlan({
+        entry: event.entryPrice,
+        side: event.side,
+        w1AnchorPrice: previousWave.anchorPrice,
+        w1ExtremePrice: previousWave.extremePrice,
+        w1LiqUsd: previousWave.liqUsd,
+        w2LiqUsd: triggerWave.liqUsd,
+        atr15mAbs: this.atrTracker.getATR(event.symbol, "15m") ?? 0,
+        p95: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
+        dailyLiqPerMinBaseline:
+          this.liquidationStats.rollingMedianLiqNotionalPerMin(
+            event.symbol,
+            60,
+          ) ?? 0,
+      });
+
+      const signalId = randomUUID();
+      const totalLiq = event.waveHistory.reduce((sum, w) => sum + w.liqUsd, 0);
+
+      const globalSignal: GlobalSignalDoc = {
+        signalId,
+        symbol: event.symbol,
+        side: event.side,
+        victim: event.victim,
+        signalTs: event.entryTs,
+        entryPrice: event.entryPrice,
+        entryWaveNumber: triggerWave.waveNumber,
+        waveHistory: [],
+        w1Diagnostics: null,
+        totalEpisodePressure: totalLiq,
+        dominantLayerLiqUsd: null,
+        dominantLayerWaveNumber: null,
+        exhaustionLayerLiqUsd: triggerWave.liqUsd,
+        exhaustionLayerWaveNumber: triggerWave.waveNumber,
+        unitAtStart: event.unitAbs,
+        p95AtEntry: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
+        dailyLiqPerMinBaselineAtEntry:
+          this.liquidationStats.rollingMedianLiqNotionalPerMin(
+            event.symbol,
+            60,
+          ) ?? 0,
+        atr15mAtEntry: this.atrTracker.getATR(event.symbol, "15m") ?? 0,
+        qualifyingEventUsd: firstWave.liqUsd,
+        qualifyingEventTs: firstWave.anchorTs,
+        p95AtQualification: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
+        physics: null,
+        btcContext: null,
+        liq24hContext: null,
+        wallContext: null,
+        entry: plan.ok ? plan.entry : null,
+        tp: plan.ok ? plan.tp : null,
+        sl: plan.ok ? plan.sl : null,
+        rr: plan.ok ? plan.rr : null,
+        btcSafetyStatus: "UNKNOWN",
+        btcIntendedSideAtSignalTime: null,
+        rejectionReason: plan.ok ? null : plan.cancelReason,
+        planDiagnostics: null,
+        status: plan.ok ? "SIGNAL" : "REJECTED_PLAN",
+        closedAt: null,
+        closePrice: null,
+        maxFavorableR: null,
+        maxAdverseR: null,
+        liquidationStatsContext: null,
+        researchCheckpoints: [],
+        unitResearch: null,
+        unitCompetitionResearch: null,
+        commonHorizonResearch: null,
+        cascadeId: event.cascadeId,
+        timeframe: event.timeframe,
+        createdAt: Date.now(),
+      };
+
+      await this.globalSignalRepo.insert(globalSignal);
+      log.info(
+        `[CASCADE_CANDIDATE_SIGNAL] ${event.symbol} ${event.side} timeframe=${event.timeframe} cascadeId=${event.cascadeId} signalId=${signalId} waves=${event.waveHistory.length} plan=${plan.ok ? "ok" : `rejected:${plan.cancelReason}`}`,
+      );
+
+      // Sep 10 2026 (Karo), operator-requested restart-safe persistence
+      // -- this candidate is now terminal (SIGNAL-READY was reached,
+      // regardless of whether the TP/SL plan itself was accepted or
+      // rejected -- either way this candidate does not retry or resume
+      // after a restart), so mark it terminal in v5_active_cascades
+      // immediately, and check whether the parent cascade is now fully
+      // closed.
+      const terminalDoc: CascadeCandidateStateDoc = {
+        timeframe: event.timeframe,
+        phase: "TERMINAL_SIGNAL",
+        frozenUnitAbs: event.unitAbs,
+        currentWaveNumber: triggerWave.waveNumber,
+        waveHistory: event.waveHistory.map((w) => ({
+          ...w,
+          state: "COMPLETED" as const,
+        })),
+        currentExtreme: triggerWave.extremePrice,
+        terminalStatus: "SIGNAL",
+        terminalReason: null,
+        signalId,
+        lastUpdatedTs: event.entryTs,
+      };
+      void this.cascadeRepo.markCandidateTerminal(
+        event.cascadeId,
+        event.symbol,
+        event.victim,
+        event.cascadeStartTs,
+        terminalDoc,
+        event.entryTs,
+      );
+
+      if (!plan.ok || globalSignal.entry === null || globalSignal.sl === null)
+        return;
+
+      // mainSymbolLocks -- the EXISTING, UNCHANGED real-position lock.
+      // Never held/released by this new cascade path directly; only
+      // ever read here, to decide whether a REAL distribution
+      // (Telegram/Binance) is safe. If MAIN already has an open
+      // position for this symbol, this candidate's own result stays
+      // persisted (above) for comparison, but is never distributed --
+      // guaranteeing MAIN can never hold two simultaneous real
+      // positions on the same symbol.
+      if (this.mainSymbolLocks.has(event.symbol)) return;
+      await this.distributor.distribute(globalSignal, this.mongo);
+      this.mainSymbolLocks.add(event.symbol);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, cascadeId: event.cascadeId, timeframe: event.timeframe },
+        "[CASCADE_SIGNAL_READY_UNHANDLED_ERROR]",
+      );
+    }
+  }
+
   private commonHorizonAtrReady(symbol: string): boolean {
     return (
       this.atrTracker.getWilderATR(
@@ -466,14 +946,9 @@ export class MarketDataOrchestrator {
     wasTrackedBefore: boolean,
   ): void {
     const victim: Side = l.side === "SELL" ? "LONG" : "SHORT";
-    // The earlier ("unitResearch") 3m/5m-vs-production-1m experiment
-    // is UNCHANGED -- still tied to V5's own watch-lifecycle
-    // deliberately, since IT is explicitly comparing against what
-    // production itself is doing. Out of scope for this fix (never
-    // mentioned by the operator, no corruption symptom observed there).
     if (!wasTrackedBefore) {
       const newWatch = this.v5.getWatch(l.symbol, victim);
-      if (!newWatch) return; // production itself declined to track this event (e.g. BTC EXCLUDE mode) -- shadow mirrors that by doing nothing too
+      if (!newWatch) return;
       const unit3m = this.atrTracker.getATR(l.symbol, "3m");
       if (unit3m !== null && unit3m > 0) {
         this.shadow3m.startEpisode(
@@ -505,29 +980,9 @@ export class MarketDataOrchestrator {
       this.shadow5m.onLiquidation(l, victim);
     }
 
-    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- the
-    // common-horizon-4h-v1 competition's own episode-boundary is now
-    // COMPLETELY DECOUPLED from V5's own watch-lifecycle (wasTrackedBefore
-    // above). V5's own watch cycles far faster than a common-horizon
-    // episode's own natural lifetime (its own UNIT is ATR1m(14), not the
-    // much longer Wilder(240/80/48) this research uses) -- reusing V5's
-    // own watch-transitions as the "is this a new episode" signal caused
-    // a real production bug: every V5-watch-cycle for the SAME symbol
-    // incorrectly started a FRESH competition episode (fresh signalId),
-    // even while this research's OWN, still-tracking 3m/5m candidates
-    // from an EARLIER cycle were still alive -- different candidates
-    // ended up split across different signalId documents, corrupting
-    // the "one episode owns all three candidates" invariant.
-    // feedCommonHorizonCompetition() owns its own, independent
-    // per-(symbol,victim) ownership map instead (see
-    // competitionEpisodeOwnership below), checked on EVERY liquidation
-    // regardless of what V5's own watch is doing.
     this.feedCommonHorizonCompetition(l, victim);
   }
 
-  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- see
-   *  common-horizon-episode-registry.ts's own doc comment for the full
-   *  invariant this enforces and the corruption bug it fixes. */
   private readonly commonHorizonEpisodes = new CommonHorizonEpisodeRegistry(
     this.competitionShadow1m,
     this.competitionShadow3m,
@@ -535,20 +990,6 @@ export class MarketDataOrchestrator {
     (signalId: string) => this.competitionWinners.has(signalId),
   );
 
-  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX. Called on
-   *  EVERY liquidation event for this symbol/victim, regardless of
-   *  V5's own watch-lifecycle. Delegates the actual ownership decision
-   *  to commonHorizonEpisodes (see common-horizon-episode-registry.ts's
-   *  own doc comment for the full invariant) -- if it resolves to the
-   *  SAME, still-active episode, the event is routed into it
-   *  (onLiquidation() on all three -- each candidate's OWN internal
-   *  state machine decides for itself whether this event starts its
-   *  own Wave 2, accumulates into an active wave, or is a no-op if
-   *  already terminal -- exactly as before, unchanged). Only when the
-   *  registry resolves a genuinely NEW episode does startEpisode() run,
-   *  with ONE freshly-generated signalId and ONE shared episodeStartTs
-   *  used for ALL THREE candidates -- never V5's own,
-   *  independently-cycling signalId. */
   private feedCommonHorizonCompetition(l: Liquidation, victim: Side): void {
     const resolved = this.commonHorizonEpisodes.resolve(
       l.symbol,
@@ -558,13 +999,6 @@ export class MarketDataOrchestrator {
     );
 
     if (resolved.action === "ignore") {
-      // An episode already owns this symbol under the OPPOSITE victim.
-      // Must not start a second, simultaneous episode on the same
-      // symbol, and must not be treated as this liquidation starting
-      // Wave 2 for the existing episode either -- simply drop it for
-      // research purposes (there is no active same-victim watch for
-      // this event to fall into: onLiquidation() is deliberately never
-      // called here).
       return;
     }
 
@@ -627,18 +1061,6 @@ export class MarketDataOrchestrator {
       );
   }
 
-  /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
-   *  comparison. Called ONCE per bookTicker tick, ALWAYS AFTER
-   *  this.v5.onTick() has already run. Ticks BOTH shadow candidates,
-   *  for BOTH victims -- their own onTick() is a complete no-op for any
-   *  symbol/victim pair with no active shadow episode, so this is cheap
-   *  and side-effect-free for the vast majority of ticks. Persists a
-   *  terminal (entry or no-entry) event the moment one occurs, and
-   *  registers the shadow's own MFE/MAE checkpoint-watch on entry --
-   *  reusing the EXACT SAME ResearchCheckpointTracker/GlobalSignalRepository
-   *  machinery production's own researchCheckpoints already uses, via a
-   *  SEPARATE tracker instance and a SEPARATE persisted field
-   *  (unitResearch), never touching researchCheckpoints itself. */
   private tickUnitResearchShadow(
     symbol: string,
     mid: number,
@@ -690,13 +1112,6 @@ export class MarketDataOrchestrator {
         mid,
         ts,
       );
-      // Sep 10 2026 (Karo), operator-requested observability extension --
-      // periodic live-phase snapshot for still-TRACKING candidates, so
-      // the read-only monitoring report can show current phase/W1/W2/
-      // next-target instead of "no result persisted yet". PURE
-      // OBSERVATION: peekWatch() never mutates the shadow's own state;
-      // this only ever calls the NEW, additive setCommonHorizonCandidate()
-      // persistence path, never touching production or any decision logic.
       this.snapshotCommonHorizonPhase(
         "atr1m",
         this.competitionShadow1m,
@@ -754,12 +1169,6 @@ export class MarketDataOrchestrator {
     this.checkCompetitionWinnerTouch(symbol, mid, ts);
   }
 
-  /** Sep 10 2026 (Karo), operator-requested observability extension --
-   *  writes a live phase-snapshot for a still-ACTIVE (non-terminal)
-   *  candidate, throttled to avoid write-spam: only when the phase
-   *  itself has changed, or at most once every 15s otherwise. PURE
-   *  READ of shadow.peekWatch() (never mutates shadow state) + a
-   *  single, additive Mongo write -- no strategy/decision logic here. */
   private readonly commonHorizonLastSnapshot = new Map<
     string,
     { phase: string; ts: number }
@@ -775,19 +1184,6 @@ export class MarketDataOrchestrator {
   ): void {
     const peek = shadow.peekWatch(symbol, victim);
     if (!peek) return;
-    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- signalId is
-    // now read from THIS competition's own, dedicated ownership map
-    // (competitionEpisodeOwnership), never from V5's own, independently-
-    // cycling watch. See feedUnitResearchShadowAfter()'s own doc comment
-    // for why the earlier v5.getWatch()-based join was the root cause of
-    // the episode-splitting corruption bug this fix addresses.
-    // Sep 10 2026 (Karo), operator-requested lifecycle correction --
-    // ownership is keyed by symbol alone now; the episode's own
-    // ORIGINAL victim is stored inside it. peek being non-null for
-    // THIS victim already implies it matches the episode's own
-    // victim (a shadow watch only exists under the episode's own
-    // original victim-key), but the check is kept explicit and
-    // defensive rather than assumed.
     const owner = this.commonHorizonEpisodes.current(symbol);
     if (!owner || owner.victim !== victim) return;
     const ownerSignalId = owner.signalId;
@@ -842,20 +1238,6 @@ export class MarketDataOrchestrator {
     );
   }
 
-  /** Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1
-   *  research (formerly the ATR(14)-based dragon competition -- same
-   *  shadow-service class, same dragon formula, now fed Wilder(240/80/48)
-   *  and persisted to the SEPARATE, versioned commonHorizonResearch
-   *  field instead of unitCompetitionResearch). Called once per
-   *  (candidate, victim) per bookTicker tick -- a complete no-op when no
-   *  competition-episode is active. On a terminal shadow event:
-   *  STRUCTURAL_CANCEL is persisted immediately for a no-entry event;
-   *  for an entry-ready event, runs evaluateDragon() (UNCHANGED formula
-   *  -- see unit-competition-dragon.ts), persists the FULL result, and
-   *  registers an MFE/MAE checkpoint-watch ONLY when verdict=PASS.
-   *  Crucially: a candidate reaching PASS or FAIL here NEVER stops any
-   *  OTHER candidate -- each of the three UnitResearchShadowService
-   *  instances is fully independent. */
   private handleCompetitionTick(
     label: "atr1m" | "atr3m" | "atr5m",
     shadow: UnitResearchShadowService,
@@ -1090,14 +1472,6 @@ export class MarketDataOrchestrator {
     return label === "atr1m" ? "1m" : label === "atr3m" ? "3m" : "5m";
   }
 
-  /** Sep 10 2026 (Karo), operator-requested MAIN-only Telegram research
-   *  lifecycle. Declares the WINNER exactly once per episode (signalId)
-   *  -- a no-op if a winner already exists, guaranteeing "FIRST PASS
-   *  wins, never reassigned" exactly as specified. Sends the ONE
-   *  RESEARCH ENTRY message via this.mainTelegram ONLY -- never
-   *  user-runtime fan-out, never Binance, never the production
-   *  signal-distributor. Registers the winner's own hypothetical
-   *  position for later TP/SL-touch monitoring (checkCompetitionWinnerTouch()). */
   private declareWinnerIfNone(
     signalId: string,
     symbol: string,
@@ -1114,7 +1488,7 @@ export class MarketDataOrchestrator {
     dragon: { relativePressure: number },
     durationMs: number,
   ): void {
-    if (this.competitionWinners.has(signalId)) return; // already has a winner -- never reassigned
+    if (this.competitionWinners.has(signalId)) return;
     this.competitionWinners.set(signalId, {
       signalId,
       symbol,
@@ -1184,13 +1558,6 @@ export class MarketDataOrchestrator {
     });
   }
 
-  /** Sep 10 2026 (Karo), operator-requested MAIN-only Telegram research
-   *  lifecycle. Called once per bookTicker tick for the symbol -- a
-   *  no-op if no open winner exists for this symbol. Pure price
-   *  comparison against the winner's own already-persisted TP/SL,
-   *  structurally identical in spirit to (never sharing state with)
-   *  MAIN's own onPriceTickForTrades() canonical-close check. Sends
-   *  the ONE RESEARCH CLOSE message via this.mainTelegram ONLY. */
   private checkCompetitionWinnerTouch(
     symbol: string,
     mid: number,
@@ -1265,7 +1632,7 @@ export class MarketDataOrchestrator {
     if ("entryPrice" in result) {
       const entry = result as ShadowEntryEvent;
       const prodWatch = this.v5.getWatch(symbol, victim);
-      const prodEntryTs: number | null = null; // production's own entry price/time is not observable from a released/consumed watch here -- delay is computed downstream from the persisted signalTs instead, at report time
+      const prodEntryTs: number | null = null;
       const planResult = deriveLiquidationPhysicsTradePlan({
         entry: entry.entryPrice,
         side: entry.side,
@@ -1312,7 +1679,7 @@ export class MarketDataOrchestrator {
           denom: denom > 0 ? denom : entry.unitAbs,
         },
       );
-      void prodWatch; // reserved for future delay-vs-production wiring; not required for this pass's own core comparison
+      void prodWatch;
     } else {
       const noEntry = result as ShadowNoEntryEvent;
       const doc: UnitResearchCandidateDoc = {
@@ -1438,11 +1805,6 @@ export class MarketDataOrchestrator {
 
       const hasRealPlan = event.plan !== null;
 
-      // Sep 9 2026 (Karo), operator-requested diagnostics/research-
-      // only context -- REUSES getVictimStatsSnapshot() as-is (see its
-      // own doc comment). Computed here, once, for BOTH victim sides
-      // -- never fed back into event/plan/qualification, which were
-      // already fully decided before this line runs.
       const liquidationStatsContext = {
         currentVictim: event.victim,
         long: this.liquidationStats.getVictimStatsSnapshot(
@@ -1460,6 +1822,8 @@ export class MarketDataOrchestrator {
         symbol: event.symbol,
         side: event.side,
         victim: event.victim,
+        cascadeId: null,
+        timeframe: null,
         signalTs: event.signalTs,
         entryPrice: event.entryPrice,
         entryWaveNumber: event.entryWaveNumber,
@@ -1535,15 +1899,6 @@ export class MarketDataOrchestrator {
         createdAt: Date.now(),
       };
 
-      // Sep 10 2026 (Karo), operator-requested -- productionSignalsEnabled
-      // gates the distribute() call AND mainSymbolLocks.add() TOGETHER.
-      // Locking the symbol without distribute() ever actually executing
-      // anything would PERMANENTLY STARVE research for that symbol
-      // (mainSymbolLocks is checked BEFORE research's own liquidation-
-      // handler code runs at all -- see the liquidation handler in
-      // start()), since the only thing that ever releases this lock is
-      // MAIN's own real trade CLOSE, which can never happen if no real
-      // signal was ever distributed. Both gated together prevents that.
       if (this.productionSignalsEnabled) {
         await this.distributor.distribute(globalSignal, this.mongo);
         if (
@@ -1615,6 +1970,8 @@ export class MarketDataOrchestrator {
       signalId: watch.signalId ?? randomUUID(),
       symbol,
       side: watch.side,
+      cascadeId: null,
+      timeframe: null,
       victim: watch.victim,
       signalTs: watch.createdAt,
       entryPrice: 0,

@@ -1,0 +1,509 @@
+/**
+ * Sep 10 2026 (Karo), operator-requested production V5 multi-timeframe
+ * cascade lifecycle -- PURELY ADDITIVE feature. Tests the wave-
+ * lifecycle state machine (CascadeCandidateService) and the symbol-
+ * level ownership registry (CascadeRegistry) directly, plus a
+ * structural check confirming mainSymbolLocks is genuinely respected
+ * by the new signal-ready path in market-data-orchestrator.ts.
+ */
+import * as assert from "assert";
+import * as fs from "fs";
+import { CascadeCandidateService } from "../src/domain/cascade/cascade-candidate.service";
+import { CascadeRegistry } from "../src/domain/cascade/cascade-registry";
+import type { Liquidation, Side } from "../src/shared/common.types";
+
+let passed = 0;
+let failed = 0;
+
+function scenario(name: string, fn: () => void): void {
+  try {
+    fn();
+    passed++;
+    console.log(`  \u2713 ${name}`);
+  } catch (err) {
+    failed++;
+    console.log(`  \u2717 ${name}`);
+    console.log(`      ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+}
+
+function liq(
+  symbol: string,
+  side: "BUY" | "SELL",
+  price: number,
+  quoteQty: number,
+  timestamp: number,
+): Liquidation {
+  return {
+    symbol,
+    side,
+    price,
+    quantity: quoteQty / price,
+    quoteQty,
+    timestamp,
+  };
+}
+
+console.log("Running cascade-candidate tests...\n");
+
+// ─── Wave lifecycle -- W1 never signals ────────────────────────────────
+
+scenario(
+  "W1 completing (1x UNIT recovery) never produces a signal-ready or cancel result",
+  () => {
+    const c = new CascadeCandidateService();
+    c.startCascade(
+      "ETHUSDT",
+      "LONG",
+      "casc-1",
+      "1m",
+      1,
+      2000,
+      1000,
+      5000,
+      1000,
+    );
+    const result = c.onTick("ETHUSDT", "LONG", 2001, 2000); // 1x UNIT recovery -> W1 completes
+    assert.strictEqual(
+      result,
+      null,
+      "W1 completing must never itself be a terminal result",
+    );
+    const peek = c.peekWatch("ETHUSDT", "LONG");
+    assert.ok(peek);
+    assert.strictEqual(peek!.waveCount, 1);
+    assert.strictEqual(peek!.phase, "WAITING_NEXT_WAVE");
+  },
+);
+
+// ─── Wave lifecycle -- W1 cancel (2x UNIT, no Wave 2) ──────────────────
+
+scenario(
+  "W1 completes then 2x-UNIT recovery with no Wave 2 arriving cancels the candidate",
+  () => {
+    const c = new CascadeCandidateService();
+    c.startCascade(
+      "ETHUSDT",
+      "LONG",
+      "casc-1",
+      "1m",
+      1,
+      2000,
+      1000,
+      5000,
+      1000,
+    );
+    c.onTick("ETHUSDT", "LONG", 2001, 2000); // W1 completes
+    const result = c.onTick("ETHUSDT", "LONG", 2002, 3000); // 2x UNIT -> CANCEL
+    assert.ok(result && !("entryPrice" in result));
+    assert.strictEqual((result as any).reason, "CANCEL_NO_NEXT_WAVE");
+    assert.strictEqual(
+      c.peekWatch("ETHUSDT", "LONG"),
+      null,
+      "candidate must now be terminal",
+    );
+  },
+);
+
+// ─── Wave lifecycle -- W2 <= W1 -> SIGNAL_READY ────────────────────────
+
+scenario(
+  "Wave 2 completing with liqUsd <= Wave 1's own liqUsd is immediately SIGNAL-READY",
+  () => {
+    const c = new CascadeCandidateService();
+    c.startCascade(
+      "ETHUSDT",
+      "LONG",
+      "casc-1",
+      "1m",
+      1,
+      2000,
+      1000,
+      8000,
+      1000,
+    ); // W1 liq = 8000
+    c.onTick("ETHUSDT", "LONG", 2001, 2000); // W1 completes
+    c.onLiquidation(liq("ETHUSDT", "SELL", 2001, 3000, 2500), "LONG"); // Wave 2 starts, liq=3000 (<= 8000)
+    const result = c.onTick("ETHUSDT", "LONG", 2002, 3000); // Wave 2 completes (1x UNIT recovery)
+    assert.ok(
+      result && "entryPrice" in result,
+      "must be signal-ready, not cancel",
+    );
+    const signal = result as any;
+    assert.strictEqual(signal.waveHistory.length, 2);
+    assert.strictEqual(signal.waveHistory[1].liqUsd, 3000);
+    assert.strictEqual(signal.entryPrice, 2002);
+  },
+);
+
+// ─── Wave lifecycle -- W2 > W1 -> wait for W3, then compare W3 vs W2 ───
+
+scenario(
+  "Wave 2 > Wave 1 waits for Wave 3; Wave 3 <= Wave 2 then signals -- arbitrary wave count, no hard cap",
+  () => {
+    const c = new CascadeCandidateService();
+    c.startCascade(
+      "ETHUSDT",
+      "LONG",
+      "casc-1",
+      "1m",
+      1,
+      2000,
+      1000,
+      3000,
+      1000,
+    ); // W1 liq = 3000
+    c.onTick("ETHUSDT", "LONG", 2001, 2000); // W1 completes
+    c.onLiquidation(liq("ETHUSDT", "SELL", 2001, 9000, 2500), "LONG"); // Wave 2 starts, liq=9000 (> 3000)
+    const afterW2 = c.onTick("ETHUSDT", "LONG", 2002, 3000); // Wave 2 completes
+    assert.strictEqual(
+      afterW2,
+      null,
+      "Wave 2 > Wave 1 must NOT signal yet -- must wait for Wave 3",
+    );
+    const peek = c.peekWatch("ETHUSDT", "LONG");
+    assert.strictEqual(peek!.waveCount, 2);
+
+    c.onLiquidation(liq("ETHUSDT", "SELL", 2002, 4000, 3500), "LONG"); // Wave 3 starts, liq=4000 (<= 9000)
+    const afterW3 = c.onTick("ETHUSDT", "LONG", 2003, 4000); // Wave 3 completes
+    assert.ok(
+      afterW3 && "entryPrice" in afterW3,
+      "Wave 3 <= Wave 2 must now be signal-ready",
+    );
+    const signal = afterW3 as any;
+    assert.strictEqual(
+      signal.waveHistory.length,
+      3,
+      "all three waves must be in the history",
+    );
+  },
+);
+
+// ─── peekWatch is a pure read ──────────────────────────────────────────
+
+scenario(
+  "peekWatch() never mutates state -- repeated calls return identical results",
+  () => {
+    const c = new CascadeCandidateService();
+    c.startCascade(
+      "ETHUSDT",
+      "LONG",
+      "casc-1",
+      "1m",
+      1,
+      2000,
+      1000,
+      5000,
+      1000,
+    );
+    const p1 = c.peekWatch("ETHUSDT", "LONG");
+    const p2 = c.peekWatch("ETHUSDT", "LONG");
+    const p3 = c.peekWatch("ETHUSDT", "LONG");
+    assert.deepStrictEqual(p1, p2);
+    assert.deepStrictEqual(p2, p3);
+  },
+);
+
+console.log("\nRunning cascade-registry tests...\n");
+
+function makeRegistry() {
+  const c1m = new CascadeCandidateService();
+  const c3m = new CascadeCandidateService();
+  const c5m = new CascadeCandidateService();
+  const registry = new CascadeRegistry(c1m, c3m, c5m);
+  let idCounter = 0;
+  const makeId = () => `casc-${++idCounter}`;
+  return { c1m, c3m, c5m, registry, makeId };
+}
+
+// ─── One cascade per symbol, regardless of victim ──────────────────────
+
+scenario(
+  "an active LONG-victim cascade blocks a SHORT-victim liquidation on the SAME symbol from starting a second cascade",
+  () => {
+    const h = makeRegistry();
+    const first = h.registry.resolve("DOGEUSDT", "LONG", 1000, h.makeId);
+    assert.strictEqual(first.action, "start");
+    if (first.action !== "start") return;
+    h.c1m.startCascade(
+      "DOGEUSDT",
+      "LONG",
+      first.cascadeId,
+      "1m",
+      0.001,
+      0.08,
+      1000,
+      5000,
+      1000,
+    );
+
+    const shortAttempt = h.registry.resolve(
+      "DOGEUSDT",
+      "SHORT",
+      2000,
+      h.makeId,
+    );
+    assert.strictEqual(shortAttempt.action, "ignore");
+    assert.strictEqual(h.registry.isActive("DOGEUSDT"), true);
+  },
+);
+
+// ─── Repeated same-victim liquidations route into the existing cascade ─
+
+scenario(
+  "repeated same-victim liquidations while a candidate is still tracking route into the SAME cascade, never a new one",
+  () => {
+    const h = makeRegistry();
+    const first = h.registry.resolve("ETHUSDT", "LONG", 1000, h.makeId);
+    if (first.action !== "start") throw new Error("setup failed");
+    h.c1m.startCascade(
+      "ETHUSDT",
+      "LONG",
+      first.cascadeId,
+      "1m",
+      1,
+      2000,
+      1000,
+      5000,
+      1000,
+    );
+
+    for (let i = 0; i < 5; i++) {
+      const r = h.registry.resolve("ETHUSDT", "LONG", 1000 + i * 100, h.makeId);
+      assert.strictEqual(r.action, "route");
+      if (r.action === "route")
+        assert.strictEqual(r.cascadeId, first.cascadeId);
+    }
+  },
+);
+
+// ─── Fresh cascade only after full terminal ────────────────────────────
+
+scenario(
+  "a fresh cascade may start only after ALL THREE candidates are terminal",
+  () => {
+    const h = makeRegistry();
+    const first = h.registry.resolve("ETHUSDT", "LONG", 1000, h.makeId);
+    if (first.action !== "start") throw new Error("setup failed");
+    h.c1m.startCascade(
+      "ETHUSDT",
+      "LONG",
+      first.cascadeId,
+      "1m",
+      1,
+      2000,
+      1000,
+      5000,
+      1000,
+    );
+    h.c3m.startCascade(
+      "ETHUSDT",
+      "LONG",
+      first.cascadeId,
+      "3m",
+      2,
+      2000,
+      1000,
+      5000,
+      1000,
+    );
+    h.c5m.startCascade(
+      "ETHUSDT",
+      "LONG",
+      first.cascadeId,
+      "5m",
+      3,
+      2000,
+      1000,
+      5000,
+      1000,
+    );
+
+    // Force all three terminal via a large enough move (two ticks each,
+    // matching the state machine's own 1x-then-2x rule).
+    h.c1m.onTick("ETHUSDT", "LONG", 2001, 1500);
+    h.c1m.onTick("ETHUSDT", "LONG", 2010, 2000);
+    h.c3m.onTick("ETHUSDT", "LONG", 2003, 1500);
+    h.c3m.onTick("ETHUSDT", "LONG", 2010, 2000);
+    h.c5m.onTick("ETHUSDT", "LONG", 2004, 1500);
+    h.c5m.onTick("ETHUSDT", "LONG", 2010, 2000);
+
+    const second = h.registry.resolve("ETHUSDT", "LONG", 5000, h.makeId);
+    assert.strictEqual(
+      second.action,
+      "start",
+      "once every candidate is terminal, a fresh cascade must be allowed",
+    );
+    if (second.action === "start")
+      assert.notStrictEqual(second.cascadeId, first.cascadeId);
+  },
+);
+
+console.log("\nRunning market-data-orchestrator wiring tests...\n");
+
+// ─── Structural: additive-only wiring, mainSymbolLocks respected ──────
+
+scenario(
+  "structural: feedCascade() is called from the liquidation handler, BEFORE the mainSymbolLocks early-return (so cascade tracking is never paused by an existing real position)",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const handlerIdx = source.indexOf('this.ws.on("liquidation"');
+    assert.ok(handlerIdx > -1);
+    const handlerBody = source.slice(
+      handlerIdx,
+      source.indexOf('this.ws.on("bookTicker"', handlerIdx),
+    );
+    const feedIdx = handlerBody.indexOf("this.feedCascade(");
+    const lockIdx = handlerBody.indexOf(
+      "this.mainSymbolLocks.has(l.symbol)) return;",
+    );
+    assert.ok(
+      feedIdx > -1,
+      "feedCascade() call must exist in the liquidation handler",
+    );
+    assert.ok(
+      lockIdx > -1,
+      "the existing mainSymbolLocks early-return must still exist, unchanged",
+    );
+    assert.ok(
+      feedIdx < lockIdx,
+      "feedCascade() must run BEFORE the mainSymbolLocks early-return",
+    );
+  },
+);
+
+scenario(
+  "structural: handleCascadeSignalReady() checks mainSymbolLocks BEFORE calling distributor.distribute() -- MAIN can never hold two simultaneous real positions on the same symbol",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("private async handleCascadeSignalReady(");
+    assert.ok(idx > -1);
+    const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+    const lockCheckIdx = body.indexOf("this.mainSymbolLocks.has(event.symbol)");
+    const distributeIdx = body.indexOf("this.distributor.distribute(");
+    assert.ok(lockCheckIdx > -1, "must check mainSymbolLocks");
+    assert.ok(distributeIdx > -1, "must call distribute()");
+    assert.ok(
+      lockCheckIdx < distributeIdx,
+      "the lock check must run BEFORE distribute() is ever called",
+    );
+    assert.ok(
+      body.includes("await this.globalSignalRepo.insert(globalSignal)"),
+      "the candidate's own signal doc must ALWAYS be persisted (for comparison), regardless of the lock",
+    );
+  },
+);
+
+scenario(
+  "structural: old research code (shadow3m/shadow5m, competitionShadow1m/3m/5m, dragon competition) is NEVER deleted, but its own live call-sites are disconnected -- it can no longer create/update state, influence decisions, send Telegram, declare winners, or persist new results",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    assert.ok(
+      source.includes("private readonly shadow3m ="),
+      "old unitResearch shadow3m must still exist, not deleted",
+    );
+    assert.ok(
+      source.includes("private readonly shadow5m ="),
+      "old unitResearch shadow5m must still exist, not deleted",
+    );
+    assert.ok(
+      source.includes("private readonly competitionShadow1m ="),
+      "old dragon-competition shadow1m must still exist, not deleted",
+    );
+    assert.ok(
+      source.includes("private feedUnitResearchShadowAfter("),
+      "the method itself must still exist, not deleted",
+    );
+    assert.ok(
+      source.includes("private tickUnitResearchShadow("),
+      "the method itself must still exist, not deleted",
+    );
+    // The call-sites that fed LIVE events into these methods must be
+    // commented out (disconnected), never left as active calls.
+    assert.ok(
+      !/^\s*this\.feedUnitResearchShadowAfter\(/m.test(source),
+      "feedUnitResearchShadowAfter() must NOT be actively called anywhere",
+    );
+    assert.ok(
+      !/^\s*this\.tickUnitResearchShadow\(/m.test(source),
+      "tickUnitResearchShadow() must NOT be actively called anywhere",
+    );
+    assert.ok(
+      source.includes(
+        "// this.feedUnitResearchShadowAfter(l, wasTrackedBeforeProduction);",
+      ),
+      "the disconnected call must be visibly commented out, not silently removed",
+    );
+    assert.ok(
+      source.includes(
+        "// this.tickUnitResearchShadow(b.symbol, mid, b.timestamp);",
+      ),
+      "the disconnected call must be visibly commented out, not silently removed",
+    );
+  },
+);
+
+scenario(
+  "structural: the existing V5 production signal path (handleTickOutcome, v5.onLiquidation/onTick, distributor.distribute for the ORIGINAL path) is completely unchanged in shape",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    assert.ok(source.includes("const outcomes = this.v5.onLiquidation(l);"));
+    assert.ok(
+      source.includes(
+        "const outcomes = this.v5.onTick(b.symbol, mid, b.timestamp);",
+      ),
+    );
+    assert.ok(
+      source.includes(
+        "const closes = this.v5.onPriceTickForTrades(b.symbol, mid, b.timestamp);",
+      ),
+    );
+    assert.ok(source.includes("private async handleTickOutcome("));
+    assert.ok(source.includes("private async handleMainTradeClose("));
+  },
+);
+
+scenario(
+  "structural: the TP/SL formula's own w1/w2 inputs are the PREVIOUS completed wave and the TRIGGERING wave -- e.g. W1 100k/W2 150k/W3 220k/W4 180k signalling at W4 feeds w1=W3, w2=W4, never waveHistory[0]/last unconditionally",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("private async handleCascadeSignalReady(");
+    assert.ok(idx > -1);
+    const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+    assert.ok(
+      body.includes("event.waveHistory[event.waveHistory.length - 1]"),
+      "triggerWave must be the LAST wave (the one that triggered signal-ready)",
+    );
+    assert.ok(
+      body.includes("event.waveHistory[event.waveHistory.length - 2]"),
+      "previousWave must be the wave immediately BEFORE the triggering one, not waveHistory[0]",
+    );
+    assert.ok(
+      body.includes("w1AnchorPrice: previousWave.anchorPrice") &&
+        body.includes("w1LiqUsd: previousWave.liqUsd"),
+      "the formula's own w1 input must come from previousWave",
+    );
+    assert.ok(
+      body.includes("w2LiqUsd: triggerWave.liqUsd"),
+      "the formula's own w2 input must come from triggerWave",
+    );
+  },
+);
+
+console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);

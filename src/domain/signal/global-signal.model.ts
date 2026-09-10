@@ -28,6 +28,16 @@ export interface GlobalSignalDoc {
   entryPrice: number;
   entryWaveNumber: number;
 
+  /** Sep 10 2026 (Karo), operator-requested production V5 multi-
+   *  timeframe cascade lifecycle -- PURELY ADDITIVE fields. cascadeId
+   *  links every 1m/3m/5m candidate signal that originated from the
+   *  SAME liquidation cascade -- each candidate still gets its own,
+   *  fully independent signalId (this document's own signalId field),
+   *  exactly as before. Both null for any legacy/non-cascade signal
+   *  (the entire existing V5 signal path). */
+  cascadeId: string | null;
+  timeframe: "1m" | "3m" | "5m" | null;
+
   waveHistory: V5Wave[];
   w1Diagnostics: V5Wave1Diagnostics | null;
 
@@ -286,14 +296,66 @@ export interface GlobalSignalDoc {
   createdAt: number;
 }
 
+/** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
+ *  comparison. Enough raw values to independently reconstruct the
+ *  shadow calculation later. */
+export interface UnitResearchCandidateDoc {
+  readonly unitAbs: number;
+  readonly entered: boolean;
+  readonly entryPrice: number | null;
+  readonly entryTs: number | null;
+  readonly delayVsProductionMs: number | null;
+  readonly noEntryReason:
+    | "CANCEL_NO_SECOND_WAVE"
+    | "CASCADE_NOT_SERIOUS"
+    | "EPISODE_EXPIRED"
+    | null;
+  readonly w1: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+  } | null;
+  readonly w2: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+  } | null;
+  readonly planSlPct: number | null;
+  readonly planTpPct: number | null;
+  readonly planRr: number | null;
+  readonly checkpoints: ResearchCheckpoint[];
+}
+
+/** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit "dragon"
+ *  competition. One candidate's own full record -- raw values only. */
+export interface UnitCompetitionCandidateDoc {
+  readonly candidate: "1m" | "3m" | "5m";
+  readonly frozenUnitAbs: number;
+  readonly frozenAtrPct: number;
+  readonly episodeStartTs: number;
+  readonly w1CompleteTs: number | null;
+  readonly w2StartTs: number | null;
+  readonly entryReadyTs: number | null;
+  readonly durationMs: number | null;
+  readonly episodeLiqUsdAtEntry: number | null;
+  readonly liqBaselineAtEntry: number | null;
+  readonly relativePressure: number | null;
+  readonly pressureFactor: number | null;
+  readonly rawTpPct: number | null;
+  readonly rrAttempts: readonly { rr: number; slPct: number; valid: boolean }[];
+  readonly selectedRR: number | null;
+  readonly rawSlPct: number | null;
+  readonly verdict: "PASS" | "FAIL_NO_VALID_RR" | "STRUCTURAL_CANCEL";
+  readonly hypotheticalEntry: number | null;
+  readonly hypotheticalTp: number | null;
+  readonly hypotheticalSl: number | null;
+  readonly checkpoints: ResearchCheckpoint[];
+}
+
 /** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
  *  Wilder-ATR experiment ("common-horizon-4h-v1"). A SINGLE, unified
  *  doc-shape covering BOTH an in-progress (TRACKING) live-phase snapshot
- *  AND a terminal (PASS/FAIL_NO_VALID_RR/STRUCTURAL_CANCEL) result --
- *  the TRACKING-only fields are populated (and periodically refreshed)
- *  while state="TRACKING", then left as their LAST known snapshot once
- *  a terminal state is reached (harmless, since terminalReason/
- *  the dragon fields below become authoritative at that point). */
+ *  AND a terminal (PASS/FAIL_NO_VALID_RR/STRUCTURAL_CANCEL) result. */
 export interface CommonHorizonCandidateDoc {
   readonly candidate: "1m" | "3m" | "5m";
   readonly atrPeriod: number;
@@ -306,7 +368,6 @@ export interface CommonHorizonCandidateDoc {
     | "FAIL_NO_VALID_RR"
     | "STRUCTURAL_CANCEL";
 
-  // --- Live-phase snapshot fields (updated periodically while TRACKING) ---
   readonly phase:
     | "WAITING_W1_RECOVERY"
     | "WAITING_W2_START"
@@ -333,11 +394,6 @@ export interface CommonHorizonCandidateDoc {
   readonly nextTargetDescription: string | null;
   readonly lastUpdatedTs: number | null;
 
-  // --- Terminal-only fields ---
-  /** The exact structural cancellation/exhaustion reason for a
-   *  STRUCTURAL_CANCEL, or the dragon's own human-readable fail reason
-   *  ("SL too small" / "SL too large" / "no valid RR") for
-   *  FAIL_NO_VALID_RR. Null while TRACKING or on PASS. */
   readonly terminalReason: string | null;
   readonly w1CompleteTs: number | null;
   readonly w2StartTs: number | null;
@@ -354,78 +410,5 @@ export interface CommonHorizonCandidateDoc {
   readonly hypotheticalEntry: number | null;
   readonly hypotheticalTp: number | null;
   readonly hypotheticalSl: number | null;
-  readonly checkpoints: ResearchCheckpoint[];
-}
-
-/** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit "dragon"
- *  competition. One candidate's own full record -- raw values only,
- *  enough to independently reconstruct the calculation later, per the
- *  operator's own explicit requirement. Duration is PERSISTED but
- *  NEVER used as a PASS/FAIL input (operator's own explicit rule). */
-export interface UnitCompetitionCandidateDoc {
-  readonly candidate: "1m" | "3m" | "5m";
-  readonly frozenUnitAbs: number;
-  readonly frozenAtrPct: number;
-  readonly episodeStartTs: number;
-  readonly w1CompleteTs: number | null;
-  readonly w2StartTs: number | null;
-  readonly entryReadyTs: number | null;
-  readonly durationMs: number | null;
-  readonly episodeLiqUsdAtEntry: number | null;
-  readonly liqBaselineAtEntry: number | null;
-  readonly relativePressure: number | null;
-  readonly pressureFactor: number | null;
-  readonly rawTpPct: number | null;
-  readonly rrAttempts: readonly { rr: number; slPct: number; valid: boolean }[];
-  readonly selectedRR: number | null;
-  readonly rawSlPct: number | null;
-  readonly verdict: "PASS" | "FAIL_NO_VALID_RR" | "STRUCTURAL_CANCEL";
-  readonly hypotheticalEntry: number | null;
-  readonly hypotheticalTp: number | null;
-  readonly hypotheticalSl: number | null;
-  /** Present only when verdict=PASS -- post-entry MFE/MAE at
-   *  [30s,1m,3m,5m,15m,30m], same R-normalized shape as
-   *  UnitResearchCandidateDoc.checkpoints. */
-  readonly checkpoints: ResearchCheckpoint[];
-}
-
-/** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
- *  comparison. One candidate's own full record -- includes enough raw
- *  values (unitAbs, W1/W2 anchor/extreme/liq, entry price/time) to
- *  independently reconstruct the shadow calculation later, per the
- *  operator's own explicit requirement. */
-export interface UnitResearchCandidateDoc {
-  readonly unitAbs: number;
-  readonly entered: boolean;
-  /** Present only when entered=true. */
-  readonly entryPrice: number | null;
-  readonly entryTs: number | null;
-  readonly delayVsProductionMs: number | null;
-  /** Present only when entered=false. */
-  readonly noEntryReason:
-    | "CANCEL_NO_SECOND_WAVE"
-    | "CASCADE_NOT_SERIOUS"
-    | "EPISODE_EXPIRED"
-    | null;
-  readonly w1: {
-    anchorPrice: number;
-    extremePrice: number;
-    liqUsd: number;
-  } | null;
-  readonly w2: {
-    anchorPrice: number;
-    extremePrice: number;
-    liqUsd: number;
-  } | null;
-  /** Same current production TP/SL function, evaluated at this
-   *  candidate's OWN hypothetical entry -- present only when
-   *  entered=true. Never used for anything but later comparison. */
-  readonly planSlPct: number | null;
-  readonly planTpPct: number | null;
-  readonly planRr: number | null;
-  /** R-normalized MFE/MAE at each of [30s,1m,3m,5m,15m,30m] -- appended
-   *  incrementally as each offset completes, via the SAME
-   *  ResearchCheckpointTracker/ResearchCheckpoint shape production's
-   *  own researchCheckpoints already uses (see research-checkpoint.model.ts). */
   readonly checkpoints: ResearchCheckpoint[];
 }

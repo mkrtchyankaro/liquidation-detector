@@ -4,6 +4,7 @@ import { assertValidUserId } from "../../domain/user/user-id.validator";
 import type { LiqMinuteAggregateDoc } from "./liq-aggregate.repository";
 import type { WallMinuteAggregateDoc } from "./wall-aggregate.repository";
 import type { GlobalSignalDoc } from "../../domain/signal/global-signal.model";
+import type { CascadeDoc } from "../../domain/cascade/cascade.model";
 import type { RawLiquidationEventDoc } from "./raw-liquidation-event.repository";
 import type { UserSignalDoc } from "../../domain/signal/user-signal.model";
 import type { ExecutionRecordDoc } from "./execution-record.model";
@@ -160,6 +161,15 @@ export class MongoClientWrapper {
     return dbs
       ? dbs.own.collection<GlobalSignalDoc>("v5_global_signals")
       : null;
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested restart-safe persistence
+   *  for the production V5 multi-timeframe cascade lifecycle. GLOBAL,
+   *  own database -- see cascade.model.ts's own doc comment for why
+   *  v5_global_signals is not sufficient for this. */
+  async activeCascades(): Promise<Collection<CascadeDoc> | null> {
+    const dbs = await this.ensure();
+    return dbs ? dbs.own.collection<CascadeDoc>("v5_active_cascades") : null;
   }
 
   /** Sep 8 2026 (Karo) -- bounded (TTL-indexed) raw liquidation-event

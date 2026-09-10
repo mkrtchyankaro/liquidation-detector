@@ -103,6 +103,8 @@ function baseGlobalSignal(): GlobalSignalDoc {
     p95AtEntry: 1000,
     dailyLiqPerMinBaselineAtEntry: 500,
     atr15mAtEntry: 5,
+    cascadeId: null,
+    timeframe: null,
     unitResearch: null,
     unitCompetitionResearch: null,
     commonHorizonResearch: null,

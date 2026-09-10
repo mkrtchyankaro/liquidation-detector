@@ -260,6 +260,11 @@ async function main(): Promise<void> {
   // through and start a second, duplicate watch before hydration
   // finishes.
   await orchestrator.hydrateMainLocks();
+  // Sep 10 2026 (Karo), operator-requested restart-safe persistence for
+  // the production V5 multi-timeframe cascade lifecycle -- MUST also
+  // run before any WS ticks flow, same ordering requirement as
+  // hydrateMainLocks() above.
+  await orchestrator.hydrateActiveCascades();
 
   // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
   // app.ts "Restart safety — Phase A: ATR bootstrap from REST history"
