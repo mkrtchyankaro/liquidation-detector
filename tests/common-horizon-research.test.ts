@@ -211,14 +211,10 @@ scenario(
       require.resolve("../src/services/market-data-orchestrator.ts"),
       "utf8",
     );
-    // "private feedUnitResearchShadowAfter" is unique -- the other two
-    // occurrences of this name in the file are comment references
-    // without the "private" prefix, so this robustly finds the ACTUAL
-    // declaration regardless of how its own parameter list is wrapped.
-    const idx = source.indexOf("private feedUnitResearchShadowAfter");
+    const idx = source.indexOf("private feedCommonHorizonCompetition(");
     assert.ok(
       idx > -1,
-      "feedUnitResearchShadowAfter's own declaration must exist",
+      "feedCommonHorizonCompetition's own declaration must exist",
     );
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
     const gateIdx = body.indexOf("commonHorizonAtrReady(");

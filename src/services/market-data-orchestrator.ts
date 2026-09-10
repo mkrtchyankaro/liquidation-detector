@@ -21,6 +21,7 @@ import {
   type ShadowEntryEvent,
   type ShadowNoEntryEvent,
 } from "../domain/research/unit-research-shadow.service";
+import { CommonHorizonEpisodeRegistry } from "../domain/research/common-horizon-episode-registry";
 import type {
   GlobalSignalDoc,
   UnitResearchCandidateDoc,
@@ -465,6 +466,11 @@ export class MarketDataOrchestrator {
     wasTrackedBefore: boolean,
   ): void {
     const victim: Side = l.side === "SELL" ? "LONG" : "SHORT";
+    // The earlier ("unitResearch") 3m/5m-vs-production-1m experiment
+    // is UNCHANGED -- still tied to V5's own watch-lifecycle
+    // deliberately, since IT is explicitly comparing against what
+    // production itself is doing. Out of scope for this fix (never
+    // mentioned by the operator, no corruption symptom observed there).
     if (!wasTrackedBefore) {
       const newWatch = this.v5.getWatch(l.symbol, victim);
       if (!newWatch) return; // production itself declined to track this event (e.g. BTC EXCLUDE mode) -- shadow mirrors that by doing nothing too
@@ -494,73 +500,120 @@ export class MarketDataOrchestrator {
           l.timestamp,
         );
       }
-      // Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1
-      // research (REPLACES the earlier ATR(14)-based dragon competition
-      // -- same shadow-service class, same dragon formula, DIFFERENT ATR
-      // source: Wilder(240/80/48) instead of Wilder(14) per interval, so
-      // all three candidates represent roughly the same ~4h volatility
-      // horizon instead of 14/42/70 minutes). Gated by
-      // commonHorizonAtrReady(): if even ONE of the three Wilder-ATRs is
-      // not yet warm (cold buffer, still bootstrapping), this episode is
-      // SKIPPED for research entirely -- never started with partial
-      // state, per the operator's own explicit requirement.
-      if (this.commonHorizonAtrReady(l.symbol)) {
-        const chUnit1m = this.atrTracker.getWilderATR(
-          l.symbol,
-          "1m",
-          COMMON_HORIZON_PERIODS.atr1m,
-        );
-        const chUnit3m = this.atrTracker.getWilderATR(
-          l.symbol,
-          "3m",
-          COMMON_HORIZON_PERIODS.atr3m,
-        );
-        const chUnit5m = this.atrTracker.getWilderATR(
-          l.symbol,
-          "5m",
-          COMMON_HORIZON_PERIODS.atr5m,
-        );
-        if (chUnit1m !== null && chUnit1m > 0)
-          this.competitionShadow1m.startEpisode(
-            l.symbol,
-            victim,
-            newWatch.signalId,
-            chUnit1m,
-            l.price,
-            l.timestamp,
-            l.quoteQty,
-            l.timestamp,
-          );
-        if (chUnit3m !== null && chUnit3m > 0)
-          this.competitionShadow3m.startEpisode(
-            l.symbol,
-            victim,
-            newWatch.signalId,
-            chUnit3m,
-            l.price,
-            l.timestamp,
-            l.quoteQty,
-            l.timestamp,
-          );
-        if (chUnit5m !== null && chUnit5m > 0)
-          this.competitionShadow5m.startEpisode(
-            l.symbol,
-            victim,
-            newWatch.signalId,
-            chUnit5m,
-            l.price,
-            l.timestamp,
-            l.quoteQty,
-            l.timestamp,
-          );
-      }
+    } else {
+      this.shadow3m.onLiquidation(l, victim);
+      this.shadow5m.onLiquidation(l, victim);
+    }
+
+    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- the
+    // common-horizon-4h-v1 competition's own episode-boundary is now
+    // COMPLETELY DECOUPLED from V5's own watch-lifecycle (wasTrackedBefore
+    // above). V5's own watch cycles far faster than a common-horizon
+    // episode's own natural lifetime (its own UNIT is ATR1m(14), not the
+    // much longer Wilder(240/80/48) this research uses) -- reusing V5's
+    // own watch-transitions as the "is this a new episode" signal caused
+    // a real production bug: every V5-watch-cycle for the SAME symbol
+    // incorrectly started a FRESH competition episode (fresh signalId),
+    // even while this research's OWN, still-tracking 3m/5m candidates
+    // from an EARLIER cycle were still alive -- different candidates
+    // ended up split across different signalId documents, corrupting
+    // the "one episode owns all three candidates" invariant.
+    // feedCommonHorizonCompetition() owns its own, independent
+    // per-(symbol,victim) ownership map instead (see
+    // competitionEpisodeOwnership below), checked on EVERY liquidation
+    // regardless of what V5's own watch is doing.
+    this.feedCommonHorizonCompetition(l, victim);
+  }
+
+  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- see
+   *  common-horizon-episode-registry.ts's own doc comment for the full
+   *  invariant this enforces and the corruption bug it fixes. */
+  private readonly commonHorizonEpisodes = new CommonHorizonEpisodeRegistry(
+    this.competitionShadow1m,
+    this.competitionShadow3m,
+    this.competitionShadow5m,
+    (signalId: string) => this.competitionWinners.has(signalId),
+  );
+
+  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX. Called on
+   *  EVERY liquidation event for this symbol/victim, regardless of
+   *  V5's own watch-lifecycle. Delegates the actual ownership decision
+   *  to commonHorizonEpisodes (see common-horizon-episode-registry.ts's
+   *  own doc comment for the full invariant) -- if it resolves to the
+   *  SAME, still-active episode, the event is routed into it
+   *  (onLiquidation() on all three -- each candidate's OWN internal
+   *  state machine decides for itself whether this event starts its
+   *  own Wave 2, accumulates into an active wave, or is a no-op if
+   *  already terminal -- exactly as before, unchanged). Only when the
+   *  registry resolves a genuinely NEW episode does startEpisode() run,
+   *  with ONE freshly-generated signalId and ONE shared episodeStartTs
+   *  used for ALL THREE candidates -- never V5's own,
+   *  independently-cycling signalId. */
+  private feedCommonHorizonCompetition(l: Liquidation, victim: Side): void {
+    const resolved = this.commonHorizonEpisodes.resolve(
+      l.symbol,
+      victim,
+      l.timestamp,
+      randomUUID,
+    );
+
+    if (!resolved.isNew) {
+      this.competitionShadow1m.onLiquidation(l, victim);
+      this.competitionShadow3m.onLiquidation(l, victim);
+      this.competitionShadow5m.onLiquidation(l, victim);
       return;
     }
-    this.shadow3m.onLiquidation(l, victim);
-    this.shadow5m.onLiquidation(l, victim);
-    this.competitionShadow1m.onLiquidation(l, victim);
-    this.competitionShadow3m.onLiquidation(l, victim);
-    this.competitionShadow5m.onLiquidation(l, victim);
+
+    if (!this.commonHorizonAtrReady(l.symbol)) return;
+
+    const chUnit1m = this.atrTracker.getWilderATR(
+      l.symbol,
+      "1m",
+      COMMON_HORIZON_PERIODS.atr1m,
+    );
+    const chUnit3m = this.atrTracker.getWilderATR(
+      l.symbol,
+      "3m",
+      COMMON_HORIZON_PERIODS.atr3m,
+    );
+    const chUnit5m = this.atrTracker.getWilderATR(
+      l.symbol,
+      "5m",
+      COMMON_HORIZON_PERIODS.atr5m,
+    );
+    if (chUnit1m !== null && chUnit1m > 0)
+      this.competitionShadow1m.startEpisode(
+        l.symbol,
+        victim,
+        resolved.signalId,
+        chUnit1m,
+        l.price,
+        resolved.episodeStartTs,
+        l.quoteQty,
+        resolved.episodeStartTs,
+      );
+    if (chUnit3m !== null && chUnit3m > 0)
+      this.competitionShadow3m.startEpisode(
+        l.symbol,
+        victim,
+        resolved.signalId,
+        chUnit3m,
+        l.price,
+        resolved.episodeStartTs,
+        l.quoteQty,
+        resolved.episodeStartTs,
+      );
+    if (chUnit5m !== null && chUnit5m > 0)
+      this.competitionShadow5m.startEpisode(
+        l.symbol,
+        victim,
+        resolved.signalId,
+        chUnit5m,
+        l.price,
+        resolved.episodeStartTs,
+        l.quoteQty,
+        resolved.episodeStartTs,
+      );
   }
 
   /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe
@@ -711,14 +764,18 @@ export class MarketDataOrchestrator {
   ): void {
     const peek = shadow.peekWatch(symbol, victim);
     if (!peek) return;
-    const watch = this.v5.getWatch(symbol, victim); // read-only, for signalId join only -- see feedUnitResearchShadowAfter's own use of the same pattern
-    // signalId is not directly retrievable from peek (by design -- see
-    // ShadowPeek's own doc comment, it exposes ONLY structural state).
-    // We instead look up the pending signalId via the SAME join key the
-    // terminal path already uses: production's own still-open watch's
-    // signalId, valid for as long as THIS episode is still active.
-    if (!watch) return;
-    const snapKey = `${watch.signalId}:${label}`;
+    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- signalId is
+    // now read from THIS competition's own, dedicated ownership map
+    // (competitionEpisodeOwnership), never from V5's own, independently-
+    // cycling watch. See feedUnitResearchShadowAfter()'s own doc comment
+    // for why the earlier v5.getWatch()-based join was the root cause of
+    // the episode-splitting corruption bug this fix addresses.
+    const ownerSignalId = this.commonHorizonEpisodes.currentSignalId(
+      symbol,
+      victim,
+    );
+    if (!ownerSignalId) return;
+    const snapKey = `${ownerSignalId}:${label}`;
     const last = this.commonHorizonLastSnapshot.get(snapKey);
     if (last && last.phase === peek.phase && ts - last.ts < 15_000) return;
     this.commonHorizonLastSnapshot.set(snapKey, { phase: peek.phase, ts });
@@ -762,7 +819,7 @@ export class MarketDataOrchestrator {
       checkpoints: [],
     };
     void this.globalSignalRepo.setCommonHorizonCandidate(
-      watch.signalId,
+      ownerSignalId,
       label,
       doc,
       { symbol, side: victim, signalTs: peek.episodeStartTs },
