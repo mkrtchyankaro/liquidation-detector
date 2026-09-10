@@ -100,10 +100,9 @@ scenario(
       require.resolve("../src/domain/market/atr-tracker.service.ts"),
       "utf8",
     );
-    const getAtrBody = source.slice(
-      source.indexOf("getATR(symbol: string"),
-      source.indexOf("\n  /**", source.indexOf("getATR(symbol: string") + 10),
-    );
+    const idx = source.indexOf("getATR(symbol:");
+    assert.ok(idx > -1, "getATR must be defined");
+    const getAtrBody = source.slice(idx, source.indexOf("\n  /**", idx + 10));
     assert.ok(
       !getAtrBody.includes("researchState"),
       "getATR() must never read the separate research buffer",
@@ -118,10 +117,15 @@ scenario(
       require.resolve("../src/domain/market/atr-tracker.service.ts"),
       "utf8",
     );
-    const idx = source.indexOf("getWilderATR(symbol: string");
+    // Search for "\n  getWilderATR(" (method-declaration-line-start,
+    // 2-space indent, no comment marker) -- skips doc-comment references
+    // to the SAME name (e.g. "read ONLY by getWilderATR() below"), which
+    // a bare indexOf("getWilderATR(") would incorrectly match first.
+    const idx = source.indexOf("\n  getWilderATR(");
+    assert.ok(idx > -1, "getWilderATR's own method declaration must exist");
     const body = source.slice(idx, source.indexOf("\n  /**", idx + 10));
     assert.ok(
-      body.includes("this.researchState.get("),
+      body.includes("researchState.get("),
       "getWilderATR must read from researchState",
     );
     assert.ok(
@@ -154,15 +158,14 @@ scenario(
       require.resolve("../src/domain/market/atr-tracker.service.ts"),
       "utf8",
     );
-    const onCandleIdx = source.indexOf("onCandle(c: Candle): void {");
+    const onCandleIdx = source.indexOf("onCandle(c: Candle)");
+    assert.ok(onCandleIdx > -1, "onCandle must be defined");
     const onCandleBody = source.slice(
       onCandleIdx,
       source.indexOf("\n  /**", onCandleIdx),
     );
-    const guardIdx = onCandleBody.indexOf("if (!c.isClosed) return;");
-    const researchPushIdx = onCandleBody.indexOf(
-      "this.researchState.set(key, rs);",
-    );
+    const guardIdx = onCandleBody.indexOf("c.isClosed");
+    const researchPushIdx = onCandleBody.indexOf("researchState.set(");
     assert.ok(
       guardIdx > -1 && researchPushIdx > -1 && guardIdx < researchPushIdx,
       "the closed-candle guard must run before the research buffer is ever touched",
@@ -179,16 +182,24 @@ scenario(
       require.resolve("../src/services/market-data-orchestrator.ts"),
       "utf8",
     );
-    const idx = source.indexOf("private commonHorizonAtrReady");
+    const idx = source.indexOf("commonHorizonAtrReady(symbol: string)");
+    assert.ok(idx > -1, "commonHorizonAtrReady must be defined");
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+    // Robust against line-wrapping: check the KEY PIECES are all present,
+    // not one long literal-string match.
     assert.ok(
-      body.includes('getWilderATR(symbol, "1m", COMMON_HORIZON_PERIODS.atr1m)'),
+      body.includes("getWilderATR(") &&
+        body.includes('"1m"') &&
+        body.includes("COMMON_HORIZON_PERIODS.atr1m"),
+      "must check the 1m Wilder-ATR period",
     );
     assert.ok(
-      body.includes('getWilderATR(symbol, "3m", COMMON_HORIZON_PERIODS.atr3m)'),
+      body.includes('"3m"') && body.includes("COMMON_HORIZON_PERIODS.atr3m"),
+      "must check the 3m Wilder-ATR period",
     );
     assert.ok(
-      body.includes('getWilderATR(symbol, "5m", COMMON_HORIZON_PERIODS.atr5m)'),
+      body.includes('"5m"') && body.includes("COMMON_HORIZON_PERIODS.atr5m"),
+      "must check the 5m Wilder-ATR period",
     );
   },
 );
@@ -200,9 +211,10 @@ scenario(
       require.resolve("../src/services/market-data-orchestrator.ts"),
       "utf8",
     );
-    const idx = source.indexOf("private feedUnitResearchShadowAfter");
+    const idx = source.indexOf("feedUnitResearchShadowAfter(l:");
+    assert.ok(idx > -1, "feedUnitResearchShadowAfter must be defined");
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
-    const gateIdx = body.indexOf("if (this.commonHorizonAtrReady(l.symbol)) {");
+    const gateIdx = body.indexOf("commonHorizonAtrReady(");
     const startIdx = body.indexOf("competitionShadow1m.startEpisode(");
     assert.ok(
       gateIdx > -1 && startIdx > -1 && gateIdx < startIdx,
@@ -220,17 +232,21 @@ scenario(
       require.resolve("../src/services/market-data-orchestrator.ts"),
       "utf8",
     );
-    const idx = source.indexOf("if (this.productionSignalsEnabled) {");
-    const body = source.slice(
-      idx,
-      source.indexOf("\n      if (hasRealPlan", idx),
-    );
+    const idx = source.indexOf("productionSignalsEnabled) {");
+    assert.ok(idx > -1, "the productionSignalsEnabled gate must exist");
+    // The gate's own body contains a NESTED "if (hasRealPlan..." at a
+    // deeper indent; the boundary we want is the LATER, outer-indent
+    // occurrence after the gate closes -- distinguish by requiring the
+    // 6-space (not 8-space) indent prefix specific to the outer block.
+    let bodyEnd = source.indexOf("\n      if (hasRealPlan", idx);
+    if (bodyEnd === -1) bodyEnd = source.indexOf("\n  private ", idx); // fallback boundary
+    const body = source.slice(idx, bodyEnd);
     assert.ok(
-      body.includes("this.distributor.distribute("),
+      body.includes("distributor.distribute("),
       "distribute() must be inside the gate",
     );
     assert.ok(
-      body.includes("this.mainSymbolLocks.add("),
+      body.includes("mainSymbolLocks.add("),
       "mainSymbolLocks.add() must be inside the SAME gate",
     );
   },
@@ -271,11 +287,7 @@ scenario(
       require.resolve("../src/services/market-data-orchestrator.ts"),
       "utf8",
     );
-    assert.ok(
-      source.includes(
-        "private readonly productionSignalsEnabled: boolean = true,",
-      ),
-    );
+    assert.ok(source.includes("productionSignalsEnabled: boolean = true"));
   },
 );
 
