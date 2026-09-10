@@ -70,13 +70,32 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
   }
 
   lines.push("");
-  const entryWaveRecord = event.waveHistory.find(
-    (w) => w.waveNumber === event.entryWaveNumber,
-  );
-  lines.push(
-    `V5 Chain: reclaimed on Wave ${event.entryWaveNumber} of ${event.waveHistory.length} ` +
-      `(trigger: ${entryWaveRecord?.selectedRecoveryPct ?? "?"}% recovery, extremeDistanceAtr=${entryWaveRecord?.extremeDistanceAtr.toFixed(3) ?? "?"})`,
-  );
+  // Sep 10 2026 (Karo), operator-requested -- for a cascade-produced
+  // signal (timeframe !== null), the OLD "reclaimed... trigger: X%
+  // recovery, extremeDistanceAtr=Y" line is not meaningful: the
+  // cascade model has no "50%/75%/100% of anchor-extreme range"
+  // recovery-percent concept at all (it completes each wave at
+  // exactly 1x UNIT recovery), so entryWaveRecord.selectedRecoveryPct
+  // is honestly null and extremeDistanceAtr is a per-wave-history
+  // reconstruction, not a real recovery-trigger metric -- printing
+  // "trigger: ?%" / "extremeDistanceAtr=0.000" there is misleading,
+  // never a genuine value. A simplified, honest line is used instead.
+  // A legacy, non-cascade signal (timeframe === null) renders the
+  // EXACT SAME line as before, completely unaffected -- those fields
+  // ARE real and meaningful for that path.
+  if (event.timeframe !== null) {
+    lines.push(
+      `V5 Chain: Signal on Wave ${event.entryWaveNumber} of ${event.waveHistory.length}`,
+    );
+  } else {
+    const entryWaveRecord = event.waveHistory.find(
+      (w) => w.waveNumber === event.entryWaveNumber,
+    );
+    lines.push(
+      `V5 Chain: reclaimed on Wave ${event.entryWaveNumber} of ${event.waveHistory.length} ` +
+        `(trigger: ${entryWaveRecord?.selectedRecoveryPct ?? "?"}% recovery, extremeDistanceAtr=${entryWaveRecord?.extremeDistanceAtr.toFixed(3) ?? "?"})`,
+    );
+  }
   lines.push(
     `Qualifying event: $${formatUsd(event.qualifyingEventUsd)} (P95 at qualification: $${formatUsd(event.p95AtQualification)})`,
   );

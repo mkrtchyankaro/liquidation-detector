@@ -263,14 +263,24 @@ scenario(
       !message.includes("Wave 2 of 0"),
       "must never show a zero-length wave chain",
     );
+    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- the OLD
+    // "trigger: X% recovery, extremeDistanceAtr=Y" chain-line is
+    // REPLACED for cascade signals with a simplified, honest
+    // "V5 Chain: Signal on Wave N of M" line (see signal.formatter.ts's
+    // own doc comment for why the old fields are not meaningful in the
+    // cascade model). Assert the NEW line, and that the old, misleading
+    // fields never appear at all.
     assert.ok(
-      !message.includes("trigger: ?%") === false ||
-        message.includes("trigger:"),
-      "the trigger line must render (selectedRecoveryPct is honestly null -- '?' is acceptable, but the LINE ITSELF must exist and reference a real wave)",
+      message.includes("V5 Chain: Signal on Wave 4 of 4"),
+      "must show the simplified, honest chain line for a cascade signal",
     );
     assert.ok(
-      !message.includes("extremeDistanceAtr=?"),
-      "extremeDistanceAtr must be a real, derived number, never '?'",
+      !message.includes("trigger:"),
+      "the old, non-meaningful trigger-recovery-percent line must never appear for a cascade signal",
+    );
+    assert.ok(
+      !message.includes("extremeDistanceAtr"),
+      "the old, misleading extremeDistanceAtr field must never appear for a cascade signal",
     );
     assert.ok(
       !message.includes("Dominant layer: $0 (Wave null)"),
@@ -382,6 +392,65 @@ scenario(
       !message.includes("Candidate:"),
       "a legacy signal must never show a Candidate line",
     );
+  },
+);
+
+scenario(
+  "a legacy, non-cascade signal with REAL selectedRecoveryPct/extremeDistanceAtr values still shows the OLD 'reclaimed...trigger:...' line, completely unaffected by the cascade-signal simplification",
+  () => {
+    const waveHistory = buildCascadeSignalDoc(true).waveHistory.map(
+      (w, i, arr) =>
+        i === arr.length - 1
+          ? {
+              ...w,
+              selectedRecoveryPct: 100 as const,
+              extremeDistanceAtr: 1.234,
+            }
+          : w,
+    );
+    const doc = {
+      ...buildCascadeSignalDoc(true),
+      timeframe: null,
+      cascadeId: null,
+      waveHistory,
+    };
+    const event = toV5SignalEventShape(doc);
+    const message = formatV5EntryMessage(event);
+    assert.ok(
+      message.includes("reclaimed on Wave"),
+      "the legacy signal must keep its own OLD chain-line wording",
+    );
+    assert.ok(
+      message.includes("trigger: 100% recovery"),
+      "the legacy signal's own REAL selectedRecoveryPct must still render",
+    );
+    assert.ok(
+      message.includes("extremeDistanceAtr=1.234"),
+      "the legacy signal's own REAL extremeDistanceAtr must still render",
+    );
+    assert.ok(
+      !message.includes("V5 Chain: Signal on Wave"),
+      "the legacy signal must never use the new, simplified cascade-only line",
+    );
+  },
+);
+
+scenario(
+  "operator-requested explicit check: cascade signals (1m, 3m, and 5m) never contain 'trigger: ?%' or 'extremeDistanceAtr=0.000'",
+  () => {
+    for (const tf of ["1m", "3m", "5m"] as const) {
+      const doc = { ...buildCascadeSignalDoc(true), timeframe: tf };
+      const event = toV5SignalEventShape(doc);
+      const message = formatV5EntryMessage(event);
+      assert.ok(
+        !message.includes("trigger: ?%"),
+        `${tf}: must never print "trigger: ?%"`,
+      );
+      assert.ok(
+        !message.includes("extremeDistanceAtr=0.000"),
+        `${tf}: must never print "extremeDistanceAtr=0.000"`,
+      );
+    }
   },
 );
 
