@@ -136,7 +136,104 @@ scenario(
   },
 );
 
-// ─── Wave lifecycle -- W2 > W1 -> wait for W3, then compare W3 vs W2 ───
+// ─── Operator-requested: 6 dedicated production-wave-rule scenarios ───
+
+function driveCascadeToWave(
+  unitAbs: number,
+  waveLiqs: number[],
+): CascadeCandidateService {
+  const c = new CascadeCandidateService();
+  c.startCascade(
+    "ETHUSDT",
+    "LONG",
+    "casc-rule",
+    "1m",
+    unitAbs,
+    2000,
+    1000,
+    waveLiqs[0]!,
+    1000,
+  );
+  let price = 2000;
+  let ts = 1000;
+  // Complete Wave 1, then every intermediate wave, one at a time --
+  // the NEXT wave only genuinely starts (as its own, separate wave)
+  // once the PREVIOUS one has actually reached COMPLETED via its own
+  // onTick() call; starting it via onLiquidation while the previous
+  // wave is still ACTIVE would just accumulate into that SAME wave
+  // instead of creating a new one.
+  for (let i = 0; i < waveLiqs.length - 1; i++) {
+    price += unitAbs; // exactly 1x UNIT recovery from the current extreme -- completes this wave
+    ts += 500;
+    c.onTick("ETHUSDT", "LONG", price, ts);
+    price -= 1; // next wave's own anchor, slightly deeper than the completed wave's own extreme
+    ts += 500;
+    c.onLiquidation(
+      liq("ETHUSDT", "SELL", price, waveLiqs[i + 1]!, ts),
+      "LONG",
+    );
+  }
+  return c;
+}
+
+scenario("1. W2 < W1 -> SIGNAL_READY", () => {
+  const c = driveCascadeToWave(1, [10_000, 5_000]);
+  const result = c.onTick("ETHUSDT", "LONG", 2002, 3000);
+  assert.ok(result && "entryPrice" in result, "W2 < W1 must signal");
+});
+
+scenario(
+  "2. W2 = W1 (exact equality) -> SIGNAL_READY -- <= is intentional, equality counts as signal",
+  () => {
+    const c = driveCascadeToWave(1, [10_000, 10_000]);
+    const result = c.onTick("ETHUSDT", "LONG", 2002, 3000);
+    assert.ok(
+      result && "entryPrice" in result,
+      "W2 = W1 (exact equality) must signal, never wait",
+    );
+  },
+);
+
+scenario("3. W2 > W1 -> wait W3, no signal yet", () => {
+  const c = driveCascadeToWave(1, [10_000, 15_000]);
+  const result = c.onTick("ETHUSDT", "LONG", 2002, 3000);
+  assert.strictEqual(
+    result,
+    null,
+    "W2 > W1 must never signal -- must wait for W3",
+  );
+});
+
+scenario("4. W3 < W2 (with W2 > W1 first) -> SIGNAL_READY", () => {
+  const c = driveCascadeToWave(1, [10_000, 15_000, 8_000]); // W1, W2 already completed internally; W3 still ACTIVE
+  const result = c.onTick("ETHUSDT", "LONG", 2002, 4000); // W3 completes, < W2
+  assert.ok(result && "entryPrice" in result, "W3 < W2 must signal");
+});
+
+scenario(
+  "5. W3 = W2 (exact equality, with W2 > W1 first) -> SIGNAL_READY",
+  () => {
+    const c = driveCascadeToWave(1, [10_000, 15_000, 15_000]); // W1, W2 already completed internally; W3 still ACTIVE
+    const result = c.onTick("ETHUSDT", "LONG", 2002, 4000); // W3 completes, = W2 exactly
+    assert.ok(
+      result && "entryPrice" in result,
+      "W3 = W2 (exact equality) must signal, never wait",
+    );
+  },
+);
+
+scenario(
+  "6. W3 > W2 (with W2 > W1 first) -> wait W4, no signal yet -- and the SAME rule repeats with no maximum wave count",
+  () => {
+    const c = driveCascadeToWave(1, [10_000, 15_000, 20_000]); // W1, W2 already completed internally; W3 still ACTIVE
+    const result = c.onTick("ETHUSDT", "LONG", 2002, 4000); // W3 completes, > W2
+    assert.strictEqual(
+      result,
+      null,
+      "W3 > W2 must never signal -- must wait for W4",
+    );
+  },
+);
 
 scenario(
   "Wave 2 > Wave 1 waits for Wave 3; Wave 3 <= Wave 2 then signals -- arbitrary wave count, no hard cap",
