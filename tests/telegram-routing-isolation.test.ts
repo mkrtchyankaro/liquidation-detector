@@ -105,6 +105,7 @@ function baseSignal(overrides: Partial<GlobalSignalDoc> = {}): GlobalSignalDoc {
     atr15mAtEntry: 5,
     unitResearch: null,
     unitCompetitionResearch: null,
+    commonHorizonResearch: null,
     qualifyingEventUsd: 100,
     qualifyingEventTs: Date.now(),
     p95AtQualification: 90,

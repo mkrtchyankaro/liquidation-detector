@@ -47,6 +47,7 @@ function baseSignal(side: "LONG" | "SHORT"): GlobalSignalDoc {
     atr15mAtEntry: 5,
     unitResearch: null,
     unitCompetitionResearch: null,
+    commonHorizonResearch: null,
     qualifyingEventUsd: 0,
     qualifyingEventTs: 0,
     p95AtQualification: 0,

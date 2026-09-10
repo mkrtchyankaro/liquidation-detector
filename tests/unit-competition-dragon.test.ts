@@ -245,9 +245,7 @@ scenario(
       "no Telegram reference inside the dragon-handling method",
     );
     assert.ok(
-      dragonSection.includes(
-        "this.globalSignalRepo.setUnitCompetitionCandidate",
-      ),
+      dragonSection.includes("this.globalSignalRepo.setCommonHorizonCandidate"),
       "the ONLY side effect must be research-persistence",
     );
   },

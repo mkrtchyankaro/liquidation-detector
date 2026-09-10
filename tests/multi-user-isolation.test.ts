@@ -82,6 +82,7 @@ function makeGlobalSignal(signalId: string): GlobalSignalDoc {
     atr15mAtEntry: 5,
     unitResearch: null,
     unitCompetitionResearch: null,
+    commonHorizonResearch: null,
     qualifyingEventUsd: 50_000,
     qualifyingEventTs: Date.now(),
     p95AtQualification: 40_000,

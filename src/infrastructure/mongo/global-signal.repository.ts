@@ -3,6 +3,7 @@ import type {
   GlobalSignalDoc,
   UnitResearchCandidateDoc,
   UnitCompetitionCandidateDoc,
+  CommonHorizonCandidateDoc,
 } from "../../domain/signal/global-signal.model";
 import type { GlobalSignalRepositoryPort } from "../../application/ports";
 import { childLogger } from "../logging/logger";
@@ -281,6 +282,130 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
       log.error(
         { err: msg, signalId, result },
         "[GLOBAL_SIGNAL_SET_UNIT_COMPETITION_WINNER_RESULT_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
+   *  Wilder-ATR experiment ("common-horizon-4h-v1"). GENUINELY SEPARATE
+   *  field from unitCompetitionResearch -- same $setOnInsert pattern for
+   *  symbol/side/signalTs (identical reasoning: values are guaranteed
+   *  identical to production's own canonical values by construction,
+   *  $setOnInsert used regardless as a hard, structural guarantee), and
+   *  the version tag is ALSO written via $setOnInsert -- once a document
+   *  is created under one version, it can never be silently switched to
+   *  a different version string later. Full candidate doc (phase-
+   *  snapshot fields while TRACKING, terminal fields once resolved) is
+   *  written via a plain $set -- this data is genuinely live-only,
+   *  written EXCLUSIVELY by this research path, so no cross-write race
+   *  with production exists here (unlike symbol/side/signalTs, which
+   *  production's own canonical doc also independently knows). */
+  async setCommonHorizonCandidate(
+    signalId: string,
+    candidate: "atr1m" | "atr3m" | "atr5m",
+    doc: CommonHorizonCandidateDoc,
+    meta: { symbol: string; side: "LONG" | "SHORT"; signalTs: number },
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        {
+          $set: { [`commonHorizonResearch.${candidate}`]: doc },
+          $setOnInsert: {
+            symbol: meta.symbol,
+            side: meta.side,
+            signalTs: meta.signalTs,
+            "commonHorizonResearch.version": "common-horizon-4h-v1",
+          },
+        },
+        { upsert: true },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, candidate },
+        "[GLOBAL_SIGNAL_SET_COMMON_HORIZON_CANDIDATE_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  async setCommonHorizonWinner(
+    signalId: string,
+    winnerCandidate: "atr1m" | "atr3m" | "atr5m",
+    winnerEntryTs: number,
+    meta: { symbol: string; side: "LONG" | "SHORT"; signalTs: number },
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        {
+          $set: {
+            "commonHorizonResearch.winnerCandidate": winnerCandidate,
+            "commonHorizonResearch.winnerEntryTs": winnerEntryTs,
+          },
+          $setOnInsert: {
+            symbol: meta.symbol,
+            side: meta.side,
+            signalTs: meta.signalTs,
+            "commonHorizonResearch.version": "common-horizon-4h-v1",
+          },
+        },
+        { upsert: true },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, winnerCandidate },
+        "[GLOBAL_SIGNAL_SET_COMMON_HORIZON_WINNER_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  async setCommonHorizonWinnerResult(
+    signalId: string,
+    result: "TP" | "SL",
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        { $set: { "commonHorizonResearch.winnerResult": result } },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, result },
+        "[GLOBAL_SIGNAL_SET_COMMON_HORIZON_WINNER_RESULT_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  async appendCommonHorizonCheckpoint(
+    signalId: string,
+    candidate: "atr1m" | "atr3m" | "atr5m",
+    checkpoint: CommonHorizonCandidateDoc["checkpoints"][number],
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        {
+          $push: {
+            [`commonHorizonResearch.${candidate}.checkpoints`]: checkpoint,
+          },
+        },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, candidate },
+        "[GLOBAL_SIGNAL_APPEND_COMMON_HORIZON_CHECKPOINT_FAILED] -- non-fatal",
       );
     }
   }

@@ -24,7 +24,7 @@ import {
 import type {
   GlobalSignalDoc,
   UnitResearchCandidateDoc,
-  UnitCompetitionCandidateDoc,
+  CommonHorizonCandidateDoc,
 } from "../domain/signal/global-signal.model";
 import type { Side, Liquidation } from "../shared/common.types";
 import { deriveLiquidationPhysicsTradePlan } from "../domain/trading/liquidation-physics-trade-plan";
@@ -79,6 +79,12 @@ const log = childLogger({ mod: "market-data-orchestrator" });
  *      reconcile-user-position.usecase.ts, which has no reference to
  *      this class or to GlobalSignalRepository at all).
  */
+/** Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1 research.
+ *  Wilder ATR periods chosen so all three candidates represent roughly
+ *  the SAME ~4h volatility horizon (period x interval-minutes ~= 240min
+ *  for every candidate): 1m x240=240min, 3m x80=240min, 5m x48=240min. */
+const COMMON_HORIZON_PERIODS = { atr1m: 240, atr3m: 80, atr5m: 48 } as const;
+
 export class MarketDataOrchestrator {
   readonly liquidationStore = new LiquidationStore();
   readonly liquidationStats: LiquidationStatsService;
@@ -254,6 +260,23 @@ export class MarketDataOrchestrator {
     mainTelegram: {
       sendMessage: (text: string) => Promise<unknown>;
     } | null = null,
+    /** Sep 10 2026 (Karo), operator-requested -- temporarily disables
+     *  ONLY the production V5 signal-creation consequence (the single
+     *  this.distributor.distribute() call below, which persists a
+     *  GlobalSignalDoc with status=SIGNAL, sends every enabled user's
+     *  own Telegram ENTRY, and triggers Binance execution, all
+     *  together). Defaults to true (enabled) -- must be EXPLICITLY
+     *  passed false to disable, so every EXISTING call-site is
+     *  unaffected unless main.ts is updated to pass it. V5WaveService's
+     *  own state machine (onLiquidation/onTick/Wave1/Wave2) keeps
+     *  running completely unchanged either way -- the
+     *  common-horizon-4h-v1 research's own episode-start detection
+     *  depends on observing that state machine, so it MUST keep
+     *  running for research to keep working. This flag only ever gates
+     *  the production SIGNAL's own downstream consequences, never the
+     *  underlying strategy computation itself. No code is deleted --
+     *  this is a single, reversible early-return. */
+    private readonly productionSignalsEnabled: boolean = true,
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
@@ -409,6 +432,34 @@ export class MarketDataOrchestrator {
     return this.v5.getWatch(symbol, victim) !== null;
   }
 
+  /** Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1
+   *  research -- readiness gate. Returns true ONLY when all three
+   *  Wilder-ATR periods (1m/240, 3m/80, 5m/48) are already warm for
+   *  this symbol. Research NEVER starts an episode with missing/partial
+   *  ATR state -- a liquidation arriving before bootstrap completes
+   *  simply gets skipped for research entirely (production itself is
+   *  completely unaffected either way -- this gate exists purely for
+   *  research data-quality). */
+  private commonHorizonAtrReady(symbol: string): boolean {
+    return (
+      this.atrTracker.getWilderATR(
+        symbol,
+        "1m",
+        COMMON_HORIZON_PERIODS.atr1m,
+      ) !== null &&
+      this.atrTracker.getWilderATR(
+        symbol,
+        "3m",
+        COMMON_HORIZON_PERIODS.atr3m,
+      ) !== null &&
+      this.atrTracker.getWilderATR(
+        symbol,
+        "5m",
+        COMMON_HORIZON_PERIODS.atr5m,
+      ) !== null
+    );
+  }
+
   private feedUnitResearchShadowAfter(
     l: Liquidation,
     wasTrackedBefore: boolean,
@@ -443,48 +494,65 @@ export class MarketDataOrchestrator {
           l.timestamp,
         );
       }
-      // Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit
-      // "dragon" competition -- COMPLETELY SEPARATE instances, started
-      // in lockstep with the SAME production Wave1-start moment, "1m"
-      // included this time (a genuinely independent shadow, unlike the
-      // earlier unitResearch experiment which treated 1m as production
-      // itself).
-      const compUnit1m = this.atrTracker.getATR(l.symbol, "1m");
-      if (compUnit1m !== null && compUnit1m > 0) {
-        this.competitionShadow1m.startEpisode(
+      // Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1
+      // research (REPLACES the earlier ATR(14)-based dragon competition
+      // -- same shadow-service class, same dragon formula, DIFFERENT ATR
+      // source: Wilder(240/80/48) instead of Wilder(14) per interval, so
+      // all three candidates represent roughly the same ~4h volatility
+      // horizon instead of 14/42/70 minutes). Gated by
+      // commonHorizonAtrReady(): if even ONE of the three Wilder-ATRs is
+      // not yet warm (cold buffer, still bootstrapping), this episode is
+      // SKIPPED for research entirely -- never started with partial
+      // state, per the operator's own explicit requirement.
+      if (this.commonHorizonAtrReady(l.symbol)) {
+        const chUnit1m = this.atrTracker.getWilderATR(
           l.symbol,
-          victim,
-          newWatch.signalId,
-          compUnit1m,
-          l.price,
-          l.timestamp,
-          l.quoteQty,
-          l.timestamp,
+          "1m",
+          COMMON_HORIZON_PERIODS.atr1m,
         );
-      }
-      if (unit3m !== null && unit3m > 0) {
-        this.competitionShadow3m.startEpisode(
+        const chUnit3m = this.atrTracker.getWilderATR(
           l.symbol,
-          victim,
-          newWatch.signalId,
-          unit3m,
-          l.price,
-          l.timestamp,
-          l.quoteQty,
-          l.timestamp,
+          "3m",
+          COMMON_HORIZON_PERIODS.atr3m,
         );
-      }
-      if (unit5m !== null && unit5m > 0) {
-        this.competitionShadow5m.startEpisode(
+        const chUnit5m = this.atrTracker.getWilderATR(
           l.symbol,
-          victim,
-          newWatch.signalId,
-          unit5m,
-          l.price,
-          l.timestamp,
-          l.quoteQty,
-          l.timestamp,
+          "5m",
+          COMMON_HORIZON_PERIODS.atr5m,
         );
+        if (chUnit1m !== null && chUnit1m > 0)
+          this.competitionShadow1m.startEpisode(
+            l.symbol,
+            victim,
+            newWatch.signalId,
+            chUnit1m,
+            l.price,
+            l.timestamp,
+            l.quoteQty,
+            l.timestamp,
+          );
+        if (chUnit3m !== null && chUnit3m > 0)
+          this.competitionShadow3m.startEpisode(
+            l.symbol,
+            victim,
+            newWatch.signalId,
+            chUnit3m,
+            l.price,
+            l.timestamp,
+            l.quoteQty,
+            l.timestamp,
+          );
+        if (chUnit5m !== null && chUnit5m > 0)
+          this.competitionShadow5m.startEpisode(
+            l.symbol,
+            victim,
+            newWatch.signalId,
+            chUnit5m,
+            l.price,
+            l.timestamp,
+            l.quoteQty,
+            l.timestamp,
+          );
       }
       return;
     }
@@ -558,6 +626,37 @@ export class MarketDataOrchestrator {
         mid,
         ts,
       );
+      // Sep 10 2026 (Karo), operator-requested observability extension --
+      // periodic live-phase snapshot for still-TRACKING candidates, so
+      // the read-only monitoring report can show current phase/W1/W2/
+      // next-target instead of "no result persisted yet". PURE
+      // OBSERVATION: peekWatch() never mutates the shadow's own state;
+      // this only ever calls the NEW, additive setCommonHorizonCandidate()
+      // persistence path, never touching production or any decision logic.
+      this.snapshotCommonHorizonPhase(
+        "atr1m",
+        this.competitionShadow1m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
+      this.snapshotCommonHorizonPhase(
+        "atr3m",
+        this.competitionShadow3m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
+      this.snapshotCommonHorizonPhase(
+        "atr5m",
+        this.competitionShadow5m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
     }
     const completed3m = this.shadowCheckpoints3m.onTick(symbol, mid, ts);
     for (const c of completed3m)
@@ -582,7 +681,7 @@ export class MarketDataOrchestrator {
             : this.competitionCheckpoints5m;
       const completed = tracker.onTick(symbol, mid, ts);
       for (const c of completed)
-        void this.globalSignalRepo.appendUnitCompetitionCheckpoint(
+        void this.globalSignalRepo.appendCommonHorizonCheckpoint(
           c.signalId,
           label,
           c.checkpoint,
@@ -591,21 +690,99 @@ export class MarketDataOrchestrator {
     this.checkCompetitionWinnerTouch(symbol, mid, ts);
   }
 
-  /** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit
-   *  "dragon" competition. Called once per (candidate, victim) per
-   *  bookTicker tick -- a complete no-op when no competition-episode is
-   *  active for this symbol/victim/candidate. On a terminal shadow
-   *  event: STRUCTURAL_CANCEL is persisted immediately for a no-entry
-   *  event; for an entry-ready event, runs evaluateDragon() (the NEW,
-   *  standalone formula -- see unit-competition-dragon.ts's own doc
-   *  comment -- NEVER deriveLiquidationPhysicsTradePlan(), no
-   *  exhaustion/absorption/ATR15m/clamp), persists the FULL result
-   *  (every attempted RR, not just the winner), and registers an
-   *  MFE/MAE checkpoint-watch ONLY when verdict=PASS. Crucially: a
-   *  candidate reaching PASS or FAIL here NEVER stops any OTHER
-   *  candidate -- each of the three UnitResearchShadowService instances
-   *  is fully independent (see this class's own module doc comment),
-   *  so all three always run their own path to completion. */
+  /** Sep 10 2026 (Karo), operator-requested observability extension --
+   *  writes a live phase-snapshot for a still-ACTIVE (non-terminal)
+   *  candidate, throttled to avoid write-spam: only when the phase
+   *  itself has changed, or at most once every 15s otherwise. PURE
+   *  READ of shadow.peekWatch() (never mutates shadow state) + a
+   *  single, additive Mongo write -- no strategy/decision logic here. */
+  private readonly commonHorizonLastSnapshot = new Map<
+    string,
+    { phase: string; ts: number }
+  >();
+
+  private snapshotCommonHorizonPhase(
+    label: "atr1m" | "atr3m" | "atr5m",
+    shadow: UnitResearchShadowService,
+    symbol: string,
+    victim: Side,
+    mid: number,
+    ts: number,
+  ): void {
+    const peek = shadow.peekWatch(symbol, victim);
+    if (!peek) return;
+    const watch = this.v5.getWatch(symbol, victim); // read-only, for signalId join only -- see feedUnitResearchShadowAfter's own use of the same pattern
+    // signalId is not directly retrievable from peek (by design -- see
+    // ShadowPeek's own doc comment, it exposes ONLY structural state).
+    // We instead look up the pending signalId via the SAME join key the
+    // terminal path already uses: production's own still-open watch's
+    // signalId, valid for as long as THIS episode is still active.
+    if (!watch) return;
+    const snapKey = `${watch.signalId}:${label}`;
+    const last = this.commonHorizonLastSnapshot.get(snapKey);
+    if (last && last.phase === peek.phase && ts - last.ts < 15_000) return;
+    this.commonHorizonLastSnapshot.set(snapKey, { phase: peek.phase, ts });
+
+    const period =
+      label === "atr1m"
+        ? COMMON_HORIZON_PERIODS.atr1m
+        : label === "atr3m"
+          ? COMMON_HORIZON_PERIODS.atr3m
+          : COMMON_HORIZON_PERIODS.atr5m;
+    const doc: CommonHorizonCandidateDoc = {
+      candidate: this.candidateLabelShort(label) as "1m" | "3m" | "5m",
+      atrPeriod: period,
+      episodeStartTs: peek.episodeStartTs,
+      frozenUnitAbs: peek.unitAbs,
+      frozenAtrPct: peek.w1 ? peek.unitAbs / peek.w1.anchorPrice : 0,
+      state: "TRACKING",
+      phase: peek.phase,
+      w1: peek.w1,
+      w2: peek.w2,
+      currentPrice: mid,
+      nextTargetPrice: peek.nextTargetPrice,
+      nextTargetDescription: peek.nextTargetDescription,
+      lastUpdatedTs: ts,
+      terminalReason: null,
+      w1CompleteTs: null,
+      w2StartTs: null,
+      entryReadyTs: null,
+      durationMs: null,
+      episodeLiqUsdAtEntry: null,
+      liqBaselineAtEntry: null,
+      relativePressure: null,
+      pressureFactor: null,
+      rawTpPct: null,
+      rrAttempts: [],
+      selectedRR: null,
+      rawSlPct: null,
+      hypotheticalEntry: null,
+      hypotheticalTp: null,
+      hypotheticalSl: null,
+      checkpoints: [],
+    };
+    void this.globalSignalRepo.setCommonHorizonCandidate(
+      watch.signalId,
+      label,
+      doc,
+      { symbol, side: victim, signalTs: peek.episodeStartTs },
+    );
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1
+   *  research (formerly the ATR(14)-based dragon competition -- same
+   *  shadow-service class, same dragon formula, now fed Wilder(240/80/48)
+   *  and persisted to the SEPARATE, versioned commonHorizonResearch
+   *  field instead of unitCompetitionResearch). Called once per
+   *  (candidate, victim) per bookTicker tick -- a complete no-op when no
+   *  competition-episode is active. On a terminal shadow event:
+   *  STRUCTURAL_CANCEL is persisted immediately for a no-entry event;
+   *  for an entry-ready event, runs evaluateDragon() (UNCHANGED formula
+   *  -- see unit-competition-dragon.ts), persists the FULL result, and
+   *  registers an MFE/MAE checkpoint-watch ONLY when verdict=PASS.
+   *  Crucially: a candidate reaching PASS or FAIL here NEVER stops any
+   *  OTHER candidate -- each of the three UnitResearchShadowService
+   *  instances is fully independent. */
   private handleCompetitionTick(
     label: "atr1m" | "atr3m" | "atr5m",
     shadow: UnitResearchShadowService,
@@ -617,6 +794,12 @@ export class MarketDataOrchestrator {
   ): void {
     const result = shadow.onTick(symbol, victim, mid, ts);
     if (!result) return;
+    const period =
+      label === "atr1m"
+        ? COMMON_HORIZON_PERIODS.atr1m
+        : label === "atr3m"
+          ? COMMON_HORIZON_PERIODS.atr3m
+          : COMMON_HORIZON_PERIODS.atr5m;
 
     if ("entryPrice" in result) {
       const entry = result as ShadowEntryEvent;
@@ -643,11 +826,32 @@ export class MarketDataOrchestrator {
             : entry.entryPrice * (1 + dragon.rawSlPct);
       }
 
-      const doc: UnitCompetitionCandidateDoc = {
+      const doc: CommonHorizonCandidateDoc = {
         candidate: label === "atr1m" ? "1m" : label === "atr3m" ? "3m" : "5m",
+        atrPeriod: period,
         frozenUnitAbs: entry.unitAbs,
         frozenAtrPct,
         episodeStartTs: entry.episodeStartTs,
+        state: dragon.verdict,
+        phase: null,
+        w1: {
+          anchorPrice: entry.w1.anchorPrice,
+          extremePrice: entry.w1.extremePrice,
+          liqUsd: entry.w1.liqUsd,
+          liqEvents: 0,
+        },
+        w2: {
+          anchorPrice: entry.w2.anchorPrice,
+          extremePrice: entry.w2.extremePrice,
+          liqUsd: entry.w2.liqUsd,
+          liqEvents: 0,
+        },
+        currentPrice: entry.entryPrice,
+        nextTargetPrice: null,
+        nextTargetDescription: null,
+        lastUpdatedTs: ts,
+        terminalReason:
+          dragon.verdict === "PASS" ? null : this.dragonFailDetail(dragon),
         w1CompleteTs: entry.w1.completedTs,
         w2StartTs: entry.w2.startedTs,
         entryReadyTs: entry.entryTs,
@@ -660,13 +864,12 @@ export class MarketDataOrchestrator {
         rrAttempts: dragon.rrAttempts,
         selectedRR: dragon.selectedRR,
         rawSlPct: dragon.rawSlPct,
-        verdict: dragon.verdict,
         hypotheticalEntry: entry.entryPrice,
         hypotheticalTp,
         hypotheticalSl,
         checkpoints: [],
       };
-      void this.globalSignalRepo.setUnitCompetitionCandidate(
+      void this.globalSignalRepo.setCommonHorizonCandidate(
         entry.signalId,
         label,
         doc,
@@ -717,14 +920,31 @@ export class MarketDataOrchestrator {
       }
     } else {
       const noEntry = result as ShadowNoEntryEvent;
-      const doc: UnitCompetitionCandidateDoc = {
+      const doc: CommonHorizonCandidateDoc = {
         candidate: label === "atr1m" ? "1m" : label === "atr3m" ? "3m" : "5m",
+        atrPeriod: period,
         frozenUnitAbs: noEntry.unitAbs,
         frozenAtrPct:
           noEntry.w1 && noEntry.w1.anchorPrice > 0
             ? noEntry.unitAbs / noEntry.w1.anchorPrice
             : 0,
         episodeStartTs: noEntry.episodeStartTs,
+        state: "STRUCTURAL_CANCEL",
+        phase: null,
+        w1: noEntry.w1
+          ? {
+              anchorPrice: noEntry.w1.anchorPrice,
+              extremePrice: noEntry.w1.extremePrice,
+              liqUsd: noEntry.w1.liqUsd,
+              liqEvents: 0,
+            }
+          : null,
+        w2: null,
+        currentPrice: mid,
+        nextTargetPrice: null,
+        nextTargetDescription: null,
+        lastUpdatedTs: ts,
+        terminalReason: noEntry.reason,
         w1CompleteTs: null,
         w2StartTs: null,
         entryReadyTs: null,
@@ -737,13 +957,12 @@ export class MarketDataOrchestrator {
         rrAttempts: [],
         selectedRR: null,
         rawSlPct: null,
-        verdict: "STRUCTURAL_CANCEL",
         hypotheticalEntry: null,
         hypotheticalTp: null,
         hypotheticalSl: null,
         checkpoints: [],
       };
-      void this.globalSignalRepo.setUnitCompetitionCandidate(
+      void this.globalSignalRepo.setCommonHorizonCandidate(
         noEntry.signalId,
         label,
         doc,
@@ -830,7 +1049,7 @@ export class MarketDataOrchestrator {
       maxFavorable: entry,
       maxAdverse: entry,
     });
-    void this.globalSignalRepo.setUnitCompetitionWinner(
+    void this.globalSignalRepo.setCommonHorizonWinner(
       signalId,
       candidate,
       entryTs,
@@ -914,10 +1133,7 @@ export class MarketDataOrchestrator {
 
       const result: "TP" | "SL" = hitTp ? "TP" : "SL";
       this.competitionWinners.delete(signalId);
-      void this.globalSignalRepo.setUnitCompetitionWinnerResult(
-        signalId,
-        result,
-      );
+      void this.globalSignalRepo.setCommonHorizonWinnerResult(signalId, result);
 
       if (this.mainTelegram) {
         const slDistance = Math.abs(w.entry - w.sl);
@@ -1236,18 +1452,35 @@ export class MarketDataOrchestrator {
         researchCheckpoints: [],
         unitResearch: null,
         unitCompetitionResearch: null,
+        commonHorizonResearch: null,
         createdAt: Date.now(),
       };
 
-      await this.distributor.distribute(globalSignal, this.mongo);
+      // Sep 10 2026 (Karo), operator-requested -- productionSignalsEnabled
+      // gates the distribute() call AND mainSymbolLocks.add() TOGETHER.
+      // Locking the symbol without distribute() ever actually executing
+      // anything would PERMANENTLY STARVE research for that symbol
+      // (mainSymbolLocks is checked BEFORE research's own liquidation-
+      // handler code runs at all -- see the liquidation handler in
+      // start()), since the only thing that ever releases this lock is
+      // MAIN's own real trade CLOSE, which can never happen if no real
+      // signal was ever distributed. Both gated together prevents that.
+      if (this.productionSignalsEnabled) {
+        await this.distributor.distribute(globalSignal, this.mongo);
+        if (
+          hasRealPlan &&
+          globalSignal.entry !== null &&
+          globalSignal.sl !== null
+        ) {
+          this.mainSymbolLocks.add(event.symbol);
+        }
+      }
 
       if (
         hasRealPlan &&
         globalSignal.entry !== null &&
         globalSignal.sl !== null
       ) {
-        this.mainSymbolLocks.add(event.symbol);
-
         const denom = Math.abs(globalSignal.entry - globalSignal.sl);
         const dirMul = event.side === "LONG" ? 1 : -1;
         this.researchCheckpoints.registerWatch(
@@ -1342,6 +1575,7 @@ export class MarketDataOrchestrator {
       researchCheckpoints: [],
       unitResearch: null,
       unitCompetitionResearch: null,
+      commonHorizonResearch: null,
       createdAt: Date.now(),
     };
     await this.globalSignalRepo.insert(doc);

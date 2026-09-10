@@ -1,0 +1,329 @@
+/**
+ * Sep 10 2026 (Karo), operator-requested common-horizon-4h-v1 research.
+ * Proves: Wilder-ATR with a configurable period is computed correctly
+ * and isolated from the existing ATR(14) path; only closed candles
+ * contribute; the readiness gate prevents starting research with
+ * partial ATR state; the production-signal-disable gate is structurally
+ * sound (state machine keeps running, only downstream consequences are
+ * gated); peekWatch() is pure/read-only.
+ */
+import * as assert from "assert";
+import * as fs from "fs";
+import { ATRTrackerService } from "../src/domain/market/atr-tracker.service";
+import { UnitResearchShadowService } from "../src/domain/research/unit-research-shadow.service";
+import type { Candle } from "../src/shared/common.types";
+
+let passed = 0;
+let failed = 0;
+
+function scenario(name: string, fn: () => void): void {
+  try {
+    fn();
+    passed++;
+    console.log(`  \u2713 ${name}`);
+  } catch (err) {
+    failed++;
+    console.log(`  \u2717 ${name}`);
+    console.log(`      ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+}
+
+function candle(
+  interval: string,
+  openTime: number,
+  close: number,
+  isClosed = true,
+): Candle {
+  return {
+    symbol: "ETHUSDT",
+    interval,
+    openTime,
+    closeTime: openTime + 60_000,
+    open: close,
+    high: close + 1,
+    low: close - 1,
+    close,
+    volume: 100,
+    isClosed,
+  } as unknown as Candle;
+}
+
+console.log("Running common-horizon-research tests...\n");
+
+// ─── getWilderATR: correctness, isolation from getATR(14) ──────────────
+
+scenario(
+  "getWilderATR returns null when the research buffer has fewer than period+1 candles",
+  () => {
+    const tracker = new ATRTrackerService();
+    for (let i = 0; i < 50; i++)
+      tracker.onCandle(candle("1m", i * 60_000, 2000 + i));
+    assert.strictEqual(
+      tracker.getWilderATR("ETHUSDT", "1m", 240),
+      null,
+      "50 candles is nowhere near enough for period=240",
+    );
+  },
+);
+
+scenario(
+  "getWilderATR returns a real value once the research buffer has period+1 candles",
+  () => {
+    const tracker = new ATRTrackerService();
+    for (let i = 0; i < 250; i++)
+      tracker.onCandle(candle("1m", i * 60_000, 2000 + Math.sin(i) * 5));
+    const v = tracker.getWilderATR("ETHUSDT", "1m", 240);
+    assert.ok(v !== null && v > 0, `expected a real positive ATR, got ${v}`);
+  },
+);
+
+scenario(
+  "getWilderATR at period=14 matches getATR(14)'s own value closely -- same Wilder formula, same underlying candle data, just fed through the separate research buffer",
+  () => {
+    const tracker = new ATRTrackerService();
+    for (let i = 0; i < 100; i++)
+      tracker.onCandle(candle("1m", i * 60_000, 2000 + Math.sin(i) * 5));
+    const production = tracker.getATR("ETHUSDT", "1m");
+    const research = tracker.getWilderATR("ETHUSDT", "1m", 14);
+    assert.ok(production !== null && research !== null);
+    assert.ok(
+      Math.abs(production! - research!) < 1e-6,
+      `production=${production} research=${research} should match closely (same formula, same data)`,
+    );
+  },
+);
+
+scenario(
+  "structural: getATR() never reads the separate research buffer",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/domain/market/atr-tracker.service.ts"),
+      "utf8",
+    );
+    const getAtrBody = source.slice(
+      source.indexOf("getATR(symbol: string"),
+      source.indexOf("\n  /**", source.indexOf("getATR(symbol: string") + 10),
+    );
+    assert.ok(
+      !getAtrBody.includes("researchState"),
+      "getATR() must never read the separate research buffer",
+    );
+  },
+);
+
+scenario(
+  "structural: getWilderATR() reads ONLY the separate researchState buffer, never the existing `state` map getATR(14) uses",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/domain/market/atr-tracker.service.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("getWilderATR(symbol: string");
+    const body = source.slice(idx, source.indexOf("\n  /**", idx + 10));
+    assert.ok(
+      body.includes("this.researchState.get("),
+      "getWilderATR must read from researchState",
+    );
+    assert.ok(
+      !body.includes("this.state.get("),
+      "getWilderATR must never read the existing state map",
+    );
+  },
+);
+
+// ─── Only closed candles contribute ─────────────────────────────────────
+
+scenario(
+  "un-closed candles never enter the research buffer either -- restart/bootstrap uses the SAME closed-candle-only rule as live",
+  () => {
+    const tracker = new ATRTrackerService();
+    for (let i = 0; i < 20; i++)
+      tracker.onCandle(candle("1m", i * 60_000, 2000 + i, false)); // all un-closed
+    assert.strictEqual(
+      tracker.researchCandleCount("ETHUSDT", "1m"),
+      0,
+      "un-closed candles must never be counted in the research buffer",
+    );
+  },
+);
+
+scenario(
+  "structural: onCandle()'s own closed-candle guard runs BEFORE both the existing and the research buffer are fed -- one shared gate, not two separate checks that could diverge",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/domain/market/atr-tracker.service.ts"),
+      "utf8",
+    );
+    const onCandleIdx = source.indexOf("onCandle(c: Candle): void {");
+    const onCandleBody = source.slice(
+      onCandleIdx,
+      source.indexOf("\n  /**", onCandleIdx),
+    );
+    const guardIdx = onCandleBody.indexOf("if (!c.isClosed) return;");
+    const researchPushIdx = onCandleBody.indexOf(
+      "this.researchState.set(key, rs);",
+    );
+    assert.ok(
+      guardIdx > -1 && researchPushIdx > -1 && guardIdx < researchPushIdx,
+      "the closed-candle guard must run before the research buffer is ever touched",
+    );
+  },
+);
+
+// ─── Readiness gate ──────────────────────────────────────────────────────
+
+scenario(
+  "structural: commonHorizonAtrReady() checks all three Wilder-ATR periods (1m/240, 3m/80, 5m/48) before an episode is allowed to start",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("private commonHorizonAtrReady");
+    const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+    assert.ok(
+      body.includes('getWilderATR(symbol, "1m", COMMON_HORIZON_PERIODS.atr1m)'),
+    );
+    assert.ok(
+      body.includes('getWilderATR(symbol, "3m", COMMON_HORIZON_PERIODS.atr3m)'),
+    );
+    assert.ok(
+      body.includes('getWilderATR(symbol, "5m", COMMON_HORIZON_PERIODS.atr5m)'),
+    );
+  },
+);
+
+scenario(
+  "structural: the common-horizon episode-start call-site is gated by commonHorizonAtrReady() -- a liquidation arriving with incomplete bootstrap is skipped for research entirely, never started with partial state",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("private feedUnitResearchShadowAfter");
+    const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+    const gateIdx = body.indexOf("if (this.commonHorizonAtrReady(l.symbol)) {");
+    const startIdx = body.indexOf("competitionShadow1m.startEpisode(");
+    assert.ok(
+      gateIdx > -1 && startIdx > -1 && gateIdx < startIdx,
+      "startEpisode() calls for the common-horizon candidates must be inside the readiness-gated block",
+    );
+  },
+);
+
+// ─── Production-signal-disable gate ─────────────────────────────────────
+
+scenario(
+  "structural: productionSignalsEnabled gates BOTH distributor.distribute() AND mainSymbolLocks.add() together -- locking a symbol without ever distributing would permanently starve research for that symbol",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("if (this.productionSignalsEnabled) {");
+    const body = source.slice(
+      idx,
+      source.indexOf("\n      if (hasRealPlan", idx),
+    );
+    assert.ok(
+      body.includes("this.distributor.distribute("),
+      "distribute() must be inside the gate",
+    );
+    assert.ok(
+      body.includes("this.mainSymbolLocks.add("),
+      "mainSymbolLocks.add() must be inside the SAME gate",
+    );
+  },
+);
+
+scenario(
+  "structural: V5WaveService's own onLiquidation()/onTick() calls are NEVER gated by productionSignalsEnabled -- the state machine must keep running unconditionally for research's own episode-detection to keep working",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const codeOnly = source
+      .split("\n")
+      .filter((l) => !l.trim().startsWith("*") && !l.trim().startsWith("//"))
+      .join("\n");
+    const v5OnLiqLine = codeOnly
+      .split("\n")
+      .find((l) => l.includes("this.v5.onLiquidation("));
+    const v5OnTickLine = codeOnly
+      .split("\n")
+      .find((l) => l.includes("this.v5.onTick("));
+    assert.ok(
+      v5OnLiqLine && !v5OnLiqLine.includes("productionSignalsEnabled"),
+      "v5.onLiquidation() call itself must not be gated",
+    );
+    assert.ok(
+      v5OnTickLine && !v5OnTickLine.includes("productionSignalsEnabled"),
+      "v5.onTick() call itself must not be gated",
+    );
+  },
+);
+
+scenario(
+  "structural: productionSignalsEnabled defaults to true (every EXISTING call-site without the new arg is unaffected)",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    assert.ok(
+      source.includes(
+        "private readonly productionSignalsEnabled: boolean = true,",
+      ),
+    );
+  },
+);
+
+// ─── peekWatch() purity ──────────────────────────────────────────────────
+
+scenario(
+  "peekWatch() never mutates shadow state -- calling it many times in a row returns identical results and never advances the watch toward a terminal state",
+  () => {
+    const shadow = new UnitResearchShadowService(() => 1000);
+    shadow.startEpisode("ETHUSDT", "LONG", "sig-1", 5, 2000, 1000, 5000, 1000);
+    const peek1 = shadow.peekWatch("ETHUSDT", "LONG");
+    const peek2 = shadow.peekWatch("ETHUSDT", "LONG");
+    const peek3 = shadow.peekWatch("ETHUSDT", "LONG");
+    assert.deepStrictEqual(peek1, peek2);
+    assert.deepStrictEqual(peek2, peek3);
+    assert.strictEqual(
+      shadow.activeWatchCount,
+      1,
+      "peekWatch must never remove or terminate the watch",
+    );
+  },
+);
+
+scenario(
+  "peekWatch() reports WAITING_W1_RECOVERY while Wave 1 is active, then WAITING_W2_START once Wave 1 completes with no Wave 2 yet",
+  () => {
+    const shadow = new UnitResearchShadowService(() => 1000);
+    shadow.startEpisode("ETHUSDT", "LONG", "sig-1", 1, 2000, 1000, 5000, 1000);
+    let peek = shadow.peekWatch("ETHUSDT", "LONG");
+    assert.strictEqual(peek?.phase, "WAITING_W1_RECOVERY");
+    shadow.onTick("ETHUSDT", "LONG", 1990, 1500); // extreme deepens
+    shadow.onTick("ETHUSDT", "LONG", 1991, 2000); // +1 UNIT recovery -> Wave 1 completes
+    peek = shadow.peekWatch("ETHUSDT", "LONG");
+    assert.strictEqual(peek?.phase, "WAITING_W2_START");
+  },
+);
+
+scenario(
+  "peekWatch() returns null once the episode reaches a terminal state -- no stale phase lingers after resolution",
+  () => {
+    const shadow = new UnitResearchShadowService(() => 1000);
+    shadow.startEpisode("ETHUSDT", "LONG", "sig-1", 1, 2000, 1000, 5000, 1000);
+    shadow.onTick("ETHUSDT", "LONG", 1990, 1500);
+    shadow.onTick("ETHUSDT", "LONG", 1991, 2000); // Wave 1 complete, extreme=1990
+    shadow.onTick("ETHUSDT", "LONG", 1993, 2500); // 2x UNIT recovery (1990+2=1992, price=1993 crosses it), no Wave 2 -> CANCEL
+    assert.strictEqual(shadow.peekWatch("ETHUSDT", "LONG"), null);
+  },
+);
+
+console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);

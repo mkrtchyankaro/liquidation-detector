@@ -235,6 +235,16 @@ async function main(): Promise<void> {
     // -- MAIN close is then simply not sent anywhere, matching how
     // every other missing-config case in this project degrades.
     userRuntimes.find((r) => r.config.userId === "main")?.telegram ?? null,
+    // Sep 10 2026 (Karo), operator-requested -- production V5 signal
+    // creation (Telegram ENTRY, Binance execution, GlobalSignalDoc
+    // status=SIGNAL persistence) is temporarily disabled. V5WaveService's
+    // own state machine keeps running unchanged (required for the
+    // common-horizon-4h-v1 research's own episode-start detection).
+    // Controlled by V5_PRODUCTION_SIGNALS_ENABLED -- defaults to false
+    // (disabled) per the operator's own current, explicit intent; set
+    // to "true" in the environment to re-enable production signals
+    // again later without any code change.
+    process.env.V5_PRODUCTION_SIGNALS_ENABLED === "true",
   );
   orchestratorPlaceholder.instance = orchestrator;
 
@@ -278,11 +288,24 @@ async function main(): Promise<void> {
   // 5m(100min)'s own already-existing bootstrap depth). Exclusively
   // consumed by the shadow unit-research service; no existing
   // production code path reads ATR(3m) at all.
+  // Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
+  // Wilder-ATR experiment ("common-horizon-4h-v1") -- "1m" needs its
+  // own, LARGER bootstrap (250 candles, matching
+  // RESEARCH_HISTORY_BUFFER_SIZE) so getWilderATR(symbol,"1m",240) can
+  // warm up immediately on restart instead of needing ~4h of live
+  // candles first. The EXISTING 100-candle bootstrap for 15m/5m/3m/1m
+  // (still used by getATR(14) and the earlier 3m/5m research
+  // experiment) is completely unchanged -- this is a SECOND, additive
+  // bootstrap call for "1m" alone, both writing into the SAME
+  // onCandle() hook (dedup-safe by openTime), so the existing 1m
+  // ATR(14) buffer is unaffected by the extra history now also being
+  // fed into the separate research buffer.
   const bootstrapPairs = pairsFor(symbols, ["15m", "5m", "3m", "1m"], 100);
+  const research1mBootstrapPairs = pairsFor(symbols, ["1m"], 250);
   await bootstrapAtrFromRest(
     new BinanceRestClient(binanceConfig),
     orchestrator.atrTracker,
-    bootstrapPairs,
+    [...bootstrapPairs, ...research1mBootstrapPairs],
   );
 
   // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own

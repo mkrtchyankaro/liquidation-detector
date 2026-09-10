@@ -1,58 +1,50 @@
 /**
  * Sep 10 2026 (Karo), operator-requested READ-ONLY monitoring script
- * for the live unitCompetitionResearch experiment (unit-competition-
- * dragon.ts / market-data-orchestrator.ts's own dragon-competition
- * wiring).
+ * for the LIVE common-horizon-4h-v1 research experiment (REPLACES the
+ * earlier ATR(14)-based dragon competition report -- reads
+ * commonHorizonResearch, NOT unitCompetitionResearch, so old and new
+ * data are never mixed in this report).
  *
  * READ-ONLY GUARANTEE: this file contains exactly ONE Mongo operation
  * -- a single .find() query, no options beyond sort/limit. There is no
  * updateOne/insertOne/deleteOne/$set/$push/upsert anywhere in this
  * file, and no import of any repository class that could perform one.
  * It has zero influence on production or research state -- it only
- * ever reads what market-data-orchestrator.ts's own dragon-competition
- * code has already, independently written.
+ * ever reads what market-data-orchestrator.ts's own common-horizon
+ * research code has already, independently written.
  *
  * Schema traced from the REAL, current source (not guessed):
  *   - Collection: v5_global_signals, in the "own" database
  *     (mongo.client.ts's own globalSignals(), dbs.own.collection(...))
- *   - Field shape: GlobalSignalDoc.unitCompetitionResearch (global-
- *     signal.model.ts) -- { atr1m, atr3m, atr5m, winnerCandidate,
- *     winnerEntryTs, winnerResult }, each candidate a
- *     UnitCompetitionCandidateDoc | null.
+ *   - Field shape: GlobalSignalDoc.commonHorizonResearch (global-
+ *     signal.model.ts) -- { version, atr1m, atr3m, atr5m,
+ *     winnerCandidate, winnerEntryTs, winnerResult }, each candidate a
+ *     CommonHorizonCandidateDoc | null (a UNIFIED shape covering both
+ *     an in-progress phase-snapshot and a terminal result).
  */
 import { MongoClient } from "mongodb";
 import type {
   GlobalSignalDoc,
-  UnitCompetitionCandidateDoc,
+  CommonHorizonCandidateDoc,
 } from "../src/domain/signal/global-signal.model";
 
-// Sep 10 2026 (Karo) -- required so `npm run research:competition` (a
-// fresh shell, no automatic .env loading, unlike the running
-// production process which already has MONGO_URI in its own
-// environment) can still read the same .env file everything else in
-// this project uses.
 require("dotenv").config();
 
 interface Args {
   limit: number;
   symbol: string | null;
-  verdict:
-    | "PASS"
-    | "FAIL_NO_VALID_RR"
-    | "STRUCTURAL_CANCEL"
-    | "TRACKING"
-    | null;
+  state: "PASS" | "FAIL_NO_VALID_RR" | "STRUCTURAL_CANCEL" | "TRACKING" | null;
 }
 
 function parseArgs(argv: string[]): Args {
-  const args: Args = { limit: 20, symbol: null, verdict: null };
+  const args: Args = { limit: 20, symbol: null, state: null };
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === "--limit" && argv[i + 1])
       args.limit = Math.max(1, parseInt(argv[++i]!, 10) || 20);
     else if (argv[i] === "--symbol" && argv[i + 1])
       args.symbol = argv[++i]!.toUpperCase();
-    else if (argv[i] === "--verdict" && argv[i + 1])
-      args.verdict = argv[++i] as Args["verdict"];
+    else if (argv[i] === "--state" && argv[i + 1])
+      args.state = argv[++i] as Args["state"];
   }
   return args;
 }
@@ -74,14 +66,13 @@ function fmtDuration(ms: number | null): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
-/** Sep 10 2026 (Karo) -- defensive against the KNOWN, ACCEPTED
+/** Sep 10 2026 (Karo) -- defensive against the known, accepted
  *  upsert-race limitation documented on GlobalSignalRepository's own
- *  setUnitCompetitionCandidate()/setUnitCompetitionWinner(): a shadow
- *  candidate's own dragon-result can be persisted (upsert:true)
+ *  setCommonHorizonCandidate()/setCommonHorizonWinner(): a shadow
+ *  candidate's own snapshot/result can be persisted (upsert:true)
  *  BEFORE production's own main signal doc exists yet, producing a
- *  genuinely PARTIAL document -- signalId + unitCompetitionResearch
- *  only, missing signalTs/symbol/side entirely. This report must
- *  display such episodes usefully, never crash on them. */
+ *  genuinely PARTIAL document missing signalTs/symbol/side entirely.
+ *  This report must display such episodes usefully, never crash. */
 function safeIsoTime(ts: number | undefined | null): string {
   if (typeof ts !== "number" || !Number.isFinite(ts) || ts <= 0)
     return "unknown time";
@@ -90,33 +81,70 @@ function safeIsoTime(ts: number | undefined | null): string {
   return d.toISOString().replace("T", " ").replace("Z", "");
 }
 
-function verdictLine(
+function fmtW(
+  w: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+    liqEvents: number;
+  } | null,
+): string {
+  if (!w) return "n/a";
+  return `anchor=${w.anchorPrice} extreme=${w.extremePrice} liq=${fmtUsd(w.liqUsd)} (${w.liqEvents} events)`;
+}
+
+function candidateLines(
   label: string,
-  c: UnitCompetitionCandidateDoc | null,
+  c: CommonHorizonCandidateDoc | null,
   isWinner: boolean,
 ): string[] {
   const lines: string[] = [];
   if (!c) {
-    lines.push(`${label}  \u23F3 TRACKING`);
-    lines.push(`    (no result persisted yet -- candidate still running)`);
-    return lines;
-  }
-  if (c.verdict === "STRUCTURAL_CANCEL") {
-    lines.push(`${label}  \u26A0\uFE0F STRUCTURAL_CANCEL`);
-    lines.push(`    Episode start: ${safeIsoTime(c.episodeStartTs)}`);
-    if (c.frozenAtrPct > 0)
-      lines.push(`    ATR (frozen): ${fmtPct(c.frozenAtrPct)}`);
-    return lines;
-  }
-  if (c.verdict === "FAIL_NO_VALID_RR") {
-    lines.push(`${label}  \u274C FAIL_NO_VALID_RR`);
-  } else {
+    lines.push(`${label} \u23F3 TRACKING`);
     lines.push(
-      `${label}  ${isWinner ? "\u{1F3C6} PASS / WINNER" : "\u2705 PASS"}`,
+      `    (no snapshot persisted yet -- candidate just started, or still warming up)`,
     );
+    return lines;
   }
+
+  if (c.state === "TRACKING") {
+    lines.push(`${label} \u23F3 TRACKING`);
+  } else if (c.state === "PASS") {
+    lines.push(
+      `${label} ${isWinner ? "\u{1F3C6} PASS / WINNER" : "\u2705 PASS"}`,
+    );
+  } else if (c.state === "FAIL_NO_VALID_RR") {
+    lines.push(`${label} \u274C FAIL_NO_VALID_RR`);
+  } else {
+    lines.push(`${label} \u26A0\uFE0F STRUCTURAL_CANCEL`);
+  }
+
+  lines.push(`    Episode start: ${safeIsoTime(c.episodeStartTs)}`);
+  lines.push(`    ATR period: ${c.atrPeriod}`);
+  lines.push(`    ATR frozen abs: ${c.frozenUnitAbs}`);
+  lines.push(`    ATR frozen %: ${fmtPct(c.frozenAtrPct)}`);
+
+  if (c.state === "TRACKING") {
+    lines.push(`    Phase: ${c.phase ?? "unknown"}`);
+    lines.push(`    W1: ${fmtW(c.w1)}`);
+    lines.push(`    W2: ${fmtW(c.w2)}`);
+    lines.push(`    Current price: ${c.currentPrice ?? "n/a"}`);
+    lines.push(
+      `    Next structural target: ${c.nextTargetPrice ?? "n/a"}${c.nextTargetDescription ? ` (${c.nextTargetDescription})` : ""}`,
+    );
+    if (c.lastUpdatedTs !== null)
+      lines.push(`    Last updated: ${safeIsoTime(c.lastUpdatedTs)}`);
+    return lines;
+  }
+
+  // Terminal states -- exact reason + relevant structural level.
+  lines.push(`    Terminal reason: ${c.terminalReason ?? "n/a"}`);
+  lines.push(`    W1: ${fmtW(c.w1)}`);
+  lines.push(`    W2: ${fmtW(c.w2)}`);
+  if (c.state === "STRUCTURAL_CANCEL") return lines;
+
+  // FAIL_NO_VALID_RR or PASS -- both reached the Dragon.
   lines.push(`    Duration: ${fmtDuration(c.durationMs)}`);
-  lines.push(`    ATR: ${fmtPct(c.frozenAtrPct)}`);
   lines.push(
     `    Liq: ${fmtUsd(c.episodeLiqUsdAtEntry)} | Baseline: ${c.liqBaselineAtEntry !== null ? fmtUsd(c.liqBaselineAtEntry) + "/min" : "n/a"}`,
   );
@@ -127,13 +155,10 @@ function verdictLine(
       .join(", ");
     lines.push(`    RR attempts: ${attemptsStr}  (* = valid)`);
   }
-  if (c.verdict === "PASS") {
+  if (c.state === "PASS") {
     lines.push(`    RR: ${c.selectedRR} | SL: ${fmtPct(c.rawSlPct)}`);
     if (c.hypotheticalEntry !== null)
       lines.push(`    Entry: ${c.hypotheticalEntry}`);
-    if (isWinner) {
-      // winner result is on the parent doc, filled in by the caller
-    }
     const last = c.checkpoints[c.checkpoints.length - 1];
     if (last) {
       const sign = (v: number) => (v >= 0 ? "+" : "");
@@ -147,10 +172,10 @@ function verdictLine(
   return lines;
 }
 
-function candidateVerdict(
-  c: UnitCompetitionCandidateDoc | null,
+function candidateState(
+  c: CommonHorizonCandidateDoc | null,
 ): "PASS" | "FAIL_NO_VALID_RR" | "STRUCTURAL_CANCEL" | "TRACKING" {
-  return c ? c.verdict : "TRACKING";
+  return c ? c.state : "TRACKING";
 }
 
 async function main(): Promise<void> {
@@ -168,7 +193,7 @@ async function main(): Promise<void> {
     const col = db.collection<GlobalSignalDoc>("v5_global_signals");
 
     const query: Record<string, unknown> = {
-      unitCompetitionResearch: { $ne: null },
+      commonHorizonResearch: { $ne: null },
     };
     if (args.symbol) query.symbol = args.symbol;
 
@@ -179,13 +204,13 @@ async function main(): Promise<void> {
       .limit(args.limit)
       .toArray();
 
-    const filtered = args.verdict
+    const filtered = args.state
       ? docs.filter((d) => {
-          const uc = d.unitCompetitionResearch!;
+          const ch = d.commonHorizonResearch!;
           return (
-            candidateVerdict(uc.atr1m) === args.verdict ||
-            candidateVerdict(uc.atr3m) === args.verdict ||
-            candidateVerdict(uc.atr5m) === args.verdict
+            candidateState(ch.atr1m) === args.state ||
+            candidateState(ch.atr3m) === args.state ||
+            candidateState(ch.atr5m) === args.state
           );
         })
       : docs;
@@ -220,10 +245,10 @@ async function main(): Promise<void> {
     const outcomeCounts = { TP: 0, SL: 0, OPEN: 0 };
 
     for (const doc of filtered) {
-      const uc = doc.unitCompetitionResearch!;
+      const ch = doc.commonHorizonResearch!;
       console.log("=".repeat(60));
       console.log(
-        `${doc.symbol ?? "UNKNOWN_SYMBOL"} ${doc.side ?? "?"} | ${safeIsoTime(doc.signalTs)}`,
+        `${doc.symbol ?? "UNKNOWN_SYMBOL"} ${doc.side ?? "?"} | ${safeIsoTime(doc.signalTs)}  [${ch.version}]`,
       );
       console.log(`Episode: ${doc.signalId}`);
       console.log("");
@@ -233,21 +258,20 @@ async function main(): Promise<void> {
         ["3m", "atr3m"],
         ["5m", "atr5m"],
       ] as const) {
-        const candidate = uc[key];
-        const isWinner = uc.winnerCandidate === key;
-        for (const line of verdictLine(label, candidate, isWinner))
+        const candidate = ch[key];
+        const isWinner = ch.winnerCandidate === key;
+        for (const line of candidateLines(label, candidate, isWinner))
           console.log(line);
         console.log("");
-        summary[key][candidateVerdict(candidate)]++;
+        summary[key][candidateState(candidate)]++;
       }
 
-      if (uc.winnerCandidate) {
-        winnerCounts[uc.winnerCandidate]++;
-        const winnerLabel = uc.winnerCandidate.replace("atr", "ATR");
-        console.log(`Winner: ${winnerLabel}`);
-        if (uc.winnerResult) {
-          console.log(`Winner result: ${uc.winnerResult}`);
-          outcomeCounts[uc.winnerResult]++;
+      if (ch.winnerCandidate) {
+        winnerCounts[ch.winnerCandidate]++;
+        console.log(`Winner: ${ch.winnerCandidate.replace("atr", "ATR")}`);
+        if (ch.winnerResult) {
+          console.log(`Winner result: ${ch.winnerResult}`);
+          outcomeCounts[ch.winnerResult]++;
         } else {
           console.log(`Winner result: OPEN (still tracking)`);
           outcomeCounts.OPEN++;

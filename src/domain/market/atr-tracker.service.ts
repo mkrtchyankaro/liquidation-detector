@@ -41,6 +41,25 @@ const ATR_PERIOD = 14;
 const APPROXIMATE_MIN_CANDLES = 4; // hybrid warmup: ≥4 closed candles = approximate ATR allowed
 const HISTORY_BUFFER_SIZE = 100; // keep last 100 candles per (symbol, interval) for range queries
 
+/** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
+ *  Wilder-ATR experiment ("common-horizon-4h-v1"). Largest requested
+ *  period is 240 (1m candidate, ~4h horizon) -- Wilder's own smoothing
+ *  needs period+1 candles for a full seed, so 250 gives comfortable
+ *  margin. Deliberately a SEPARATE constant/buffer from
+ *  HISTORY_BUFFER_SIZE above: reusing the SAME buffer and simply
+ *  enlarging it would change WHERE Wilder's own recursive seed starts
+ *  for the EXISTING getATR(14) computation too (the seed is always the
+ *  first `period` candles CURRENTLY in the buffer, which shifts as the
+ *  sliding window evicts old candles) -- in practice this would very
+ *  likely converge to the same asymptotic ATR(14) value (Wilder's own
+ *  exponential decay makes a ~100-candle buffer already far longer than
+ *  ATR(14)'s own effective memory), but "very likely the same" is not
+ *  the bar for a change that could subtly shift production's own live
+ *  TP/SL ruler. A genuinely separate, parallel candle-store removes
+ *  that question entirely -- getATR(14)'s own candle buffer, and
+ *  everything that reads it, is completely untouched by this. */
+const RESEARCH_HISTORY_BUFFER_SIZE = 250;
+
 // ── Patch P (May 2026): 15m trend classification thresholds ──
 // Replaces Patch A's 1h trend filter. Liquidation cascades complete in
 // 5–10 minutes; the 1h slope was too slow to reflect intraday direction
@@ -87,6 +106,14 @@ interface ATRState {
 
 export class ATRTrackerService {
   private readonly state = new Map<string, ATRState>();
+  /** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
+   *  Wilder-ATR experiment. Genuinely SEPARATE from `state` above --
+   *  fed additively in onCandle() (never replacing or altering the
+   *  existing push), read ONLY by getWilderATR() below. Nothing in
+   *  this class's own existing methods (getATR, getRollingMedianATR,
+   *  rangeBefore, getTrend15m, lastClosedCandleAfter, candleCount,
+   *  recentClosedCandles) ever reads this map. */
+  private readonly researchState = new Map<string, Candle[]>();
 
   /** Hook called from app.ts on every kline event. Only closed candles
    *  contribute to ATR — open candles are ignored. */
@@ -122,6 +149,56 @@ export class ATRTrackerService {
         s.atrHistory.shift();
       }
     }
+
+    // Sep 10 2026 (Karo) — additive, separate research buffer. The
+    // EXISTING logic above (s.candles/smoothedAtr/atrHistory) is
+    // completely unaffected by this block; this only ever writes into
+    // researchState, read exclusively by getWilderATR() below.
+    let rs = this.researchState.get(key);
+    if (!rs) {
+      rs = [];
+      this.researchState.set(key, rs);
+    }
+    const rsLast = rs[rs.length - 1];
+    if (!rsLast || rsLast.openTime !== c.openTime) {
+      rs.push(c);
+      if (rs.length > RESEARCH_HISTORY_BUFFER_SIZE) rs.shift();
+    }
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
+   *  Wilder-ATR experiment ("common-horizon-4h-v1"). Computes Wilder's
+   *  ATR with an ARBITRARY period (not the fixed ATR_PERIOD=14 above),
+   *  from the SEPARATE researchState buffer. Delegates to the EXACT
+   *  SAME wilderAtr() utility getATR()'s own recomputeSmoothed() uses
+   *  internally (../../shared/indicators.atr, which already accepts a
+   *  `period` argument) -- no new smoothing logic, no second EMA on
+   *  top, purely Wilder's own standard recursive smoothing at a
+   *  different period. Returns null if the research buffer doesn't yet
+   *  hold period+1 candles (cold buffer / still warming up after a
+   *  restart -- most relevant for 1m's own period=240, which needs
+   *  ~240 minutes = 4h of live candles, or a sufficiently deep REST
+   *  bootstrap, before this returns non-null). */
+  getWilderATR(
+    symbol: string,
+    interval: KlineInterval,
+    period: number,
+  ): number | null {
+    const key = this.keyFor(symbol, interval);
+    const candles = this.researchState.get(key);
+    if (!candles || candles.length < period + 1) return null;
+    const v = wilderAtr(candles, period);
+    return v > 0 ? v : null;
+  }
+
+  /** Diagnostic only -- how many candles the SEPARATE research buffer
+   *  currently holds for this (symbol, interval), so a caller (or the
+   *  monitoring report) can tell "cold, still warming up" from "warm,
+   *  period X is currently unreachable because the requested period
+   *  exceeds even a fully warm buffer". */
+  researchCandleCount(symbol: string, interval: KlineInterval): number {
+    const key = this.keyFor(symbol, interval);
+    return this.researchState.get(key)?.length ?? 0;
   }
 
   /** Aug 21 2026, operator-requested (Karo) — MARKET BASELINE shadow

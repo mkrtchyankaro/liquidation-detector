@@ -266,7 +266,91 @@ export interface GlobalSignalDoc {
     winnerResult: "TP" | "SL" | null;
   } | null;
 
+  /** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
+   *  Wilder-ATR experiment. GENUINELY SEPARATE from unitCompetitionResearch
+   *  above -- different ATR source (Wilder(240/80/48) instead of the old
+   *  ATR(14) per interval, chosen so all three candidates represent
+   *  roughly the same ~4h volatility horizon), explicitly versioned so
+   *  old ATR(14)-based data can never be silently mixed with this.
+   *  Never read by any production entry/execution/Telegram path. */
+  commonHorizonResearch: {
+    readonly version: "common-horizon-4h-v1";
+    atr1m: CommonHorizonCandidateDoc | null;
+    atr3m: CommonHorizonCandidateDoc | null;
+    atr5m: CommonHorizonCandidateDoc | null;
+    winnerCandidate: "atr1m" | "atr3m" | "atr5m" | null;
+    winnerEntryTs: number | null;
+    winnerResult: "TP" | "SL" | null;
+  } | null;
+
   createdAt: number;
+}
+
+/** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY common-horizon
+ *  Wilder-ATR experiment ("common-horizon-4h-v1"). A SINGLE, unified
+ *  doc-shape covering BOTH an in-progress (TRACKING) live-phase snapshot
+ *  AND a terminal (PASS/FAIL_NO_VALID_RR/STRUCTURAL_CANCEL) result --
+ *  the TRACKING-only fields are populated (and periodically refreshed)
+ *  while state="TRACKING", then left as their LAST known snapshot once
+ *  a terminal state is reached (harmless, since terminalReason/
+ *  the dragon fields below become authoritative at that point). */
+export interface CommonHorizonCandidateDoc {
+  readonly candidate: "1m" | "3m" | "5m";
+  readonly atrPeriod: number;
+  readonly episodeStartTs: number;
+  readonly frozenUnitAbs: number;
+  readonly frozenAtrPct: number;
+  readonly state:
+    | "TRACKING"
+    | "PASS"
+    | "FAIL_NO_VALID_RR"
+    | "STRUCTURAL_CANCEL";
+
+  // --- Live-phase snapshot fields (updated periodically while TRACKING) ---
+  readonly phase:
+    | "WAITING_W1_RECOVERY"
+    | "WAITING_W2_START"
+    | "WAITING_W2_RECOVERY"
+    | null;
+  readonly w1: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+    liqEvents: number;
+  } | null;
+  readonly w2: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+    liqEvents: number;
+  } | null;
+  readonly currentPrice: number | null;
+  readonly nextTargetPrice: number | null;
+  readonly nextTargetDescription: string | null;
+  readonly lastUpdatedTs: number | null;
+
+  // --- Terminal-only fields ---
+  /** The exact structural cancellation/exhaustion reason for a
+   *  STRUCTURAL_CANCEL, or the dragon's own human-readable fail reason
+   *  ("SL too small" / "SL too large" / "no valid RR") for
+   *  FAIL_NO_VALID_RR. Null while TRACKING or on PASS. */
+  readonly terminalReason: string | null;
+  readonly w1CompleteTs: number | null;
+  readonly w2StartTs: number | null;
+  readonly entryReadyTs: number | null;
+  readonly durationMs: number | null;
+  readonly episodeLiqUsdAtEntry: number | null;
+  readonly liqBaselineAtEntry: number | null;
+  readonly relativePressure: number | null;
+  readonly pressureFactor: number | null;
+  readonly rawTpPct: number | null;
+  readonly rrAttempts: readonly { rr: number; slPct: number; valid: boolean }[];
+  readonly selectedRR: number | null;
+  readonly rawSlPct: number | null;
+  readonly hypotheticalEntry: number | null;
+  readonly hypotheticalTp: number | null;
+  readonly hypotheticalSl: number | null;
+  readonly checkpoints: ResearchCheckpoint[];
 }
 
 /** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit "dragon"

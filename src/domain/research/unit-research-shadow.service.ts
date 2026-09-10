@@ -99,6 +99,37 @@ export interface ShadowNoEntryEvent {
   } | null;
 }
 
+/** Sep 10 2026 (Karo), operator-requested research-observability
+ *  extension ("common-horizon-4h-v1"). Which structural step an
+ *  ACTIVE (non-terminal) candidate is currently waiting on. */
+export type ShadowPhase =
+  | "WAITING_W1_RECOVERY"
+  | "WAITING_W2_START"
+  | "WAITING_W2_RECOVERY";
+
+export interface ShadowPeek {
+  readonly phase: ShadowPhase;
+  readonly episodeStartTs: number;
+  readonly unitAbs: number;
+  readonly w1: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+    liqEvents: number;
+  } | null;
+  readonly w2: {
+    anchorPrice: number;
+    extremePrice: number;
+    liqUsd: number;
+    liqEvents: number;
+  } | null;
+  /** The exact price the candidate needs THIS tick's own mid to reach
+   *  for its current phase to resolve (a recovery threshold, or the
+   *  2x-UNIT cancellation threshold while awaiting Wave 2). */
+  readonly nextTargetPrice: number;
+  readonly nextTargetDescription: string;
+}
+
 const EPISODE_MAX_AGE_MS = 30 * 60_000; // matches production's own safety-timeout order of magnitude
 
 export class UnitResearchShadowService {
@@ -310,6 +341,84 @@ export class UnitResearchShadowService {
   /** Diagnostic only. */
   get activeWatchCount(): number {
     return this.watches.size;
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested research-observability
+   *  extension ("common-horizon-4h-v1"). PURE READ, zero mutation --
+   *  never advances state, never removes a watch, never affects
+   *  onTick()/onLiquidation() in any way. Lets a caller (the market-
+   *  data-orchestrator's own periodic phase-snapshot persistence, or a
+   *  future direct caller) inspect an in-progress candidate's current
+   *  phase and next structural target, for observability only. Returns
+   *  null if no active watch exists for this symbol/victim. */
+  peekWatch(symbol: string, victim: Side): ShadowPeek | null {
+    const watch = this.watches.get(this.keyFor(symbol, victim));
+    if (!watch || watch.terminal) return null;
+    const w1 = watch.waves[0]!;
+    const w2 = watch.waves[1];
+    const w1Summary = {
+      anchorPrice: w1.anchorPrice,
+      extremePrice: w1.extremePrice,
+      liqUsd: w1.liqNotionalUsd,
+      liqEvents: w1.liqEvents,
+    };
+    const w2Summary = w2
+      ? {
+          anchorPrice: w2.anchorPrice,
+          extremePrice: w2.extremePrice,
+          liqUsd: w2.liqNotionalUsd,
+          liqEvents: w2.liqEvents,
+        }
+      : null;
+
+    if (!w2) {
+      if (w1.state === "ACTIVE") {
+        const target =
+          victim === "LONG"
+            ? w1.extremePrice + watch.unitAbs
+            : w1.extremePrice - watch.unitAbs;
+        return {
+          phase: "WAITING_W1_RECOVERY",
+          episodeStartTs: watch.createdAt,
+          unitAbs: watch.unitAbs,
+          w1: w1Summary,
+          w2: null,
+          nextTargetPrice: target,
+          nextTargetDescription:
+            "1x UNIT recovery from Wave 1's own extreme completes Wave 1 (no entry yet)",
+        };
+      }
+      // Wave 1 completed, no Wave 2 yet.
+      const cancelTarget =
+        victim === "LONG"
+          ? w1.extremePrice + 2 * watch.unitAbs
+          : w1.extremePrice - 2 * watch.unitAbs;
+      return {
+        phase: "WAITING_W2_START",
+        episodeStartTs: watch.createdAt,
+        unitAbs: watch.unitAbs,
+        w1: w1Summary,
+        w2: null,
+        nextTargetPrice: cancelTarget,
+        nextTargetDescription:
+          "2x UNIT recovery with no Wave 2 yet cancels the episode; a new same-victim liquidation before then starts Wave 2",
+      };
+    }
+
+    const target =
+      victim === "LONG"
+        ? w2.extremePrice + watch.unitAbs
+        : w2.extremePrice - watch.unitAbs;
+    return {
+      phase: "WAITING_W2_RECOVERY",
+      episodeStartTs: watch.createdAt,
+      unitAbs: watch.unitAbs,
+      w1: w1Summary,
+      w2: w2Summary,
+      nextTargetPrice: target,
+      nextTargetDescription:
+        "1x UNIT recovery from Wave 2's own extreme completes Wave 2 -- entry-ready, evaluated by the Dragon immediately",
+    };
   }
 
   private w1Summary(

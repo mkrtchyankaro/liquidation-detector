@@ -105,6 +105,7 @@ function baseGlobalSignal(): GlobalSignalDoc {
     atr15mAtEntry: 5,
     unitResearch: null,
     unitCompetitionResearch: null,
+    commonHorizonResearch: null,
     qualifyingEventUsd: 100,
     qualifyingEventTs: 1,
     p95AtQualification: 90,
