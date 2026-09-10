@@ -26,6 +26,13 @@ import type {
   UnitCompetitionCandidateDoc,
 } from "../src/domain/signal/global-signal.model";
 
+// Sep 10 2026 (Karo) -- required so `npm run research:competition` (a
+// fresh shell, no automatic .env loading, unlike the running
+// production process which already has MONGO_URI in its own
+// environment) can still read the same .env file everything else in
+// this project uses.
+require("dotenv").config();
+
 interface Args {
   limit: number;
   symbol: string | null;
