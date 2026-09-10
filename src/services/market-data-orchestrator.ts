@@ -26,6 +26,7 @@ import {
   CascadeCandidateService,
   type CascadeSignalReadyEvent,
   type CascadeCancelEvent,
+  type WaveSummary,
 } from "../domain/cascade/cascade-candidate.service";
 import { CascadeRegistry } from "../domain/cascade/cascade-registry";
 import { CascadeRepository } from "../infrastructure/mongo/cascade.repository";
@@ -790,6 +791,92 @@ export class MarketDataOrchestrator {
    *  can NEVER hold two simultaneous real positions on the same
    *  symbol, regardless of how many candidates independently reach
    *  signal-ready. */
+  /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- root-cause
+   *  fix for the malformed cascade-signal Telegram message ("Wave 2 of
+   *  0", "Dominant layer: $0 (Wave null)", "Plan rejected: unknown").
+   *  formatV5EntryMessage() (via toV5SignalEventShape()) reads
+   *  event.waveHistory as V5Wave[], a RICHER shape than this project's
+   *  own CascadeWaveState. Converts genuinely, deriving every field
+   *  that has a real, honest cascade equivalent:
+   *    - waveNumber/state/anchorPrice/anchorTs/extremePrice/extremeTs/
+   *      liqNotionalUsd/liqEvents: direct, 1:1 from the cascade wave.
+   *    - reclaimPrice/reclaimTs: for a COMPLETED wave, the price/time
+   *      at which it actually completed -- extremePrice +/- unitAbs
+   *      (the exact 1x-UNIT-recovery threshold that closed it), at
+   *      extremeTs; for an ACTIVE wave (only ever the LAST one), null
+   *      (matches V5Wave's own doc comment: "set only when state ->
+   *      COMPLETED").
+   *    - extremeDistanceAtr: |anchor-extreme| / atr15mAbs -- the SAME
+   *      normalization deriveLiquidationPhysicsTradePlan() itself
+   *      already uses for w1DisplacementAtr, applied per-wave here.
+   *  Every OTHER V5Wave field (maxSingleEventUsd, maxRecoveryPrice,
+   *  recoveryPct, priceEfficiency, liquidationRatioVsDominant,
+   *  priceEfficiencyRatioVsDominant, isMeaningful, selectedRecoveryPct,
+   *  recoveryTargetPrice, recovery50/75AtTs/Price, taker*, oi*) has NO
+   *  natural cascade equivalent -- the cascade model's own wave-
+   *  completion rule (exactly 1x UNIT recovery, always) has no
+   *  "50%/75%/100% of anchor-extreme range" concept at all, and this
+   *  project never tracks per-wave taker-flow/OI for cascade
+   *  candidates. These are explicitly left at their own neutral/null
+   *  "not tracked" value (0/false/null) rather than a fabricated
+   *  number -- NONE of them are read by formatV5EntryMessage() (
+   *  confirmed: the formatter only ever reads waveNumber, anchorPrice,
+   *  extremePrice, reclaimPrice, liqNotionalUsd, and, for the entry
+   *  wave specifically, selectedRecoveryPct/extremeDistanceAtr), so
+   *  this is a type-compatibility requirement, never a display fake. */
+  private cascadeWavesToV5Waves(
+    waves: readonly WaveSummary[],
+    unitAbs: number,
+    victim: Side,
+    atr15mAbs: number,
+  ): V5Wave[] {
+    return waves.map((w, i): V5Wave => {
+      const isLast = i === waves.length - 1;
+      const isCompleted = !isLast; // every wave before the last one has, by construction, already completed (the next wave only ever starts after the previous one reached COMPLETED)
+      const reclaimPrice = isCompleted
+        ? victim === "LONG"
+          ? w.extremePrice + unitAbs
+          : w.extremePrice - unitAbs
+        : null;
+      return {
+        waveNumber: w.waveNumber,
+        state: isCompleted ? "COMPLETED" : "ACTIVE",
+        anchorPrice: w.anchorPrice,
+        anchorTs: w.anchorTs,
+        extremePrice: w.extremePrice,
+        extremeTs: w.extremeTs,
+        reclaimPrice,
+        reclaimTs: isCompleted ? w.extremeTs : null,
+        liqNotionalUsd: w.liqUsd,
+        liqEvents: w.liqEvents,
+        // Not tracked by the cascade model -- see this method's own doc comment.
+        maxSingleEventUsd: 0,
+        maxRecoveryPrice: w.extremePrice,
+        recoveryPct: null,
+        priceEfficiency: null,
+        liquidationRatioVsDominant: null,
+        priceEfficiencyRatioVsDominant: null,
+        extremeDistanceAtr:
+          atr15mAbs > 0
+            ? Math.abs(w.anchorPrice - w.extremePrice) / atr15mAbs
+            : 0,
+        isMeaningful: true,
+        selectedRecoveryPct: null,
+        recoveryTargetPrice: null,
+        recovery50AtTs: null,
+        recovery50AtPrice: null,
+        recovery75AtTs: null,
+        recovery75AtPrice: null,
+        takerBuyUsd: null,
+        takerSellUsd: null,
+        takerImbalance: null,
+        oiStart: null,
+        oiEnd: null,
+        oiDeltaPct: null,
+      };
+    });
+  }
+
   private async handleCascadeSignalReady(
     event: CascadeSignalReadyEvent,
   ): Promise<void> {
@@ -806,6 +893,22 @@ export class MarketDataOrchestrator {
       const triggerWave = event.waveHistory[event.waveHistory.length - 1]!;
       const previousWave = event.waveHistory[event.waveHistory.length - 2]!;
       const firstWave = event.waveHistory[0]!; // the TRUE episode-start wave -- used ONLY for qualifyingEvent* below, never for the formula inputs
+      const atr15mAbs = this.atrTracker.getATR(event.symbol, "15m") ?? 0;
+      const baseline =
+        this.liquidationStats.rollingMedianLiqNotionalPerMin(
+          event.symbol,
+          60,
+        ) ?? 0;
+      // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- the
+      // "dominant layer" (largest single wave by liquidation total) is
+      // genuinely derivable from the full cascade wave history, unlike
+      // the OLD path's own dominantLayerLiqUsd (which is left null for
+      // cascade signals otherwise, matching what the Telegram formatter
+      // showed as "Wave null" before this fix).
+      const dominantWave = event.waveHistory.reduce(
+        (best, w) => (w.liqUsd > best.liqUsd ? w : best),
+        event.waveHistory[0]!,
+      );
 
       const plan = deriveLiquidationPhysicsTradePlan({
         entry: event.entryPrice,
@@ -814,17 +917,13 @@ export class MarketDataOrchestrator {
         w1ExtremePrice: previousWave.extremePrice,
         w1LiqUsd: previousWave.liqUsd,
         w2LiqUsd: triggerWave.liqUsd,
-        atr15mAbs: this.atrTracker.getATR(event.symbol, "15m") ?? 0,
+        atr15mAbs,
         p95: this.liquidationStats.notionalPercentile(
           event.symbol,
           event.victim,
           95,
         ),
-        dailyLiqPerMinBaseline:
-          this.liquidationStats.rollingMedianLiqNotionalPerMin(
-            event.symbol,
-            60,
-          ) ?? 0,
+        dailyLiqPerMinBaseline: baseline,
       });
 
       const signalId = randomUUID();
@@ -838,11 +937,16 @@ export class MarketDataOrchestrator {
         signalTs: event.entryTs,
         entryPrice: event.entryPrice,
         entryWaveNumber: triggerWave.waveNumber,
-        waveHistory: [],
+        waveHistory: this.cascadeWavesToV5Waves(
+          event.waveHistory,
+          event.unitAbs,
+          event.victim,
+          atr15mAbs,
+        ),
         w1Diagnostics: null,
         totalEpisodePressure: totalLiq,
-        dominantLayerLiqUsd: null,
-        dominantLayerWaveNumber: null,
+        dominantLayerLiqUsd: dominantWave.liqUsd,
+        dominantLayerWaveNumber: dominantWave.waveNumber,
         exhaustionLayerLiqUsd: triggerWave.liqUsd,
         exhaustionLayerWaveNumber: triggerWave.waveNumber,
         unitAtStart: event.unitAbs,
@@ -851,12 +955,8 @@ export class MarketDataOrchestrator {
           event.victim,
           95,
         ),
-        dailyLiqPerMinBaselineAtEntry:
-          this.liquidationStats.rollingMedianLiqNotionalPerMin(
-            event.symbol,
-            60,
-          ) ?? 0,
-        atr15mAtEntry: this.atrTracker.getATR(event.symbol, "15m") ?? 0,
+        dailyLiqPerMinBaselineAtEntry: baseline,
+        atr15mAtEntry: atr15mAbs,
         qualifyingEventUsd: firstWave.liqUsd,
         qualifyingEventTs: firstWave.anchorTs,
         p95AtQualification: this.liquidationStats.notionalPercentile(
@@ -864,7 +964,40 @@ export class MarketDataOrchestrator {
           event.victim,
           95,
         ),
-        physics: null,
+        physics: plan.ok
+          ? {
+              cumLiqUsd: totalLiq,
+              atrPct: atr15mAbs,
+              liqBaseline: baseline,
+              liqStrengthRaw: plan.liquidityStrengthP95,
+              liqStrength: plan.liquidityStrength,
+              physicsTPPct: plan.tpPct,
+              wallAdjustedTpPct: plan.tpPct,
+              wallApplied: false,
+              rrCandidate: plan.selectedRR,
+              slCapApplied: false,
+              slCapValue: 0,
+              finalTpPct: plan.tpPct,
+              finalSlPct: plan.slPct,
+              actualRR: plan.rr,
+              structuralSoftExitPrice: 0,
+              structuralRiskPct: 0,
+              sizingRiskPct: 0,
+              hardStopRiskPct: 0,
+              liquidityStrengthP95: plan.liquidityStrengthP95,
+              liquidityStrength24h: plan.liquidityStrength24h,
+              liquidityStrength: plan.liquidityStrength,
+              w2ToW1Ratio: plan.w2ToW1Ratio,
+              exhaustionScore: plan.exhaustionScore,
+              w1DisplacementAtr: plan.w1DisplacementAtr,
+              absorptionRaw: plan.absorptionRaw,
+              absorptionScore: plan.absorptionScore,
+              dynamicPhysicsScore: plan.dynamicPhysicsScore,
+              selectedRR: plan.selectedRR,
+              tpMultiplier: plan.tpMultiplier,
+              slDeterminedBy: plan.slDeterminedBy,
+            }
+          : null,
         btcContext: null,
         liq24hContext: null,
         wallContext: null,
