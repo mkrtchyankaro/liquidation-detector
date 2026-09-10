@@ -6,6 +6,7 @@
  * (persisted in Mongo, never re-derived from live state).
  */
 import * as assert from "assert";
+import * as fs from "fs";
 import { CascadeCandidateService } from "../src/domain/cascade/cascade-candidate.service";
 import { CascadeRepository } from "../src/infrastructure/mongo/cascade.repository";
 import {
@@ -329,6 +330,30 @@ async function main(): Promise<void> {
       assert.strictEqual(c3m.recoveryDistance, 4);
       assert.strictEqual(c3m.recoveryUnits, 2.0);
       assert.strictEqual(c3m.frozenUnitAbs, 2);
+    },
+  );
+
+  await scenario(
+    "operator-reported CRITICAL FIX (root cause of 'DOGE 3m CLOSE with no 3m ENTER'): hydrateMainLocks()'s own filter must skip an OLD cascade signal (cascadeId set) with isMainExecuted===undefined -- treating undefined-as-executed is only correct for LEGACY, non-cascade signals",
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/market-data-orchestrator.ts"),
+        "utf8",
+      );
+      const idx = source.indexOf("async hydrateMainLocks(): Promise<void> {");
+      const body = source.slice(idx, source.indexOf("\n  async ", idx + 50));
+      assert.ok(
+        body.includes("doc.cascadeId !== null"),
+        "must distinguish cascade signals from legacy ones",
+      );
+      assert.ok(
+        body.includes("doc.isMainExecuted !== true"),
+        "a cascade signal must require an EXPLICIT true, never fall back on undefined",
+      );
+      assert.ok(
+        body.includes("doc.isMainExecuted === false"),
+        "a legacy signal keeps the original, safe undefined-means-executed behavior",
+      );
     },
   );
 

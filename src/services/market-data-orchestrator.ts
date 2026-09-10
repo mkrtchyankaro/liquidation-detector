@@ -276,17 +276,31 @@ export class MarketDataOrchestrator {
       // status="SIGNAL" documents (1m/3m/5m each independently
       // reaching SIGNAL_READY), but only ONE of them (isMainExecuted)
       // is MAIN's own real, executed position; the others are
-      // comparison-only records that never held mainSymbolLocks or a
-      // real position, and must NOT be re-installed into V5WaveService's
-      // own close-tracking on restart (doing so would falsely occupy
-      // the symbol/signalId and could fire a spurious close). Treated
-      // as executed if EXPLICITLY true, OR if the field is simply
-      // absent (doc.isMainExecuted === undefined) -- for backward
-      // compatibility with signals persisted before this field existed,
-      // where every status="SIGNAL" doc genuinely WAS the real,
-      // executed one (the old, pre-cascade V5 path never had a
-      // comparison-only concept). Only an EXPLICIT `false` is skipped.
-      if (doc.isMainExecuted === false) {
+      // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- root
+      // cause of the "DOGE 3m CLOSE with no 3m ENTER" class of bug.
+      // The earlier version of this filter treated ANY doc with
+      // isMainExecuted===undefined as "genuinely executed" for
+      // backward compatibility -- correct for a LEGACY, non-cascade
+      // signal (cascadeId===null, where every status="SIGNAL" doc
+      // truly was the real, executed one), but WRONG for an OLD
+      // CASCADE signal (cascadeId!==null) persisted before this field
+      // existed: such a doc could easily have been a comparison-only
+      // signal that correctly never got an ENTER Telegram (mainSymbolLocks
+      // was already held by another candidate at the time), yet the old
+      // filter would still hydrate it into activeTrades on the next
+      // restart -- eventually producing a CLOSE notification for a
+      // signal that never had a matching ENTER. For a cascade signal,
+      // ONLY an EXPLICIT isMainExecuted===true is hydrated; undefined
+      // is now treated the SAME as false (skip) for cascade signals
+      // specifically -- the safe direction to err in, since a wrongly-
+      // skipped real trade is far less harmful than a phantom
+      // CLOSE-without-ENTER. Legacy (cascadeId===null) signals keep the
+      // ORIGINAL, still-correct undefined-means-executed behavior.
+      const isCascadeSignal = doc.cascadeId !== null;
+      const shouldSkip = isCascadeSignal
+        ? doc.isMainExecuted !== true
+        : doc.isMainExecuted === false;
+      if (shouldSkip) {
         skippedComparisonOnly++;
         continue;
       }
