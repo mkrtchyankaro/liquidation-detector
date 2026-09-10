@@ -241,7 +241,64 @@ export interface GlobalSignalDoc {
     atr5m: UnitResearchCandidateDoc | null;
   } | null;
 
+  /** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit
+   *  "dragon" competition -- COMPLETELY SEPARATE from unitResearch
+   *  above (different formula: no exhaustion, no absorption, no
+   *  ATR15m, descending-RR-search 2.5->2.1, 0.20-0.50% SL band, no
+   *  clamp/floor). NEVER read by any production entry/execution/
+   *  Telegram path -- see unit-research-shadow.service.ts's own doc
+   *  comment for the isolation guarantee. Filled in progressively as
+   *  each of the three candidates (1m/3m/5m) independently reaches
+   *  its own terminal state. */
+  unitCompetitionResearch: {
+    atr1m: UnitCompetitionCandidateDoc | null;
+    atr3m: UnitCompetitionCandidateDoc | null;
+    atr5m: UnitCompetitionCandidateDoc | null;
+    /** Sep 10 2026 (Karo), operator-requested MAIN-only Telegram
+     *  research lifecycle. The FIRST candidate whose own Dragon PASSes
+     *  for this episode -- never reassigned once set, even if a later,
+     *  slower candidate also PASSes (that candidate's own result is
+     *  still fully persisted above, just never becomes the winner). */
+    winnerCandidate: "atr1m" | "atr3m" | "atr5m" | null;
+    winnerEntryTs: number | null;
+    /** Set once the winner's own hypothetical TP or SL is actually
+     *  touched by live price -- null while still open. */
+    winnerResult: "TP" | "SL" | null;
+  } | null;
+
   createdAt: number;
+}
+
+/** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit "dragon"
+ *  competition. One candidate's own full record -- raw values only,
+ *  enough to independently reconstruct the calculation later, per the
+ *  operator's own explicit requirement. Duration is PERSISTED but
+ *  NEVER used as a PASS/FAIL input (operator's own explicit rule). */
+export interface UnitCompetitionCandidateDoc {
+  readonly candidate: "1m" | "3m" | "5m";
+  readonly frozenUnitAbs: number;
+  readonly frozenAtrPct: number;
+  readonly episodeStartTs: number;
+  readonly w1CompleteTs: number | null;
+  readonly w2StartTs: number | null;
+  readonly entryReadyTs: number | null;
+  readonly durationMs: number | null;
+  readonly episodeLiqUsdAtEntry: number | null;
+  readonly liqBaselineAtEntry: number | null;
+  readonly relativePressure: number | null;
+  readonly pressureFactor: number | null;
+  readonly rawTpPct: number | null;
+  readonly rrAttempts: readonly { rr: number; slPct: number; valid: boolean }[];
+  readonly selectedRR: number | null;
+  readonly rawSlPct: number | null;
+  readonly verdict: "PASS" | "FAIL_NO_VALID_RR" | "STRUCTURAL_CANCEL";
+  readonly hypotheticalEntry: number | null;
+  readonly hypotheticalTp: number | null;
+  readonly hypotheticalSl: number | null;
+  /** Present only when verdict=PASS -- post-entry MFE/MAE at
+   *  [30s,1m,3m,5m,15m,30m], same R-normalized shape as
+   *  UnitResearchCandidateDoc.checkpoints. */
+  readonly checkpoints: ResearchCheckpoint[];
 }
 
 /** Sep 9 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe

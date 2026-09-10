@@ -45,6 +45,7 @@ function baseSignal(overrides: Partial<GlobalSignalDoc>): GlobalSignalDoc {
     dailyLiqPerMinBaselineAtEntry: 500,
     atr15mAtEntry: 5,
     unitResearch: null,
+    unitCompetitionResearch: null,
     qualifyingEventUsd: 0,
     qualifyingEventTs: 0,
     p95AtQualification: 0,

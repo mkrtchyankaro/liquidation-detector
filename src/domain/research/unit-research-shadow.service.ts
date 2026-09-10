@@ -67,6 +67,7 @@ export interface ShadowEntryEvent {
   readonly entryPrice: number;
   readonly entryTs: number;
   readonly unitAbs: number;
+  readonly episodeStartTs: number;
   readonly w1: {
     anchorPrice: number;
     extremePrice: number;
@@ -86,6 +87,7 @@ export interface ShadowNoEntryEvent {
   readonly symbol: string;
   readonly victim: Side;
   readonly unitAbs: number;
+  readonly episodeStartTs: number;
   readonly reason:
     | "CANCEL_NO_SECOND_WAVE"
     | "CASCADE_NOT_SERIOUS"
@@ -219,6 +221,7 @@ export class UnitResearchShadowService {
         symbol,
         victim,
         unitAbs: watch.unitAbs,
+        episodeStartTs: watch.createdAt,
         reason: "EPISODE_EXPIRED",
         w1: this.w1Summary(watch),
       };
@@ -260,6 +263,7 @@ export class UnitResearchShadowService {
           entryPrice: mid,
           entryTs: ts,
           unitAbs: watch.unitAbs,
+          episodeStartTs: watch.createdAt,
           w1: {
             anchorPrice: w1.anchorPrice,
             extremePrice: w1.extremePrice,
@@ -279,6 +283,7 @@ export class UnitResearchShadowService {
         symbol,
         victim,
         unitAbs: watch.unitAbs,
+        episodeStartTs: watch.createdAt,
         reason: "CASCADE_NOT_SERIOUS",
         w1: this.w1Summary(watch),
       };
@@ -296,6 +301,7 @@ export class UnitResearchShadowService {
       symbol,
       victim,
       unitAbs: watch.unitAbs,
+      episodeStartTs: watch.createdAt,
       reason: "CANCEL_NO_SECOND_WAVE",
       w1: this.w1Summary(watch),
     };

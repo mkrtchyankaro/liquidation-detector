@@ -104,6 +104,7 @@ function baseGlobalSignal(): GlobalSignalDoc {
     dailyLiqPerMinBaselineAtEntry: 500,
     atr15mAtEntry: 5,
     unitResearch: null,
+    unitCompetitionResearch: null,
     qualifyingEventUsd: 100,
     qualifyingEventTs: 1,
     p95AtQualification: 90,

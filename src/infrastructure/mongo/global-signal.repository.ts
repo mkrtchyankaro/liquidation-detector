@@ -2,6 +2,7 @@ import type { MongoClientWrapper } from "./mongo.client";
 import type {
   GlobalSignalDoc,
   UnitResearchCandidateDoc,
+  UnitCompetitionCandidateDoc,
 } from "../../domain/signal/global-signal.model";
 import type { GlobalSignalRepositoryPort } from "../../application/ports";
 import { childLogger } from "../logging/logger";
@@ -142,6 +143,116 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
       log.error(
         { err: msg, signalId, label },
         "[GLOBAL_SIGNAL_APPEND_UNIT_RESEARCH_CHECKPOINT_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested LIVE 3-way ATR-unit
+   *  "dragon" competition -- SAME pattern as setUnitResearchCandidate()
+   *  above, writing into the SEPARATE unitCompetitionResearch field
+   *  instead. upsert:true for the exact same race-tolerance reason
+   *  (candidates of different UNIT-timeframes resolve at different
+   *  wall-clock times, independent of when/whether the production
+   *  signal doc itself has been created yet). */
+  async setUnitCompetitionCandidate(
+    signalId: string,
+    candidate: "atr1m" | "atr3m" | "atr5m",
+    doc: UnitCompetitionCandidateDoc,
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        { $set: { [`unitCompetitionResearch.${candidate}`]: doc } },
+        { upsert: true },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, candidate },
+        "[GLOBAL_SIGNAL_SET_UNIT_COMPETITION_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo) -- appends ONE MFE/MAE checkpoint to a dragon
+   *  candidate's own checkpoints array (PASS-verdict candidates only). */
+  async appendUnitCompetitionCheckpoint(
+    signalId: string,
+    candidate: "atr1m" | "atr3m" | "atr5m",
+    checkpoint: UnitCompetitionCandidateDoc["checkpoints"][number],
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        {
+          $push: {
+            [`unitCompetitionResearch.${candidate}.checkpoints`]: checkpoint,
+          },
+        },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, candidate },
+        "[GLOBAL_SIGNAL_APPEND_UNIT_COMPETITION_CHECKPOINT_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo), operator-requested MAIN-only Telegram research
+   *  lifecycle. Sets the winner fields exactly once (the caller's own
+   *  logic guarantees this is only invoked on the FIRST PASS for a
+   *  given episode). upsert:true, same race-tolerance reasoning as
+   *  setUnitCompetitionCandidate() above. */
+  async setUnitCompetitionWinner(
+    signalId: string,
+    winnerCandidate: "atr1m" | "atr3m" | "atr5m",
+    winnerEntryTs: number,
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        {
+          $set: {
+            "unitCompetitionResearch.winnerCandidate": winnerCandidate,
+            "unitCompetitionResearch.winnerEntryTs": winnerEntryTs,
+          },
+        },
+        { upsert: true },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, winnerCandidate },
+        "[GLOBAL_SIGNAL_SET_UNIT_COMPETITION_WINNER_FAILED] -- non-fatal",
+      );
+    }
+  }
+
+  /** Sep 10 2026 (Karo) -- records the winner's own final TP/SL outcome,
+   *  once the hypothetical position actually closes. */
+  async setUnitCompetitionWinnerResult(
+    signalId: string,
+    result: "TP" | "SL",
+  ): Promise<void> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return;
+      await col.updateOne(
+        { signalId },
+        { $set: { "unitCompetitionResearch.winnerResult": result } },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, signalId, result },
+        "[GLOBAL_SIGNAL_SET_UNIT_COMPETITION_WINNER_RESULT_FAILED] -- non-fatal",
       );
     }
   }
