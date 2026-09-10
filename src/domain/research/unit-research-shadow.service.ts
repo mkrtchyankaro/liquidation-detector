@@ -70,14 +70,20 @@ export interface ShadowEntryEvent {
   readonly episodeStartTs: number;
   readonly w1: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
+    liqEvents: number;
     completedTs: number;
   };
   readonly w2: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
+    liqEvents: number;
     startedTs: number;
   };
 }
@@ -94,8 +100,11 @@ export interface ShadowNoEntryEvent {
     | "EPISODE_EXPIRED";
   readonly w1: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
+    liqEvents: number;
   } | null;
 }
 
@@ -113,13 +122,17 @@ export interface ShadowPeek {
   readonly unitAbs: number;
   readonly w1: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
     liqEvents: number;
   } | null;
   readonly w2: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
     liqEvents: number;
   } | null;
@@ -297,14 +310,20 @@ export class UnitResearchShadowService {
           episodeStartTs: watch.createdAt,
           w1: {
             anchorPrice: w1.anchorPrice,
+            anchorTs: w1.anchorTs,
             extremePrice: w1.extremePrice,
+            extremeTs: w1.extremeTs,
             liqUsd: w1.liqNotionalUsd,
+            liqEvents: w1.liqEvents,
             completedTs: w1.extremeTs,
           },
           w2: {
             anchorPrice: currentWave.anchorPrice,
+            anchorTs: currentWave.anchorTs,
             extremePrice: currentWave.extremePrice,
+            extremeTs: currentWave.extremeTs,
             liqUsd: currentWave.liqNotionalUsd,
+            liqEvents: currentWave.liqEvents,
             startedTs: currentWave.anchorTs,
           },
         };
@@ -358,14 +377,18 @@ export class UnitResearchShadowService {
     const w2 = watch.waves[1];
     const w1Summary = {
       anchorPrice: w1.anchorPrice,
+      anchorTs: w1.anchorTs,
       extremePrice: w1.extremePrice,
+      extremeTs: w1.extremeTs,
       liqUsd: w1.liqNotionalUsd,
       liqEvents: w1.liqEvents,
     };
     const w2Summary = w2
       ? {
           anchorPrice: w2.anchorPrice,
+          anchorTs: w2.anchorTs,
           extremePrice: w2.extremePrice,
+          extremeTs: w2.extremeTs,
           liqUsd: w2.liqNotionalUsd,
           liqEvents: w2.liqEvents,
         }
@@ -423,13 +446,23 @@ export class UnitResearchShadowService {
 
   private w1Summary(
     watch: ShadowWatch,
-  ): { anchorPrice: number; extremePrice: number; liqUsd: number } | null {
+  ): {
+    anchorPrice: number;
+    anchorTs: number;
+    extremePrice: number;
+    extremeTs: number;
+    liqUsd: number;
+    liqEvents: number;
+  } | null {
     const w1 = watch.waves[0];
     if (!w1) return null;
     return {
       anchorPrice: w1.anchorPrice,
+      anchorTs: w1.anchorTs,
       extremePrice: w1.extremePrice,
+      extremeTs: w1.extremeTs,
       liqUsd: w1.liqNotionalUsd,
+      liqEvents: w1.liqEvents,
     };
   }
 

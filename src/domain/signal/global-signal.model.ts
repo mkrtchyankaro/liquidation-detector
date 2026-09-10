@@ -314,13 +314,17 @@ export interface CommonHorizonCandidateDoc {
     | null;
   readonly w1: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
     liqEvents: number;
   } | null;
   readonly w2: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
     liqEvents: number;
   } | null;

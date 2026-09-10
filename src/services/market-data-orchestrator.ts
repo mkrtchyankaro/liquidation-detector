@@ -836,15 +836,19 @@ export class MarketDataOrchestrator {
         phase: null,
         w1: {
           anchorPrice: entry.w1.anchorPrice,
+          anchorTs: entry.w1.anchorTs,
           extremePrice: entry.w1.extremePrice,
+          extremeTs: entry.w1.extremeTs,
           liqUsd: entry.w1.liqUsd,
-          liqEvents: 0,
+          liqEvents: entry.w1.liqEvents,
         },
         w2: {
           anchorPrice: entry.w2.anchorPrice,
+          anchorTs: entry.w2.anchorTs,
           extremePrice: entry.w2.extremePrice,
+          extremeTs: entry.w2.extremeTs,
           liqUsd: entry.w2.liqUsd,
-          liqEvents: 0,
+          liqEvents: entry.w2.liqEvents,
         },
         currentPrice: entry.entryPrice,
         nextTargetPrice: null,
@@ -934,9 +938,11 @@ export class MarketDataOrchestrator {
         w1: noEntry.w1
           ? {
               anchorPrice: noEntry.w1.anchorPrice,
+              anchorTs: noEntry.w1.anchorTs,
               extremePrice: noEntry.w1.extremePrice,
+              extremeTs: noEntry.w1.extremeTs,
               liqUsd: noEntry.w1.liqUsd,
-              liqEvents: 0,
+              liqEvents: noEntry.w1.liqEvents,
             }
           : null,
         w2: null,

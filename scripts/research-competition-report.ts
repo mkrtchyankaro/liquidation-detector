@@ -110,13 +110,15 @@ function safeIsoTime(ts: number | undefined | null): string {
 function fmtW(
   w: {
     anchorPrice: number;
+    anchorTs: number;
     extremePrice: number;
+    extremeTs: number;
     liqUsd: number;
     liqEvents: number;
   } | null,
 ): string {
   if (!w) return "n/a";
-  return `anchor=${w.anchorPrice} extreme=${w.extremePrice} liq=${fmtUsd(w.liqUsd)} (${w.liqEvents} events)`;
+  return `anchor=${w.anchorPrice} @ ${safeIsoTime(w.anchorTs)}  extreme=${w.extremePrice} @ ${safeIsoTime(w.extremeTs)}  liq=${fmtUsd(w.liqUsd)} (${w.liqEvents} events)`;
 }
 
 function candidateLines(
