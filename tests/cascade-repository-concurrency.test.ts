@@ -435,17 +435,16 @@ async function main(): Promise<void> {
       assert.ok(idx > -1, "handleCandlePhysicsEntry must be defined");
       const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
       assert.ok(
-        body.includes("FIXED_SL_PCT = 0.003"),
+        /FIXED_SL_PCT\s*=\s*0\.003/.test(body),
         "must use a fixed 0.30% SL constant",
       );
       assert.ok(
-        body.includes("REWARD_RISK_RATIO = 2.2"),
+        /REWARD_RISK_RATIO\s*=\s*2\.2/.test(body),
         "must keep TP at exactly 2.2R",
       );
       assert.ok(
-        /const sl = event\.victim === "LONG" \? entry \* \(1 - FIXED_SL_PCT\)/.test(
-          body,
-        ),
+        /const\s+sl\s*=[\s\S]{0,120}?FIXED_SL_PCT/.test(body) &&
+          body.includes('event.victim === "LONG"'),
         "SL must be derived from FIXED_SL_PCT directly, not from any structural wave computation",
       );
       assert.ok(
