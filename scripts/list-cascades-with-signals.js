@@ -84,8 +84,33 @@ async function main() {
             tf +
             ": ACTIVE (wave " +
             cand.currentWaveNumber +
-            ", still tracking)",
+            ", still tracking) {",
         );
+        console.log("      frozenUnit:      " + cand.frozenUnitAbs);
+        console.log("      currentExtreme:  " + cand.currentExtreme);
+        console.log("      waveHistory: [");
+        (cand.waveHistory || []).forEach(function (w) {
+          console.log(
+            "        W" +
+              w.waveNumber +
+              " (" +
+              w.state +
+              "): anchor=" +
+              w.anchorPrice +
+              "@" +
+              fmtTs(w.anchorTs) +
+              " extreme=" +
+              w.extremePrice +
+              "@" +
+              fmtTs(w.extremeTs) +
+              " liqUsd=" +
+              w.liqUsd +
+              " liqEvents=" +
+              w.liqEvents,
+          );
+        });
+        console.log("      ]");
+        console.log("    }");
         return;
       }
       if (cand.phase === "TERMINAL_CANCEL") {
@@ -98,7 +123,31 @@ async function main() {
         console.log("      terminalAt:      " + fmtTs(cand.terminalAt));
         console.log("      frozenUnit:      " + cand.frozenUnitAbs);
         console.log("      cancelPrice:     " + cand.cancelPrice);
+        console.log("      recoveryDistance:" + cand.recoveryDistance);
         console.log("      recoveryUnits:   " + cand.recoveryUnits);
+        console.log("      currentExtreme:  " + cand.currentExtreme);
+        console.log("      waveHistory: [");
+        (cand.waveHistory || []).forEach(function (w) {
+          console.log(
+            "        W" +
+              w.waveNumber +
+              " (" +
+              w.state +
+              "): anchor=" +
+              w.anchorPrice +
+              "@" +
+              fmtTs(w.anchorTs) +
+              " extreme=" +
+              w.extremePrice +
+              "@" +
+              fmtTs(w.extremeTs) +
+              " liqUsd=" +
+              w.liqUsd +
+              " liqEvents=" +
+              w.liqEvents,
+          );
+        });
+        console.log("      ]");
         console.log("    }");
         return;
       }
@@ -106,18 +155,82 @@ async function main() {
         var sig = signalsById[cand.signalId];
         console.log("    " + tf + ": {");
         console.log("      signalId:    " + cand.signalId);
+        console.log("      frozenUnit:  " + cand.frozenUnitAbs);
+        console.log("      currentWaveNumber: " + cand.currentWaveNumber);
+        console.log("      candidate own waveHistory: [");
+        (cand.waveHistory || []).forEach(function (w) {
+          console.log(
+            "        W" +
+              w.waveNumber +
+              " (" +
+              w.state +
+              "): anchor=" +
+              w.anchorPrice +
+              "@" +
+              fmtTs(w.anchorTs) +
+              " extreme=" +
+              w.extremePrice +
+              "@" +
+              fmtTs(w.extremeTs) +
+              " liqUsd=" +
+              w.liqUsd +
+              " liqEvents=" +
+              w.liqEvents,
+          );
+        });
+        console.log("      ]");
         if (sig) {
-          console.log("      status:      " + sig.status);
-          console.log("      isMainExecuted: " + sig.isMainExecuted);
-          console.log("      entry:       " + sig.entry);
-          console.log("      tp:          " + sig.tp);
-          console.log("      sl:          " + sig.sl);
-          console.log("      rr:          " + sig.rr);
-          console.log("      signalTs:    " + fmtTs(sig.signalTs));
-          if (sig.status === "CLOSED_TP" || sig.status === "CLOSED_SL") {
-            console.log("      closePrice:  " + sig.closePrice);
-            console.log("      closedAt:    " + fmtTs(sig.closedAt));
-          }
+          console.log("      --- full v5_global_signals document ---");
+          var keys = Object.keys(sig).filter(function (k) {
+            return k !== "_id" && k !== "waveHistory";
+          });
+          keys.forEach(function (k) {
+            var v = sig[k];
+            if (v !== null && typeof v === "object" && !Array.isArray(v)) {
+              console.log("      " + k + ": " + JSON.stringify(v));
+            } else if (Array.isArray(v)) {
+              console.log(
+                "      " +
+                  k +
+                  ": [" +
+                  v.length +
+                  " item(s)]" +
+                  (v.length > 0 ? " " + JSON.stringify(v) : ""),
+              );
+            } else if (
+              k === "signalTs" ||
+              k === "closedAt" ||
+              k === "createdAt"
+            ) {
+              console.log("      " + k + ": " + v + "  (" + fmtTs(v) + ")");
+            } else {
+              console.log("      " + k + ": " + v);
+            }
+          });
+          console.log(
+            "      signal own waveHistory (full, from v5_global_signals): [",
+          );
+          (sig.waveHistory || []).forEach(function (w) {
+            console.log(
+              "        W" +
+                w.waveNumber +
+                " (" +
+                w.state +
+                "): anchor=" +
+                w.anchorPrice +
+                " extreme=" +
+                w.extremePrice +
+                " reclaim=" +
+                w.reclaimPrice +
+                " liqNotionalUsd=" +
+                w.liqNotionalUsd +
+                " liqEvents=" +
+                w.liqEvents +
+                " extremeDistanceAtr=" +
+                w.extremeDistanceAtr,
+            );
+          });
+          console.log("      ]");
         } else {
           console.log("      (signal document not found in v5_global_signals)");
         }
