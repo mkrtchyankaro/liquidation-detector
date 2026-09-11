@@ -248,24 +248,33 @@ export class CascadeCandidateService {
         return null;
       }
 
-      const prevWave = watch.waves[watch.waves.length - 2]!;
-      if (currentWave.liqNotionalUsd <= prevWave.liqNotionalUsd) {
-        watch.terminal = true;
-        this.watches.delete(key);
-        return {
-          cascadeId: watch.cascadeId,
-          symbol,
-          victim,
-          side: victim,
-          timeframe: watch.timeframe,
-          entryPrice: mid,
-          entryTs: ts,
-          unitAbs: watch.unitAbs,
-          cascadeStartTs: watch.createdAt,
-          waveHistory: this.historyOf(watch),
-        };
-      }
-      return null;
+      // Sep 10 2026 (Karo), operator-requested DETERMINISTIC production
+      // rule change -- the recursive Wn<=W(n-1) liquidation-size
+      // comparison is REMOVED. W2 completing its own 1x-UNIT recovery
+      // is now, by itself, sufficient for SIGNAL_READY -- unconditionally,
+      // regardless of whether W2's own liquidationUsd is smaller,
+      // approximately equal to, or LARGER than W1's own. There is no
+      // production W3+ path anymore: a candidate can only ever reach
+      // waves.length===2 before becoming terminal (SIGNAL), so this
+      // branch is now reached at most once per candidate. W1/W2
+      // physics (liqNotionalUsd, liqEvents, anchor/extreme -- from
+      // which liqRatio/progressRatio/efficiency can still be derived
+      // downstream for research/logging) remain fully tracked and
+      // persisted in waveHistory; they simply no longer GATE entry.
+      watch.terminal = true;
+      this.watches.delete(key);
+      return {
+        cascadeId: watch.cascadeId,
+        symbol,
+        victim,
+        side: victim,
+        timeframe: watch.timeframe,
+        entryPrice: mid,
+        entryTs: ts,
+        unitAbs: watch.unitAbs,
+        cascadeStartTs: watch.createdAt,
+        waveHistory: this.historyOf(watch),
+      };
     }
 
     const recoveryDistance = Math.abs(mid - currentWave.extremePrice);

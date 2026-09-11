@@ -183,60 +183,48 @@ scenario("1. W2 < W1 -> SIGNAL_READY", () => {
 });
 
 scenario(
-  "2. W2 = W1 (exact equality) -> SIGNAL_READY -- <= is intentional, equality counts as signal",
+  "2. W2 = W1 (exact equality) -> SIGNAL_READY -- always signals now, equality is not a special case anymore",
   () => {
     const c = driveCascadeToWave(1, [10_000, 10_000]);
     const result = c.onTick("ETHUSDT", "LONG", 2002, 3000);
-    assert.ok(
-      result && "entryPrice" in result,
-      "W2 = W1 (exact equality) must signal, never wait",
-    );
+    assert.ok(result && "entryPrice" in result, "W2 = W1 must signal");
   },
 );
 
-scenario("3. W2 > W1 -> wait W3, no signal yet", () => {
-  const c = driveCascadeToWave(1, [10_000, 15_000]);
-  const result = c.onTick("ETHUSDT", "LONG", 2002, 3000);
-  assert.strictEqual(
-    result,
-    null,
-    "W2 > W1 must never signal -- must wait for W3",
-  );
-});
-
-scenario("4. W3 < W2 (with W2 > W1 first) -> SIGNAL_READY", () => {
-  const c = driveCascadeToWave(1, [10_000, 15_000, 8_000]); // W1, W2 already completed internally; W3 still ACTIVE
-  const result = c.onTick("ETHUSDT", "LONG", 2002, 4000); // W3 completes, < W2
-  assert.ok(result && "entryPrice" in result, "W3 < W2 must signal");
-});
+// Sep 10 2026 (Karo), operator-requested DETERMINISTIC production rule
+// change -- the recursive Wn<=W(n-1) liquidation-size comparison is
+// REMOVED entirely. W2 completing its own 1x-UNIT recovery is now,
+// by itself, ALWAYS sufficient for SIGNAL_READY, regardless of W2's
+// own size relative to W1. There is no production W3+ path anymore.
 
 scenario(
-  "5. W3 = W2 (exact equality, with W2 > W1 first) -> SIGNAL_READY",
+  "3 (was: W2 > W1 waits for W3). W2 > W1 -> SIGNAL_READY anyway -- W2 liquidation size no longer gates entry at all",
   () => {
-    const c = driveCascadeToWave(1, [10_000, 15_000, 15_000]); // W1, W2 already completed internally; W3 still ACTIVE
-    const result = c.onTick("ETHUSDT", "LONG", 2002, 4000); // W3 completes, = W2 exactly
+    const c = driveCascadeToWave(1, [10_000, 15_000]);
+    const result = c.onTick("ETHUSDT", "LONG", 2002, 3000);
     assert.ok(
       result && "entryPrice" in result,
-      "W3 = W2 (exact equality) must signal, never wait",
+      "W2 > W1 must ALSO signal now -- the recursive comparison is removed",
     );
   },
 );
 
 scenario(
-  "6. W3 > W2 (with W2 > W1 first) -> wait W4, no signal yet -- and the SAME rule repeats with no maximum wave count",
+  "H. No W3 is required for ENTRY -- a candidate can only ever reach waveHistory.length===2 before becoming terminal (SIGNAL)",
   () => {
-    const c = driveCascadeToWave(1, [10_000, 15_000, 20_000]); // W1, W2 already completed internally; W3 still ACTIVE
-    const result = c.onTick("ETHUSDT", "LONG", 2002, 4000); // W3 completes, > W2
+    const c = driveCascadeToWave(1, [10_000, 999_999_999]); // W2 enormously larger than W1
+    const result = c.onTick("ETHUSDT", "LONG", 2002, 3000) as any;
+    assert.ok(result && "entryPrice" in result);
     assert.strictEqual(
-      result,
-      null,
-      "W3 > W2 must never signal -- must wait for W4",
+      result.waveHistory.length,
+      2,
+      "W2 completion must signal immediately -- no W3 is ever awaited or required",
     );
   },
 );
 
 scenario(
-  "Wave 2 > Wave 1 waits for Wave 3; Wave 3 <= Wave 2 then signals -- arbitrary wave count, no hard cap",
+  "E. W2 arrives but has not yet completed its own 1x UNIT recovery -> NO SIGNAL",
   () => {
     const c = new CascadeCandidateService();
     c.startCascade(
@@ -247,31 +235,60 @@ scenario(
       1,
       2000,
       1000,
-      3000,
+      5000,
       1000,
-    ); // W1 liq = 3000
+    );
     c.onTick("ETHUSDT", "LONG", 2001, 2000); // W1 completes
-    c.onLiquidation(liq("ETHUSDT", "SELL", 2001, 9000, 2500), "LONG"); // Wave 2 starts, liq=9000 (> 3000)
-    const afterW2 = c.onTick("ETHUSDT", "LONG", 2002, 3000); // Wave 2 completes
+    c.onLiquidation(liq("ETHUSDT", "SELL", 2000, 3000, 2500), "LONG"); // W2 starts
+    const result = c.onTick("ETHUSDT", "LONG", 2000.5, 3000); // price has NOT moved 1x UNIT from W2's own extreme yet
     assert.strictEqual(
-      afterW2,
+      result,
       null,
-      "Wave 2 > Wave 1 must NOT signal yet -- must wait for Wave 3",
+      "an incomplete W2 must never produce a signal",
     );
     const peek = c.peekWatch("ETHUSDT", "LONG");
-    assert.strictEqual(peek!.waveCount, 2);
-
-    c.onLiquidation(liq("ETHUSDT", "SELL", 2002, 4000, 3500), "LONG"); // Wave 3 starts, liq=4000 (<= 9000)
-    const afterW3 = c.onTick("ETHUSDT", "LONG", 2003, 4000); // Wave 3 completes
-    assert.ok(
-      afterW3 && "entryPrice" in afterW3,
-      "Wave 3 <= Wave 2 must now be signal-ready",
-    );
-    const signal = afterW3 as any;
     assert.strictEqual(
-      signal.waveHistory.length,
-      3,
-      "all three waves must be in the history",
+      peek!.waveCount,
+      2,
+      "W2 must still be tracked as ACTIVE, not yet terminal",
+    );
+  },
+);
+
+scenario(
+  "F. Opposite-victim liquidation after W1 does NOT start W2 -- structurally guaranteed by the per-(symbol,victim) keying, never a same-watch cross-victim mutation",
+  () => {
+    const c = new CascadeCandidateService();
+    c.startCascade(
+      "ETHUSDT",
+      "LONG",
+      "casc-1",
+      "1m",
+      1,
+      2000,
+      1000,
+      5000,
+      1000,
+    ); // LONG-victim watch
+    c.onTick("ETHUSDT", "LONG", 2001, 2000); // W1 completes, waiting for same-victim W2
+    // A SHORT-victim liquidation on the SAME symbol is routed to a
+    // COMPLETELY SEPARATE (symbol,victim) watch -- it can never reach or
+    // mutate the LONG-victim watch's own waves at all.
+    c.onLiquidation(liq("ETHUSDT", "BUY", 2000, 3000, 2500), "SHORT");
+    const longPeek = c.peekWatch("ETHUSDT", "LONG");
+    assert.strictEqual(
+      longPeek!.waveCount,
+      1,
+      "the LONG-victim watch's own wave count must be completely unaffected by a SHORT-victim liquidation",
+    );
+    // The LONG-victim candidate must still be waiting for a genuine
+    // same-victim W2, or eventually cancel at 2x UNIT -- never signal
+    // from the opposite-victim event.
+    const stillWaiting = c.onTick("ETHUSDT", "LONG", 2001.5, 3000);
+    assert.strictEqual(
+      stillWaiting,
+      null,
+      "must still be waiting, not signaling, after an opposite-victim event",
     );
   },
 );
