@@ -424,6 +424,55 @@ async function main(): Promise<void> {
     },
   );
 
+  await scenario(
+    "operator-requested (fixed 0.30% risk model): handleCandlePhysicsEntry() computes executable SL/TP from a FIXED 0.30% risk, never from deriveLastTwoWaveTradePlan()'s own stopLoss/takeProfit, and never rejects or clamps based on the structural diagnostics",
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/market-data-orchestrator.ts"),
+        "utf8",
+      );
+      const idx = source.indexOf("private async handleCandlePhysicsEntry(");
+      assert.ok(idx > -1, "handleCandlePhysicsEntry must be defined");
+      const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+      assert.ok(
+        body.includes("FIXED_SL_PCT = 0.003"),
+        "must use a fixed 0.30% SL constant",
+      );
+      assert.ok(
+        body.includes("REWARD_RISK_RATIO = 2.2"),
+        "must keep TP at exactly 2.2R",
+      );
+      assert.ok(
+        /const sl = event\.victim === "LONG" \? entry \* \(1 - FIXED_SL_PCT\)/.test(
+          body,
+        ),
+        "SL must be derived from FIXED_SL_PCT directly, not from any structural wave computation",
+      );
+      assert.ok(
+        !body.includes("sl: structuralDiagnostics.stopLoss") &&
+          !body.includes("sl: planCalc.stopLoss"),
+        "the executable SL must NEVER be assigned from the structural (last-two-wave) computation",
+      );
+      assert.ok(
+        !body.includes("tp: structuralDiagnostics.takeProfit") &&
+          !body.includes("tp: planCalc.takeProfit"),
+        "the executable TP must NEVER be assigned from the structural (last-two-wave) computation",
+      );
+      assert.ok(
+        body.includes("deriveLastTwoWaveTradePlan("),
+        "the structural computation must still be present, but as a diagnostic only",
+      );
+      assert.ok(
+        body.includes("DIAGNOSTICS_ONLY_NOT_EXECUTABLE"),
+        "the structural computation's own log line must be clearly labeled as non-executable",
+      );
+      assert.ok(
+        !/if\s*\(\s*structuralDiagnostics/.test(body),
+        "must never branch/reject/clamp based on the structural diagnostics",
+      );
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

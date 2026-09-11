@@ -993,44 +993,75 @@ export class MarketDataOrchestrator {
           60,
         ) ?? 0;
 
+      // Sep 11 2026 (Karo), operator-requested simplification -- the
+      // last-two-wave structural SL is kept ONLY as a diagnostic
+      // computation below (logged via [LAST_TWO_WAVE_STRUCTURAL_
+      // DIAGNOSTICS_ONLY_NOT_EXECUTABLE]); it NEVER determines the
+      // executable stopLoss/takeProfit anymore. No rejection, no
+      // clamping to any range based on this value.
       const previousExtreme = event.dominantWave.extreme;
       const finalExtreme = event.signalWave.extreme;
-      const planCalc = deriveLastTwoWaveTradePlan({
+      const structuralDiagnostics = deriveLastTwoWaveTradePlan({
         entryPrice: event.entryPrice,
         direction: event.victim,
         previousExtreme,
         finalExtreme,
       });
+      log.info(
+        {
+          symbol: event.symbol,
+          direction: event.victim,
+          entryPrice: structuralDiagnostics.entryPrice,
+          previousExtreme: structuralDiagnostics.previousExtreme,
+          finalExtreme: structuralDiagnostics.finalExtreme,
+          lastLegExtension: structuralDiagnostics.lastLegExtension,
+          naturalSL: structuralDiagnostics.naturalSL,
+          naturalRiskPct: structuralDiagnostics.naturalRiskPct,
+          diagnosticExecutionRiskPct: structuralDiagnostics.executionRiskPct,
+          diagnosticSlAdjustment: structuralDiagnostics.slAdjustment,
+          diagnosticStopLoss: structuralDiagnostics.stopLoss,
+        },
+        "[LAST_TWO_WAVE_STRUCTURAL_DIAGNOSTICS_ONLY_NOT_EXECUTABLE]",
+      );
+
+      // Sep 11 2026 (Karo), operator-requested -- THE executable SL/TP.
+      // Fixed 0.30% risk, 2.2R reward. Never derived from wave
+      // structure, never clamped/rejected based on it.
+      const FIXED_SL_PCT = 0.003;
+      const REWARD_RISK_RATIO = 2.2;
+      const entry = event.entryPrice;
+      const sl =
+        event.victim === "LONG"
+          ? entry * (1 - FIXED_SL_PCT)
+          : entry * (1 + FIXED_SL_PCT);
+      const riskDistance = Math.abs(entry - sl);
+      const rewardDistance = riskDistance * REWARD_RISK_RATIO;
+      const tp =
+        event.victim === "LONG"
+          ? entry + rewardDistance
+          : entry - rewardDistance;
       const plan = {
         ok: true as const,
-        entry: planCalc.entryPrice,
-        sl: planCalc.stopLoss,
-        tp: planCalc.takeProfit,
-        slPct: planCalc.executionRiskPct,
-        tpPct:
-          event.entryPrice > 0 ? planCalc.rewardDistance / event.entryPrice : 0,
-        rr: planCalc.rewardRiskRatio,
+        entry,
+        sl,
+        tp,
+        slPct: FIXED_SL_PCT,
+        tpPct: entry > 0 ? rewardDistance / entry : 0,
+        rr: REWARD_RISK_RATIO,
       };
 
       log.info(
         {
           symbol: event.symbol,
           direction: event.victim,
-          entryPrice: planCalc.entryPrice,
-          previousExtreme: planCalc.previousExtreme,
-          finalExtreme: planCalc.finalExtreme,
-          lastLegExtension: planCalc.lastLegExtension,
-          naturalSL: planCalc.naturalSL,
-          naturalRiskPct: planCalc.naturalRiskPct,
-          executionRiskPct: planCalc.executionRiskPct,
-          slAdjustment: planCalc.slAdjustment,
-          stopLoss: planCalc.stopLoss,
-          riskDistance: planCalc.riskDistance,
-          rewardRiskRatio: planCalc.rewardRiskRatio,
-          takeProfit: planCalc.takeProfit,
-          rewardDistance: planCalc.rewardDistance,
+          entryPrice: entry,
+          stopLoss: sl,
+          riskDistance,
+          rewardDistance,
+          takeProfit: tp,
+          rewardRiskRatio: REWARD_RISK_RATIO,
         },
-        "[LAST_TWO_WAVE_TRADE_PLAN]",
+        "[FIXED_RISK_TRADE_PLAN]",
       );
 
       const signalId = randomUUID();
