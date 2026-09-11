@@ -672,7 +672,7 @@ scenario(
 );
 
 scenario(
-  "structural: SL/TP is CONSTANT (0.30%/0.70%), never derived from the physics formula, w1AnchorPrice/w1LiqUsd/w2LiqUsd inputs are gone; previousWave/triggerWave are still correctly identified as the PREVIOUS completed wave and the TRIGGERING wave, used only for diagnostics now",
+  "structural: SL/TP is derived from deriveEpisodeDisplacementTradePlan() (episode-displacement, 0.20%-0.50% execution envelope, TP=2.2R) -- never the old constant 0.30%/0.70%, never the physics formula; previousWave/triggerWave are still correctly identified for diagnostics",
   () => {
     const source = fs.readFileSync(
       require.resolve("../src/services/market-data-orchestrator.ts"),
@@ -690,16 +690,20 @@ scenario(
       "previousWave must be the wave immediately BEFORE the triggering one, not waveHistory[0]",
     );
     assert.ok(
-      body.includes("CASCADE_FIXED_SL_PCT = 0.003"),
-      "SL must be the constant 0.30%",
+      body.includes("deriveEpisodeDisplacementTradePlan("),
+      "SL/TP must come from the episode-displacement formula",
     );
     assert.ok(
-      body.includes("CASCADE_FIXED_TP_PCT = 0.007"),
-      "TP must be the constant 0.70%",
+      !body.includes("CASCADE_FIXED_SL_PCT"),
+      "the old constant 0.30% SL must be gone",
+    );
+    assert.ok(
+      !body.includes("CASCADE_FIXED_TP_PCT"),
+      "the old constant 0.70% TP must be gone",
     );
     assert.ok(
       !body.includes("deriveLiquidationPhysicsTradePlan("),
-      "the physics formula must NEVER be called for cascade-signal execution in this phase",
+      "the OLDER physics formula must NEVER be called for cascade-signal execution",
     );
   },
 );

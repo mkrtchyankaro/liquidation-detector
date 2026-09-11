@@ -106,6 +106,7 @@ function baseGlobalSignal(): GlobalSignalDoc {
     cascadeId: null,
     timeframe: null,
     isMainExecuted: true,
+    episodePlan: null,
     unitResearch: null,
     unitCompetitionResearch: null,
     commonHorizonResearch: null,

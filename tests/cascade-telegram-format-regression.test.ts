@@ -178,6 +178,7 @@ function buildCascadeSignalDoc(planOk: boolean): GlobalSignalDoc {
     cascadeId: "casc-test",
     timeframe: "3m",
     isMainExecuted: true,
+    episodePlan: null,
     waveHistory,
     w1Diagnostics: null,
     totalEpisodePressure: totalLiq,

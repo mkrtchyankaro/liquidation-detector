@@ -50,6 +50,18 @@ export interface GlobalSignalDoc {
    *  path (there is only ever one canonical watch per symbol there, so
    *  every real signal it produces IS the executed one). */
   isMainExecuted: boolean;
+  /** Sep 11 2026 (Karo), operator-requested -- ADDITIVE. The full,
+   *  episode-displacement-derived structural SL/TP plan for this
+   *  signal (see episode-displacement-trade-plan.ts's own header for
+   *  the exact formula). Null for the legacy, non-cascade V5 path
+   *  (which uses its own, unrelated structural-trade-plan.ts formula
+   *  and has no episode-displacement concept). This is the required
+   *  logging the operator asked for -- firstAnchorPrice through
+   *  slAdjustment -- kept as ONE structured object rather than spread
+   *  across the older, unrelated `physics` field's own shape. */
+  episodePlan:
+    | import("../trading/episode-displacement-trade-plan").EpisodeDisplacementTradePlan
+    | null;
 
   waveHistory: V5Wave[];
   w1Diagnostics: V5Wave1Diagnostics | null;

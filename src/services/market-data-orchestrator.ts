@@ -39,6 +39,7 @@ import type {
 } from "../domain/signal/global-signal.model";
 import type { Side, Liquidation } from "../shared/common.types";
 import { deriveLiquidationPhysicsTradePlan } from "../domain/trading/liquidation-physics-trade-plan";
+import { deriveEpisodeDisplacementTradePlan } from "../domain/trading/episode-displacement-trade-plan";
 import { evaluateDragon } from "../domain/research/unit-competition-dragon";
 import type { V5Wave } from "../strategy/v5/v5-wave.model";
 import type { SignalDistributor } from "./signal-distributor";
@@ -881,35 +882,65 @@ export class MarketDataOrchestrator {
         event.waveHistory[0]!,
       );
 
-      // Sep 10 2026 (Karo), operator-requested production stabilization
-      // -- CONSTANT TP/SL for this observation phase, per the
-      // operator's own explicit instruction: the existing physics
-      // formula (deriveLiquidationPhysicsTradePlan) is deliberately NOT
-      // called for cascade-produced execution during this phase. No
-      // ATR/liquidation-strength/RR-ladder/Hybrid/sizing-floor logic is
-      // involved -- exactly SL=0.30%, TP=0.70%, RR=0.70/0.30=2.333333,
-      // for every 1m/3m/5m candidate, every symbol, unconditionally.
-      const CASCADE_FIXED_SL_PCT = 0.003;
-      const CASCADE_FIXED_TP_PCT = 0.007;
-      const entry = event.entryPrice;
-      const sl =
-        event.side === "LONG"
-          ? entry * (1 - CASCADE_FIXED_SL_PCT)
-          : entry * (1 + CASCADE_FIXED_SL_PCT);
-      const tp =
-        event.side === "LONG"
-          ? entry * (1 + CASCADE_FIXED_TP_PCT)
-          : entry * (1 - CASCADE_FIXED_TP_PCT);
-      const rr = CASCADE_FIXED_TP_PCT / CASCADE_FIXED_SL_PCT;
-      const plan = {
-        ok: true as const,
-        entry,
-        sl,
-        tp,
-        slPct: CASCADE_FIXED_SL_PCT,
-        tpPct: CASCADE_FIXED_TP_PCT,
-        rr,
-      };
+      // Sep 11 2026 (Karo), operator-requested -- REPLACES the constant
+      // SL=0.30%/TP=0.70% observation-phase values with the
+      // deterministic, episode-displacement-derived structural SL/TP
+      // (episode-displacement-trade-plan.ts). Wave detection itself
+      // (W1/W2, entry conditions, liquidation thresholds, the 1m ATR/
+      // UNIT calculation) is completely unchanged -- this ONLY replaces
+      // how SL/TP is computed once a signal is already ready.
+      //
+      // finalExtremePrice: the operator's own explicit definition --
+      // "the final structural extreme across ALL waves that occurred
+      // before entry", NOT necessarily Wave 1's own extreme. Computed
+      // generically across the full waveHistory (currently always
+      // exactly W1+W2, but this reduce() makes no assumption about
+      // wave count) -- the LOWEST extreme for a LONG-victim episode,
+      // the HIGHEST for a SHORT-victim episode.
+      const firstAnchorPrice = event.waveHistory[0]!.anchorPrice;
+      const finalExtremePrice = event.waveHistory.reduce(
+        (best, w) =>
+          event.side === "LONG"
+            ? Math.min(best, w.extremePrice)
+            : Math.max(best, w.extremePrice),
+        event.waveHistory[0]!.extremePrice,
+      );
+      const episodePlanCalc = deriveEpisodeDisplacementTradePlan({
+        entryPrice: event.entryPrice,
+        direction: event.side,
+        firstAnchorPrice,
+        finalExtremePrice,
+      });
+      const entry = episodePlanCalc.entryPrice;
+      const sl = episodePlanCalc.stopLoss;
+      const tp = episodePlanCalc.takeProfit;
+      const slPct = episodePlanCalc.executionRiskPct;
+      const tpPct = entry > 0 ? episodePlanCalc.rewardDistance / entry : 0;
+      const rr = episodePlanCalc.rewardRiskRatio;
+      const plan = { ok: true as const, entry, sl, tp, slPct, tpPct, rr };
+
+      // Required logging (operator's own explicit field list, section 8).
+      log.info(
+        {
+          signalId: event.cascadeId,
+          symbol: event.symbol,
+          direction: event.side,
+          entryPrice: episodePlanCalc.entryPrice,
+          firstAnchorPrice: episodePlanCalc.firstAnchorPrice,
+          finalExtremePrice: episodePlanCalc.finalExtremePrice,
+          episodeDisplacement: episodePlanCalc.episodeDisplacement,
+          episodeDisplacementPct: episodePlanCalc.episodeDisplacementPct,
+          naturalSL: episodePlanCalc.naturalSL,
+          naturalRiskPct: episodePlanCalc.naturalRiskPct,
+          executionRiskPct: episodePlanCalc.executionRiskPct,
+          slAdjustment: episodePlanCalc.slAdjustment,
+          stopLoss: episodePlanCalc.stopLoss,
+          riskDistance: episodePlanCalc.riskDistance,
+          rewardRiskRatio: episodePlanCalc.rewardRiskRatio,
+          takeProfit: episodePlanCalc.takeProfit,
+        },
+        "[EPISODE_DISPLACEMENT_TRADE_PLAN]",
+      );
 
       const signalId = randomUUID();
       const totalLiq = event.waveHistory.reduce((sum, w) => sum + w.liqUsd, 0);
@@ -1029,6 +1060,7 @@ export class MarketDataOrchestrator {
         cascadeId: event.cascadeId,
         timeframe: event.timeframe,
         isMainExecuted: willExecuteAsMain,
+        episodePlan: episodePlanCalc,
         createdAt: Date.now(),
       };
 
@@ -2046,6 +2078,7 @@ export class MarketDataOrchestrator {
         signalId: event.signalId,
         cascadeId: null,
         timeframe: null,
+        episodePlan: null,
         isMainExecuted: true,
         symbol: event.symbol,
         side: event.side,
@@ -2198,6 +2231,7 @@ export class MarketDataOrchestrator {
       side: watch.side,
       cascadeId: null,
       timeframe: null,
+      episodePlan: null,
       isMainExecuted: false,
       victim: watch.victim,
       signalTs: watch.createdAt,
