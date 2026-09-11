@@ -197,17 +197,21 @@ async function main() {
 
   console.log("\n" + "=".repeat(90));
   console.log(
-    "CANDLE-BY-CANDLE REPLAY (adaptive, self-referential -- see script header for the 'no fixed threshold' rule)",
+    "CANDLE-BY-CANDLE REPLAY (adaptive, self-referential -- NO fixed thresholds, NO permanent invalid states)",
   );
   console.log("=".repeat(90));
   console.log(
     "time                 O/H/L/C                        liqUSD     ev  frozenU   curU      newExtU   recU     eff        state",
   );
 
-  var state = "NO_WAVE";
-  var waveCandles = [];
+  var state = "NO_WAVE"; // NO_WAVE | CANDIDATE | ACTIVE | EXHAUSTING | ENTERED
+  var waveNumber = 0;
+  var currentWaveCandles = [];
   var episodeExtreme = null;
+  var dominantWave = null; // { waveNumber, totalLiqUsd, totalExtensionUnits, efficiency }
+  var completedWaveLog = [];
   var stateLog = [];
+  var entryEvent = null;
 
   const startMinute = minuteFloor(episodeStart);
   const eventsByMinute = new Map();
@@ -216,6 +220,23 @@ async function main() {
     if (!eventsByMinute.has(m)) eventsByMinute.set(m, []);
     eventsByMinute.get(m).push(e);
   });
+
+  function waveSummary(candles) {
+    const totalLiqUsd = candles.reduce(function (s, c) {
+      return s + c.sameSideLiqUsd;
+    }, 0);
+    const totalExtensionUnits = candles.reduce(function (s, c) {
+      return s + Math.max(0, c.newDirectionalExtensionUnits);
+    }, 0);
+    const liqMillions = totalLiqUsd / 1000000;
+    const efficiency =
+      liqMillions > 0 ? totalExtensionUnits / liqMillions : null; // null = NOT_COMPUTABLE, zero-liq wave
+    return {
+      totalLiqUsd: totalLiqUsd,
+      totalExtensionUnits: totalExtensionUnits,
+      efficiency: efficiency,
+    };
+  }
 
   for (let t = startMinute; t <= replayEnd; t += 60000) {
     const kl = klines.get(t);
@@ -254,99 +275,157 @@ async function main() {
           ? newDirectionalExtensionUnits / liqMillions
           : "NOT_COMPUTABLE"
         : "NOT_COMPUTABLE";
+    const madeNewExtreme = newDirectionalExtensionUnits > 0;
 
     const stateBefore = state;
     let reason = "";
+    const thisCandleMetrics = {
+      t: t,
+      sameSideLiqUsd: sameSideLiqUsd,
+      newDirectionalExtensionUnits: newDirectionalExtensionUnits,
+      recoveryUnits: recoveryUnits,
+    };
 
     if (state === "NO_WAVE" || state === "WAIT_NEXT_PRESSURE") {
       if (sameSideLiqUsd > 0) {
-        state = state === "NO_WAVE" ? "W1_CANDIDATE" : "W2_CANDIDATE";
-        waveCandles = [
-          {
-            t: t,
-            sameSideLiqUsd: sameSideLiqUsd,
-            newDirectionalExtensionUnits: newDirectionalExtensionUnits,
-            recoveryUnits: recoveryUnits,
-          },
-        ];
-        reason = "same-side liquidation printed, opening a candidate wave";
+        // Section 1: open a candidate, THEN immediately judge THIS SAME
+        // closed candle (the candidate-candle IS already closed by the
+        // time we process it in this loop) per section 2's A/B/C rules.
+        waveNumber++;
+        currentWaveCandles = [thisCandleMetrics];
+        if (madeNewExtreme) {
+          // Case A (real displacement) and Case C (displacement +
+          // rejection in the same candle) are BOTH promoted to ACTIVE --
+          // per section 2C, a same-candle rejection is deliberately NOT
+          // auto-classified as exhausting without a prior candle to
+          // compare against; the VERY NEXT candle's own self-referential
+          // comparison below will naturally detect exhaustion if the
+          // rejection continues.
+          state = "ACTIVE";
+          reason =
+            "W" +
+            waveNumber +
+            "_CANDIDATE: first closed candle showed real directional extension -- promoted to ACTIVE";
+        } else {
+          // Case B: no displacement at all -- per section 2B and 11,
+          // this is NOT a permanent invalid state. Return to NO_WAVE /
+          // WAIT_NEXT_PRESSURE immediately so the NEXT liquidation can
+          // freely open a fresh candidate.
+          const target =
+            dominantWave === null ? "NO_WAVE" : "WAIT_NEXT_PRESSURE";
+          reason =
+            "W" +
+            waveNumber +
+            "_CANDIDATE: liquidation printed but produced ZERO directional extension -- not a real wave, returning to " +
+            target +
+            " (next liquidation may open a fresh candidate)";
+          waveNumber--; // this candidate never became a real, numbered wave
+          currentWaveCandles = [];
+          state = target;
+        }
       }
-    } else if (state === "W1_CANDIDATE" || state === "W2_CANDIDATE") {
-      waveCandles.push({
-        t: t,
-        sameSideLiqUsd: sameSideLiqUsd,
-        newDirectionalExtensionUnits: newDirectionalExtensionUnits,
-        recoveryUnits: recoveryUnits,
-      });
-      if (newDirectionalExtensionUnits > 0) {
-        state = state === "W1_CANDIDATE" ? "W1_ACTIVE" : "W2_ACTIVE";
-        reason =
-          "candidate showed real directional extension -- promoted to ACTIVE";
-      } else if (sameSideLiqUsd === 0 && recoveryUnits > 0) {
-        state =
-          state === "W1_CANDIDATE" ? "INVALID_W1" : "INVALID_W2_CANDIDATE";
-        reason =
-          "no directional extension was ever produced, and price is now moving away -- this print never became a real wave";
-      }
-    } else if (
-      state === "W1_ACTIVE" ||
-      state === "W2_ACTIVE" ||
-      state === "W1_EXHAUSTING" ||
-      state === "W2_EXHAUSTING"
-    ) {
-      waveCandles.push({
-        t: t,
-        sameSideLiqUsd: sameSideLiqUsd,
-        newDirectionalExtensionUnits: newDirectionalExtensionUnits,
-        recoveryUnits: recoveryUnits,
-      });
-      const priorActive = waveCandles.slice(0, -1).filter(function (c) {
-        return c.sameSideLiqUsd > 0;
-      });
-      const priorMedianExt = median(
-        priorActive.map(function (c) {
-          return c.newDirectionalExtensionUnits;
-        }),
-      );
-      const priorMedianRecovery = median(
-        priorActive.map(function (c) {
-          return c.recoveryUnits;
-        }),
-      );
-      const madeNewExtreme = newDirectionalExtensionUnits > 0;
+    } else if (state === "ACTIVE" || state === "EXHAUSTING") {
+      currentWaveCandles.push(thisCandleMetrics);
+      const priorCandles = currentWaveCandles.slice(0, -1);
+      const priorMedianRecovery =
+        median(
+          priorCandles.map(function (c) {
+            return c.recoveryUnits;
+          }),
+        ) || 0;
 
-      const isExhausting =
-        priorMedianExt !== null &&
-        !madeNewExtreme &&
-        recoveryUnits > (priorMedianRecovery || 0) &&
-        sameSideLiqUsd > 0;
-      const isComplete =
-        state.indexOf("EXHAUSTING") !== -1 &&
-        !madeNewExtreme &&
-        recoveryUnits > (priorMedianRecovery || 0);
-
-      if (isComplete) {
-        state = state.indexOf("W1") === 0 ? "W1_COMPLETE" : "W2_COMPLETE";
+      if (madeNewExtreme) {
+        // Section 5: "if the next candle resumes strong same-side
+        // liquidation and makes a new extreme again, the wave was NOT
+        // really complete" -- ALWAYS reverts an EXHAUSTING wave back to
+        // ACTIVE the moment a new extreme is made again, regardless of
+        // how large the candle is (UNIT is a ruler here, never a cap).
+        state = "ACTIVE";
         reason =
-          "no new directional extreme this candle, AND recovery exceeded this wave's own prior median recovery -- pressure/result relationship structurally broke";
-      } else if (isExhausting) {
-        state = state.indexOf("W1") === 0 ? "W1_EXHAUSTING" : "W2_EXHAUSTING";
+          "W" +
+          waveNumber +
+          ": new directional extreme made (" +
+          newDirectionalExtensionUnits.toFixed(3) +
+          "U) -- pressure remains effective, wave continues";
+      } else if (state === "ACTIVE" && recoveryUnits > priorMedianRecovery) {
+        state = "EXHAUSTING";
         reason =
-          "liquidation pressure still present but produced no new extreme, and recovery is building relative to this wave's own prior candles";
-      } else if (madeNewExtreme) {
-        state = state.indexOf("W1") === 0 ? "W1_ACTIVE" : "W2_ACTIVE";
-        reason = "new directional extreme made -- pressure remains effective";
+          "W" +
+          waveNumber +
+          ": no new extreme this candle, and recovery (" +
+          recoveryUnits.toFixed(3) +
+          "U) exceeds this wave's own prior median recovery -- first sign of stalling";
+      } else if (state === "EXHAUSTING") {
+        // Section 5: a SECOND consecutive closed candle confirming no
+        // new price discovery is the required closed-candle confirmation.
+        const summary = waveSummary(currentWaveCandles);
+        completedWaveLog.push({
+          waveNumber: waveNumber,
+          summary: summary,
+          completedAt: t,
+        });
+        if (dominantWave === null) {
+          dominantWave = { waveNumber: waveNumber, summary: summary };
+          state = "WAIT_NEXT_PRESSURE";
+          reason =
+            "W" +
+            waveNumber +
+            "_COMPLETE: confirmed stall (2nd consecutive non-extending candle) -- this is the FIRST meaningful wave, becomes the dominant reference";
+        } else {
+          const domEff = dominantWave.summary.efficiency;
+          const curEff = summary.efficiency;
+          const domLabel =
+            "W" +
+            dominantWave.waveNumber +
+            " (eff=" +
+            (domEff === null ? "NOT_COMPUTABLE" : domEff.toFixed(2)) +
+            ")";
+          const curLabel =
+            "W" +
+            waveNumber +
+            " (eff=" +
+            (curEff === null ? "NOT_COMPUTABLE" : curEff.toFixed(2)) +
+            ")";
+          if (domEff === null || curEff === null) {
+            state = "WAIT_NEXT_PRESSURE";
+            dominantWave = { waveNumber: waveNumber, summary: summary };
+            reason =
+              "W" +
+              waveNumber +
+              "_COMPLETE vs dominant " +
+              domLabel +
+              ": efficiencyRatio NOT_COMPUTABLE (a zero-liquidity reference) -- " +
+              curLabel +
+              " becomes the new dominant reference, waiting for the next wave";
+          } else if (curEff >= domEff) {
+            state = "WAIT_NEXT_PRESSURE";
+            dominantWave = { waveNumber: waveNumber, summary: summary };
+            reason =
+              curLabel +
+              " vs dominant " +
+              domLabel +
+              ": efficiency held or improved (continuation) -- W" +
+              waveNumber +
+              " becomes the new dominant reference, waiting for the next wave";
+          } else {
+            state = "ENTERED";
+            entryEvent = {
+              time: t,
+              price: kl.close,
+              waveNumber: waveNumber,
+              dominant: dominantWave,
+              signal: { waveNumber: waveNumber, summary: summary },
+            };
+            reason =
+              curLabel +
+              " vs dominant " +
+              domLabel +
+              ": efficiency COLLAPSED (exhaustion) -- ENTRY at this candle's own close (" +
+              kl.close +
+              ")";
+          }
+        }
       }
-    } else if (state === "W1_COMPLETE") {
-      state = "WAIT_NEXT_PRESSURE";
-      const meaningful = waveCandles.some(function (c) {
-        return c.newDirectionalExtensionUnits > 0;
-      });
-      reason = meaningful
-        ? "W1 was meaningful -- becomes the dominant reference for W2"
-        : "W1 never showed real extension -- excluded from dominant-wave reference";
-    } else if (state === "W2_COMPLETE") {
-      reason = "W2 complete -- ready for entry evaluation (see summary below)";
     }
 
     const curU =
@@ -386,7 +465,7 @@ async function main() {
         reason: reason,
       });
 
-    if (state === "W2_COMPLETE") break;
+    if (state === "ENTERED") break;
   }
 
   console.log("\n" + "=".repeat(90));
@@ -405,68 +484,50 @@ async function main() {
     );
   });
 
-  // ── Operator's own final decision block: compare W2 vs dominant W1 ──
   console.log("\n" + "=".repeat(90));
-  console.log(
-    "FINAL DECISION: W2 vs DOMINANT W1 (only runs if a genuine W2_COMPLETE was reached)",
-  );
+  console.log("COMPLETED WAVES");
   console.log("=".repeat(90));
-  if (state !== "W2_COMPLETE") {
+  completedWaveLog.forEach(function (w) {
     console.log(
-      "Replay ended in state=" +
-        state +
-        " -- W2 never genuinely completed, so no ENTRY decision applies. Per the operator's own rule, an incomplete/invalid setup is NO TRADE, never forced.",
+      "W" +
+        w.waveNumber +
+        " completed at " +
+        fmtTs(w.completedAt) +
+        ": totalLiqUsd=" +
+        w.summary.totalLiqUsd.toFixed(0) +
+        " totalExtensionUnits=" +
+        w.summary.totalExtensionUnits.toFixed(3) +
+        " efficiency=" +
+        (w.summary.efficiency === null
+          ? "NOT_COMPUTABLE"
+          : w.summary.efficiency.toFixed(2)),
+    );
+  });
+
+  console.log("\n" + "=".repeat(90));
+  console.log("FINAL DECISION");
+  console.log("=".repeat(90));
+  if (entryEvent) {
+    console.log(
+      "ENTRY at " + fmtTs(entryEvent.time) + ", price=" + entryEvent.price,
+    );
+    console.log(
+      "Signal wave: W" +
+        entryEvent.signal.waveNumber +
+        " " +
+        JSON.stringify(entryEvent.signal.summary),
+    );
+    console.log(
+      "Dominant reference: W" +
+        entryEvent.dominant.waveNumber +
+        " " +
+        JSON.stringify(entryEvent.dominant.summary),
     );
   } else {
-    // Find the meaningful W1 candles (from stateLog's own recorded
-    // history -- w1MeaningfulCandles is reconstructed from the full
-    // candle-by-candle loop's own waveCandles snapshots via stateLog.
-    // Simpler: re-derive directly from candlesLoggedForW1/W2 captured below.
     console.log(
-      "W2 completed. See the candle-by-candle table above for W1's own accumulated",
-    );
-    console.log(
-      "candles (before WAIT_NEXT_PRESSURE) and W2's own accumulated candles (after",
-    );
-    console.log("W2_CANDIDATE) to compare:");
-    console.log(
-      "  - W1's own total same-side liqUsd and BEST (max) newDirectionalExtensionUnits",
-    );
-    console.log("    reached during W1_ACTIVE/W1_EXHAUSTING, vs");
-    console.log(
-      "  - W2's own total same-side liqUsd and BEST (max) newDirectionalExtensionUnits",
-    );
-    console.log("    reached during W2_ACTIVE/W2_EXHAUSTING.");
-    console.log("");
-    console.log("Per the operator's own rule:");
-    console.log(
-      "  - if W2's own pressure-to-extension relationship is STILL AS EFFECTIVE as W1's",
-    );
-    console.log(
-      "    own (comparable or better efficiency, still making real new extremes) ->",
-    );
-    console.log(
-      "    W2 becomes the new dominant reference, WAIT for W3 (no entry yet).",
-    );
-    console.log(
-      "  - if W2's own effectiveness genuinely COLLAPSED relative to W1's own (similar",
-    );
-    console.log(
-      "    or larger pressure, but W1_EXHAUSTING/W2_EXHAUSTING triggered on materially",
-    );
-    console.log(
-      "    less new extension + more recovery than W1 ever showed) -> ENTRY, at this",
-    );
-    console.log("    candle's own close, at this candle's own close price.");
-    console.log("");
-    console.log(
-      "This script deliberately does NOT auto-decide this final comparison with a",
-    );
-    console.log(
-      "hardcoded number -- read the W1 vs W2 candle rows above and apply the operator's",
-    );
-    console.log(
-      "own relative-effort-vs-result rule directly, exactly as specified.",
+      "NO TRADE -- replay ended in state=" +
+        state +
+        " without a genuine exhaustion signal against a dominant wave.",
     );
   }
 
