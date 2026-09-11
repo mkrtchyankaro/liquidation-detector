@@ -176,7 +176,7 @@ scenario(
 // ─── Readiness gate ──────────────────────────────────────────────────────
 
 scenario(
-  "structural: commonHorizonAtrReady() checks all three Wilder-ATR periods (1m/240, 3m/80, 5m/48) before an episode is allowed to start",
+  "structural: commonHorizonAtrReady() checks ONLY the 1m Wilder-ATR period (240) now -- production no longer waits for 3m/5m confirmation (operator-requested 1m-only simplification)",
   () => {
     const source = fs.readFileSync(
       require.resolve("../src/services/market-data-orchestrator.ts"),
@@ -185,8 +185,6 @@ scenario(
     const idx = source.indexOf("private commonHorizonAtrReady(");
     assert.ok(idx > -1, "commonHorizonAtrReady must be defined");
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
-    // Robust against line-wrapping: check the KEY PIECES are all present,
-    // not one long literal-string match.
     assert.ok(
       body.includes("getWilderATR(") &&
         body.includes('"1m"') &&
@@ -194,12 +192,12 @@ scenario(
       "must check the 1m Wilder-ATR period",
     );
     assert.ok(
-      body.includes('"3m"') && body.includes("COMMON_HORIZON_PERIODS.atr3m"),
-      "must check the 3m Wilder-ATR period",
+      !body.includes('"3m"') && !body.includes("COMMON_HORIZON_PERIODS.atr3m"),
+      "must NEVER check the 3m Wilder-ATR period anymore",
     );
     assert.ok(
-      body.includes('"5m"') && body.includes("COMMON_HORIZON_PERIODS.atr5m"),
-      "must check the 5m Wilder-ATR period",
+      !body.includes('"5m"') && !body.includes("COMMON_HORIZON_PERIODS.atr5m"),
+      "must NEVER check the 5m Wilder-ATR period anymore",
     );
   },
 );

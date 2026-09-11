@@ -285,7 +285,7 @@ async function main(): Promise<void> {
   console.log("\nRunning structural tests (application-layer fix)...\n");
 
   await scenario(
-    "structural: feedCascade() awaits each candidate's own persistActiveCandidateSnapshot() call SEQUENTIALLY -- never Promise.all / fire-and-forget for the three candidates",
+    "structural: feedCascade() awaits its own single candidate's persistActiveCandidateSnapshot() call -- never fire-and-forget (operator-requested 1m-only simplification: only ONE candidate/timeframe exists in production now, so the original three-candidate race-condition concern no longer applies structurally, but the await discipline itself is unchanged)",
     () => {
       const source = fs.readFileSync(
         require.resolve("../src/services/market-data-orchestrator.ts"),
@@ -299,12 +299,17 @@ async function main(): Promise<void> {
       ).length;
       assert.strictEqual(
         awaitCount,
-        6,
-        "all six persistActiveCandidateSnapshot() call-sites (route + start branches) must be awaited",
-      ); // 3 in "route" branch + 3 in "start" branch
+        2,
+        "both persistActiveCandidateSnapshot() call-sites (route + start branches) for the SINGLE 1m candidate must be awaited",
+      );
       assert.ok(
         !body.includes("void this.persistActiveCandidateSnapshot("),
         "must never fire-and-forget this call anymore",
+      );
+      assert.ok(
+        !body.includes("cascadeCandidate3m") &&
+          !body.includes("cascadeCandidate5m"),
+        "feedCascade() must never reference the 3m/5m candidates anymore",
       );
     },
   );
@@ -354,6 +359,67 @@ async function main(): Promise<void> {
       assert.ok(idx > -1);
       const body = source.slice(idx, source.indexOf("\n  async ", idx + 50));
       assert.ok(body.includes("this.cascadeRepo.ensureIndexes()"));
+    },
+  );
+
+  await scenario(
+    "1-4 (operator-requested 1m-only production change). Every new cascade creates EXACTLY ONE candidate, timeframe=1m, UNIT from 1m Wilder ATR(240), and NO 3m/5m candidate is created anywhere in feedCascade()'s own start-branch",
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/market-data-orchestrator.ts"),
+        "utf8",
+      );
+      const idx = source.indexOf("private async feedCascade(");
+      const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+      const startCascadeCount = (body.match(/\.startCascade\(/g) ?? []).length;
+      assert.strictEqual(
+        startCascadeCount,
+        1,
+        "exactly one startCascade() call in feedCascade() -- exactly one candidate ever created per cascade",
+      );
+      assert.ok(
+        body.includes(
+          'this.cascadeCandidate1m.startCascade(l.symbol, victim, resolved.cascadeId, "1m",',
+        ),
+        'the single candidate\'s own timeframe must be "1m"',
+      );
+      assert.ok(
+        body.includes(
+          'this.atrTracker.getWilderATR(l.symbol, "1m", COMMON_HORIZON_PERIODS.atr1m)',
+        ),
+        'UNIT must be read via getWilderATR(symbol, "1m", COMMON_HORIZON_PERIODS.atr1m)',
+      );
+      assert.ok(
+        !body.includes("cascadeCandidate3m") &&
+          !body.includes("cascadeCandidate5m"),
+        "feedCascade() must never reference the 3m/5m candidates",
+      );
+    },
+  );
+
+  await scenario(
+    "structural: tickCascade() ticks ONLY the 1m candidate -- no 3m/5m candidate is ever ticked in live execution",
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/market-data-orchestrator.ts"),
+        "utf8",
+      );
+      const idx = source.indexOf("private tickCascade(");
+      const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+      const tickCount = (body.match(/handleCascadeTick\(/g) ?? []).length;
+      assert.strictEqual(
+        tickCount,
+        1,
+        "exactly one handleCascadeTick() call per victim-loop iteration -- only the 1m candidate is ticked",
+      );
+      assert.ok(
+        body.includes('handleCascadeTick("1m", this.cascadeCandidate1m,'),
+      );
+      assert.ok(
+        !body.includes("cascadeCandidate3m") &&
+          !body.includes("cascadeCandidate5m"),
+        "tickCascade() must never reference the 3m/5m candidates",
+      );
     },
   );
 

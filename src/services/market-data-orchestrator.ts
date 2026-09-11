@@ -584,8 +584,6 @@ export class MarketDataOrchestrator {
 
     if (resolved.action === "route") {
       this.cascadeCandidate1m.onLiquidation(l, victim);
-      this.cascadeCandidate3m.onLiquidation(l, victim);
-      this.cascadeCandidate5m.onLiquidation(l, victim);
       await this.persistActiveCandidateSnapshot(
         l.symbol,
         victim,
@@ -593,38 +591,23 @@ export class MarketDataOrchestrator {
         "1m",
         l.timestamp,
       );
-      await this.persistActiveCandidateSnapshot(
-        l.symbol,
-        victim,
-        this.cascadeCandidate3m,
-        "3m",
-        l.timestamp,
-      );
-      await this.persistActiveCandidateSnapshot(
-        l.symbol,
-        victim,
-        this.cascadeCandidate5m,
-        "5m",
-        l.timestamp,
-      );
       return;
     }
 
+    // Sep 10 2026 (Karo), operator-requested production simplification --
+    // ONLY the 1m candidate is created/run in live execution now. 3m/5m
+    // are removed from this path entirely (CascadeRegistry itself is
+    // still constructed with 3m/5m CascadeCandidateService instances --
+    // see this class's own field declarations -- solely because
+    // isCascadeStillActive()'s own ownership-release logic reads all
+    // three; those two instances simply never receive startCascade()/
+    // onLiquidation()/onTick() calls anymore, so they stay permanently
+    // empty and inert).
     if (!this.commonHorizonAtrReady(l.symbol)) return;
     const unit1m = this.atrTracker.getWilderATR(
       l.symbol,
       "1m",
       COMMON_HORIZON_PERIODS.atr1m,
-    );
-    const unit3m = this.atrTracker.getWilderATR(
-      l.symbol,
-      "3m",
-      COMMON_HORIZON_PERIODS.atr3m,
-    );
-    const unit5m = this.atrTracker.getWilderATR(
-      l.symbol,
-      "5m",
-      COMMON_HORIZON_PERIODS.atr5m,
     );
     if (unit1m !== null && unit1m > 0) {
       this.cascadeCandidate1m.startCascade(
@@ -646,77 +629,20 @@ export class MarketDataOrchestrator {
         l.timestamp,
       );
     }
-    if (unit3m !== null && unit3m > 0) {
-      this.cascadeCandidate3m.startCascade(
-        l.symbol,
-        victim,
-        resolved.cascadeId,
-        "3m",
-        unit3m,
-        l.price,
-        resolved.cascadeStartTs,
-        l.quoteQty,
-        resolved.cascadeStartTs,
-      );
-      await this.persistActiveCandidateSnapshot(
-        l.symbol,
-        victim,
-        this.cascadeCandidate3m,
-        "3m",
-        l.timestamp,
-      );
-    }
-    if (unit5m !== null && unit5m > 0) {
-      this.cascadeCandidate5m.startCascade(
-        l.symbol,
-        victim,
-        resolved.cascadeId,
-        "5m",
-        unit5m,
-        l.price,
-        resolved.cascadeStartTs,
-        l.quoteQty,
-        resolved.cascadeStartTs,
-      );
-      await this.persistActiveCandidateSnapshot(
-        l.symbol,
-        victim,
-        this.cascadeCandidate5m,
-        "5m",
-        l.timestamp,
-      );
-    }
   }
 
-  /** Sep 10 2026 (Karo), operator-requested production V5 multi-
-   *  timeframe cascade lifecycle. Called on EVERY bookTicker tick,
-   *  PURELY ADDITIVE. Ticks all three candidates for BOTH victims --
-   *  each candidate's own onTick() is a complete no-op when it has no
-   *  active watch for that symbol/victim, so this is cheap for the
-   *  vast majority of ticks. A signal-ready result flows into the
-   *  EXISTING V5 signal path (handleCascadeSignalReady()); a cancel
-   *  result is diagnostic-only (logged, no further action). */
+  /** Sep 10 2026 (Karo), operator-requested production simplification --
+   *  ticks ONLY the 1m candidate now. Called on EVERY bookTicker tick,
+   *  PURELY ADDITIVE. onTick() is a complete no-op when there is no
+   *  active watch for that symbol/victim, so this is cheap for the vast
+   *  majority of ticks. A signal-ready result flows into the EXISTING
+   *  V5 signal path (handleCascadeSignalReady()); a cancel result is
+   *  diagnostic-only (logged, no further action). */
   private tickCascade(symbol: string, mid: number, ts: number): void {
     for (const victim of ["LONG", "SHORT"] as const) {
       this.handleCascadeTick(
         "1m",
         this.cascadeCandidate1m,
-        symbol,
-        victim,
-        mid,
-        ts,
-      );
-      this.handleCascadeTick(
-        "3m",
-        this.cascadeCandidate3m,
-        symbol,
-        victim,
-        mid,
-        ts,
-      );
-      this.handleCascadeTick(
-        "5m",
-        this.cascadeCandidate5m,
         symbol,
         victim,
         mid,
@@ -1224,22 +1150,16 @@ export class MarketDataOrchestrator {
     }
   }
 
+  /** Sep 10 2026 (Karo), operator-requested production simplification --
+   *  gates ONLY on 1m ATR readiness now. Never waits for 3m/5m
+   *  confirmation -- those timeframes are no longer part of live
+   *  cascade creation at all. */
   private commonHorizonAtrReady(symbol: string): boolean {
     return (
       this.atrTracker.getWilderATR(
         symbol,
         "1m",
         COMMON_HORIZON_PERIODS.atr1m,
-      ) !== null &&
-      this.atrTracker.getWilderATR(
-        symbol,
-        "3m",
-        COMMON_HORIZON_PERIODS.atr3m,
-      ) !== null &&
-      this.atrTracker.getWilderATR(
-        symbol,
-        "5m",
-        COMMON_HORIZON_PERIODS.atr5m,
       ) !== null
     );
   }
