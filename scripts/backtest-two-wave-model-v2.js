@@ -408,7 +408,9 @@ async function main() {
         state: "NORMAL",
         cancelReason: null,
       };
+      const MAX_TRANSITIONS_PER_SETUP = 500; // defensive cap -- prevents unbounded memory growth from any unforeseen edge case; a genuine setup never needs this many
       function log(tsAt, from, to, reason, extra) {
+        if (setup.transitions.length >= MAX_TRANSITIONS_PER_SETUP) return;
         setup.transitions.push(
           Object.assign(
             { time: tsAt, from: from, to: to, reason: reason },
@@ -630,6 +632,7 @@ async function main() {
           let reachedZone = false;
           let promoted = false;
           let watchDataGap = false;
+          let watchBoundExceeded = false;
 
           while (true) {
             const wc = candleAt(watchCursor);
@@ -664,11 +667,20 @@ async function main() {
             }
             if (watchZeroStreak >= 2 && watchLastLiqTime !== null) break;
             watchCursor += 60000;
-            if (
-              watchCursor >
-              Math.min(w2WaitDeadline, endTime) + 24 * 60 * 60000
-            ) {
-              watchDataGap = true;
+            // Sep 11 2026 (Karo), operator-reported CRITICAL FIX --
+            // the prior 24-hour extension here caused runaway inner-
+            // loop iteration (and unbounded JSON.stringify-heavy log
+            // accumulation) whenever a post-bounce period had frequent
+            // liquidation-but-never-2-consecutive-zeros for a long
+            // stretch, across up to ~524 setups x 27 sensitivity
+            // configs -- this caused the OOM crash. 60 minutes past
+            // candidateStart is a generous, bounded cap for
+            // determining whether a candidate episode is noise -- this
+            // is NOT a genuine Binance-candle data gap, so it is
+            // tracked SEPARATELY from watchDataGap and treated as
+            // IGNORE_W2_NOISE below, never a fake CANCEL_DATA_GAP.
+            if (watchCursor > candidateStart + 60 * 60000) {
+              watchBoundExceeded = true;
               break;
             }
           }
@@ -686,14 +698,17 @@ async function main() {
           }
 
           if (!promoted) {
-            const reason = reachedZone
-              ? "W2_ZONE_TEST_TOO_SMALL"
-              : "IGNORE_W2_NOISE";
+            const reason = watchBoundExceeded
+              ? "IGNORE_W2_NOISE"
+              : reachedZone
+                ? "W2_ZONE_TEST_TOO_SMALL"
+                : "IGNORE_W2_NOISE";
             log(watchCursor, "WAITING_FOR_W2", "WAITING_FOR_W2", reason, {
               candidateStart: candidateStart,
               watchLiqSum: watchLiqSum,
               reachedZone: reachedZone,
               w2RequiredLiqUsd: w2RequiredLiqUsd0,
+              watchBoundExceeded: watchBoundExceeded,
             });
             waitCursor = watchCursor + 60000;
             continue;
