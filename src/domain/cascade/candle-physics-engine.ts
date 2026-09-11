@@ -87,6 +87,16 @@ export interface CandlePhysicsEntryEvent {
   readonly signalWave: CompletedWaveSummary;
   readonly dominantWave: CompletedWaveSummary;
   readonly allWaves: readonly CompletedWaveSummary[];
+  /** Sep 11 2026 (Karo), operator-requested -- the largest SINGLE raw
+   *  liquidation event notional seen anywhere in this episode (across
+   *  every wave, including any single-event waves that were
+   *  discarded). Purely a raw, episode-level maximum -- this engine
+   *  itself has no knowledge of P95 or any other threshold; the
+   *  caller (market-data-orchestrator.ts) is the ONLY place that
+   *  compares this value against P95 as a final gate before allowing
+   *  ENTRY, per the operator's own explicit "P95 lives OUTSIDE the
+   *  candle-physics engine" instruction. */
+  readonly maxIndividualEventUsd: number;
 }
 
 export interface CandlePhysicsCancelEvent {
@@ -118,6 +128,13 @@ interface Watch {
   pendingLiqEvents: number;
   pendingMaxEvent: number;
   lastWaveCompletedAt: number;
+  /** Sep 11 2026 (Karo), operator-requested -- raw, episode-level
+   *  maximum of any SINGLE liquidation event's own notional seen
+   *  since this episode began (never reset per-wave, persists across
+   *  discarded single-event waves too -- "somewhere in the CURRENT
+   *  episode, before that ENTRY"). Purely tracked here; never
+   *  compared against anything inside this engine. */
+  episodeMaxIndividualEventUsd: number;
 }
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60_000;
@@ -195,12 +212,17 @@ export class CandlePhysicsEngine {
         pendingLiqEvents: 0,
         pendingMaxEvent: 0,
         lastWaveCompletedAt: ts,
+        episodeMaxIndividualEventUsd: 0,
       };
       this.watches.set(key, w);
     }
     w.pendingLiqUsd += liq.quoteQty;
     w.pendingLiqEvents += 1;
     w.pendingMaxEvent = Math.max(w.pendingMaxEvent, liq.quoteQty);
+    w.episodeMaxIndividualEventUsd = Math.max(
+      w.episodeMaxIndividualEventUsd,
+      liq.quoteQty,
+    );
   }
 
   onClosedCandle(
@@ -361,6 +383,7 @@ export class CandlePhysicsEngine {
         signalWave: summary,
         dominantWave: w.dominantWave,
         allWaves: w.completedWaves,
+        maxIndividualEventUsd: w.episodeMaxIndividualEventUsd,
       };
     }
 

@@ -805,5 +805,318 @@ scenario(
   },
 );
 
+// ─── Sep 11 2026 (Karo), operator-requested: P95 seriousness-gate support ───
+// (the actual P95 COMPARISON lives in market-data-orchestrator.ts, outside
+// this pure engine -- these tests prove the engine's own
+// maxIndividualEventUsd tracking, the raw ingredient that gate needs, is
+// correctly episode-level, individual-event-based, never cumulative.)
+
+scenario(
+  "1/2. maxIndividualEventUsd on the ENTRY event correctly reflects the largest SINGLE raw event notional seen anywhere in the episode (not cumulative)",
+  () => {
+    const e = new CandlePhysicsEngine();
+    // Same proven candle-structure as the "two-wave sequence...ENTRY" test above -- only the notional amounts differ.
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 100, 90000, 1000),
+      1,
+      100,
+      1000,
+    ); // the one large event
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 95, 2000, 30000),
+      1,
+      100,
+      30000,
+    );
+    e.onClosedCandle("ETHUSDT", "LONG", 60000, 100, 100.1, 90, 90.5);
+    e.onClosedCandle("ETHUSDT", "LONG", 120000, 90.5, 90.6, 90.6, 92);
+    e.onClosedCandle("ETHUSDT", "LONG", 180000, 92, 92.1, 92.1, 92.5);
+
+    // W2 -- must still end up LESS efficient than W1's own 10u/$92k ratio
+    // for physics to reach exhaustion->ENTRY; liq bumped up accordingly
+    // (only the RATIO matters here, not realism).
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 92, 20000, 240000),
+      1,
+      92,
+      240000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91, 20000, 260000),
+      1,
+      92,
+      260000,
+    );
+    e.onClosedCandle("ETHUSDT", "LONG", 240000, 92, 92.1, 89, 89.5);
+    e.onClosedCandle("ETHUSDT", "LONG", 300000, 89.5, 89.6, 89.6, 90.2);
+    const result = e.onClosedCandle(
+      "ETHUSDT",
+      "LONG",
+      360000,
+      90.2,
+      90.3,
+      90.3,
+      90.6,
+    );
+
+    assert.ok(result && result.kind === "ENTRY");
+    if (result?.kind === "ENTRY") {
+      assert.strictEqual(
+        result.maxIndividualEventUsd,
+        90000,
+        "must reflect the single largest event ($90k, from W1), NOT the signal wave's own small events, NOT any cumulative sum",
+      );
+    }
+  },
+);
+
+scenario(
+  "3. cumulative episode liquidity can exceed a hypothetical P95 while every INDIVIDUAL event stays below it -- maxIndividualEventUsd must reflect only the individual max, proving the caller's own gate compares against the right thing",
+  () => {
+    const e = new CandlePhysicsEngine();
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 100, 9000, 1000),
+      1,
+      100,
+      1000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 95, 2000, 30000),
+      1,
+      100,
+      30000,
+    );
+    e.onClosedCandle("ETHUSDT", "LONG", 60000, 100, 100.1, 90, 90.5);
+    e.onClosedCandle("ETHUSDT", "LONG", 120000, 90.5, 90.6, 90.6, 92);
+    e.onClosedCandle("ETHUSDT", "LONG", 180000, 92, 92.1, 92.1, 92.5);
+
+    // W2 -- 5 individual events, none exceeding $9k, cumulative $45k -- deliberately
+    // larger than a hypothetical P95 that a single event never reaches.
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 92, 9000, 240000),
+      1,
+      92,
+      240000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91.5, 9000, 250000),
+      1,
+      92,
+      250000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91, 9000, 260000),
+      1,
+      92,
+      260000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 90.5, 9000, 270000),
+      1,
+      92,
+      270000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 90, 9000, 280000),
+      1,
+      92,
+      280000,
+    );
+    e.onClosedCandle("ETHUSDT", "LONG", 240000, 92, 92.1, 89, 89.5);
+    e.onClosedCandle("ETHUSDT", "LONG", 300000, 89.5, 89.6, 89.6, 90.2);
+    const result = e.onClosedCandle(
+      "ETHUSDT",
+      "LONG",
+      360000,
+      90.2,
+      90.3,
+      90.3,
+      90.6,
+    );
+
+    assert.ok(result && result.kind === "ENTRY");
+    if (result?.kind === "ENTRY") {
+      const episodeTotal = result.allWaves.reduce(
+        (s, w) => s + w.totalLiqUsd,
+        0,
+      );
+      assert.ok(
+        episodeTotal >= 56000,
+        "episode total must be meaningfully large (sanity check on the test itself), got " +
+          episodeTotal,
+      );
+      assert.strictEqual(
+        result.maxIndividualEventUsd,
+        9000,
+        "must be the single largest INDIVIDUAL event ($9k), even though cumulative episode liquidity is far larger ($" +
+          episodeTotal +
+          ")",
+      );
+    }
+  },
+);
+
+scenario(
+  "4. a single qualifying large event earlier in the episode (even in the dominant wave, not the signal wave) is still correctly reflected in maxIndividualEventUsd at the later, real ENTRY",
+  () => {
+    const e = new CandlePhysicsEngine();
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 100, 88000, 1000),
+      1,
+      100,
+      1000,
+    ); // the one large event, in W1
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 95, 2000, 30000),
+      1,
+      100,
+      30000,
+    );
+    e.onClosedCandle("ETHUSDT", "LONG", 60000, 100, 100.1, 90, 90.5);
+    e.onClosedCandle("ETHUSDT", "LONG", 120000, 90.5, 90.6, 90.6, 92);
+    e.onClosedCandle("ETHUSDT", "LONG", 180000, 92, 92.1, 92.1, 92.5);
+
+    // W2 -- the real signal/exhaustion wave, contains nothing near $88k
+    // PER EVENT (many smaller events instead, same cumulative liq bump).
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 92, 50000, 240000),
+      1,
+      92,
+      240000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91.8, 50000, 245000),
+      1,
+      92,
+      245000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91.6, 50000, 250000),
+      1,
+      92,
+      250000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91.4, 50000, 255000),
+      1,
+      92,
+      255000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91.2, 50000, 258000),
+      1,
+      92,
+      258000,
+    );
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 91, 50000, 260000),
+      1,
+      92,
+      260000,
+    );
+    e.onClosedCandle("ETHUSDT", "LONG", 240000, 92, 92.1, 89, 89.5);
+    e.onClosedCandle("ETHUSDT", "LONG", 300000, 89.5, 89.6, 89.6, 90.2);
+    const result = e.onClosedCandle(
+      "ETHUSDT",
+      "LONG",
+      360000,
+      90.2,
+      90.3,
+      90.3,
+      90.6,
+    );
+
+    assert.ok(
+      result && result.kind === "ENTRY",
+      "physics must still reach ENTRY on its own terms",
+    );
+    if (result?.kind === "ENTRY") {
+      assert.strictEqual(
+        result.signalWave.waveNumber,
+        2,
+        "W2 is the signal/exhaustion wave",
+      );
+      assert.strictEqual(
+        result.maxIndividualEventUsd,
+        88000,
+        "the qualifying $88k event from W1 (NOT the signal wave) must still be visible at the moment of ENTRY -- 'somewhere in the CURRENT episode, before that ENTRY'",
+      );
+    }
+  },
+);
+
+scenario(
+  "5. single-event-wave discard behavior is completely unaffected by the new maxIndividualEventUsd tracking -- even a LARGE single event still gets its wave discarded",
+  () => {
+    const e = new CandlePhysicsEngine();
+    // A single event, even a huge one, still only counts as ONE event -- its wave must still be discarded.
+    e.onLiquidation(
+      "ETHUSDT",
+      "LONG",
+      liq("ETHUSDT", 100, 500000, 1000),
+      1,
+      100,
+      1000,
+    );
+    e.onClosedCandle("ETHUSDT", "LONG", 60000, 100, 100.1, 95, 95.5); // ACTIVE
+    e.onClosedCandle("ETHUSDT", "LONG", 120000, 95.5, 95.6, 95.6, 96.5); // EXHAUSTING
+    e.onClosedCandle("ETHUSDT", "LONG", 180000, 96.5, 96.6, 96.6, 97); // completes, eventCount=1 -> DISCARDED
+
+    const w = e.peekWatch("ETHUSDT", "LONG");
+    assert.strictEqual(
+      w!.state,
+      "NO_WAVE",
+      "must still be discarded regardless of the event's own size",
+    );
+    assert.strictEqual(w!.waveNumber, 0);
+    assert.strictEqual(w!.dominantWave, null);
+    // But the episode-level max-event tracker itself is untouched by the discard --
+    // it is a completely separate, episode-scoped concern from wave-meaningfulness.
+    assert.strictEqual(
+      (w as unknown as { episodeMaxIndividualEventUsd: number })
+        .episodeMaxIndividualEventUsd,
+      500000,
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

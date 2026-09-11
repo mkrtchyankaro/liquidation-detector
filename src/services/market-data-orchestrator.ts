@@ -986,6 +986,43 @@ export class MarketDataOrchestrator {
     event: import("../domain/cascade/candle-physics-engine").CandlePhysicsEntryEvent,
   ): Promise<void> {
     try {
+      // Sep 11 2026 (Karo), operator-requested -- P95 FINAL SERIOUSNESS
+      // GATE, restored as ONLY a permission check immediately before
+      // ENTRY. Uses the SAME existing P95 source as everywhere else in
+      // this file (this.liquidationStats.notionalPercentile(...,95)) --
+      // no new calculation, no retuning. Compared against the largest
+      // SINGLE raw liquidation event seen anywhere in the episode
+      // (event.maxIndividualEventUsd, tracked by the candle-physics
+      // engine itself, never against cumulative wave/episode totals).
+      // The engine's own wave-detection/exhaustion/dominant-wave logic
+      // is completely untouched -- this check runs strictly AFTER
+      // physics already decided ENTRY, and can only downgrade that
+      // decision to NO_P95_EVENT, never upgrade a physics non-entry.
+      const p95Gate = this.liquidationStats.notionalPercentile(
+        event.symbol,
+        event.victim,
+        95,
+      );
+      if (p95Gate === null || event.maxIndividualEventUsd < p95Gate) {
+        log.info(
+          {
+            symbol: event.symbol,
+            victim: event.victim,
+            p95: p95Gate,
+            maxIndividualEventUsd: event.maxIndividualEventUsd,
+            episodeTotalLiqUsd: event.allWaves.reduce(
+              (s, w) => s + w.totalLiqUsd,
+              0,
+            ),
+            waveCount: event.allWaves.length,
+            eventCount: event.allWaves.reduce((s, w) => s + w.totalEvents, 0),
+          },
+          "[NO_P95_EVENT]",
+        );
+        this.candlePhysics.clearTerminal(event.symbol, event.victim);
+        return;
+      }
+
       const atr15mAbs = this.atrTracker.getATR(event.symbol, "15m") ?? 0;
       const baseline =
         this.liquidationStats.rollingMedianLiqNotionalPerMin(

@@ -472,6 +472,83 @@ async function main(): Promise<void> {
     },
   );
 
+  await scenario(
+    "operator-requested (P95 final seriousness gate): handleCandlePhysicsEntry() checks P95 FIRST, before any signal construction, comparing event.maxIndividualEventUsd (an INDIVIDUAL event, never cumulative) against this.liquidationStats.notionalPercentile(...,95) -- the SAME existing P95 source used elsewhere",
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/market-data-orchestrator.ts"),
+        "utf8",
+      );
+      const idx = source.indexOf("private async handleCandlePhysicsEntry(");
+      assert.ok(idx > -1);
+      const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+      const p95Idx = body.indexOf("notionalPercentile");
+      const atrIdx = body.indexOf("this.atrTracker.getATR");
+      assert.ok(
+        p95Idx > -1,
+        "must call the existing notionalPercentile() P95 source",
+      );
+      assert.ok(
+        atrIdx > -1,
+        "the rest of the function (ATR, SL/TP, signal construction) must still be present",
+      );
+      assert.ok(
+        p95Idx < atrIdx,
+        "the P95 gate must run FIRST, before any downstream signal-construction work",
+      );
+      assert.ok(
+        body.includes("event.maxIndividualEventUsd"),
+        "must compare against the INDIVIDUAL max event, not a cumulative sum",
+      );
+      assert.ok(
+        !/totalLiqUsd\s*<\s*p95|episodeTotal.*<.*p95|p95.*>.*totalLiqUsd/.test(
+          body.slice(0, atrIdx),
+        ),
+        "must never gate on cumulative wave/episode totals vs P95",
+      );
+      assert.ok(
+        body.includes("NO_P95_EVENT"),
+        "must use the clear NO_P95_EVENT diagnostic reason",
+      );
+      assert.ok(
+        body.slice(0, atrIdx).includes("this.candlePhysics.clearTerminal("),
+        "a P95 rejection must cleanly release the watch, never leaving an orphan candidate/lock",
+      );
+    },
+  );
+
+  await scenario(
+    "operator-requested: the P95 gate touches ONLY handleCandlePhysicsEntry()'s own entry point -- SL/TP construction, hydrateActiveTrade, and distribute() remain completely present and unchanged downstream of the gate",
+    () => {
+      const source = fs.readFileSync(
+        require.resolve("../src/services/market-data-orchestrator.ts"),
+        "utf8",
+      );
+      const idx = source.indexOf("private async handleCandlePhysicsEntry(");
+      const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+      assert.ok(
+        body.includes("FIXED_SL_PCT"),
+        "fixed 0.30% SL logic must still be present, untouched",
+      );
+      assert.ok(
+        body.includes("REWARD_RISK_RATIO = 2.2"),
+        "TP=2.2R logic must still be present, untouched",
+      );
+      assert.ok(
+        body.includes("this.v5.hydrateActiveTrade("),
+        "post-entry TP/SL/CLOSE lifecycle installation must still be present, untouched",
+      );
+      assert.ok(
+        body.includes("this.distributor.distribute("),
+        "signal distribution must still be present, untouched",
+      );
+      assert.ok(
+        body.includes("this.mainSymbolLocks.add("),
+        "symbol-lock behavior must still be present, untouched",
+      );
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }
