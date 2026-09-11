@@ -179,6 +179,7 @@ function buildCascadeSignalDoc(planOk: boolean): GlobalSignalDoc {
     timeframe: "3m",
     isMainExecuted: true,
     episodePlan: null,
+    waveEfficiencyAnalysis: null,
     waveHistory,
     w1Diagnostics: null,
     totalEpisodePressure: totalLiq,

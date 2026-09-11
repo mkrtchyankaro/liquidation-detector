@@ -107,6 +107,7 @@ function baseGlobalSignal(): GlobalSignalDoc {
     timeframe: null,
     isMainExecuted: true,
     episodePlan: null,
+    waveEfficiencyAnalysis: null,
     unitResearch: null,
     unitCompetitionResearch: null,
     commonHorizonResearch: null,

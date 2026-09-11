@@ -40,6 +40,7 @@ import type {
 import type { Side, Liquidation } from "../shared/common.types";
 import { deriveLiquidationPhysicsTradePlan } from "../domain/trading/liquidation-physics-trade-plan";
 import { deriveEpisodeDisplacementTradePlan } from "../domain/trading/episode-displacement-trade-plan";
+import { computeWaveEfficiencyAnalysis } from "../domain/trading/wave-efficiency-analysis";
 import { evaluateDragon } from "../domain/research/unit-competition-dragon";
 import type { V5Wave } from "../strategy/v5/v5-wave.model";
 import type { SignalDistributor } from "./signal-distributor";
@@ -953,6 +954,54 @@ export class MarketDataOrchestrator {
         "[EPISODE_DISPLACEMENT_TRADE_PLAN]",
       );
 
+      // Sep 11 2026 (Karo), operator-requested -- OBSERVATIONAL/
+      // ANALYTICAL LOGGING ONLY. dominantWave/signalWave liquidation-
+      // efficiency comparison, computed and logged for every signal,
+      // never influencing wave lifecycle, entry decisions, UNIT, or
+      // SL/TP. triggerWave IS the signal-triggering wave here (see this
+      // method's own earlier comment on triggerWave/previousWave).
+      const waveEfficiencyAnalysis = computeWaveEfficiencyAnalysis(
+        event.waveHistory,
+        triggerWave.waveNumber,
+        event.unitAbs,
+        event.victim,
+      );
+      if (waveEfficiencyAnalysis) {
+        log.info(
+          {
+            signalId: event.cascadeId,
+            symbol: event.symbol,
+            dominantWaveNumber: waveEfficiencyAnalysis.dominant.waveNumber,
+            dominantWaveLiqUsd: waveEfficiencyAnalysis.dominant.liqUsd,
+            dominantWaveAnchorPrice:
+              waveEfficiencyAnalysis.dominant.anchorPrice,
+            dominantWaveExtremePrice:
+              waveEfficiencyAnalysis.dominant.extremePrice,
+            dominantWaveProgressUnits:
+              waveEfficiencyAnalysis.dominant.progressUnits,
+            dominantWaveEfficiency: waveEfficiencyAnalysis.dominant.efficiency,
+            signalWaveNumber: waveEfficiencyAnalysis.signal.waveNumber,
+            signalWaveLiqUsd: waveEfficiencyAnalysis.signal.liqUsd,
+            signalWaveAnchorPrice: waveEfficiencyAnalysis.signal.anchorPrice,
+            signalWaveExtremePrice: waveEfficiencyAnalysis.signal.extremePrice,
+            signalWaveProgressUnits:
+              waveEfficiencyAnalysis.signal.progressUnits,
+            signalWaveEfficiency: waveEfficiencyAnalysis.signal.efficiency,
+            liqRatio: waveEfficiencyAnalysis.liqRatio,
+            efficiencyRatio: waveEfficiencyAnalysis.efficiencyRatio,
+            exhaustion: waveEfficiencyAnalysis.exhaustion,
+            exhaustionPct: waveEfficiencyAnalysis.exhaustionPct,
+            previousEpisodeExtreme:
+              waveEfficiencyAnalysis.previousEpisodeExtreme,
+            newExtremeExtension: waveEfficiencyAnalysis.newExtremeExtension,
+            newExtremeExtensionUnits:
+              waveEfficiencyAnalysis.newExtremeExtensionUnits,
+            unitAbs: waveEfficiencyAnalysis.unitAbs,
+          },
+          "[WAVE_EFFICIENCY_ANALYSIS]",
+        );
+      }
+
       const signalId = randomUUID();
       const totalLiq = event.waveHistory.reduce((sum, w) => sum + w.liqUsd, 0);
 
@@ -1072,6 +1121,7 @@ export class MarketDataOrchestrator {
         timeframe: event.timeframe,
         isMainExecuted: willExecuteAsMain,
         episodePlan: episodePlanCalc,
+        waveEfficiencyAnalysis,
         createdAt: Date.now(),
       };
 
@@ -2090,6 +2140,7 @@ export class MarketDataOrchestrator {
         cascadeId: null,
         timeframe: null,
         episodePlan: null,
+        waveEfficiencyAnalysis: null,
         isMainExecuted: true,
         symbol: event.symbol,
         side: event.side,
@@ -2243,6 +2294,7 @@ export class MarketDataOrchestrator {
       cascadeId: null,
       timeframe: null,
       episodePlan: null,
+      waveEfficiencyAnalysis: null,
       isMainExecuted: false,
       victim: watch.victim,
       signalTs: watch.createdAt,

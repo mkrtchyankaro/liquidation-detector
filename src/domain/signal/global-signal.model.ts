@@ -62,6 +62,16 @@ export interface GlobalSignalDoc {
   episodePlan:
     | import("../trading/episode-displacement-trade-plan").EpisodeDisplacementTradePlan
     | null;
+  /** Sep 11 2026 (Karo), operator-requested -- ADDITIVE, OBSERVATIONAL/
+   *  ANALYTICAL LOGGING ONLY. The dominant-prior-wave-vs-signal-wave
+   *  liquidation-efficiency comparison (see wave-efficiency-analysis.ts's
+   *  own header for the exact formulas). Never influences wave
+   *  lifecycle, entry decisions, UNIT, or SL/TP. Null for the legacy,
+   *  non-cascade V5 path, and null in the (should-never-happen in
+   *  production) case where no prior wave exists before the signal wave. */
+  waveEfficiencyAnalysis:
+    | import("../trading/wave-efficiency-analysis").WaveEfficiencyAnalysis
+    | null;
 
   waveHistory: V5Wave[];
   w1Diagnostics: V5Wave1Diagnostics | null;
