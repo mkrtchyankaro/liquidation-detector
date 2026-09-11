@@ -180,9 +180,18 @@ function replayWaves(
       : currentWave.extremePrice - unitAbs;
     var recoveredBeforeEvent = false;
     var recoveryTime = null;
+    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- the SAME
+    // candle that just set/extended the wave's own extreme cannot also
+    // be used to PROVE recovery: we have no sub-minute ordering, so
+    // that candle's own high (for a LONG-victim wave) could have
+    // occurred BEFORE its own low within the same 60-second window.
+    // Recovery-proof only starts from the NEXT full minute onward --
+    // never the extreme-setting minute itself. This mirrors the exact
+    // fix already applied to the trailing-wave cancellation scan below.
+    var recoveryScanFrom = minuteFloor(currentWave.extremeTime) + 60000;
     for (var mk2 = 0; mk2 < minuteKeys.length; mk2++) {
       var mkT2 = minuteKeys[mk2];
-      if (mkT2 < minuteFloor(currentWave.extremeTime)) continue;
+      if (mkT2 < recoveryScanFrom) continue;
       if (mkT2 > nextMinute) break;
       var kl2 = klinesByMinute.get(mkT2);
       if (!kl2) continue;
