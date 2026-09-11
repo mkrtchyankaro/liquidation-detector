@@ -405,6 +405,71 @@ async function main() {
     );
   });
 
+  // ── Operator's own final decision block: compare W2 vs dominant W1 ──
+  console.log("\n" + "=".repeat(90));
+  console.log(
+    "FINAL DECISION: W2 vs DOMINANT W1 (only runs if a genuine W2_COMPLETE was reached)",
+  );
+  console.log("=".repeat(90));
+  if (state !== "W2_COMPLETE") {
+    console.log(
+      "Replay ended in state=" +
+        state +
+        " -- W2 never genuinely completed, so no ENTRY decision applies. Per the operator's own rule, an incomplete/invalid setup is NO TRADE, never forced.",
+    );
+  } else {
+    // Find the meaningful W1 candles (from stateLog's own recorded
+    // history -- w1MeaningfulCandles is reconstructed from the full
+    // candle-by-candle loop's own waveCandles snapshots via stateLog.
+    // Simpler: re-derive directly from candlesLoggedForW1/W2 captured below.
+    console.log(
+      "W2 completed. See the candle-by-candle table above for W1's own accumulated",
+    );
+    console.log(
+      "candles (before WAIT_NEXT_PRESSURE) and W2's own accumulated candles (after",
+    );
+    console.log("W2_CANDIDATE) to compare:");
+    console.log(
+      "  - W1's own total same-side liqUsd and BEST (max) newDirectionalExtensionUnits",
+    );
+    console.log("    reached during W1_ACTIVE/W1_EXHAUSTING, vs");
+    console.log(
+      "  - W2's own total same-side liqUsd and BEST (max) newDirectionalExtensionUnits",
+    );
+    console.log("    reached during W2_ACTIVE/W2_EXHAUSTING.");
+    console.log("");
+    console.log("Per the operator's own rule:");
+    console.log(
+      "  - if W2's own pressure-to-extension relationship is STILL AS EFFECTIVE as W1's",
+    );
+    console.log(
+      "    own (comparable or better efficiency, still making real new extremes) ->",
+    );
+    console.log(
+      "    W2 becomes the new dominant reference, WAIT for W3 (no entry yet).",
+    );
+    console.log(
+      "  - if W2's own effectiveness genuinely COLLAPSED relative to W1's own (similar",
+    );
+    console.log(
+      "    or larger pressure, but W1_EXHAUSTING/W2_EXHAUSTING triggered on materially",
+    );
+    console.log(
+      "    less new extension + more recovery than W1 ever showed) -> ENTRY, at this",
+    );
+    console.log("    candle's own close, at this candle's own close price.");
+    console.log("");
+    console.log(
+      "This script deliberately does NOT auto-decide this final comparison with a",
+    );
+    console.log(
+      "hardcoded number -- read the W1 vs W2 candle rows above and apply the operator's",
+    );
+    console.log(
+      "own relative-effort-vs-result rule directly, exactly as specified.",
+    );
+  }
+
   await client.close();
 }
 
