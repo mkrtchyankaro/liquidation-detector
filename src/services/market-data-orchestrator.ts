@@ -910,6 +910,7 @@ export class MarketDataOrchestrator {
         direction: event.side,
         firstAnchorPrice,
         finalExtremePrice,
+        unitAbs: event.unitAbs,
       });
       const entry = episodePlanCalc.entryPrice;
       const sl = episodePlanCalc.stopLoss;
@@ -919,25 +920,35 @@ export class MarketDataOrchestrator {
       const rr = episodePlanCalc.rewardRiskRatio;
       const plan = { ok: true as const, entry, sl, tp, slPct, tpPct, rr };
 
-      // Required logging (operator's own explicit field list, section 8).
+      // Required logging (operator's own explicit field list, plus the
+      // Sep 11 2026 UNIT-relative additions -- observational/analytical
+      // only, never fed back into the SL/TP calculation above).
       log.info(
         {
           signalId: event.cascadeId,
           symbol: event.symbol,
           direction: event.side,
+          unitAbs: episodePlanCalc.unitAbs,
+          unitPctAtEntry: episodePlanCalc.unitPctAtEntry,
           entryPrice: episodePlanCalc.entryPrice,
           firstAnchorPrice: episodePlanCalc.firstAnchorPrice,
           finalExtremePrice: episodePlanCalc.finalExtremePrice,
           episodeDisplacement: episodePlanCalc.episodeDisplacement,
           episodeDisplacementPct: episodePlanCalc.episodeDisplacementPct,
+          actualRecoveryDistance: episodePlanCalc.actualRecoveryDistance,
+          actualRecoveryPct: episodePlanCalc.actualRecoveryPct,
+          actualRecoveryUnits: episodePlanCalc.actualRecoveryUnits,
           naturalSL: episodePlanCalc.naturalSL,
           naturalRiskPct: episodePlanCalc.naturalRiskPct,
           executionRiskPct: episodePlanCalc.executionRiskPct,
           slAdjustment: episodePlanCalc.slAdjustment,
           stopLoss: episodePlanCalc.stopLoss,
           riskDistance: episodePlanCalc.riskDistance,
+          stopDistanceUnits: episodePlanCalc.stopDistanceUnits,
           rewardRiskRatio: episodePlanCalc.rewardRiskRatio,
           takeProfit: episodePlanCalc.takeProfit,
+          rewardDistance: episodePlanCalc.rewardDistance,
+          takeProfitDistanceUnits: episodePlanCalc.takeProfitDistanceUnits,
         },
         "[EPISODE_DISPLACEMENT_TRADE_PLAN]",
       );

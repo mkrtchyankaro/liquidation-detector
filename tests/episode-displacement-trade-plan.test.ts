@@ -36,6 +36,7 @@ scenario(
       direction: "LONG",
       firstAnchorPrice: 2010,
       finalExtremePrice: 1990,
+      unitAbs: 10,
     });
     assert.ok(closeTo(plan.episodeDisplacement, 20));
     assert.ok(closeTo(plan.naturalSL, 1990 - 20));
@@ -50,6 +51,7 @@ scenario(
       direction: "SHORT",
       firstAnchorPrice: 1990,
       finalExtremePrice: 2010,
+      unitAbs: 10,
     });
     assert.ok(closeTo(plan.episodeDisplacement, 20));
     assert.ok(closeTo(plan.naturalSL, 2010 + 20));
@@ -67,6 +69,7 @@ scenario("naturalRisk=0.14% -> executionRisk=0.20% (MIN_FLOOR)", () => {
     direction: "LONG",
     firstAnchorPrice: firstAnchor,
     finalExtremePrice: finalExtreme,
+    unitAbs: 10,
   });
   assert.ok(
     closeTo(plan.naturalRiskPct, 0.0014, 1e-6),
@@ -92,6 +95,7 @@ scenario(
       direction: "LONG",
       firstAnchorPrice: firstAnchor,
       finalExtremePrice: finalExtreme,
+      unitAbs: 10,
     });
     assert.ok(closeTo(plan.naturalRiskPct, 0.0032, 1e-6));
     assert.ok(
@@ -113,6 +117,7 @@ scenario(
       direction: "LONG",
       firstAnchorPrice: entry + displacement,
       finalExtremePrice: entry,
+      unitAbs: 10,
     });
     assert.ok(closeTo(plan.naturalRiskPct, 0.0047, 1e-6));
     assert.ok(closeTo(plan.executionRiskPct, 0.0047, 1e-6));
@@ -131,6 +136,7 @@ scenario(
       direction: "LONG",
       firstAnchorPrice: entry + displacement,
       finalExtremePrice: entry,
+      unitAbs: 10,
     });
     assert.ok(closeTo(plan.naturalRiskPct, 0.0068, 1e-6));
     assert.ok(
@@ -154,6 +160,7 @@ scenario("naturalRisk=1.10% -> executionRisk=0.50% (MAX_CAP)", () => {
     direction: "LONG",
     firstAnchorPrice: entry + displacement,
     finalExtremePrice: entry,
+    unitAbs: 10,
   });
   assert.ok(closeTo(plan.naturalRiskPct, 0.011, 1e-6));
   assert.ok(closeTo(plan.executionRiskPct, 0.005, 1e-9));
@@ -170,6 +177,7 @@ for (const dir of ["LONG", "SHORT"] as const) {
         direction: dir,
         firstAnchorPrice: dir === "LONG" ? entry + 50 : entry - 50,
         finalExtremePrice: dir === "LONG" ? entry - 20 : entry + 20,
+        unitAbs: 10,
       });
       if (dir === "LONG")
         assert.ok(plan.stopLoss < entry, "LONG SL must be below entry");
@@ -196,6 +204,7 @@ scenario(
         direction: "LONG",
         firstAnchorPrice: entry + displacement,
         finalExtremePrice: entry,
+        unitAbs: 10,
       });
       const actualTpPct = plan.rewardDistance / entry;
       assert.ok(
@@ -222,6 +231,7 @@ scenario(
       direction: "LONG",
       firstAnchorPrice: entry + displacement,
       finalExtremePrice: entry,
+      unitAbs: 10,
     });
     assert.strictEqual(plan.slAdjustment, "MAX_CAP");
     assert.ok(closeTo(plan.executionRiskPct, 0.005, 1e-9));
@@ -229,6 +239,141 @@ scenario(
       plan.takeProfit > entry,
       "a full, valid TP must still be produced",
     );
+  },
+);
+
+// ─── Sep 11 2026, operator-requested UNIT-relative logging additions ──
+
+scenario(
+  "operator's own worked example (LONG): UNIT=$56, Entry=$70056, FinalExtreme=$70000 -> unitPctAtEntry~0.0799%, actualRecoveryUnits=1.00U",
+  () => {
+    const unitAbs = 56;
+    const entry = 70056;
+    const finalExtreme = 70000;
+    // Solve backward for the naturalSL that gives EXACTLY 0.32%
+    // naturalRiskPct relative to ENTRY (the real formula's own anchor:
+    // naturalRiskPct = |entryPrice - naturalSL| / entryPrice), then
+    // derive the displacement/firstAnchor that produces THAT naturalSL
+    // from finalExtreme=70000.
+    const targetNaturalSL = entry * (1 - 0.0032);
+    const displacement = finalExtreme - targetNaturalSL;
+    const plan = deriveEpisodeDisplacementTradePlan({
+      entryPrice: entry,
+      direction: "LONG",
+      firstAnchorPrice: finalExtreme + displacement,
+      finalExtremePrice: finalExtreme,
+      unitAbs,
+    });
+    assert.ok(closeTo(plan.unitAbs, 56));
+    assert.ok(closeTo(plan.unitPctAtEntry, 56 / 70056, 1e-9));
+    assert.ok(
+      closeTo(plan.unitPctAtEntry * 100, 0.0799, 1e-3),
+      "unitPctAtEntryDisplay must be ~0.0799%",
+    );
+    assert.ok(closeTo(plan.actualRecoveryDistance, 56, 1e-9));
+    assert.ok(closeTo(plan.actualRecoveryPct, 56 / 70056, 1e-9));
+    assert.ok(
+      closeTo(plan.actualRecoveryUnits, 1.0, 1e-6),
+      "actualRecoveryUnits must be ~1.00U here, but is a SEPARATELY calculated value, never assumed to be exactly 1.0",
+    );
+    assert.strictEqual(plan.slAdjustment, "STRUCTURAL");
+    assert.ok(closeTo(plan.executionRiskPct, 0.0032, 1e-9));
+    assert.ok(
+      closeTo(plan.stopDistanceUnits, plan.riskDistance / unitAbs, 1e-9),
+    );
+    assert.ok(
+      closeTo(
+        plan.takeProfitDistanceUnits,
+        plan.rewardDistance / unitAbs,
+        1e-9,
+      ),
+    );
+    assert.ok(
+      closeTo(plan.takeProfitDistanceUnits, plan.stopDistanceUnits * 2.2, 1e-6),
+      "takeProfitDistanceUnits must be ~stopDistanceUnits*2.2, since TP=2.2R",
+    );
+  },
+);
+
+scenario(
+  "operator's own worked example (SHORT mirror): same structure, direction reversed",
+  () => {
+    const unitAbs = 56;
+    const entry = 69944; // SHORT mirror: entry BELOW the final extreme
+    const finalExtreme = 70000;
+    const naturalSL = entry * (1 + 0.0032);
+    const displacement = naturalSL - entry;
+    const plan = deriveEpisodeDisplacementTradePlan({
+      entryPrice: entry,
+      direction: "SHORT",
+      firstAnchorPrice: entry - displacement,
+      finalExtremePrice: finalExtreme,
+      unitAbs,
+    });
+    assert.ok(closeTo(plan.actualRecoveryDistance, 56, 1e-9));
+    assert.ok(closeTo(plan.actualRecoveryUnits, 1.0, 1e-6));
+    assert.strictEqual(plan.slAdjustment, "STRUCTURAL");
+    assert.ok(plan.stopLoss > entry, "SHORT stopLoss must be above entry");
+    assert.ok(plan.takeProfit < entry, "SHORT takeProfit must be below entry");
+    assert.ok(
+      closeTo(plan.takeProfitDistanceUnits, plan.stopDistanceUnits * 2.2, 1e-6),
+    );
+  },
+);
+
+scenario(
+  "actualRecoveryUnits is a SEPARATELY calculated value, never assumed to be exactly 1.0 -- e.g. slippage giving 1.15U",
+  () => {
+    const unitAbs = 10;
+    const entry = 10011.5; // 1.15 UNIT away from finalExtreme=10000
+    const finalExtreme = 10000;
+    const naturalSL = entry * (1 - 0.0032);
+    const displacement = entry - naturalSL;
+    const plan = deriveEpisodeDisplacementTradePlan({
+      entryPrice: entry,
+      direction: "LONG",
+      firstAnchorPrice: entry + displacement,
+      finalExtremePrice: finalExtreme,
+      unitAbs,
+    });
+    assert.ok(
+      closeTo(plan.actualRecoveryUnits, 1.15, 1e-3),
+      "must genuinely reflect actual entry vs finalExtreme, not a hardcoded 1.0",
+    );
+  },
+);
+
+scenario(
+  "UNIT-relative fields are PURELY additive/observational -- naturalSL/executionRiskPct/stopLoss/takeProfit are IDENTICAL with or without unitAbs present",
+  () => {
+    const entry = 10000;
+    const naturalSLTarget = entry * (1 - 0.0035);
+    const displacement = entry - naturalSLTarget;
+    const planA = deriveEpisodeDisplacementTradePlan({
+      entryPrice: entry,
+      direction: "LONG",
+      firstAnchorPrice: entry + displacement,
+      finalExtremePrice: entry,
+      unitAbs: 5,
+    });
+    const planB = deriveEpisodeDisplacementTradePlan({
+      entryPrice: entry,
+      direction: "LONG",
+      firstAnchorPrice: entry + displacement,
+      finalExtremePrice: entry,
+      unitAbs: 500,
+    });
+    assert.strictEqual(
+      planA.naturalSL,
+      planB.naturalSL,
+      "naturalSL must be IDENTICAL regardless of unitAbs -- UNIT never influences SL",
+    );
+    assert.strictEqual(planA.executionRiskPct, planB.executionRiskPct);
+    assert.strictEqual(planA.stopLoss, planB.stopLoss);
+    assert.strictEqual(planA.takeProfit, planB.takeProfit);
+    assert.strictEqual(planA.slAdjustment, planB.slAdjustment);
+    // Only the UNIT-relative fields themselves differ.
+    assert.notStrictEqual(planA.stopDistanceUnits, planB.stopDistanceUnits);
   },
 );
 

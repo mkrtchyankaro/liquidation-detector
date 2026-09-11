@@ -51,6 +51,20 @@ export interface EpisodeDisplacementTradePlan {
   readonly rewardDistance: number;
   readonly rewardRiskRatio: number;
   readonly takeProfit: number;
+  /** Sep 11 2026 (Karo), operator-requested -- ADDITIVE, OBSERVATIONAL/
+   *  ANALYTICAL LOGGING ONLY. None of the fields below feed back into
+   *  naturalSL, executionRiskPct, stopLoss, or takeProfit above -- they
+   *  are computed AFTER and FROM those already-final values, purely for
+   *  visibility. unitAbs is the SAME frozen 1m Wilder ATR(240) the
+   *  candidate itself was frozen with at cascade start (passed in,
+   *  never recalculated here). */
+  readonly unitAbs: number;
+  readonly unitPctAtEntry: number;
+  readonly actualRecoveryDistance: number;
+  readonly actualRecoveryPct: number;
+  readonly actualRecoveryUnits: number;
+  readonly stopDistanceUnits: number;
+  readonly takeProfitDistanceUnits: number;
 }
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -68,6 +82,11 @@ export function deriveEpisodeDisplacementTradePlan(p: {
   direction: "LONG" | "SHORT";
   firstAnchorPrice: number;
   finalExtremePrice: number;
+  /** The SAME frozen 1m Wilder ATR(240) UNIT the candidate itself was
+   *  frozen with at cascade start -- never recalculated here, used
+   *  ONLY to derive the additive, observational UNIT-relative fields
+   *  below. Never participates in naturalSL/stopLoss/takeProfit. */
+  unitAbs: number;
 }): EpisodeDisplacementTradePlan {
   const episodeDisplacement = Math.abs(
     p.firstAnchorPrice - p.finalExtremePrice,
@@ -97,6 +116,18 @@ export function deriveEpisodeDisplacementTradePlan(p: {
       ? p.entryPrice + rewardDistance
       : p.entryPrice - rewardDistance;
 
+  // ── Observational/analytical UNIT-relative logging fields only --
+  // computed AFTER the above, never feeding back into them. ──
+  const unitPctAtEntry = p.entryPrice > 0 ? p.unitAbs / p.entryPrice : 0;
+  const actualRecoveryDistance = Math.abs(p.entryPrice - p.finalExtremePrice);
+  const actualRecoveryPct =
+    p.entryPrice > 0 ? actualRecoveryDistance / p.entryPrice : 0;
+  const actualRecoveryUnits =
+    p.unitAbs > 0 ? actualRecoveryDistance / p.unitAbs : 0;
+  const stopDistanceUnits = p.unitAbs > 0 ? riskDistance / p.unitAbs : 0;
+  const takeProfitDistanceUnits =
+    p.unitAbs > 0 ? rewardDistance / p.unitAbs : 0;
+
   return {
     entryPrice: p.entryPrice,
     direction: p.direction,
@@ -113,5 +144,12 @@ export function deriveEpisodeDisplacementTradePlan(p: {
     rewardDistance,
     rewardRiskRatio: REWARD_RISK_RATIO,
     takeProfit,
+    unitAbs: p.unitAbs,
+    unitPctAtEntry,
+    actualRecoveryDistance,
+    actualRecoveryPct,
+    actualRecoveryUnits,
+    stopDistanceUnits,
+    takeProfitDistanceUnits,
   };
 }
