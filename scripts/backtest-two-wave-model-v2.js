@@ -114,6 +114,11 @@ async function main() {
   const runSensitivity = args.includes("--sensitivity");
   const focusDateIdx = args.indexOf("--focus-date");
   const focusDate = focusDateIdx !== -1 ? args[focusDateIdx + 1] : "2026-09-11";
+  const focusOnly = args.includes("--focus-only");
+  const t0 = Date.now();
+  function elapsed() {
+    return Date.now() - t0;
+  }
 
   const uri = process.env.MONGO_URI;
   if (!uri) {
@@ -184,15 +189,42 @@ async function main() {
   const dataFetchStart = startTime - 25 * 60 * 60000;
   const totalMinutesInWindow = Math.floor((endTime - startTime) / 60000) + 1;
 
+  // Sep 11 2026 (Karo), operator-requested debugging mode -- restricts
+  // the ENTIRE detector run (not just the printed trace) to a small,
+  // fast window so a hang/slowness can be isolated quickly. Candle/
+  // episode data is still fetched with full ATR/baseline warmup
+  // BEFORE this window (unchanged), only the outer simulation loop's
+  // own start/end are narrowed.
+  const detectorStartTime = focusOnly
+    ? new Date(focusDate + "T10:00:00Z").getTime()
+    : startTime;
+  const detectorEndTime = focusOnly
+    ? new Date(focusDate + "T11:30:00Z").getTime()
+    : endTime;
+  if (focusOnly)
+    console.log(
+      "\n*** --focus-only: detector will run ONLY " +
+        fmtTs(detectorStartTime) +
+        " .. " +
+        fmtTs(detectorEndTime) +
+        " ***",
+    );
+
   console.log(
-    "\nFetching candles (Binance REST klines, last-trade-price basis)...",
+    "\n[t=" +
+      elapsed() +
+      "ms] Fetching candles (Binance REST klines, last-trade-price basis)...",
   );
   const klines = await fetchKlinesRange(symbol, dataFetchStart, endTime);
   const candlesAsc = Array.from(klines.values()).sort((a, b) => a.t - b.t);
-  console.log("  " + candlesAsc.length + " candles fetched.");
+  console.log(
+    "  " + candlesAsc.length + " candles fetched. [t=" + elapsed() + "ms]",
+  );
 
   console.log(
-    "Fetching liq_raw_events and building minute buckets directly...",
+    "[t=" +
+      elapsed() +
+      "ms] Fetching liq_raw_events and building minute buckets directly...",
   );
   const rawEvents = await rawCol
     .find({
@@ -212,7 +244,9 @@ async function main() {
       rawEvents.length +
       " raw LONG-liquidation events -> " +
       longSumByMinute.size +
-      " distinct minutes with recorded liquidation.",
+      " distinct minutes with recorded liquidation. [t=" +
+      elapsed() +
+      "ms]",
   );
 
   const recordedMinutes = longSumByMinute.size;
@@ -312,11 +346,50 @@ async function main() {
     };
   }
 
-  console.log("\nBuilding the full historical episode list...");
+  console.log(
+    "\n[t=" + elapsed() + "ms] Building the full historical episode list...",
+  );
   const allEpisodes = [];
   {
     let t = dataFetchStart;
+    let iterGuard = 0;
+    const maxIter = Math.ceil((endTime - dataFetchStart) / 60000) + 10;
+    let lastT = null;
     while (t <= endTime) {
+      iterGuard++;
+      if (iterGuard > maxIter)
+        throw new Error(
+          "Episode-building index guard tripped: iterGuard=" +
+            iterGuard +
+            " maxIter=" +
+            maxIter +
+            " t=" +
+            fmtTs(t) +
+            " allEpisodes.length=" +
+            allEpisodes.length,
+        );
+      if (lastT !== null && t <= lastT)
+        throw new Error(
+          "Episode-building index FAILED TO ADVANCE: prevT=" +
+            fmtTs(lastT) +
+            " newT=" +
+            fmtTs(t),
+        );
+      lastT = t;
+      if (iterGuard % 500 === 0)
+        console.log(
+          "  [episode-build progress] iter=" +
+            iterGuard +
+            "/" +
+            maxIter +
+            " t=" +
+            fmtTs(t) +
+            " episodesSoFar=" +
+            allEpisodes.length +
+            " elapsed=" +
+            elapsed() +
+            "ms",
+        );
       const liq = longLiqUsdAt(t);
       if (liq.status === "RECORDED" && liq.value > 0) {
         const ep = buildEpisodeFrom(t, 24 * 60);
@@ -333,7 +406,11 @@ async function main() {
     }
   }
   console.log(
-    "  " + allEpisodes.length + " completed long-liquidation episodes built.",
+    "  " +
+      allEpisodes.length +
+      " completed long-liquidation episodes built. [t=" +
+      elapsed() +
+      "ms]",
   );
 
   const MIN_WARMUP_EPISODES = 5;
@@ -393,9 +470,52 @@ async function main() {
       params,
     );
     const setups = [];
-    let cursor = startTime;
+    let cursor = detectorStartTime;
+    const detT0 = Date.now();
+    let outerIterGuard = 0;
+    const maxOuterIter =
+      Math.ceil((detectorEndTime - detectorStartTime) / 60000) + 100;
+    let lastCursor = null;
 
-    while (cursor <= endTime) {
+    while (cursor <= detectorEndTime) {
+      outerIterGuard++;
+      if (outerIterGuard > maxOuterIter)
+        throw new Error(
+          "runDetector OUTER loop index guard tripped: iter=" +
+            outerIterGuard +
+            " maxOuterIter=" +
+            maxOuterIter +
+            " cursor=" +
+            fmtTs(cursor) +
+            " setups.length=" +
+            setups.length,
+        );
+      if (lastCursor !== null && cursor <= lastCursor)
+        throw new Error(
+          "runDetector OUTER cursor FAILED TO ADVANCE: prevCursor=" +
+            fmtTs(lastCursor) +
+            " newCursor=" +
+            fmtTs(cursor) +
+            " setups.length=" +
+            setups.length,
+        );
+      lastCursor = cursor;
+      if (outerIterGuard % 500 === 0) {
+        console.log(
+          "  [detector progress] processedMinutes=" +
+            outerIterGuard +
+            "/" +
+            maxOuterIter +
+            " cursor=" +
+            fmtTs(cursor) +
+            " setups=" +
+            setups.length +
+            " elapsed=" +
+            (Date.now() - detT0) +
+            "ms",
+        );
+      }
+
       const liq = longLiqUsdAt(cursor);
       if (liq.status !== "RECORDED" || !(liq.value > 0)) {
         cursor += 60000;
@@ -558,8 +678,33 @@ async function main() {
       let bounceConfirmed = false;
       const w2WaitDeadline = w1.confirmedEndTime + 15 * 60000;
       let w2 = null;
+      let w2LoopIterGuard = 0;
+      const maxW2LoopIter = 20000; // generous, non-arbitrary-feeling cap given the 15-min deadline + bounded merges/watches -- exists purely to convert a hang into a diagnostic error
+      let lastWaitCursor = null;
 
       while (waitCursor <= Math.min(w2WaitDeadline, endTime)) {
+        w2LoopIterGuard++;
+        if (w2LoopIterGuard > maxW2LoopIter)
+          throw new Error(
+            "WAITING_FOR_W2 loop index guard tripped: iter=" +
+              w2LoopIterGuard +
+              " waitCursor=" +
+              fmtTs(waitCursor) +
+              " w1.startTime=" +
+              fmtTs(w1.startTime) +
+              " bounceConfirmed=" +
+              bounceConfirmed,
+          );
+        if (lastWaitCursor !== null && waitCursor <= lastWaitCursor)
+          throw new Error(
+            "WAITING_FOR_W2 waitCursor FAILED TO ADVANCE: prev=" +
+              fmtTs(lastWaitCursor) +
+              " new=" +
+              fmtTs(waitCursor) +
+              " w1.startTime=" +
+              fmtTs(w1.startTime),
+          );
+        lastWaitCursor = waitCursor;
         const c = candleAt(waitCursor);
         if (!c) {
           setup.state = "CANCELLED";
@@ -633,8 +778,19 @@ async function main() {
           let promoted = false;
           let watchDataGap = false;
           let watchBoundExceeded = false;
+          let watchIterGuard = 0;
 
           while (true) {
+            watchIterGuard++;
+            if (watchIterGuard > 100)
+              throw new Error(
+                "Inner watch-loop index guard tripped (should be impossible given the 60-min bound below): iter=" +
+                  watchIterGuard +
+                  " candidateStart=" +
+                  fmtTs(candidateStart) +
+                  " watchCursor=" +
+                  fmtTs(watchCursor),
+              );
             const wc = candleAt(watchCursor);
             if (!wc) {
               watchDataGap = true;
@@ -825,11 +981,22 @@ async function main() {
       let entryCursor = w2.confirmedEndTime;
       let entry = null;
       let tooLate = false;
+      let entryLoopIterGuard = 0;
 
       while (
         entryCursor <=
         Math.min(exhaustionDeadline, endTime, w1.startTime + 30 * 60000)
       ) {
+        entryLoopIterGuard++;
+        if (entryLoopIterGuard > 5000)
+          throw new Error(
+            "Entry-recovery loop index guard tripped: iter=" +
+              entryLoopIterGuard +
+              " entryCursor=" +
+              fmtTs(entryCursor) +
+              " w2.confirmedEndTime=" +
+              fmtTs(w2.confirmedEndTime),
+          );
         const c = candleAt(entryCursor);
         if (!c) {
           entryCursor += 60000;
@@ -924,9 +1091,12 @@ async function main() {
 
   console.log("\n" + "=".repeat(90));
   console.log(
-    "MAIN BACKTEST RUN (W1: p75 + 0.50 ATR | W2: p90 + 0.30 ATR + zone | bounce 0.20 ATR | recovery [0.10, 0.50] ATR)",
+    "MAIN BACKTEST RUN (W1: p75 + 0.50 ATR | W2: p90 + 0.30 ATR + zone | bounce 0.20 ATR | recovery [0.10, 0.50] ATR)  [t=" +
+      elapsed() +
+      "ms]",
   );
   console.log("=".repeat(90));
+  const mainRunT0 = Date.now();
   const mainSetups = runDetector(
     {
       w1Percentile: 75,
@@ -938,6 +1108,15 @@ async function main() {
       maxRecoveryAtr: 0.5,
     },
     false,
+  );
+  console.log(
+    "  main run complete in " +
+      (Date.now() - mainRunT0) +
+      "ms, produced " +
+      mainSetups.length +
+      " setup(s). [t=" +
+      elapsed() +
+      "ms]",
   );
 
   function summarize(setups) {
@@ -1038,7 +1217,13 @@ async function main() {
     });
 
   console.log("\n" + "=".repeat(90));
-  console.log("FOCUSED TRACE -- " + focusDate + " 10:00 UTC through 11:30 UTC");
+  console.log(
+    "FOCUSED TRACE -- " +
+      focusDate +
+      " 10:00 UTC through 11:30 UTC  [t=" +
+      elapsed() +
+      "ms]",
+  );
   console.log("=".repeat(90));
   const traceStart = new Date(focusDate + "T10:00:00Z").getTime();
   const traceEnd = new Date(focusDate + "T11:30:00Z").getTime();
@@ -1213,16 +1398,22 @@ async function main() {
   }
 
   let sensitivityResults = null;
-  if (runSensitivity) {
+  if (runSensitivity && !focusOnly) {
     console.log("\n" + "=".repeat(90));
     console.log(
-      "SENSITIVITY MATRIX (W1 percentile p50/p60/p75 x W1 displacement 0.50/0.75/1.00 ATR x max entry recovery 0.30/0.50/0.75 ATR; W2 fixed at trailing p90)",
+      "SENSITIVITY MATRIX (W1 percentile p50/p60/p75 x W1 displacement 0.50/0.75/1.00 ATR x max entry recovery 0.30/0.50/0.75 ATR; W2 fixed at trailing p90)  [t=" +
+        elapsed() +
+        "ms]",
     );
     console.log("=".repeat(90));
     sensitivityResults = [];
+    let cfgIdx = 0;
+    const totalCfgs = 3 * 3 * 3;
     for (const w1Percentile of [50, 60, 75]) {
       for (const w1MinDistanceAtr of [0.5, 0.75, 1.0]) {
         for (const maxRecoveryAtr of [0.3, 0.5, 0.75]) {
+          cfgIdx++;
+          const cfgT0 = Date.now();
           const s = runDetector(
             {
               w1Percentile: w1Percentile,
@@ -1247,7 +1438,13 @@ async function main() {
             ),
           );
           console.log(
-            "W1p" +
+            "[cfg " +
+              cfgIdx +
+              "/" +
+              totalCfgs +
+              ", " +
+              (Date.now() - cfgT0) +
+              "ms] W1p" +
               w1Percentile +
               " dist=" +
               w1MinDistanceAtr +
@@ -1262,13 +1459,21 @@ async function main() {
               " ignoreNoise=" +
               sum.ignoreNoiseCount +
               " zoneTestTooSmall=" +
-              sum.zoneTestTooSmallCount,
+              sum.zoneTestTooSmallCount +
+              "  [t=" +
+              elapsed() +
+              "ms]",
           );
         }
       }
     }
+  } else if (focusOnly) {
+    console.log(
+      "\n*** --focus-only: skipping the sensitivity matrix (per the operator's own explicit instruction to isolate the focused case first) ***",
+    );
   }
 
+  console.log("\n[t=" + elapsed() + "ms] Writing JSON output...");
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const outPath = path.join(
     OUTPUT_DIR,
@@ -1296,7 +1501,13 @@ async function main() {
       2,
     ),
   );
-  console.log("\nFull machine-readable output saved to: " + outPath);
+  console.log(
+    "Full machine-readable output saved to: " +
+      outPath +
+      "  [total elapsed t=" +
+      elapsed() +
+      "ms]",
+  );
 
   await client.close();
 }
