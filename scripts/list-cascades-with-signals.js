@@ -20,6 +20,7 @@ async function main() {
   var limit = 50;
   var limIdx = args.indexOf("--limit");
   if (limIdx !== -1 && args[limIdx + 1]) limit = parseInt(args[limIdx + 1], 10);
+  var activeOnly = args.includes("--active-only");
 
   var client = new MongoClient(uri);
   await client.connect();
@@ -27,7 +28,9 @@ async function main() {
   var cascadeCol = db.collection("v5_active_cascades");
   var signalCol = db.collection("v5_global_signals");
 
-  var cascadeFilter = symbolFilter ? { symbol: symbolFilter } : {};
+  var cascadeFilter = {};
+  if (symbolFilter) cascadeFilter.symbol = symbolFilter;
+  if (activeOnly) cascadeFilter.status = "ACTIVE";
   var cascades = await cascadeCol
     .find(cascadeFilter)
     .sort({ startedAt: -1 })
@@ -39,6 +42,7 @@ async function main() {
       cascades.length +
       " cascade(s)" +
       (symbolFilter ? " for " + symbolFilter : "") +
+      (activeOnly ? " (ACTIVE only)" : "") +
       " (most recent " +
       limit +
       "):\n",
