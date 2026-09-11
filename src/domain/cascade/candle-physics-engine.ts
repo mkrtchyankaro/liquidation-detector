@@ -311,6 +311,26 @@ export class CandlePhysicsEngine {
         w.currentWaveCandles,
         w.episodeExtreme,
       );
+
+      // Sep 11 2026 (Karo), operator-requested -- a wave that naturally
+      // completes with exactly ONE liquidation event across its whole
+      // life is discarded entirely: it never becomes a meaningful
+      // wave, never becomes dominant, never enters efficiency
+      // comparison, never triggers ENTRY, and its own wave number is
+      // reused by the next real candidate (waveNumber is decremented
+      // back). This check runs ONLY at natural completion -- a
+      // single-event candidate is still tracked normally through
+      // ACTIVE/EXHAUSTING exactly as before, since more events may
+      // still arrive while it is active.
+      if (summary.totalEvents === 1) {
+        w.waveNumber--;
+        w.currentWaveCandles = [];
+        w.currentWaveStart = null;
+        w.state = w.dominantWave === null ? "NO_WAVE" : "WAIT_NEXT_PRESSURE";
+        w.lastWaveCompletedAt = candleStart;
+        return null;
+      }
+
       w.completedWaves.push(summary);
 
       if (w.dominantWave === null) {
