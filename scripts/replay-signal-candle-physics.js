@@ -156,7 +156,7 @@ async function main() {
   const victim = sig.victim;
   const forcedDown = victim === "LONG";
   const episodeStart = sig.waveHistory[0].anchorTs;
-  const replayEnd = (sig.closedAt || sig.signalTs) + 10 * 60000;
+  const replayEnd = (sig.closedAt || sig.signalTs) + 30 * 60000; // extended buffer -- WAIT_EXTREME_TEST may push entry later than the original replay's own entry point
 
   const events = await rawCol
     .find({
@@ -204,11 +204,13 @@ async function main() {
     "time                 O/H/L/C                        liqUSD     ev  frozenU   curU      newExtU   recU     eff        state",
   );
 
-  var state = "NO_WAVE"; // NO_WAVE | CANDIDATE | ACTIVE | EXHAUSTING | ENTERED
+  var state = "NO_WAVE"; // NO_WAVE | CANDIDATE | ACTIVE | EXHAUSTING | WAIT_EXTREME_TEST | REVERSAL_CONFIRMED
   var waveNumber = 0;
   var currentWaveCandles = [];
   var episodeExtreme = null;
   var dominantWave = null; // { waveNumber, totalLiqUsd, totalExtensionUnits, efficiency }
+  var exhaustedWave = null; // { waveNumber, summary, finalExtreme, dominant } -- set when entering WAIT_EXTREME_TEST
+  var testCandles = []; // re-attack test candles, accumulated during WAIT_EXTREME_TEST
   var completedWaveLog = [];
   var stateLog = [];
   var entryEvent = null;
@@ -408,24 +410,98 @@ async function main() {
               waveNumber +
               " becomes the new dominant reference, waiting for the next wave";
           } else {
-            state = "ENTERED";
-            entryEvent = {
-              time: t,
-              price: kl.close,
+            // Sep 11 2026 (Karo), operator-requested confirmation layer
+            // -- do NOT enter yet. The exhausted wave's own final
+            // structural extreme (episodeExtreme, at THIS exact moment)
+            // must first survive a renewed re-attack before this counts
+            // as a real reversal.
+            state = "WAIT_EXTREME_TEST";
+            exhaustedWave = {
               waveNumber: waveNumber,
+              summary: summary,
+              finalExtreme: episodeExtreme,
               dominant: dominantWave,
-              signal: { waveNumber: waveNumber, summary: summary },
             };
+            testCandles = [];
             reason =
               curLabel +
               " vs dominant " +
               domLabel +
-              ": efficiency COLLAPSED (exhaustion) -- ENTRY at this candle's own close (" +
-              kl.close +
-              ")";
+              ": efficiency COLLAPSED -- EXHAUSTION_CANDIDATE, remembering finalExtreme=" +
+              episodeExtreme +
+              ", now WAIT_EXTREME_TEST (no entry yet -- the extreme must survive a re-attack)";
           }
         }
       }
+    } else if (state === "WAIT_EXTREME_TEST") {
+      if (sameSideLiqUsd > 0) {
+        if (madeNewExtreme) {
+          // Section "Case A": renewed pressure efficiently broke through
+          // -- the exhaustion was NOT real. This re-attack itself
+          // becomes a genuine new wave (reusing the SAME candidate->
+          // ACTIVE promotion as a fresh wave), continuing forward. The
+          // OLD dominant reference is left unchanged -- this new wave
+          // will be judged against it normally when it later completes.
+          waveNumber++;
+          currentWaveCandles = [thisCandleMetrics];
+          state = "ACTIVE";
+          reason =
+            "WAIT_EXTREME_TEST: renewed pressure broke through finalExtreme=" +
+            exhaustedWave.finalExtreme +
+            " with real new extension (" +
+            newDirectionalExtensionUnits.toFixed(3) +
+            "U) -- exhaustion FAILED, this becomes new W" +
+            waveNumber +
+            "_ACTIVE (continuation)";
+        } else {
+          testCandles.push(thisCandleMetrics);
+          const priorTestCandles = testCandles.slice(0, -1);
+          const priorTestMedianRecovery =
+            median(
+              priorTestCandles.map(function (c) {
+                return c.recoveryUnits;
+              }),
+            ) || 0;
+          if (
+            testCandles.length >= 2 &&
+            recoveryUnits > priorTestMedianRecovery
+          ) {
+            const testSummary = waveSummary(testCandles);
+            state = "REVERSAL_CONFIRMED";
+            entryEvent = {
+              time: t,
+              price: kl.close,
+              waveNumber: exhaustedWave.waveNumber,
+              exhaustedWave: exhaustedWave,
+              dominant: exhaustedWave.dominant,
+              test: testSummary,
+            };
+            reason =
+              "WAIT_EXTREME_TEST: renewed pressure (testLiqUsd=" +
+              testSummary.totalLiqUsd.toFixed(0) +
+              ") tested finalExtreme=" +
+              exhaustedWave.finalExtreme +
+              " but produced only " +
+              testSummary.totalExtensionUnits.toFixed(3) +
+              "U of new territory, then recovery confirmed -- REVERSAL_CONFIRMED, ENTRY at this candle's own close (" +
+              kl.close +
+              ")";
+          } else {
+            reason =
+              "WAIT_EXTREME_TEST: renewed pressure testing finalExtreme=" +
+              exhaustedWave.finalExtreme +
+              ", no new extension yet this candle (testCandles=" +
+              testCandles.length +
+              ") -- still observing";
+          }
+        }
+      } else if (testCandles.length > 0) {
+        reason =
+          "WAIT_EXTREME_TEST: no liquidation this candle -- an in-progress re-attack test simply pauses, does not reset (a small sweep/pause is allowed)";
+      }
+      // No liquidation at all and no test in progress: stay silently
+      // in WAIT_EXTREME_TEST -- per the operator's own explicit
+      // instruction, "no more liquidation" must NEVER auto-trigger entry.
     }
 
     const curU =
@@ -465,7 +541,7 @@ async function main() {
         reason: reason,
       });
 
-    if (state === "ENTERED") break;
+    if (state === "REVERSAL_CONFIRMED") break;
   }
 
   console.log("\n" + "=".repeat(90));
@@ -509,25 +585,39 @@ async function main() {
   console.log("=".repeat(90));
   if (entryEvent) {
     console.log(
-      "ENTRY at " + fmtTs(entryEvent.time) + ", price=" + entryEvent.price,
+      "REVERSAL_CONFIRMED -> ENTRY at " +
+        fmtTs(entryEvent.time) +
+        ", price=" +
+        entryEvent.price,
     );
     console.log(
-      "Signal wave: W" +
-        entryEvent.signal.waveNumber +
+      "Exhausted wave: W" +
+        entryEvent.exhaustedWave.waveNumber +
         " " +
-        JSON.stringify(entryEvent.signal.summary),
+        JSON.stringify(entryEvent.exhaustedWave.summary) +
+        " finalExtreme=" +
+        entryEvent.exhaustedWave.finalExtreme,
     );
     console.log(
-      "Dominant reference: W" +
+      "Dominant reference at the time of exhaustion: W" +
         entryEvent.dominant.waveNumber +
         " " +
         JSON.stringify(entryEvent.dominant.summary),
+    );
+    console.log("Re-attack test result: " + JSON.stringify(entryEvent.test));
+  } else if (state === "WAIT_EXTREME_TEST") {
+    console.log(
+      "NO TRADE (yet) -- replay ended still in WAIT_EXTREME_TEST for W" +
+        exhaustedWave.waveNumber +
+        " (finalExtreme=" +
+        exhaustedWave.finalExtreme +
+        "). Per the operator's own explicit rule, this stays an UNRESOLVED exhaustion candidate -- no entry is forced just because liquidation stopped.",
     );
   } else {
     console.log(
       "NO TRADE -- replay ended in state=" +
         state +
-        " without a genuine exhaustion signal against a dominant wave.",
+        " without ever reaching a genuine exhaustion candidate.",
     );
   }
 
