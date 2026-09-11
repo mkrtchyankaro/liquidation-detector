@@ -93,6 +93,7 @@ async function main() {
   const idx = args.indexOf("--signalId");
   const signalId =
     idx !== -1 ? args[idx + 1] : "2e377402-141e-475b-aaf4-ecff73b7347d";
+  const noExtremeTest = args.includes("--no-extreme-test");
 
   const uri = process.env.MONGO_URI;
   if (!uri) {
@@ -410,26 +411,49 @@ async function main() {
               waveNumber +
               " becomes the new dominant reference, waiting for the next wave";
           } else {
-            // Sep 11 2026 (Karo), operator-requested confirmation layer
-            // -- do NOT enter yet. The exhausted wave's own final
-            // structural extreme (episodeExtreme, at THIS exact moment)
-            // must first survive a renewed re-attack before this counts
-            // as a real reversal.
-            state = "WAIT_EXTREME_TEST";
-            exhaustedWave = {
-              waveNumber: waveNumber,
-              summary: summary,
-              finalExtreme: episodeExtreme,
-              dominant: dominantWave,
-            };
-            testCandles = [];
-            reason =
-              curLabel +
-              " vs dominant " +
-              domLabel +
-              ": efficiency COLLAPSED -- EXHAUSTION_CANDIDATE, remembering finalExtreme=" +
-              episodeExtreme +
-              ", now WAIT_EXTREME_TEST (no entry yet -- the extreme must survive a re-attack)";
+            // Sep 11 2026 (Karo), operator-requested -- optional
+            // bypass, via --no-extreme-test, reproducing the EARLIER
+            // (pre-confirmation-layer) replay behavior EXACTLY: enter
+            // immediately on exhaustion, no re-attack test. Nothing
+            // else in the wave/candidate logic changes.
+            if (noExtremeTest) {
+              state = "ENTERED";
+              entryEvent = {
+                time: t,
+                price: kl.close,
+                waveNumber: waveNumber,
+                dominant: dominantWave,
+                signal: { waveNumber: waveNumber, summary: summary },
+              };
+              reason =
+                curLabel +
+                " vs dominant " +
+                domLabel +
+                ": efficiency COLLAPSED -- (--no-extreme-test) ENTRY at this candle's own close (" +
+                kl.close +
+                ")";
+            } else {
+              // Sep 11 2026 (Karo), operator-requested confirmation layer
+              // -- do NOT enter yet. The exhausted wave's own final
+              // structural extreme (episodeExtreme, at THIS exact moment)
+              // must first survive a renewed re-attack before this counts
+              // as a real reversal.
+              state = "WAIT_EXTREME_TEST";
+              exhaustedWave = {
+                waveNumber: waveNumber,
+                summary: summary,
+                finalExtreme: episodeExtreme,
+                dominant: dominantWave,
+              };
+              testCandles = [];
+              reason =
+                curLabel +
+                " vs dominant " +
+                domLabel +
+                ": efficiency COLLAPSED -- EXHAUSTION_CANDIDATE, remembering finalExtreme=" +
+                episodeExtreme +
+                ", now WAIT_EXTREME_TEST (no entry yet -- the extreme must survive a re-attack)";
+            }
           }
         }
       }
@@ -541,7 +565,7 @@ async function main() {
         reason: reason,
       });
 
-    if (state === "REVERSAL_CONFIRMED") break;
+    if (state === "REVERSAL_CONFIRMED" || state === "ENTERED") break;
   }
 
   console.log("\n" + "=".repeat(90));
@@ -581,9 +605,14 @@ async function main() {
   });
 
   console.log("\n" + "=".repeat(90));
-  console.log("FINAL DECISION");
+  console.log(
+    "FINAL DECISION" +
+      (noExtremeTest
+        ? " (--no-extreme-test: immediate entry on exhaustion, no re-attack confirmation)"
+        : ""),
+  );
   console.log("=".repeat(90));
-  if (entryEvent) {
+  if (entryEvent && entryEvent.test) {
     console.log(
       "REVERSAL_CONFIRMED -> ENTRY at " +
         fmtTs(entryEvent.time) +
@@ -605,6 +634,26 @@ async function main() {
         JSON.stringify(entryEvent.dominant.summary),
     );
     console.log("Re-attack test result: " + JSON.stringify(entryEvent.test));
+  } else if (entryEvent) {
+    console.log(
+      "EXHAUSTION -> ENTRY at " +
+        fmtTs(entryEvent.time) +
+        ", price=" +
+        entryEvent.price +
+        " (no-extreme-test mode)",
+    );
+    console.log(
+      "Signal wave: W" +
+        entryEvent.signal.waveNumber +
+        " " +
+        JSON.stringify(entryEvent.signal.summary),
+    );
+    console.log(
+      "Dominant reference: W" +
+        entryEvent.dominant.waveNumber +
+        " " +
+        JSON.stringify(entryEvent.dominant.summary),
+    );
   } else if (state === "WAIT_EXTREME_TEST") {
     console.log(
       "NO TRADE (yet) -- replay ended still in WAIT_EXTREME_TEST for W" +
