@@ -383,7 +383,7 @@ async function main(): Promise<void> {
         'the single candidate\'s own timeframe must be "1m"',
       );
       assert.ok(
-        /getWilderATR\(\s*l\.symbol,\s*"1m",\s*COMMON_HORIZON_PERIODS\.atr1m\s*\)/.test(
+        /getWilderATR\(\s*l\.symbol,\s*"1m",\s*COMMON_HORIZON_PERIODS\.atr1m\s*,?\s*\)/.test(
           body,
         ),
         'UNIT must be read via getWilderATR(symbol, "1m", COMMON_HORIZON_PERIODS.atr1m)',
