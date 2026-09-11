@@ -41,6 +41,11 @@ import type { Side, Liquidation } from "../shared/common.types";
 import { deriveLiquidationPhysicsTradePlan } from "../domain/trading/liquidation-physics-trade-plan";
 import { deriveEpisodeDisplacementTradePlan } from "../domain/trading/episode-displacement-trade-plan";
 import { computeWaveEfficiencyAnalysis } from "../domain/trading/wave-efficiency-analysis";
+import { deriveLastTwoWaveTradePlan } from "../domain/trading/last-two-wave-trade-plan";
+import {
+  CandlePhysicsEngine,
+  type CompletedWaveSummary,
+} from "../domain/cascade/candle-physics-engine";
 import { evaluateDragon } from "../domain/research/unit-competition-dragon";
 import type { V5Wave } from "../strategy/v5/v5-wave.model";
 import type { SignalDistributor } from "./signal-distributor";
@@ -211,6 +216,13 @@ export class MarketDataOrchestrator {
    *  cascadeRegistry (which only governs whether a new COMPARISON
    *  cascade may start, never whether MAIN may hold a real position). */
   private readonly cascadeCandidate1m = new CascadeCandidateService();
+  /** Sep 11 2026 (Karo), operator-requested -- THE production wave-
+   *  decision path. cascadeCandidate1m/3m/5m above (and the OLD
+   *  feedCascade()/tickCascade() call-sites) are no longer invoked
+   *  from any live handler -- left in place, unused, per the
+   *  operator's own "do not delete" convention. This is the ONLY
+   *  engine that can now produce a live ENTRY. */
+  private readonly candlePhysics = new CandlePhysicsEngine();
   private readonly cascadeCandidate3m = new CascadeCandidateService();
   private readonly cascadeCandidate5m = new CascadeCandidateService();
   private readonly cascadeRegistry = new CascadeRegistry(
@@ -257,6 +269,12 @@ export class MarketDataOrchestrator {
     // typecheck without calling either method or removing any code.
     void this.feedUnitResearchShadowAfter;
     void this.tickUnitResearchShadow;
+    // Sep 11 2026 (Karo), operator-requested -- the OLD 1x-UNIT-
+    // recovery cascade engine's own entry points are disconnected too
+    // (see candlePhysics, the new production path, above); neither
+    // method is deleted, per the operator's own explicit instruction.
+    void this.feedCascade;
+    void this.tickCascade;
   }
 
   async ensureIndexes(): Promise<void> {
@@ -399,6 +417,27 @@ export class MarketDataOrchestrator {
     this.ws.on("kline", (c) => {
       this.atrTracker.onCandle(c);
       this.candleStore.ingest(c);
+      // Sep 11 2026 (Karo), operator-requested -- THE production wave
+      // engine now runs on CLOSED 1m candles only, for both victim
+      // sides of this symbol. onClosedCandle() is a cheap no-op for
+      // any (symbol,victim) with no active watch.
+      if (c.interval === "1m" && c.isClosed) {
+        for (const victim of ["LONG", "SHORT"] as const) {
+          const result = this.candlePhysics.onClosedCandle(
+            c.symbol,
+            victim,
+            c.openTime,
+            c.open,
+            c.high,
+            c.low,
+            c.close,
+          );
+          if (result?.kind === "ENTRY")
+            void this.handleCandlePhysicsEntry(result);
+          else if (result?.kind === "CANCEL")
+            this.handleCandlePhysicsCancel(result);
+        }
+      }
     });
 
     this.ws.on("liquidation", (l) => {
@@ -413,17 +452,34 @@ export class MarketDataOrchestrator {
         timestamp: l.timestamp,
       });
       const victimForShadow: Side = l.side === "SELL" ? "LONG" : "SHORT";
-      // Sep 10 2026 (Karo), operator-requested production V5 multi-
-      // timeframe cascade lifecycle -- PURELY ADDITIVE call, placed
-      // BEFORE the mainSymbolLocks early-return below so cascade-
-      // tracking for THIS symbol is never paused just because MAIN
-      // happens to already hold a real, open position for it (e.g.
-      // from an earlier-signaling candidate) -- mainSymbolLocks itself
-      // is completely untouched by this call; it continues to gate
-      // ONLY the real-position-creation step inside
-      // handleCascadeSignalReady() below, exactly as it already does
-      // for the existing V5 signal path.
-      void this.feedCascade(l, victimForShadow);
+      // Sep 11 2026 (Karo), operator-requested -- THE production wave
+      // engine. Replaces the OLD feedCascade() call entirely (removed
+      // below, left commented per the operator's own "do not delete"
+      // convention). Fed regardless of mainSymbolLocks, same
+      // convention as before -- willExecuteAsMain is decided inside
+      // handleCandlePhysicsEntry() at the moment of entry, not here.
+      const unit1m = this.commonHorizonAtrReady(l.symbol)
+        ? this.atrTracker.getWilderATR(
+            l.symbol,
+            "1m",
+            COMMON_HORIZON_PERIODS.atr1m,
+          )
+        : null;
+      if (unit1m !== null && unit1m > 0) {
+        this.candlePhysics.onLiquidation(
+          l.symbol,
+          victimForShadow,
+          l,
+          unit1m,
+          l.price,
+          l.timestamp,
+        );
+      }
+      // OLD 1x-UNIT-recovery cascade engine -- DISCONNECTED, no longer
+      // the production decision path. Left in place, unused, per the
+      // operator's own "do not delete" convention (see
+      // cascadeCandidate1m/3m/5m field declarations above).
+      // void this.feedCascade(l, victimForShadow);
       if (this.mainSymbolLocks.has(l.symbol)) return;
       const wasTrackedBeforeProduction = this.wasProductionWatchTracked(
         l.symbol,
@@ -441,9 +497,7 @@ export class MarketDataOrchestrator {
       // delete now" instruction) -- simply never invoked, so old
       // research can no longer create/update state, influence signal
       // decisions, send its own Telegram messages, declare winners, or
-      // persist new results. The NEW cascade engine (feedCascade()
-      // above) is now the ONLY 1m/3m/5m candidate lifecycle receiving
-      // live liquidation events for this purpose.
+      // persist new results.
       // this.feedUnitResearchShadowAfter(l, wasTrackedBeforeProduction);
     });
 
@@ -461,9 +515,12 @@ export class MarketDataOrchestrator {
       // (wave-completion checks, dragon evaluation, winner-touch
       // checks, research Telegram). Left commented, not deleted.
       // this.tickUnitResearchShadow(b.symbol, mid, b.timestamp);
-      // Sep 10 2026 (Karo), operator-requested production V5 multi-
-      // timeframe cascade lifecycle -- PURELY ADDITIVE.
-      this.tickCascade(b.symbol, mid, b.timestamp);
+      // Sep 11 2026 (Karo), operator-requested -- the OLD 1x-UNIT-
+      // recovery cascade engine's own tick-driven evaluation is no
+      // longer the production decision path (see candlePhysics
+      // above, driven by closed candles instead). Left commented, not
+      // deleted, per the operator's own convention.
+      // this.tickCascade(b.symbol, mid, b.timestamp);
     });
 
     this.ws.on("orderbook", (snap) => {
@@ -854,6 +911,306 @@ export class MarketDataOrchestrator {
         oiDeltaPct: null,
       };
     });
+  }
+
+  /** Sep 11 2026 (Karo), operator-requested -- maps the NEW candle-
+   *  physics engine's own CompletedWaveSummary[] into the SAME V5Wave[]
+   *  shape used for persistence/display everywhere else in this
+   *  project, so existing Telegram formatting and downstream tooling
+   *  keep working unchanged. anchorPrice is reverse-derived from
+   *  extreme/totalExtensionUnits (this wave's own price displacement),
+   *  since the candle-physics engine tracks displacement directly
+   *  rather than a literal anchor price -- a reasonable, documented
+   *  approximation for DISPLAY purposes only; it never feeds back into
+   *  SL/TP (last-two-wave-trade-plan.ts uses extreme values directly). */
+  private candlePhysicsWavesToV5Waves(
+    waves: readonly CompletedWaveSummary[],
+    unitAbs: number,
+    victim: Side,
+    atr15mAbs: number,
+  ): V5Wave[] {
+    return waves.map((w, i): V5Wave => {
+      const isLast = i === waves.length - 1;
+      const isCompleted = !isLast;
+      const anchorPrice =
+        victim === "LONG"
+          ? w.extreme + w.totalExtensionUnits * unitAbs
+          : w.extreme - w.totalExtensionUnits * unitAbs;
+      const reclaimPrice = isCompleted
+        ? victim === "LONG"
+          ? w.extreme + unitAbs
+          : w.extreme - unitAbs
+        : null;
+      return {
+        waveNumber: w.waveNumber,
+        state: isCompleted ? "COMPLETED" : "ACTIVE",
+        anchorPrice,
+        anchorTs: w.startTime,
+        extremePrice: w.extreme,
+        extremeTs: w.endTime,
+        reclaimPrice,
+        reclaimTs: isCompleted ? w.endTime : null,
+        liqNotionalUsd: w.totalLiqUsd,
+        liqEvents: w.totalEvents,
+        maxSingleEventUsd: w.maxEvent,
+        maxRecoveryPrice: w.extreme,
+        recoveryPct: null,
+        priceEfficiency: w.efficiency,
+        liquidationRatioVsDominant: null,
+        priceEfficiencyRatioVsDominant: null,
+        extremeDistanceAtr:
+          atr15mAbs > 0 ? Math.abs(anchorPrice - w.extreme) / atr15mAbs : 0,
+        isMeaningful: true,
+        selectedRecoveryPct: null,
+        recoveryTargetPrice: null,
+        recovery50AtTs: null,
+        recovery50AtPrice: null,
+        recovery75AtTs: null,
+        recovery75AtPrice: null,
+        takerBuyUsd: null,
+        takerSellUsd: null,
+        takerImbalance: null,
+        oiStart: null,
+        oiEnd: null,
+        oiDeltaPct: null,
+      };
+    });
+  }
+
+  /** Sep 11 2026 (Karo), operator-requested -- the ONLY live production
+   *  entry point for a real trade decision now. Mirrors
+   *  handleCascadeSignalReady()'s own structure/persistence/
+   *  distribution pattern exactly, substituting the NEW last-two-wave
+   *  SL/TP formula and the NEW engine's own wave shape. */
+  private async handleCandlePhysicsEntry(
+    event: import("../domain/cascade/candle-physics-engine").CandlePhysicsEntryEvent,
+  ): Promise<void> {
+    try {
+      const atr15mAbs = this.atrTracker.getATR(event.symbol, "15m") ?? 0;
+      const baseline =
+        this.liquidationStats.rollingMedianLiqNotionalPerMin(
+          event.symbol,
+          60,
+        ) ?? 0;
+
+      const previousExtreme = event.dominantWave.extreme;
+      const finalExtreme = event.signalWave.extreme;
+      const planCalc = deriveLastTwoWaveTradePlan({
+        entryPrice: event.entryPrice,
+        direction: event.victim,
+        previousExtreme,
+        finalExtreme,
+      });
+      const plan = {
+        ok: true as const,
+        entry: planCalc.entryPrice,
+        sl: planCalc.stopLoss,
+        tp: planCalc.takeProfit,
+        slPct: planCalc.executionRiskPct,
+        tpPct:
+          event.entryPrice > 0 ? planCalc.rewardDistance / event.entryPrice : 0,
+        rr: planCalc.rewardRiskRatio,
+      };
+
+      log.info(
+        {
+          symbol: event.symbol,
+          direction: event.victim,
+          entryPrice: planCalc.entryPrice,
+          previousExtreme: planCalc.previousExtreme,
+          finalExtreme: planCalc.finalExtreme,
+          lastLegExtension: planCalc.lastLegExtension,
+          naturalSL: planCalc.naturalSL,
+          naturalRiskPct: planCalc.naturalRiskPct,
+          executionRiskPct: planCalc.executionRiskPct,
+          slAdjustment: planCalc.slAdjustment,
+          stopLoss: planCalc.stopLoss,
+          riskDistance: planCalc.riskDistance,
+          rewardRiskRatio: planCalc.rewardRiskRatio,
+          takeProfit: planCalc.takeProfit,
+          rewardDistance: planCalc.rewardDistance,
+        },
+        "[LAST_TWO_WAVE_TRADE_PLAN]",
+      );
+
+      const signalId = randomUUID();
+      const totalLiq = event.allWaves.reduce(
+        (sum, w) => sum + w.totalLiqUsd,
+        0,
+      );
+      const willExecuteAsMain = !this.mainSymbolLocks.has(event.symbol);
+      const v5Waves = this.candlePhysicsWavesToV5Waves(
+        event.allWaves,
+        event.unitAbs,
+        event.victim,
+        atr15mAbs,
+      );
+
+      const globalSignal: GlobalSignalDoc = {
+        signalId,
+        symbol: event.symbol,
+        side: event.victim,
+        victim: event.victim,
+        signalTs: event.entryTs,
+        entryPrice: event.entryPrice,
+        entryWaveNumber: event.signalWave.waveNumber,
+        waveHistory: v5Waves,
+        w1Diagnostics: null,
+        totalEpisodePressure: totalLiq,
+        dominantLayerLiqUsd: event.dominantWave.totalLiqUsd,
+        dominantLayerWaveNumber: event.dominantWave.waveNumber,
+        exhaustionLayerLiqUsd: event.signalWave.totalLiqUsd,
+        exhaustionLayerWaveNumber: event.signalWave.waveNumber,
+        unitAtStart: event.unitAbs,
+        p95AtEntry: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
+        dailyLiqPerMinBaselineAtEntry: baseline,
+        atr15mAtEntry: atr15mAbs,
+        qualifyingEventUsd: event.allWaves[0]?.totalLiqUsd ?? 0,
+        qualifyingEventTs: event.allWaves[0]?.startTime ?? event.episodeStartTs,
+        p95AtQualification: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
+        physics: {
+          cumLiqUsd: totalLiq,
+          atrPct: atr15mAbs,
+          liqBaseline: baseline,
+          liqStrengthRaw: 0,
+          liqStrength: 0,
+          physicsTPPct: plan.tpPct,
+          wallAdjustedTpPct: plan.tpPct,
+          wallApplied: false,
+          rrCandidate: plan.rr,
+          slCapApplied: false,
+          slCapValue: 0,
+          finalTpPct: plan.tpPct,
+          finalSlPct: plan.slPct,
+          actualRR: plan.rr,
+          structuralSoftExitPrice: 0,
+          structuralRiskPct: 0,
+          sizingRiskPct: 0,
+          hardStopRiskPct: 0,
+          liquidityStrengthP95: 0,
+          liquidityStrength24h: 0,
+          liquidityStrength: 0,
+          w2ToW1Ratio:
+            event.dominantWave.totalLiqUsd > 0
+              ? event.signalWave.totalLiqUsd / event.dominantWave.totalLiqUsd
+              : 0,
+          exhaustionScore: 0,
+          w1DisplacementAtr: 0,
+          absorptionRaw: 0,
+          absorptionScore: 0,
+          dynamicPhysicsScore: 0,
+          selectedRR: plan.rr,
+          tpMultiplier: 0,
+          slDeterminedBy: "physics",
+        },
+        btcContext: null,
+        liq24hContext: null,
+        wallContext: null,
+        entry: plan.entry,
+        tp: plan.tp,
+        sl: plan.sl,
+        rr: plan.rr,
+        btcSafetyStatus: "UNKNOWN",
+        btcIntendedSideAtSignalTime: null,
+        rejectionReason: null,
+        planDiagnostics: null,
+        status: "SIGNAL",
+        closedAt: null,
+        closePrice: null,
+        maxFavorableR: null,
+        maxAdverseR: null,
+        liquidationStatsContext: null,
+        researchCheckpoints: [],
+        unitResearch: null,
+        unitCompetitionResearch: null,
+        commonHorizonResearch: null,
+        cascadeId: null,
+        timeframe: "1m",
+        isMainExecuted: willExecuteAsMain,
+        episodePlan: null,
+        waveEfficiencyAnalysis: null,
+        createdAt: Date.now(),
+      };
+
+      await this.globalSignalRepo.insert(globalSignal);
+      log.info(
+        `[CANDLE_PHYSICS_ENTRY] ${event.symbol} ${event.victim} signalId=${signalId} waves=${event.allWaves.length} entry=${plan.entry} sl=${plan.sl} tp=${plan.tp} rr=${plan.rr.toFixed(2)} willExecuteAsMain=${willExecuteAsMain}`,
+      );
+
+      this.candlePhysics.clearTerminal(event.symbol, event.victim);
+
+      if (!willExecuteAsMain) return;
+      const { mainTelegramSent } = await this.distributor.distribute(
+        globalSignal,
+        this.mongo,
+      );
+      if (!mainTelegramSent) {
+        log.error(
+          `[CANDLE_PHYSICS_MAIN_ENTRY_TELEGRAM_MISSING] ${event.symbol} ${event.victim} signalId=${signalId} -- MAIN's own ENTRY notification FAILED to send, but this trade IS still being installed into active TP/SL tracking`,
+        );
+      }
+      this.mainSymbolLocks.add(event.symbol);
+      this.v5.hydrateActiveTrade({
+        signalId,
+        symbol: event.symbol,
+        victim: event.victim,
+        side: event.victim,
+        entry: plan.entry,
+        tp: plan.tp,
+        sl: plan.sl,
+        openedAt: event.entryTs,
+        bestPrice: plan.entry,
+        worstPrice: plan.entry,
+        entryWaveNumber: event.signalWave.waveNumber,
+        isLive: false,
+        binanceSlOrderId: null,
+        binanceTpOrderId: null,
+        positionQty: null,
+        notional: null,
+        riskUsd: null,
+        timeframe: "1m",
+      });
+
+      const denom = Math.abs(plan.entry - plan.sl);
+      const dirMul = event.victim === "LONG" ? 1 : -1;
+      this.researchCheckpoints.registerWatch(
+        signalId,
+        event.symbol,
+        "SIGNAL",
+        event.entryTs,
+        plan.entry,
+        { kind: "R", dirMul, denom },
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, symbol: event.symbol, victim: event.victim },
+        "[CANDLE_PHYSICS_ENTRY_UNHANDLED_ERROR]",
+      );
+    }
+  }
+
+  /** Sep 11 2026 (Karo), operator-requested lifecycle timeouts --
+   *  diagnostic-only (logged), never itself creating any state change
+   *  beyond what CandlePhysicsEngine already did internally (the watch
+   *  is already TERMINAL_CANCELLED by the time this is called; this
+   *  just makes the reason visible and releases the engine's own map
+   *  entry so a fresh episode can start immediately). */
+  private handleCandlePhysicsCancel(
+    event: import("../domain/cascade/candle-physics-engine").CandlePhysicsCancelEvent,
+  ): void {
+    log.info(
+      `[CANDLE_PHYSICS_CANCEL] ${event.symbol} ${event.victim} reason=${event.reason} episodeStartTs=${event.episodeStartTs} cancelTs=${event.cancelTs} completedWaves=${event.allWaves.length}`,
+    );
+    this.candlePhysics.clearTerminal(event.symbol, event.victim);
   }
 
   private async handleCascadeSignalReady(
