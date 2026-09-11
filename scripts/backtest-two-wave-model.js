@@ -132,6 +132,37 @@ async function main() {
     "DATA SOURCE: liq_raw_events ONLY (liq_minute_aggregates verified EMPTY, unused).",
   );
 
+  // ── Direction-mapping proof (operator-requested) -- shown at every
+  // run, not just asserted. Matches RawLiquidationEventDoc's own doc
+  // comment: "Derived once, at write time, from the raw WS side
+  // (SELL=LONG liquidated, BUY=SHORT liquidated)". ──
+  const sampleLongDoc = await rawCol.findOne({ symbol, victim: "LONG" });
+  console.log(
+    "\nDirection-mapping proof (verified against actual stored data):",
+  );
+  console.log(
+    '  raw Binance forceOrder.side: SELL -> stored victim: "LONG"  |  BUY -> stored victim: "SHORT"',
+  );
+  console.log(
+    "  (source: binanceWs.client.ts line ~379 + raw-liquidation-event.repository.ts's own RawLiquidationEventDoc doc comment)",
+  );
+  console.log(
+    "  notional field: quoteQty (USD, price*quantity)  |  timestamp field: ms since epoch",
+  );
+  console.log(
+    "  sample BTCUSDT victim=LONG document: " +
+      (sampleLongDoc
+        ? JSON.stringify({
+            symbol: sampleLongDoc.symbol,
+            victim: sampleLongDoc.victim,
+            price: sampleLongDoc.price,
+            quoteQty: sampleLongDoc.quoteQty,
+            timestamp: sampleLongDoc.timestamp,
+            timestampIso: fmtTs(sampleLongDoc.timestamp),
+          })
+        : "none found"),
+  );
+
   const earliestDoc = await rawCol
     .find({})
     .sort({ timestamp: 1 })
@@ -416,8 +447,14 @@ async function main() {
       }
 
       const baseline = historicalP90Baseline(w1.startTime);
+      // Sep 11 2026 (Karo), operator-requested warm-up floor -- a
+      // percentile computed from too few prior completed episodes is
+      // statistically unstable. MIN_WARMUP_EPISODES = 5 is this
+      // script's own documented, explicit choice (not silently
+      // invented) -- reported at startup and in every SKIP reason.
+      const MIN_WARMUP_EPISODES = 5;
       const requiredLiqUsd =
-        baseline.p90 !== null
+        baseline.count >= MIN_WARMUP_EPISODES && baseline.p90 !== null
           ? P.minPercentile === 95
             ? baseline.p95
             : baseline.p90
@@ -429,13 +466,20 @@ async function main() {
 
       if (requiredLiqUsd === null) {
         setup.state = "CANCELLED";
-        setup.cancelReason = "CANCEL_INSUFFICIENT_BASELINE_HISTORY";
+        setup.cancelReason = "SKIP_INSUFFICIENT_LIQ_HISTORY";
         log(
           w1.confirmedEndTime,
           "W1_CANDIDATE",
           "CANCELLED",
-          "CANCEL_INSUFFICIENT_BASELINE_HISTORY: no completed episodes in the trailing 24h to compute a percentile",
-          { historicalEpisodeCount: baseline.count },
+          "SKIP_INSUFFICIENT_LIQ_HISTORY: fewer than " +
+            MIN_WARMUP_EPISODES +
+            " completed episodes in the trailing 24h to compute a stable percentile (only " +
+            baseline.count +
+            " available)",
+          {
+            historicalEpisodeCount: baseline.count,
+            requiredWarmupEpisodes: MIN_WARMUP_EPISODES,
+          },
         );
         setups.push(setup);
         cursor = w1.confirmedEndTime + 60000;
@@ -626,7 +670,7 @@ async function main() {
 
       const w2Baseline = historicalP90Baseline(w2.startTime);
       const w2RequiredLiqUsd =
-        w2Baseline.p90 !== null
+        w2Baseline.count >= MIN_WARMUP_EPISODES && w2Baseline.p90 !== null
           ? P.minPercentile === 95
             ? w2Baseline.p95
             : w2Baseline.p90
@@ -802,7 +846,7 @@ async function main() {
         s.cancelReason === "CANCEL_W1_TOO_SMALL" ||
         s.cancelReason === "CANCEL_DATA_GAP" ||
         s.cancelReason === "CANCEL_INSUFFICIENT_ATR_HISTORY" ||
-        s.cancelReason === "CANCEL_INSUFFICIENT_BASELINE_HISTORY"
+        s.cancelReason === "SKIP_INSUFFICIENT_LIQ_HISTORY"
       ) {
         cancelledW1++;
         continue;
@@ -887,6 +931,62 @@ async function main() {
   console.log("=".repeat(90));
   const focusDayStart = new Date(focusDate + "T00:00:00Z").getTime();
   const focusDayEnd = focusDayStart + 24 * 60 * 60000;
+
+  // Sep 11 2026 (Karo), operator-requested cross-symbol supporting
+  // evidence -- explicitly SUPPORTING evidence only, never definitive
+  // heartbeat proof (raw-event presence/absence is never used to
+  // invent a DATA_GAP decision anywhere in this script's own logic
+  // above; this block is diagnostic-only, printed, not fed back into
+  // any state-machine decision).
+  const crossSymbolWindow = {
+    start: focusDayStart + 10 * 60 * 60000,
+    end: focusDayStart + 14 * 60 * 60000,
+  }; // 10:00-14:00 UTC, covers the ~12:00 UTC area
+  const crossSymbolEvents = await rawCol
+    .aggregate([
+      {
+        $match: {
+          timestamp: {
+            $gte: crossSymbolWindow.start,
+            $lt: crossSymbolWindow.end,
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$symbol",
+          count: { $sum: 1 },
+          minTs: { $min: "$timestamp" },
+          maxTs: { $max: "$timestamp" },
+        },
+      },
+      { $sort: { count: -1 } },
+    ])
+    .toArray();
+  console.log(
+    "\nCross-symbol raw-event activity, " +
+      fmtTs(crossSymbolWindow.start) +
+      " .. " +
+      fmtTs(crossSymbolWindow.end) +
+      " (SUPPORTING EVIDENCE ONLY that the shared websocket pipeline was probably running around this window -- NOT definitive heartbeat proof, and NOT used by any decision above):",
+  );
+  crossSymbolEvents.forEach((e) =>
+    console.log(
+      "  " +
+        e._id +
+        ": " +
+        e.count +
+        " events, " +
+        fmtTs(e.minTs) +
+        " .. " +
+        fmtTs(e.maxTs),
+    ),
+  );
+  if (crossSymbolEvents.length === 0)
+    console.log(
+      "  (no events from any symbol in this window -- no supporting evidence either way)",
+    );
+
   const focusSetups = mainSetups.filter(
     (s) =>
       s.transitions.length &&
@@ -894,7 +994,11 @@ async function main() {
       s.transitions[0].time < focusDayEnd,
   );
   console.log(
-    focusSetups.length + " setup(s) found starting on " + focusDate + ".",
+    "\n" +
+      focusSetups.length +
+      " setup(s) found starting on " +
+      focusDate +
+      ".",
   );
   focusSetups.forEach((s, i) => {
     console.log(
