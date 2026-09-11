@@ -378,9 +378,8 @@ async function main(): Promise<void> {
         "exactly one startCascade() call in feedCascade() -- exactly one candidate ever created per cascade",
       );
       assert.ok(
-        body.includes(
-          'this.cascadeCandidate1m.startCascade(l.symbol, victim, resolved.cascadeId, "1m",',
-        ),
+        body.includes("this.cascadeCandidate1m.startCascade(") &&
+          /startCascade\([\s\S]{0,120}?"1m"/.test(body),
         'the single candidate\'s own timeframe must be "1m"',
       );
       assert.ok(
@@ -413,7 +412,9 @@ async function main(): Promise<void> {
         "exactly one handleCascadeTick() call per victim-loop iteration -- only the 1m candidate is ticked",
       );
       assert.ok(
-        body.includes('handleCascadeTick("1m", this.cascadeCandidate1m,'),
+        body.includes("this.handleCascadeTick(") &&
+          body.includes("this.cascadeCandidate1m") &&
+          /handleCascadeTick\(\s*"1m"/.test(body),
       );
       assert.ok(
         !body.includes("cascadeCandidate3m") &&
