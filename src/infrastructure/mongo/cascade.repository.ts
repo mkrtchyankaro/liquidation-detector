@@ -178,9 +178,24 @@ export class CascadeRepository {
       if (!col) return { allTerminal: false };
       const doc = await col.findOne({ cascadeId });
       if (!doc) return { allTerminal: false };
+      // Sep 11 2026 (Karo), operator-reported CRITICAL FIX -- since
+      // the 1m-only production change, 3m/5m candidates are NEVER
+      // started anymore (their own phase stays "NOT_STARTED" forever).
+      // The original all-three-terminal check therefore could NEVER
+      // become true again, meaning a cascade would never close, ever,
+      // for any symbol, going forward. A candidate now counts as
+      // "not blocking closure" if it reached a real terminal state
+      // (SIGNAL/CANCEL) OR if it was simply never started at all --
+      // "NOT_STARTED" is now a genuinely FINAL state for 3m/5m, not a
+      // transient one waiting to progress.
       const allTerminal = (["1m", "3m", "5m"] as const).every((tf) => {
         const phase = doc.candidates[tf]?.phase;
-        return phase === "TERMINAL_SIGNAL" || phase === "TERMINAL_CANCEL";
+        return (
+          phase === "TERMINAL_SIGNAL" ||
+          phase === "TERMINAL_CANCEL" ||
+          phase === undefined ||
+          phase === "NOT_STARTED"
+        );
       });
       if (allTerminal && doc.status === "ACTIVE") {
         await col.updateOne(

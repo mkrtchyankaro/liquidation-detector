@@ -273,7 +273,7 @@ async function main(): Promise<void> {
       const now = Date.now();
 
       const cancelDoc: CascadeCandidateStateDoc = {
-        timeframe: "3m",
+        timeframe: "1m",
         phase: "TERMINAL_CANCEL",
         frozenUnitAbs: 2,
         currentWaveNumber: 1,
@@ -309,27 +309,41 @@ async function main(): Promise<void> {
         now,
       );
 
+      // Sep 11 2026 (Karo), operator-reported CRITICAL FIX -- since the
+      // 1m-only production change, a cascade now correctly CLOSES the
+      // moment its own 1m candidate goes terminal (3m/5m stay
+      // NOT_STARTED forever and no longer block closure -- see
+      // cascade.repository.ts's own markCandidateTerminal()). This
+      // cascade is therefore CLOSED at this point, not ACTIVE -- read it
+      // directly by cascadeId rather than via findActiveCascades()
+      // (which only returns status="ACTIVE" ones) to prove the
+      // diagnostics themselves still survive the restart regardless.
       const repoAfterRestart = new CascadeRepository(makeFakeMongo(col));
-      const activeCascades = await repoAfterRestart.findActiveCascades();
-      const found = activeCascades.find((d) => d.cascadeId === "casc-z");
+      void repoAfterRestart; // constructed to genuinely simulate a fresh instance, even though this read goes through the shared fake collection directly
+      const found = await col.findOne({ cascadeId: "casc-z" });
       assert.ok(
         found,
         "the cascade must still be found after the simulated restart",
       );
-      const c3m = found!.candidates["3m"];
       assert.strictEqual(
-        c3m.terminalReason,
+        found!.status,
+        "CLOSED",
+        "the cascade must now be CLOSED -- 1m was its only ever-started candidate, and it is terminal",
+      );
+      const c1m = found!.candidates["1m"];
+      assert.strictEqual(
+        c1m.terminalReason,
         "CANCEL_NO_NEXT_WAVE",
         "the precise reason must survive restart, never lost or genericized",
       );
       assert.strictEqual(
-        c3m.terminalReasonText,
+        c1m.terminalReasonText,
         "No next wave before 2.00 UNIT recovery",
       );
-      assert.strictEqual(c3m.cancelPrice, 102);
-      assert.strictEqual(c3m.recoveryDistance, 4);
-      assert.strictEqual(c3m.recoveryUnits, 2.0);
-      assert.strictEqual(c3m.frozenUnitAbs, 2);
+      assert.strictEqual(c1m.cancelPrice, 102);
+      assert.strictEqual(c1m.recoveryDistance, 4);
+      assert.strictEqual(c1m.recoveryUnits, 2.0);
+      assert.strictEqual(c1m.frozenUnitAbs, 2);
     },
   );
 
@@ -398,6 +412,56 @@ async function main(): Promise<void> {
         source.includes('runtime.config.userId === "main"'),
         "must specifically track the main user's own send-result",
       );
+    },
+  );
+
+  await scenario(
+    "operator-reported CRITICAL FIX (cascade never closed after the 1m-only production change): a cascade closes the moment its own 1m candidate goes terminal, even though 3m/5m stay NOT_STARTED forever",
+    async () => {
+      const col = new FakeCascadeCollection();
+      const repo = new CascadeRepository(makeFakeMongo(col));
+      const now = Date.now();
+
+      const signalDoc: CascadeCandidateStateDoc = {
+        timeframe: "1m",
+        phase: "TERMINAL_SIGNAL",
+        frozenUnitAbs: 1,
+        currentWaveNumber: 2,
+        waveHistory: [],
+        currentExtreme: 100,
+        terminalStatus: "SIGNAL",
+        terminalReason: null,
+        terminalReasonText: null,
+        cancelPrice: null,
+        recoveryDistance: null,
+        recoveryUnits: null,
+        signalId: "sig-1m-only",
+        terminalAt: now,
+        lastUpdatedTs: now,
+      };
+      const result = await repo.markCandidateTerminal(
+        "casc-1monly",
+        "ETHUSDT",
+        "LONG",
+        1000,
+        signalDoc,
+        now,
+      );
+      assert.strictEqual(
+        result.allTerminal,
+        true,
+        "allTerminal must be true -- 3m/5m being permanently NOT_STARTED must NOT block this",
+      );
+
+      const found = await col.findOne({ cascadeId: "casc-1monly" });
+      assert.ok(found);
+      assert.strictEqual(
+        found!.status,
+        "CLOSED",
+        "the cascade must be CLOSED immediately -- it must never stay stuck ACTIVE forever waiting for 3m/5m that will never start",
+      );
+      assert.strictEqual(found!.candidates["3m"].phase, "NOT_STARTED");
+      assert.strictEqual(found!.candidates["5m"].phase, "NOT_STARTED");
     },
   );
 
