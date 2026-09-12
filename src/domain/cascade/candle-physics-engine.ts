@@ -97,6 +97,38 @@ export interface CandlePhysicsEntryEvent {
    *  ENTRY, per the operator's own explicit "P95 lives OUTSIDE the
    *  candle-physics engine" instruction. */
   readonly maxIndividualEventUsd: number;
+  /** Sep 11 2026 (Karo), operator-requested -- the REAL, live P95 value
+   *  that was actually used to qualify this episode's own W1 (captured
+   *  at the exact candle-close where that wave completed and passed
+   *  the P95 check -- never an entry-time snapshot), plus the specific
+   *  individual event and timestamp that qualified it. Null only in
+   *  the structurally-impossible case where ENTRY fires without a
+   *  W1 ever having been qualified (should never happen -- see the
+   *  engine's own state machine, which requires dominantWave !== null
+   *  before ENTRY can fire, and dominantWave is only ever set at W1
+   *  qualification). */
+  readonly p95AtW1Qualification: number | null;
+  readonly maxIndividualEventUsdAtW1: number | null;
+  readonly w1QualificationTs: number | null;
+}
+
+/** Sep 11 2026 (Karo), operator-requested -- diagnostic-only event for
+ *  a completed candidate that was discarded BEFORE a meaningful W1
+ *  exists (never affects any state beyond what the engine already
+ *  does internally -- the watch simply returns to NO_WAVE, ready for
+ *  the next candidate). Purely for the caller's own logging; carries
+ *  no decision. */
+export interface CandlePhysicsPreW1DiscardEvent {
+  readonly kind: "PRE_W1_DISCARD";
+  readonly symbol: string;
+  readonly victim: Side;
+  readonly candidateStartTs: number;
+  readonly candidateEndTs: number;
+  readonly eventCount: number;
+  readonly totalLiqUsd: number;
+  readonly maxIndividualEventUsd: number;
+  readonly p95AtCheck: number | null;
+  readonly reason: "DISCARDED_SINGLE_EVENT" | "DISCARDED_NO_P95";
 }
 
 export interface CandlePhysicsCancelEvent {
@@ -135,6 +167,13 @@ interface Watch {
    *  episode, before that ENTRY"). Purely tracked here; never
    *  compared against anything inside this engine. */
   episodeMaxIndividualEventUsd: number;
+  /** Sep 11 2026 (Karo), operator-requested -- the REAL, live P95 that
+   *  qualified this episode's own W1, plus the qualifying event and
+   *  timestamp. Set exactly once, at W1 qualification, never updated
+   *  again (W2/W3/etc. never re-qualify or overwrite this). */
+  p95AtW1Qualification: number | null;
+  maxIndividualEventUsdAtW1: number | null;
+  w1QualificationTs: number | null;
 }
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60_000;
@@ -213,6 +252,9 @@ export class CandlePhysicsEngine {
         pendingMaxEvent: 0,
         lastWaveCompletedAt: ts,
         episodeMaxIndividualEventUsd: 0,
+        p95AtW1Qualification: null,
+        maxIndividualEventUsdAtW1: null,
+        w1QualificationTs: null,
       };
       this.watches.set(key, w);
     }
@@ -233,7 +275,19 @@ export class CandlePhysicsEngine {
     high: number,
     low: number,
     close: number,
-  ): CandlePhysicsEntryEvent | CandlePhysicsCancelEvent | null {
+    /** Sep 11 2026 (Karo), operator-requested -- the REAL, live P95
+     *  value available RIGHT NOW, at this exact candle close (the
+     *  caller, market-data-orchestrator.ts, reads
+     *  this.liquidationStats.notionalPercentile(...) fresh on every
+     *  call -- never an entry-time-only snapshot). Only consulted at
+     *  the moment a candidate wave completes AND no meaningful W1
+     *  exists yet (dominantWave === null) -- never afterward. */
+    currentP95: number | null,
+  ):
+    | CandlePhysicsEntryEvent
+    | CandlePhysicsCancelEvent
+    | CandlePhysicsPreW1DiscardEvent
+    | null {
     const key = keyFor(symbol, victim);
     const w = this.watches.get(key);
     if (!w || w.state === "TERMINAL_CANCELLED" || w.state === "ENTERED")
@@ -333,6 +387,7 @@ export class CandlePhysicsEngine {
         w.currentWaveCandles,
         w.episodeExtreme,
       );
+      const hasNoMeaningfulW1Yet = w.dominantWave === null;
 
       // Sep 11 2026 (Karo), operator-requested -- a wave that naturally
       // completes with exactly ONE liquidation event across its whole
@@ -343,26 +398,78 @@ export class CandlePhysicsEngine {
       // back). This check runs ONLY at natural completion -- a
       // single-event candidate is still tracked normally through
       // ACTIVE/EXHAUSTING exactly as before, since more events may
-      // still arrive while it is active.
+      // still arrive while it is active. Applies REGARDLESS of
+      // whether a meaningful W1 already exists (unchanged from before).
       if (summary.totalEvents === 1) {
         w.waveNumber--;
         w.currentWaveCandles = [];
         w.currentWaveStart = null;
-        w.state = w.dominantWave === null ? "NO_WAVE" : "WAIT_NEXT_PRESSURE";
+        w.state = hasNoMeaningfulW1Yet ? "NO_WAVE" : "WAIT_NEXT_PRESSURE";
         w.lastWaveCompletedAt = candleStart;
-        return null;
+        return {
+          kind: "PRE_W1_DISCARD",
+          symbol,
+          victim,
+          candidateStartTs: summary.startTime,
+          candidateEndTs: summary.endTime,
+          eventCount: summary.totalEvents,
+          totalLiqUsd: summary.totalLiqUsd,
+          maxIndividualEventUsd: summary.maxEvent,
+          p95AtCheck: currentP95,
+          reason: "DISCARDED_SINGLE_EVENT",
+        };
       }
 
-      w.completedWaves.push(summary);
-
-      if (w.dominantWave === null) {
+      // Sep 11 2026 (Karo), operator-requested NEW RULE -- before a
+      // meaningful W1 exists, a completed multi-event wave may ONLY
+      // become that first meaningful W1/reference wave if its own
+      // largest INDIVIDUAL raw liquidation event (never cumulative
+      // wave liquidity, never episode total) reaches the REAL, live
+      // P95 available at this exact moment. A wave that fails this
+      // check is discarded exactly like the single-event case above
+      // (no wave number, no dominant, no efficiency comparison, never
+      // triggers ENTRY) -- tracking simply resumes for the next
+      // candidate. This check NEVER applies once a real W1 already
+      // exists (hasNoMeaningfulW1Yet is false) -- W2/W3/etc. continue
+      // using the EXISTING efficiency-vs-dominant comparison below,
+      // completely unaffected, with no P95 requirement of their own.
+      if (hasNoMeaningfulW1Yet) {
+        const passesP95 = currentP95 !== null && summary.maxEvent >= currentP95;
+        if (!passesP95) {
+          w.waveNumber--;
+          w.currentWaveCandles = [];
+          w.currentWaveStart = null;
+          w.state = "NO_WAVE";
+          w.lastWaveCompletedAt = candleStart;
+          return {
+            kind: "PRE_W1_DISCARD",
+            symbol,
+            victim,
+            candidateStartTs: summary.startTime,
+            candidateEndTs: summary.endTime,
+            eventCount: summary.totalEvents,
+            totalLiqUsd: summary.totalLiqUsd,
+            maxIndividualEventUsd: summary.maxEvent,
+            p95AtCheck: currentP95,
+            reason: "DISCARDED_NO_P95",
+          };
+        }
+        // Qualifies -- becomes the REAL, first meaningful W1.
+        w.completedWaves.push(summary);
         w.dominantWave = summary;
+        w.p95AtW1Qualification = currentP95;
+        w.maxIndividualEventUsdAtW1 = summary.maxEvent;
+        w.w1QualificationTs = candleStart;
         w.state = "WAIT_NEXT_PRESSURE";
         w.lastWaveCompletedAt = candleStart;
         return null;
       }
 
-      const domEff = w.dominantWave.efficiency;
+      // A meaningful W1 already exists -- EXISTING logic, completely
+      // unchanged, no P95 requirement for this wave.
+      w.completedWaves.push(summary);
+
+      const domEff = w.dominantWave!.efficiency;
       const curEff = summary.efficiency;
       if (domEff === null || curEff === null || curEff >= domEff) {
         w.dominantWave = summary;
@@ -381,9 +488,12 @@ export class CandlePhysicsEngine {
         unitAbs: w.unitAbs,
         episodeStartTs: w.episodeStartTs,
         signalWave: summary,
-        dominantWave: w.dominantWave,
+        dominantWave: w.dominantWave!,
         allWaves: w.completedWaves,
         maxIndividualEventUsd: w.episodeMaxIndividualEventUsd,
+        p95AtW1Qualification: w.p95AtW1Qualification,
+        maxIndividualEventUsdAtW1: w.maxIndividualEventUsdAtW1,
+        w1QualificationTs: w.w1QualificationTs,
       };
     }
 

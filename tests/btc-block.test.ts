@@ -5,6 +5,7 @@
  * see UserConfig.btcBlockEnabled's own doc comment for the full spec).
  */
 import * as assert from "assert";
+import * as fs from "fs";
 import { isBtcBlockedForUser } from "../src/services/signal-distributor";
 import type { GlobalSignalDoc } from "../src/domain/signal/global-signal.model";
 import type { UserConfig } from "../src/domain/user/user-config.model";
@@ -49,6 +50,9 @@ function baseSignal(overrides: Partial<GlobalSignalDoc>): GlobalSignalDoc {
     isMainExecuted: true,
     episodePlan: null,
     waveEfficiencyAnalysis: null,
+    p95AtW1Qualification: null,
+    maxIndividualEventUsdAtW1: null,
+    w1QualificationTs: null,
     unitResearch: null,
     unitCompetitionResearch: null,
     commonHorizonResearch: null,
@@ -168,6 +172,95 @@ scenario(
     const friend = baseUser({ userId: "friend", btcBlockEnabled: false });
     assert.strictEqual(isBtcBlockedForUser(signal, karo), true);
     assert.strictEqual(isBtcBlockedForUser(signal, friend), false);
+  },
+);
+
+// ─── Sep 11 2026 (Karo), operator-reported CRITICAL FIX: MAIN's own
+// real-position-opening decision + the Telegram diagnostic line must
+// both reuse this SAME per-user mechanism, never a hardcoded/
+// disconnected approximation. ───
+
+scenario(
+  "1. BTC_BLOCK active (main btcBlockEnabled=true) + ALT signal, same-side active BTC setup -- blocked",
+  () => {
+    const signal = baseSignal({
+      symbol: "SOLUSDT",
+      side: "LONG",
+      btcIntendedSideAtSignalTime: "LONG",
+    });
+    const main = baseUser({ userId: "main", btcBlockEnabled: true });
+    assert.strictEqual(isBtcBlockedForUser(signal, main), true);
+  },
+);
+
+scenario(
+  "2. BTC_BLOCK inactive (main btcBlockEnabled=false) + ALT signal -- never blocked, regardless of BTC state",
+  () => {
+    const signal = baseSignal({
+      symbol: "SOLUSDT",
+      side: "LONG",
+      btcIntendedSideAtSignalTime: "LONG",
+    });
+    const main = baseUser({ userId: "main", btcBlockEnabled: false });
+    assert.strictEqual(isBtcBlockedForUser(signal, main), false);
+  },
+);
+
+scenario(
+  "3. BTC signal itself is ALWAYS blocked when main btcBlockEnabled=true (unconditional, regardless of btcIntendedSideAtSignalTime), and NEVER blocked when false",
+  () => {
+    const signalBlocked = baseSignal({
+      symbol: "BTCUSDT",
+      side: "LONG",
+      btcIntendedSideAtSignalTime: null,
+    });
+    const mainBlocking = baseUser({ userId: "main", btcBlockEnabled: true });
+    assert.strictEqual(isBtcBlockedForUser(signalBlocked, mainBlocking), true);
+
+    const mainNotBlocking = baseUser({
+      userId: "main",
+      btcBlockEnabled: false,
+    });
+    assert.strictEqual(
+      isBtcBlockedForUser(signalBlocked, mainNotBlocking),
+      false,
+      "BTC must be free to trade normally when main's own btcBlockEnabled=false -- this is exactly the operator-observed live bug (BTC entries/closes happening while Telegram falsely implied it never trades)",
+    );
+  },
+);
+
+// Sep 11 2026 (Karo), operator-instructed REVERT -- tests 4/4b removed:
+// they asserted the BTC_BLOCK execution-gating/diagnostic wiring
+// (isMainBtcBlocked(), real btcEval on handleCandlePhysicsEntry())
+// which was never deployed to production and the operator explicitly
+// does not want implemented yet. Re-add these once that work is
+// actually requested and implemented again.
+
+scenario(
+  "5. no regression -- fixed 0.30% SL, TP=2.2R, P95 seriousness gate, and single-event discard are all still fully present and untouched by the BTC_BLOCK fix",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("private async handleCandlePhysicsEntry(");
+    const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
+    assert.ok(body.includes("FIXED_SL_PCT = 0.003"));
+    assert.ok(body.includes("REWARD_RISK_RATIO = 2.2"));
+    assert.ok(
+      body.includes("event.p95AtW1Qualification"),
+      "the P95-at-W1-qualification value (from the new engine-level rule) must still be logged",
+    );
+    assert.ok(body.includes("event.maxIndividualEventUsd"));
+
+    const engineSource = fs.readFileSync(
+      require.resolve("../src/domain/cascade/candle-physics-engine.ts"),
+      "utf8",
+    );
+    assert.ok(
+      engineSource.includes("summary.totalEvents === 1"),
+      "single-event-wave discard rule must still be present, untouched",
+    );
   },
 );
 

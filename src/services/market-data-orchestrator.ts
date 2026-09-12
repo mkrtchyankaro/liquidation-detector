@@ -423,6 +423,11 @@ export class MarketDataOrchestrator {
       // any (symbol,victim) with no active watch.
       if (c.interval === "1m" && c.isClosed) {
         for (const victim of ["LONG", "SHORT"] as const) {
+          const currentP95 = this.liquidationStats.notionalPercentile(
+            c.symbol,
+            victim,
+            95,
+          );
           const result = this.candlePhysics.onClosedCandle(
             c.symbol,
             victim,
@@ -431,11 +436,14 @@ export class MarketDataOrchestrator {
             c.high,
             c.low,
             c.close,
+            currentP95,
           );
           if (result?.kind === "ENTRY")
             void this.handleCandlePhysicsEntry(result);
           else if (result?.kind === "CANCEL")
             this.handleCandlePhysicsCancel(result);
+          else if (result?.kind === "PRE_W1_DISCARD")
+            this.handleCandlePhysicsPreW1Discard(result);
         }
       }
     });
@@ -986,42 +994,38 @@ export class MarketDataOrchestrator {
     event: import("../domain/cascade/candle-physics-engine").CandlePhysicsEntryEvent,
   ): Promise<void> {
     try {
-      // Sep 11 2026 (Karo), operator-requested -- P95 FINAL SERIOUSNESS
-      // GATE, restored as ONLY a permission check immediately before
-      // ENTRY. Uses the SAME existing P95 source as everywhere else in
-      // this file (this.liquidationStats.notionalPercentile(...,95)) --
-      // no new calculation, no retuning. Compared against the largest
-      // SINGLE raw liquidation event seen anywhere in the episode
-      // (event.maxIndividualEventUsd, tracked by the candle-physics
-      // engine itself, never against cumulative wave/episode totals).
-      // The engine's own wave-detection/exhaustion/dominant-wave logic
-      // is completely untouched -- this check runs strictly AFTER
-      // physics already decided ENTRY, and can only downgrade that
-      // decision to NO_P95_EVENT, never upgrade a physics non-entry.
-      const p95Gate = this.liquidationStats.notionalPercentile(
-        event.symbol,
-        event.victim,
-        95,
+      // Sep 11 2026 (Karo), operator-requested -- the OLD final-entry
+      // P95 gate (which compared event.maxIndividualEventUsd against a
+      // FRESH P95 read at ENTRY time, and could still reject ENTRY
+      // even after physics decided it) is REMOVED. It is now
+      // structurally redundant: the candle-physics engine itself
+      // (candle-physics-engine.ts) already guarantees that a
+      // meaningful W1 can only ever be established when its own
+      // largest individual event reached the REAL, live P95 available
+      // at THAT wave's own completion moment (see
+      // event.p95AtW1Qualification / event.maxIndividualEventUsdAtW1
+      // below) -- ENTRY is structurally impossible without a
+      // legitimately-qualified W1 already existing (dominantWave is
+      // never null at ENTRY). A second, independent P95 check here
+      // would be double-gating the SAME underlying rule at a
+      // different point in time, which the operator explicitly does
+      // not want. This is now purely an informational log.
+      log.info(
+        {
+          symbol: event.symbol,
+          victim: event.victim,
+          p95AtW1Qualification: event.p95AtW1Qualification,
+          maxIndividualEventUsdAtW1: event.maxIndividualEventUsdAtW1,
+          w1QualificationTs: event.w1QualificationTs,
+          episodeTotalLiqUsd: event.allWaves.reduce(
+            (s, w) => s + w.totalLiqUsd,
+            0,
+          ),
+          waveCount: event.allWaves.length,
+          eventCount: event.allWaves.reduce((s, w) => s + w.totalEvents, 0),
+        },
+        "[W1_P95_QUALIFICATION]",
       );
-      if (p95Gate === null || event.maxIndividualEventUsd < p95Gate) {
-        log.info(
-          {
-            symbol: event.symbol,
-            victim: event.victim,
-            p95: p95Gate,
-            maxIndividualEventUsd: event.maxIndividualEventUsd,
-            episodeTotalLiqUsd: event.allWaves.reduce(
-              (s, w) => s + w.totalLiqUsd,
-              0,
-            ),
-            waveCount: event.allWaves.length,
-            eventCount: event.allWaves.reduce((s, w) => s + w.totalEvents, 0),
-          },
-          "[NO_P95_EVENT]",
-        );
-        this.candlePhysics.clearTerminal(event.symbol, event.victim);
-        return;
-      }
 
       const atr15mAbs = this.atrTracker.getATR(event.symbol, "15m") ?? 0;
       const baseline =
@@ -1106,6 +1110,27 @@ export class MarketDataOrchestrator {
         (sum, w) => sum + w.totalLiqUsd,
         0,
       );
+
+      // Sep 11 2026 (Karo), operator-reported CRITICAL FIX -- the
+      // candle-physics engine's own entry point never evaluated the
+      // EXISTING, intended V5_BTC_BLOCK mechanism at all: BTC's own
+      // signals could actually execute (contradicting "BTC never
+      // trades when V5_BTC_BLOCK=true"), ALT signals were never
+      // blocked even with an active same-side BTC setup, and the
+      // Telegram diagnostic line was a disconnected hardcode (always
+      // "YES, unconditionally" for BTCUSDT, always "NO" for every ALT
+      // since btcIntendedSideAtSignalTime was hardcoded null). This
+      // reuses the EXISTING, already-correct mechanism the legacy V5
+      // path already has (this.v5.getBtcWatchVictim() +
+      // Sep 11 2026 (Karo), operator-instructed REVERT -- BTC_BLOCK
+      // execution-gating/diagnostic-wiring (isMainBtcBlocked(),
+      // evaluateBtcOpposingWatchSafe(), real btcSafetyStatus/
+      // btcIntendedSideAtSignalTime) was NEVER deployed to production
+      // and the operator explicitly does not want it implemented yet
+      // (their own desired future change is Telegram-diagnostic-only,
+      // with zero execution impact, and they have not asked for it to
+      // be implemented). Reverted back to the ORIGINAL, pre-BTC_BLOCK-
+      // work state so this file matches what is ACTUALLY deployed.
       const willExecuteAsMain = !this.mainSymbolLocks.has(event.symbol);
       const v5Waves = this.candlePhysicsWavesToV5Waves(
         event.allWaves,
@@ -1205,6 +1230,9 @@ export class MarketDataOrchestrator {
         isMainExecuted: willExecuteAsMain,
         episodePlan: null,
         waveEfficiencyAnalysis: null,
+        p95AtW1Qualification: event.p95AtW1Qualification,
+        maxIndividualEventUsdAtW1: event.maxIndividualEventUsdAtW1,
+        w1QualificationTs: event.w1QualificationTs,
         createdAt: Date.now(),
       };
 
@@ -1279,6 +1307,33 @@ export class MarketDataOrchestrator {
       `[CANDLE_PHYSICS_CANCEL] ${event.symbol} ${event.victim} reason=${event.reason} episodeStartTs=${event.episodeStartTs} cancelTs=${event.cancelTs} completedWaves=${event.allWaves.length}`,
     );
     this.candlePhysics.clearTerminal(event.symbol, event.victim);
+  }
+
+  /** Sep 11 2026 (Karo), operator-requested -- diagnostic-only log for
+   *  every completed candidate discarded BEFORE a meaningful W1 exists
+   *  (either single-event, or multi-event but below the live P95).
+   *  Never itself changes any state -- the engine already reset the
+   *  watch to NO_WAVE/WAIT_NEXT_PRESSURE internally; this call exists
+   *  purely so the operator's own explicit per-candidate diagnostic
+   *  requirement (symbol, victim, start/end, eventCount, totalLiqUsd,
+   *  maxIndividualEventUsd, current P95, result) is visible in logs. */
+  private handleCandlePhysicsPreW1Discard(
+    event: import("../domain/cascade/candle-physics-engine").CandlePhysicsPreW1DiscardEvent,
+  ): void {
+    log.info(
+      {
+        symbol: event.symbol,
+        victim: event.victim,
+        candidateStartTs: event.candidateStartTs,
+        candidateEndTs: event.candidateEndTs,
+        eventCount: event.eventCount,
+        totalLiqUsd: event.totalLiqUsd,
+        maxIndividualEventUsd: event.maxIndividualEventUsd,
+        p95AtCheck: event.p95AtCheck,
+        result: event.reason,
+      },
+      "[PRE_W1_DISCARD]",
+    );
   }
 
   private async handleCascadeSignalReady(
@@ -1547,6 +1602,9 @@ export class MarketDataOrchestrator {
         isMainExecuted: willExecuteAsMain,
         episodePlan: episodePlanCalc,
         waveEfficiencyAnalysis,
+        p95AtW1Qualification: null,
+        maxIndividualEventUsdAtW1: null,
+        w1QualificationTs: null,
         createdAt: Date.now(),
       };
 
@@ -2566,6 +2624,9 @@ export class MarketDataOrchestrator {
         timeframe: null,
         episodePlan: null,
         waveEfficiencyAnalysis: null,
+        p95AtW1Qualification: null,
+        maxIndividualEventUsdAtW1: null,
+        w1QualificationTs: null,
         isMainExecuted: true,
         symbol: event.symbol,
         side: event.side,
@@ -2720,6 +2781,9 @@ export class MarketDataOrchestrator {
       timeframe: null,
       episodePlan: null,
       waveEfficiencyAnalysis: null,
+      p95AtW1Qualification: null,
+      maxIndividualEventUsdAtW1: null,
+      w1QualificationTs: null,
       isMainExecuted: false,
       victim: watch.victim,
       signalTs: watch.createdAt,

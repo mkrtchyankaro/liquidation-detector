@@ -72,6 +72,17 @@ export interface GlobalSignalDoc {
   waveEfficiencyAnalysis:
     | import("../trading/wave-efficiency-analysis").WaveEfficiencyAnalysis
     | null;
+  /** Sep 11 2026 (Karo), operator-requested -- the REAL, live P95 that
+   *  qualified this episode's own first meaningful W1 (captured at the
+   *  exact candle-close where that wave completed and passed the P95
+   *  check -- never an entry-time-only snapshot), plus the qualifying
+   *  individual event and timestamp. Lets list-candle-physics-signals.js
+   *  print the TRUE W1-qualification P95 rather than approximating it
+   *  with the (single, entry-time) p95AtEntry/p95AtQualification
+   *  snapshot above. Null for the legacy, non-cascade V5 path. */
+  p95AtW1Qualification: number | null;
+  maxIndividualEventUsdAtW1: number | null;
+  w1QualificationTs: number | null;
 
   waveHistory: V5Wave[];
   w1Diagnostics: V5Wave1Diagnostics | null;

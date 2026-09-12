@@ -473,7 +473,7 @@ async function main(): Promise<void> {
   );
 
   await scenario(
-    "operator-requested (P95 final seriousness gate): handleCandlePhysicsEntry() checks P95 FIRST, before any signal construction, comparing event.maxIndividualEventUsd (an INDIVIDUAL event, never cumulative) against this.liquidationStats.notionalPercentile(...,95) -- the SAME existing P95 source used elsewhere",
+    "operator-requested (P95 now qualifies W1 at the engine level, NOT a final entry-time gate): handleCandlePhysicsEntry() no longer performs its own P95 comparison -- it only LOGS the engine's own p95AtW1Qualification/maxIndividualEventUsdAtW1, never a second, redundant gate",
     () => {
       const source = fs.readFileSync(
         require.resolve("../src/services/market-data-orchestrator.ts"),
@@ -482,43 +482,29 @@ async function main(): Promise<void> {
       const idx = source.indexOf("private async handleCandlePhysicsEntry(");
       assert.ok(idx > -1);
       const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
-      const p95Idx = body.indexOf("notionalPercentile");
-      const atrIdx = body.indexOf("this.atrTracker.getATR");
       assert.ok(
-        p95Idx > -1,
-        "must call the existing notionalPercentile() P95 source",
+        body.includes("event.p95AtW1Qualification"),
+        "must log the engine's own real W1-qualification P95",
       );
       assert.ok(
-        atrIdx > -1,
-        "the rest of the function (ATR, SL/TP, signal construction) must still be present",
+        body.includes("event.maxIndividualEventUsdAtW1"),
+        "must log the engine's own real W1-qualifying individual event",
       );
       assert.ok(
-        p95Idx < atrIdx,
-        "the P95 gate must run FIRST, before any downstream signal-construction work",
+        !body.includes("NO_P95_EVENT"),
+        "the OLD final-entry P95 gate/rejection must be gone -- P95 now only qualifies W1, at the engine level, never a second gate here",
       );
       assert.ok(
-        body.includes("event.maxIndividualEventUsd"),
-        "must compare against the INDIVIDUAL max event, not a cumulative sum",
-      );
-      assert.ok(
-        !/totalLiqUsd\s*<\s*p95|episodeTotal.*<.*p95|p95.*>.*totalLiqUsd/.test(
-          body.slice(0, atrIdx),
+        !/this\.liquidationStats\.notionalPercentile\(event\.symbol, event\.victim, 95\)/.test(
+          body.slice(0, body.indexOf("this.atrTracker.getATR")),
         ),
-        "must never gate on cumulative wave/episode totals vs P95",
-      );
-      assert.ok(
-        body.includes("NO_P95_EVENT"),
-        "must use the clear NO_P95_EVENT diagnostic reason",
-      );
-      assert.ok(
-        body.slice(0, atrIdx).includes("this.candlePhysics.clearTerminal("),
-        "a P95 rejection must cleanly release the watch, never leaving an orphan candidate/lock",
+        "must never independently recompute/compare P95 before ATR/SL/TP construction anymore",
       );
     },
   );
 
   await scenario(
-    "operator-requested: the P95 gate touches ONLY handleCandlePhysicsEntry()'s own entry point -- SL/TP construction, hydrateActiveTrade, and distribute() remain completely present and unchanged downstream of the gate",
+    "operator-requested: the removed P95 gate touches ONLY handleCandlePhysicsEntry()'s own entry point -- SL/TP construction, hydrateActiveTrade, and distribute() remain completely present and unchanged downstream",
     () => {
       const source = fs.readFileSync(
         require.resolve("../src/services/market-data-orchestrator.ts"),
