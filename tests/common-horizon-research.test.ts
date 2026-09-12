@@ -254,7 +254,7 @@ scenario(
 );
 
 scenario(
-  "structural: V5WaveService's own onLiquidation()/onTick() calls are NEVER gated by productionSignalsEnabled -- the state machine must keep running unconditionally for research's own episode-detection to keep working",
+  "structural: V5WaveService's own onLiquidation() call is now fully disconnected (Sep 12 2026 legacy-shadow cleanup, confirmed safe -- its own downstream research consumer, feedUnitResearchShadowAfter, was ALREADY disconnected before this change); onTick() remains connected, unconditionally, never gated by productionSignalsEnabled",
   () => {
     const source = fs.readFileSync(
       require.resolve("../src/services/market-data-orchestrator.ts"),
@@ -270,13 +270,14 @@ scenario(
     const v5OnTickLine = codeOnly
       .split("\n")
       .find((l) => l.includes("this.v5.onTick("));
-    assert.ok(
-      v5OnLiqLine && !v5OnLiqLine.includes("productionSignalsEnabled"),
-      "v5.onLiquidation() call itself must not be gated",
+    assert.strictEqual(
+      v5OnLiqLine,
+      undefined,
+      "v5.onLiquidation() must have NO executable (non-comment) call-site anymore -- fully disconnected, per the Sep 12 2026 legacy-shadow cleanup",
     );
     assert.ok(
       v5OnTickLine && !v5OnTickLine.includes("productionSignalsEnabled"),
-      "v5.onTick() call itself must not be gated",
+      "v5.onTick() call itself must not be gated -- left connected, its own side effects confirmed harmless once onLiquidation() no longer feeds it new watches",
     );
   },
 );

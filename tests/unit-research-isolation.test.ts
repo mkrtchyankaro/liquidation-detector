@@ -200,7 +200,7 @@ scenario(
 );
 
 scenario(
-  "structural: this.v5.onTick()/onLiquidation()/evaluateSignal() each appear EXACTLY where production calls them -- shadow code adds no additional call to any of these write-capable methods",
+  "structural: this.v5.onTick()/evaluateSignal() still appear EXACTLY where production calls them; this.v5.onLiquidation() is now fully disconnected (Sep 12 2026 legacy-shadow cleanup) -- shadow code adds no additional call to any of these write-capable methods",
   () => {
     const source = fs.readFileSync(
       require.resolve("../src/services/market-data-orchestrator.ts"),
@@ -228,15 +228,21 @@ scenario(
       1,
       `this.v5.onTick( must appear exactly once (production only) -- found ${countOnTick}`,
     );
+    // Sep 12 2026 (Karo), operator-requested cleanup -- the OLD, legacy
+    // 1x-UNIT-recovery signal-GENERATION entry point is now disconnected
+    // (commented out, matching this project's own established "do not
+    // delete, just stop calling" convention). It must never be called
+    // from executable code anymore -- this is the exact fix this test
+    // now guards.
     assert.strictEqual(
       countOnLiquidation,
-      1,
-      `this.v5.onLiquidation( must appear exactly once (production only) -- found ${countOnLiquidation}`,
+      0,
+      `this.v5.onLiquidation( must be fully disconnected (0 executable calls) -- found ${countOnLiquidation}`,
     );
     assert.strictEqual(
       countEvaluateSignal,
       1,
-      `this.v5.evaluateSignal( must appear exactly once (production only) -- found ${countEvaluateSignal}`,
+      `this.v5.evaluateSignal( call-site itself is untouched (now naturally unreachable dead code, never deleted) -- found ${countEvaluateSignal}`,
     );
     const countGetWatch = (codeOnly.match(/this\.v5\.getWatch\(/g) ?? [])
       .length;

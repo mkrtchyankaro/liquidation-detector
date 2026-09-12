@@ -493,8 +493,34 @@ export class MarketDataOrchestrator {
         l.symbol,
         victimForShadow,
       );
-      const outcomes = this.v5.onLiquidation(l);
-      for (const outcome of outcomes) void this.handleTickOutcome(outcome);
+      // Sep 12 2026 (Karo), operator-requested CLEANUP -- the OLD,
+      // legacy 1x-UNIT-recovery V5WaveService signal-GENERATION path
+      // (this.v5.onLiquidation(), which builds/tracks its own separate
+      // `watches` state and can emit TERMINAL_NON_SIGNAL outcomes like
+      // CANCEL_NO_SECOND_WAVE/CASCADE_NOT_SERIOUS via handleTickOutcome()
+      // -> persistTerminalNonSignal()) is DISCONNECTED here, matching
+      // this project's own established "do not delete, just stop
+      // calling" convention (see feedCascade/feedUnitResearchShadowAfter
+      // immediately below, disconnected the exact same way). Audited
+      // and confirmed safe before this change: this.v5's OWN SEPARATE
+      // `activeTrades` map (hydrateActiveTrade()/onPriceTickForTrades(),
+      // MAIN's own real trade CLOSE-tracking) is a COMPLETELY DIFFERENT
+      // data structure, never touched by onLiquidation() or this
+      // disconnection -- MAIN's own TP/SL close-detection is entirely
+      // unaffected. this.v5.onTick() (bookTicker handler, below) keeps
+      // running unchanged, but becomes a guaranteed no-op for its own
+      // signal-generation side (its `watches` map can never be
+      // populated again) since onLiquidation() no longer creates any
+      // new watch -- it is left connected rather than also disconnected,
+      // since its own harmless side effects (lastBtcPrice/lastPriceAt,
+      // confirmed never read by anything else) are cheaper to leave
+      // alone than to risk touching. getBtcWatchVictim() (used only
+      // inside the old evaluateSignal(), itself only reachable from a
+      // SIGNAL_CANDIDATE outcome that can now never occur) and
+      // persistTerminalNonSignal() become naturally unreachable dead
+      // code paths as a result -- neither needed to be touched directly.
+      // const outcomes = this.v5.onLiquidation(l);
+      // for (const outcome of outcomes) void this.handleTickOutcome(outcome);
       void wasTrackedBeforeProduction; // no longer consumed -- its only reader (feedUnitResearchShadowAfter) is disconnected below; kept computed, untouched, not deleted
       // Sep 10 2026 (Karo), operator-requested: old research (unitResearch
       // shadow3m/shadow5m + the earlier dragon competition) DISCONNECTED
