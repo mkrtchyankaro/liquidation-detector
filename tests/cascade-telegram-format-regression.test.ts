@@ -269,28 +269,27 @@ scenario(
       !message.includes("Wave 2 of 0"),
       "must never show a zero-length wave chain",
     );
-    // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- the OLD
-    // "trigger: X% recovery, extremeDistanceAtr=Y" chain-line is
-    // REPLACED for cascade signals with a simplified, honest
-    // "V5 Chain: Signal on Wave N of M" line (see signal.formatter.ts's
-    // own doc comment for why the old fields are not meaningful in the
-    // cascade model). Assert the NEW line, and that the old, misleading
-    // fields never appear at all.
+    // Sep 11 2026 (Karo), operator-requested Telegram redesign -- the
+    // OLD "V5 Chain: Signal on Wave N of M" / "Dominant layer.../
+    // Exhaustion layer..." lines are REMOVED entirely (both cascade and
+    // legacy signals now render the SAME compact P95/Episode/per-wave
+    // block -- see signal.formatter.ts's own header). Assert those old
+    // lines are gone, and the new compact fields are present instead.
     assert.ok(
-      message.includes("V5 Chain: Signal on Wave 4 of 4"),
-      "must show the simplified, honest chain line for a cascade signal",
+      !message.includes("V5 Chain:"),
+      "the old 'V5 Chain' line must never appear anymore",
     );
     assert.ok(
       !message.includes("trigger:"),
-      "the old, non-meaningful trigger-recovery-percent line must never appear for a cascade signal",
+      "the old, non-meaningful trigger-recovery-percent line must never appear",
     );
     assert.ok(
-      !message.includes("extremeDistanceAtr"),
-      "the old, misleading extremeDistanceAtr field must never appear for a cascade signal",
+      !message.includes("Dominant layer"),
+      "the old 'Dominant layer' wording must never appear anymore",
     );
     assert.ok(
-      !message.includes("Dominant layer: $0 (Wave null)"),
-      "dominant layer must never show $0/Wave null",
+      !message.includes("Exhaustion layer"),
+      "the old 'Exhaustion layer' wording must never appear anymore",
     );
     assert.ok(
       !message.includes("Plan rejected: unknown"),
@@ -300,17 +299,10 @@ scenario(
       message.includes("🟢"),
       "a valid plan must render as an executed ENTRY (green), not a rejected SIGNAL",
     );
+    assert.ok(message.includes("W4 ·"), "must show the real, final wave (W4)");
     assert.ok(
-      message.includes("Wave 4 of 4"),
-      "must show the real wave count (4) and the real entry wave (4)",
-    );
-    assert.ok(
-      message.includes("Dominant layer: $220k (Wave 3)"),
-      "must show the REAL dominant wave (W3, the largest at 220k)",
-    );
-    assert.ok(
-      message.includes("Exhaustion layer: $180k (Wave 4)"),
-      "must show the real exhaustion/trigger wave",
+      message.includes("$220k"),
+      "must show W3's own real liquidation total somewhere in the compact wave listing",
     );
   },
 );
@@ -334,10 +326,6 @@ scenario(
       !message.includes("Wave 2 of 0"),
       "even a rejected plan must show the real wave chain, never a zero-length one",
     );
-    assert.ok(
-      !message.includes("Dominant layer: $0 (Wave null)"),
-      "dominant layer must be populated even for a rejected plan",
-    );
   },
 );
 
@@ -349,7 +337,7 @@ scenario(
     const message = formatV5EntryMessage(event);
 
     assert.ok(
-      message.includes("W1: anchor=2000"),
+      message.includes("anchor 2000"),
       "Wave 1's own real anchor must appear",
     );
     assert.ok(
@@ -357,7 +345,7 @@ scenario(
       "Wave 1's own real liquidation total must appear",
     );
     assert.ok(
-      message.includes("W3: anchor=1986"),
+      message.includes("anchor 1986"),
       "Wave 3's own real anchor must appear",
     );
     assert.ok(
@@ -367,25 +355,29 @@ scenario(
   },
 );
 
-// ─── Operator-requested: Candidate-timeframe line ──────────────────────
+// ─── Sep 11 2026 (Karo), operator-requested Telegram redesign: the
+// "Candidate: Xm" line is REMOVED entirely from ENTRY (per-symbol
+// timeframe is no longer shown at all -- see signal.formatter.ts's
+// own header). These tests now confirm its ABSENCE, for every
+// timeframe, cascade or legacy. ───
 
 for (const tf of ["1m", "3m", "5m"] as const) {
   scenario(
-    `a cascade signal with timeframe="${tf}" shows "Candidate: ${tf}" in the Telegram message`,
+    `a cascade signal with timeframe="${tf}" never shows a "Candidate:" line anymore (removed in the Sep 11 2026 redesign)`,
     () => {
       const doc = { ...buildCascadeSignalDoc(true), timeframe: tf };
       const event = toV5SignalEventShape(doc);
       const message = formatV5EntryMessage(event);
       assert.ok(
-        message.includes(`Candidate: ${tf}`),
-        `must show the real, persisted timeframe (${tf}), never a different/inferred one`,
+        !message.includes("Candidate:"),
+        `the Candidate line must be gone for timeframe=${tf}`,
       );
     },
   );
 }
 
 scenario(
-  "a legacy, non-cascade signal (timeframe=null) shows NO Candidate line at all -- the existing V5 format is completely unaffected",
+  "a legacy, non-cascade signal (timeframe=null) also never shows a Candidate line (unaffected, since it never had one)",
   () => {
     const doc = {
       ...buildCascadeSignalDoc(true),
@@ -402,7 +394,7 @@ scenario(
 );
 
 scenario(
-  "a legacy, non-cascade signal with REAL selectedRecoveryPct/extremeDistanceAtr values still shows the OLD 'reclaimed...trigger:...' line, completely unaffected by the cascade-signal simplification",
+  "a legacy, non-cascade signal renders the SAME new compact format as a cascade signal -- the old 'reclaimed...trigger:...' wording is gone for BOTH paths now",
   () => {
     const waveHistory = buildCascadeSignalDoc(true).waveHistory.map(
       (w, i, arr) =>
@@ -423,20 +415,20 @@ scenario(
     const event = toV5SignalEventShape(doc);
     const message = formatV5EntryMessage(event);
     assert.ok(
-      message.includes("reclaimed on Wave"),
-      "the legacy signal must keep its own OLD chain-line wording",
+      !message.includes("reclaimed on Wave"),
+      "the old chain-line wording must be gone for the legacy path too, after the redesign",
     );
     assert.ok(
-      message.includes("trigger: 100% recovery"),
-      "the legacy signal's own REAL selectedRecoveryPct must still render",
+      !message.includes("trigger:"),
+      "the old trigger-recovery-percent wording must be gone for the legacy path too",
     );
     assert.ok(
-      message.includes("extremeDistanceAtr=1.234"),
-      "the legacy signal's own REAL extremeDistanceAtr must still render",
+      !message.includes("extremeDistanceAtr="),
+      "the old extremeDistanceAtr field must be gone from the message body for the legacy path too",
     );
     assert.ok(
-      !message.includes("V5 Chain: Signal on Wave"),
-      "the legacy signal must never use the new, simplified cascade-only line",
+      message.includes("SignalId:"),
+      "the new compact format (SignalId, P95, Episode, per-wave lines) must render instead",
     );
   },
 );
@@ -461,22 +453,14 @@ scenario(
 );
 
 scenario(
-  "the Candidate line appears immediately after the title line, before Entry/SL/TP -- matching the operator's own requested placement",
+  "SignalId appears in the ENTRY message, directly (Sep 11 2026 redesign requirement)",
   () => {
     const doc = { ...buildCascadeSignalDoc(true), timeframe: "3m" as const };
     const event = toV5SignalEventShape(doc);
     const message = formatV5EntryMessage(event);
-    const lines = message.split("\n");
-    const titleIdx = lines.findIndex((l) => l.includes("V5 ENTRY"));
-    const candidateIdx = lines.findIndex((l) => l.includes("Candidate:"));
-    const entryIdx = lines.findIndex((l) => l.startsWith("Entry:"));
     assert.ok(
-      titleIdx >= 0 && candidateIdx === titleIdx + 1,
-      "Candidate line must come immediately after the title line",
-    );
-    assert.ok(
-      candidateIdx < entryIdx,
-      "Candidate line must come before the Entry line",
+      message.includes(`SignalId: ${doc.signalId}`),
+      "the real signalId must appear directly in the ENTRY message body",
     );
   },
 );

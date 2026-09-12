@@ -96,6 +96,15 @@ export interface V5SignalEvent {
    *  signal time -- purely informational, always populated regardless
    *  of v5BtcBlockEnabled(). */
   btcIntendedSideAtSignalTime: Side | null;
+  /** Sep 11 2026 (Karo), operator-requested Telegram-formatter-only
+   *  redesign -- ADDITIVE, purely for display. Present at runtime for
+   *  every candle-physics signal via toV5SignalEventShape()'s own
+   *  `...doc` spread (GlobalSignalDoc already carries these -- see
+   *  that field's own doc comment there); undefined for the legacy,
+   *  non-cascade V5 path. Declared here so the formatter can read them
+   *  with normal type safety instead of an `as any` cast. */
+  p95AtW1Qualification?: number | null;
+  maxIndividualEventUsdAtW1?: number | null;
   plan: {
     entry: number;
     tp: number;

@@ -86,8 +86,8 @@ for (const tf of ["1m", "3m", "5m"] as const) {
         close.trade.signalId,
       );
       assert.ok(
-        message.includes(`Candidate: ${tf}`),
-        `the Telegram CLOSE message must show Candidate: ${tf}`,
+        !message.includes("Candidate:"),
+        "the Candidate line must be gone from CLOSE messages after the redesign",
       );
       assert.ok(message.includes("✅ V5 CLOSE"), "must be a TP close message");
       assert.ok(
@@ -140,13 +140,16 @@ for (const tf of ["1m", "3m", "5m"] as const) {
         close.trade.timeframe,
         close.trade.signalId,
       );
-      assert.ok(message.includes(`Candidate: ${tf}`));
+      assert.ok(
+        !message.includes("Candidate:"),
+        "the Candidate line must be gone from CLOSE messages after the redesign",
+      );
       assert.ok(message.includes("❌ V5 CLOSE"));
     },
   );
 
   scenario(
-    `${tf} cascade signal: timeframe survives a simulated restart (hydrateActiveTrade() called fresh, from persisted doc-shaped data, exactly like hydrateMainLocks() does) and still closes/shows Candidate: ${tf} correctly`,
+    `${tf} cascade signal: timeframe survives a simulated restart (hydrateActiveTrade() called fresh, from persisted doc-shaped data, exactly like hydrateMainLocks() does) and CLOSE still shows the correct real trade data (Candidate line itself removed in the Sep 11 2026 redesign)`,
     () => {
       const persistedDoc = {
         signalId: `sig-${tf}-restart`,
@@ -210,8 +213,8 @@ for (const tf of ["1m", "3m", "5m"] as const) {
         closes[0]!.trade.signalId,
       );
       assert.ok(
-        message.includes(`Candidate: ${tf}`),
-        "after restart, the CLOSE message must still show the correct candidate",
+        !message.includes("Candidate:"),
+        "the Candidate line must be gone from CLOSE messages after the redesign, even after restart",
       );
     },
   );

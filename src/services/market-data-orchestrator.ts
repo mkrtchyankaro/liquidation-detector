@@ -2548,6 +2548,7 @@ export class MarketDataOrchestrator {
             close.trade.entryWaveNumber,
             close.trade.timeframe,
             close.trade.signalId,
+            close.closeTs - close.trade.openedAt,
           );
           await this.mainTelegram.sendMessage(message);
         } catch (err) {
