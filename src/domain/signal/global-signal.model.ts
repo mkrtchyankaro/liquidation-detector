@@ -138,6 +138,27 @@ export interface GlobalSignalDoc {
     priceAtSignal: number | null;
     oiAtSignal: number | null;
   } | null;
+  /** Sep 12 2026 (Karo), operator-requested research-persistence audit
+   *  -- ADDITIVE, episode-level, ENTRY-TIME-ONLY snapshot (never a
+   *  per-wave historical reconstruction -- see this project's own
+   *  AggressiveFlowService/OiTrackerService doc comments for why a
+   *  per-wave value cannot be honestly derived retroactively: the
+   *  taker-flow ring only retains 30s, and OI is a live-polled single
+   *  current value, neither has per-wave history). Each sub-field is
+   *  null when the underlying live service itself has no data yet
+   *  (cold start / stale), never a fabricated 0. Purely observational
+   *  -- read once at signal-construction time, never influences any
+   *  wave/entry/execution decision. Null entirely for the legacy,
+   *  non-cascade V5 path (that path already has its own, unrelated
+   *  context fields above). */
+  marketContextAtEntry: {
+    takerFlowLast30sBuyUsd: number | null;
+    takerFlowLast30sSellUsd: number | null;
+    takerFlowLast30sImbalance: number | null;
+    takerVolumeRollingMedianPerMinUsd: number | null;
+    oiCurrentContracts: number | null;
+    oiRollingMedianChangeContracts: number | null;
+  } | null;
   liq24hContext: { dayLiqTotalUsd: number; dayLiqEvents: number } | null;
   wallContext: {
     topBidNotional: number;

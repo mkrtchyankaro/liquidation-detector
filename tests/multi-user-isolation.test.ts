@@ -85,6 +85,7 @@ function makeGlobalSignal(signalId: string): GlobalSignalDoc {
     isMainExecuted: true,
     episodePlan: null,
     waveEfficiencyAnalysis: null,
+    marketContextAtEntry: null,
     p95AtW1Qualification: null,
     maxIndividualEventUsdAtW1: null,
     w1QualificationTs: null,

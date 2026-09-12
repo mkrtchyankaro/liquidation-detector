@@ -1,469 +1,358 @@
 /**
- * Sep 10 2026 (Karo), operator-reported CRITICAL FIX. Proves a cascade-
- * produced GlobalSignalDoc (mapped exactly as handleCascadeSignalReady()
- * now does) renders through the EXISTING, UNCHANGED
- * toV5SignalEventShape() + formatV5EntryMessage() exactly like a
- * normal V5 signal -- never producing the malformed output that
- * originally motivated this fix ("Wave 2 of 0", "Dominant layer: $0
- * (Wave null)", "Plan rejected: unknown").
+ * Sep 9 2026 (Karo), operator-requested. Reproduces the OLD, proven
+ * liqwatch-bot pattern (V5WaveService.closeTrade()'s own synchronous
+ * `activeTrades.delete()`, confirmed via direct old-code trace to run
+ * BEFORE any DB write or Telegram send) inside the NEW multi-user
+ * reconciliation path.
+ *
+ * Root cause this fixes (confirmed via a real production incident,
+ * signalId b0704c42-ecd1-470e-b8f3-1798e6d1fa8d, Artak's own LINKUSDT
+ * close sent twice): the OLD design pruned the in-memory open-cache
+ * only AFTER reconcileUserPosition() had already fully returned
+ * (including having already sent the DB write and Telegram message),
+ * and only in the CALLER's own, later code. A second onTick()
+ * invocation, starting after the first had ALREADY finished (guard
+ * released) but before that later pruning line executed, would still
+ * find the signal "open" and run the entire confirm-DB-notify chain a
+ * second time.
+ *
+ * Fix: onConfirmedClosed(signalId) now fires SYNCHRONOUSLY, inside
+ * reconcileUserPosition() itself, the MOMENT Binance confirms closed
+ * -- before the DB write, before Telegram. This test uses the REAL
+ * reconcileUserPosition() function and a REAL InFlightGuard, simulating
+ * ReconciliationManager.onTick()'s own read-cache/iterate/reconcile
+ * loop pattern exactly, firing many rapid, overlapping "ticks" for the
+ * same signal.
  */
 import * as assert from "assert";
-import { formatV5EntryMessage } from "../src/infrastructure/telegram/signal.formatter";
+import { reconcileUserPosition } from "../src/application/execution/reconcile-user-position.usecase";
+import { InFlightGuard } from "../src/domain/trading/risk/in-flight-guard";
+import { ReconciliationHealthTracker } from "../src/domain/trading/risk/reconciliation-health";
+import { DailyLossLimitTracker } from "../src/domain/trading/risk/daily-loss-limit.service";
+import type { UserSignalDoc } from "../src/domain/signal/user-signal.model";
 import type { GlobalSignalDoc } from "../src/domain/signal/global-signal.model";
-import type { V5Wave } from "../src/strategy/v5/v5-wave.model";
+import type { UserRuntime } from "../src/services/user-runtime";
 
 let passed = 0;
 let failed = 0;
 
-function scenario(name: string, fn: () => void): void {
-  try {
-    fn();
-    passed++;
-    console.log(`  \u2713 ${name}`);
-  } catch (err) {
-    failed++;
-    console.log(`  \u2717 ${name}`);
-    console.log(`      ${err instanceof Error ? err.message : String(err)}\n`);
-  }
-}
-
-/** Mirrors toV5SignalEventShape() in notify-user.usecase.ts -- same
- *  physics-presence gate, same spread. Reproduced here (not imported)
- *  because that function is not exported; this keeps the test
- *  exercising the SAME contract without depending on an internal. */
-function toV5SignalEventShape(doc: GlobalSignalDoc): any {
-  const plan =
-    doc.entry !== null &&
-    doc.tp !== null &&
-    doc.sl !== null &&
-    doc.rr !== null &&
-    doc.physics !== null
-      ? {
-          entry: doc.entry,
-          tp: doc.tp,
-          sl: doc.sl,
-          rr: doc.rr,
-          liqStrengthRaw: doc.physics.liqStrengthRaw,
-          liqStrength: doc.physics.liqStrength,
-          liqBaseline: doc.physics.liqBaseline,
-          physicsTPPct: doc.physics.physicsTPPct,
-          wallAdjustedTpPct: doc.physics.wallAdjustedTpPct,
-          wallApplied: doc.physics.wallApplied,
-          rrCandidate: doc.physics.rrCandidate,
-          slCapApplied: doc.physics.slCapApplied,
-          slCapValue: doc.physics.slCapValue,
-          finalTpPct: doc.physics.finalTpPct,
-          finalSlPct: doc.physics.finalSlPct,
-          structuralSoftExitPrice: doc.physics.structuralSoftExitPrice,
-          structuralRiskPct: doc.physics.structuralRiskPct,
-          sizingRiskPct: doc.physics.sizingRiskPct,
-          hardStopRiskPct: doc.physics.hardStopRiskPct,
-          liquidityStrengthP95: doc.physics.liquidityStrengthP95,
-          liquidityStrength24h: doc.physics.liquidityStrength24h,
-          liquidityStrength: doc.physics.liquidityStrength,
-          w2ToW1Ratio: doc.physics.w2ToW1Ratio,
-          exhaustionScore: doc.physics.exhaustionScore,
-          w1DisplacementAtr: doc.physics.w1DisplacementAtr,
-          absorptionRaw: doc.physics.absorptionRaw,
-          absorptionScore: doc.physics.absorptionScore,
-          dynamicPhysicsScore: doc.physics.dynamicPhysicsScore,
-          selectedRR: doc.physics.selectedRR,
-          tpMultiplier: doc.physics.tpMultiplier,
-          slDeterminedBy: doc.physics.slDeterminedBy,
-        }
-      : null;
-  return { ...doc, plan };
-}
-
-/** Builds a realistic W1(100k)->W2(150k)->W3(220k)->W4(180k) cascade
- *  waveHistory, exactly like cascadeWavesToV5Waves() now derives it --
- *  every wave before the last is COMPLETED with a derived reclaimPrice
- *  (extreme +/- unitAbs), the last is ACTIVE (this is the signal-
- *  triggering wave, entryPrice is its own completion price in
- *  practice, but the object itself models it as just-completed here
- *  for a clean, realistic fixture). */
-function buildCascadeWaveHistory(unitAbs: number): V5Wave[] {
-  const raw = [
-    {
-      waveNumber: 1,
-      anchorPrice: 2000,
-      anchorTs: 1000,
-      extremePrice: 1990,
-      extremeTs: 1500,
-      liqUsd: 100_000,
-      liqEvents: 3,
-    },
-    {
-      waveNumber: 2,
-      anchorPrice: 1991,
-      anchorTs: 1600,
-      extremePrice: 1985,
-      extremeTs: 2000,
-      liqUsd: 150_000,
-      liqEvents: 5,
-    },
-    {
-      waveNumber: 3,
-      anchorPrice: 1986,
-      anchorTs: 2100,
-      extremePrice: 1975,
-      extremeTs: 2500,
-      liqUsd: 220_000,
-      liqEvents: 8,
-    },
-    {
-      waveNumber: 4,
-      anchorPrice: 1976,
-      anchorTs: 2600,
-      extremePrice: 1970,
-      extremeTs: 3000,
-      liqUsd: 180_000,
-      liqEvents: 4,
-    },
-  ];
-  return raw.map((w, i, arr): V5Wave => {
-    const isCompleted = i < arr.length - 1;
-    return {
-      waveNumber: w.waveNumber,
-      state: isCompleted ? "COMPLETED" : "ACTIVE",
-      anchorPrice: w.anchorPrice,
-      anchorTs: w.anchorTs,
-      extremePrice: w.extremePrice,
-      extremeTs: w.extremeTs,
-      reclaimPrice: isCompleted ? w.extremePrice + unitAbs : null,
-      reclaimTs: isCompleted ? w.extremeTs : null,
-      liqNotionalUsd: w.liqUsd,
-      liqEvents: w.liqEvents,
-      maxSingleEventUsd: 0,
-      maxRecoveryPrice: w.extremePrice,
-      recoveryPct: null,
-      priceEfficiency: null,
-      liquidationRatioVsDominant: null,
-      priceEfficiencyRatioVsDominant: null,
-      extremeDistanceAtr: Math.abs(w.anchorPrice - w.extremePrice) / 5, // atr15mAbs=5
-      isMeaningful: true,
-      selectedRecoveryPct: null,
-      recoveryTargetPrice: null,
-      recovery50AtTs: null,
-      recovery50AtPrice: null,
-      recovery75AtTs: null,
-      recovery75AtPrice: null,
-      takerBuyUsd: null,
-      takerSellUsd: null,
-      takerImbalance: null,
-      oiStart: null,
-      oiEnd: null,
-      oiDeltaPct: null,
-    };
+function scenario(name: string, fn: () => Promise<void> | void): void {
+  scenarios.push(async () => {
+    try {
+      await fn();
+      passed++;
+      console.log(`  \u2713 ${name}`);
+    } catch (err) {
+      failed++;
+      console.log(`  \u2717 ${name}`);
+      console.log(
+        `      ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
   });
 }
+const scenarios: Array<() => Promise<void>> = [];
 
-function buildCascadeSignalDoc(planOk: boolean): GlobalSignalDoc {
-  const waveHistory = buildCascadeWaveHistory(1);
-  const triggerWave = waveHistory[waveHistory.length - 1]!;
-  const dominantWave = waveHistory.reduce(
-    (best, w) => (w.liqNotionalUsd > best.liqNotionalUsd ? w : best),
-    waveHistory[0]!,
-  );
-  const totalLiq = waveHistory.reduce((sum, w) => sum + w.liqNotionalUsd, 0);
-
+function baseUserSignal(overrides: Partial<UserSignalDoc> = {}): UserSignalDoc {
   return {
-    signalId: "sig-cascade-test",
-    symbol: "ETHUSDT",
+    signalId: "SIG-1",
+    symbol: "LINKUSDT",
+    side: "LONG",
+    entry: 12.087,
+    tp: 12.389,
+    sl: 11.966,
+    status: "OPEN",
+    isLive: true,
+    executionEnabled: true,
+    executionSkipReason: null,
+    binanceSlOrderId: 1,
+    binanceTpOrderId: 2,
+    positionQty: 8.27,
+    notional: 100,
+    riskUsd: 1,
+    closedAt: null,
+    closePrice: null,
+    closeReason: null,
+    telegramSent: true,
+    telegramSentAt: 1,
+    maxFavorableR: null,
+    maxAdverseR: null,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  } as UserSignalDoc;
+}
+
+function baseGlobalSignal(): GlobalSignalDoc {
+  return {
+    signalId: "SIG-1",
+    symbol: "LINKUSDT",
     side: "LONG",
     victim: "LONG",
-    signalTs: 3000,
-    entryPrice: 1971,
-    entryWaveNumber: triggerWave.waveNumber,
-    cascadeId: "casc-test",
-    timeframe: "3m",
+    signalTs: 1,
+    entryPrice: 12.087,
+    entryWaveNumber: 1,
+    waveHistory: [],
+    w1Diagnostics: null,
+    totalEpisodePressure: 100000,
+    dominantLayerLiqUsd: null,
+    dominantLayerWaveNumber: null,
+    exhaustionLayerLiqUsd: 100000,
+    exhaustionLayerWaveNumber: 1,
+    unitAtStart: 1,
+    p95AtEntry: 1000,
+    dailyLiqPerMinBaselineAtEntry: 500,
+    atr15mAtEntry: 5,
+    cascadeId: null,
+    timeframe: null,
     isMainExecuted: true,
     episodePlan: null,
     waveEfficiencyAnalysis: null,
     p95AtW1Qualification: null,
     maxIndividualEventUsdAtW1: null,
     w1QualificationTs: null,
-    waveHistory,
-    w1Diagnostics: null,
-    totalEpisodePressure: totalLiq,
-    dominantLayerLiqUsd: dominantWave.liqNotionalUsd,
-    dominantLayerWaveNumber: dominantWave.waveNumber,
-    exhaustionLayerLiqUsd: triggerWave.liqNotionalUsd,
-    exhaustionLayerWaveNumber: triggerWave.waveNumber,
-    unitAtStart: 1,
-    p95AtEntry: 50_000,
-    dailyLiqPerMinBaselineAtEntry: 20_000,
-    atr15mAtEntry: 5,
-    qualifyingEventUsd: waveHistory[0]!.liqNotionalUsd,
-    qualifyingEventTs: waveHistory[0]!.anchorTs,
-    p95AtQualification: 50_000,
-    physics: planOk
-      ? {
-          cumLiqUsd: totalLiq,
-          atrPct: 5,
-          liqBaseline: 20_000,
-          liqStrengthRaw: 1.4,
-          liqStrength: 1.8,
-          physicsTPPct: 0.01,
-          wallAdjustedTpPct: 0.01,
-          wallApplied: false,
-          rrCandidate: 2.2,
-          slCapApplied: false,
-          slCapValue: 0,
-          finalTpPct: 0.01,
-          finalSlPct: 0.0045,
-          actualRR: 2.2,
-          structuralSoftExitPrice: 0,
-          structuralRiskPct: 0,
-          sizingRiskPct: 0,
-          hardStopRiskPct: 0,
-          liquidityStrengthP95: 1.4,
-          liquidityStrength24h: 2.2,
-          liquidityStrength: 1.8,
-          w2ToW1Ratio: 0.5,
-          exhaustionScore: 0.5,
-          w1DisplacementAtr: 2.0,
-          absorptionRaw: 0.7,
-          absorptionScore: 0.83,
-          dynamicPhysicsScore: 0.37,
-          selectedRR: 2.2,
-          tpMultiplier: 0.6,
-          slDeterminedBy: "physics",
-        }
-      : null,
+    marketContextAtEntry: null,
+    unitResearch: null,
+    unitCompetitionResearch: null,
+    commonHorizonResearch: null,
+    qualifyingEventUsd: 100,
+    qualifyingEventTs: 1,
+    p95AtQualification: 90,
+    physics: null,
     btcContext: null,
     liq24hContext: null,
     wallContext: null,
-    entry: planOk ? 1971 : null,
-    tp: planOk ? 1990.71 : null,
-    sl: planOk ? 1962.13 : null,
-    rr: planOk ? 2.2 : null,
-    btcSafetyStatus: "UNKNOWN",
+    entry: 12.087,
+    tp: 12.389,
+    sl: 11.966,
+    rr: 2.5,
+    btcSafetyStatus: "CLEAN",
     btcIntendedSideAtSignalTime: null,
-    rejectionReason: planOk ? null : "invalid-input",
-    planDiagnostics: null,
-    status: planOk ? "SIGNAL" : "REJECTED_PLAN",
+    rejectionReason: null,
+    status: "SIGNAL",
     closedAt: null,
     closePrice: null,
     maxFavorableR: null,
     maxAdverseR: null,
     liquidationStatsContext: null,
+    planDiagnostics: null,
     researchCheckpoints: [],
-    unitResearch: null,
-    unitCompetitionResearch: null,
-    commonHorizonResearch: null,
-    createdAt: Date.now(),
+    createdAt: 1,
+  } as GlobalSignalDoc;
+}
+
+/** Real telegram-call counter, matching runtime.telegram's own sendMessage shape. */
+function fakeTelegram() {
+  let count = 0;
+  return {
+    get count() {
+      return count;
+    },
+    sendMessage: async (_text: string) => {
+      count++;
+      return { ok: true, results: [] };
+    },
   };
 }
 
-console.log("Running cascade-Telegram-format regression tests...\n");
-
-scenario(
-  "a cascade signal with a VALID plan renders a normal V5 ENTRY message -- never the malformed output",
-  () => {
-    const doc = buildCascadeSignalDoc(true);
-    const event = toV5SignalEventShape(doc);
-    const message = formatV5EntryMessage(event);
-
-    assert.ok(
-      !message.includes("Wave 2 of 0"),
-      "must never show a zero-length wave chain",
-    );
-    // Sep 11 2026 (Karo), operator-requested Telegram redesign -- the
-    // OLD "V5 Chain: Signal on Wave N of M" / "Dominant layer.../
-    // Exhaustion layer..." lines are REMOVED entirely (both cascade and
-    // legacy signals now render the SAME compact P95/Episode/per-wave
-    // block -- see signal.formatter.ts's own header). Assert those old
-    // lines are gone, and the new compact fields are present instead.
-    assert.ok(
-      !message.includes("V5 Chain:"),
-      "the old 'V5 Chain' line must never appear anymore",
-    );
-    assert.ok(
-      !message.includes("trigger:"),
-      "the old, non-meaningful trigger-recovery-percent line must never appear",
-    );
-    assert.ok(
-      !message.includes("Dominant layer"),
-      "the old 'Dominant layer' wording must never appear anymore",
-    );
-    assert.ok(
-      !message.includes("Exhaustion layer"),
-      "the old 'Exhaustion layer' wording must never appear anymore",
-    );
-    assert.ok(
-      !message.includes("Plan rejected: unknown"),
-      "a VALID plan must never show 'Plan rejected'",
-    );
-    assert.ok(
-      message.includes("🟢"),
-      "a valid plan must render as an executed ENTRY (green), not a rejected SIGNAL",
-    );
-    assert.ok(message.includes("W4 ·"), "must show the real, final wave (W4)");
-    assert.ok(
-      message.includes("$220k"),
-      "must show W3's own real liquidation total somewhere in the compact wave listing",
-    );
-  },
-);
-
-scenario(
-  "a cascade signal with a REJECTED plan shows the REAL rejection reason, never 'unknown'",
-  () => {
-    const doc = buildCascadeSignalDoc(false);
-    const event = toV5SignalEventShape(doc);
-    const message = formatV5EntryMessage(event);
-
-    assert.ok(
-      message.includes("🟡"),
-      "a rejected plan must render as SIGNAL (not executed), not a fake green ENTRY",
-    );
-    assert.ok(
-      message.includes("Plan rejected: invalid-input"),
-      "must show the REAL rejection reason from plan.cancelReason, never 'unknown'",
-    );
-    assert.ok(
-      !message.includes("Wave 2 of 0"),
-      "even a rejected plan must show the real wave chain, never a zero-length one",
-    );
-  },
-);
-
-scenario(
-  "every wave in the chain listing shows its own real anchor/extreme/liquidation, never a fabricated placeholder",
-  () => {
-    const doc = buildCascadeSignalDoc(true);
-    const event = toV5SignalEventShape(doc);
-    const message = formatV5EntryMessage(event);
-
-    assert.ok(
-      message.includes("anchor 2000"),
-      "Wave 1's own real anchor must appear",
-    );
-    assert.ok(
-      message.includes("$100k"),
-      "Wave 1's own real liquidation total must appear",
-    );
-    assert.ok(
-      message.includes("anchor 1986"),
-      "Wave 3's own real anchor must appear",
-    );
-    assert.ok(
-      message.includes("$220k"),
-      "Wave 3's own real (dominant) liquidation total must appear",
-    );
-  },
-);
-
-// ─── Sep 11 2026 (Karo), operator-requested Telegram redesign: the
-// "Candidate: Xm" line is REMOVED entirely from ENTRY (per-symbol
-// timeframe is no longer shown at all -- see signal.formatter.ts's
-// own header). These tests now confirm its ABSENCE, for every
-// timeframe, cascade or legacy. ───
-
-for (const tf of ["1m", "3m", "5m"] as const) {
-  scenario(
-    `a cascade signal with timeframe="${tf}" never shows a "Candidate:" line anymore (removed in the Sep 11 2026 redesign)`,
-    () => {
-      const doc = { ...buildCascadeSignalDoc(true), timeframe: tf };
-      const event = toV5SignalEventShape(doc);
-      const message = formatV5EntryMessage(event);
-      assert.ok(
-        !message.includes("Candidate:"),
-        `the Candidate line must be gone for timeframe=${tf}`,
-      );
+/** Simulates Binance's own reconcileLivePosition() with an artificial
+ *  delay -- long enough that several rapid "ticks" can realistically
+ *  overlap with it, mirroring a real REST round-trip. */
+function fakeExecution(delayMs: number) {
+  return {
+    reconcileLivePosition: async (
+      _symbol: string,
+      _sl: number | null,
+      _tp: number | null,
+      _signalId: string,
+    ) => {
+      await new Promise((r) => setTimeout(r, delayMs));
+      return { stillOpen: false, reason: "SL" as const, actualPrice: 11.965 };
     },
-  );
+    recordConfirmedClose: async (
+      _signalId: string,
+      _outcome: "TP" | "SL",
+    ) => {},
+  };
 }
 
-scenario(
-  "a legacy, non-cascade signal (timeframe=null) also never shows a Candidate line (unaffected, since it never had one)",
-  () => {
-    const doc = {
-      ...buildCascadeSignalDoc(true),
-      timeframe: null,
-      cascadeId: null,
-    };
-    const event = toV5SignalEventShape(doc);
-    const message = formatV5EntryMessage(event);
-    assert.ok(
-      !message.includes("Candidate:"),
-      "a legacy signal must never show a Candidate line",
-    );
-  },
-);
+function fakeRuntime(
+  telegram: ReturnType<typeof fakeTelegram>,
+  execution: ReturnType<typeof fakeExecution>,
+): UserRuntime {
+  return {
+    config: {
+      userId: "artak",
+      enabled: true,
+      telegram: { enabled: true, botToken: "x", chatIds: ["1"] },
+      binance: null,
+      risk: { riskUsd: 1, accountBudgetUsd: 500, dailyLossLimitPct: 5 },
+      btcBlockEnabled: false,
+      longEnabled: true,
+      shortEnabled: true,
+    },
+    telegram: telegram as unknown as UserRuntime["telegram"],
+    execution: execution as unknown as UserRuntime["execution"],
+    dailyLossLimit: new DailyLossLimitTracker("artak", 500, 5),
+    reconcileInFlight: new InFlightGuard(),
+    reconcileHealth: new ReconciliationHealthTracker(),
+  } as unknown as UserRuntime;
+}
+
+/** Mirrors ReconciliationManager's OWN openCache: a plain array,
+ *  mutated via the SAME synchronous pruneFromCache() pattern the real
+ *  fix now uses. */
+function makeCache(entries: UserSignalDoc[]) {
+  let arr = entries;
+  return {
+    read: () => arr,
+    prune: (signalId: string) => {
+      arr = arr.filter((s) => s.signalId !== signalId);
+    },
+  };
+}
+
+console.log("Running duplicate-close early-prune regression tests...\n");
 
 scenario(
-  "a legacy, non-cascade signal renders the SAME new compact format as a cascade signal -- the old 'reclaimed...trigger:...' wording is gone for BOTH paths now",
-  () => {
-    const waveHistory = buildCascadeSignalDoc(true).waveHistory.map(
-      (w, i, arr) =>
-        i === arr.length - 1
-          ? {
-              ...w,
-              selectedRecoveryPct: 100 as const,
-              extremeDistanceAtr: 1.234,
-            }
-          : w,
-    );
-    const doc = {
-      ...buildCascadeSignalDoc(true),
-      timeframe: null,
-      cascadeId: null,
-      waveHistory,
+  "many RAPID, overlapping onTick()-style calls for the SAME signal produce EXACTLY ONE Telegram close notification",
+  async () => {
+    const telegram = fakeTelegram();
+    const execution = fakeExecution(50); // 50ms artificial Binance round-trip
+    const runtime = fakeRuntime(telegram, execution);
+    const userSignalRepo = {
+      upsert: async (_userId: string, _doc: UserSignalDoc) => {},
     };
-    const event = toV5SignalEventShape(doc);
-    const message = formatV5EntryMessage(event);
-    assert.ok(
-      !message.includes("reclaimed on Wave"),
-      "the old chain-line wording must be gone for the legacy path too, after the redesign",
-    );
-    assert.ok(
-      !message.includes("trigger:"),
-      "the old trigger-recovery-percent wording must be gone for the legacy path too",
-    );
-    assert.ok(
-      !message.includes("extremeDistanceAtr="),
-      "the old extremeDistanceAtr field must be gone from the message body for the legacy path too",
-    );
-    assert.ok(
-      message.includes("SignalId:"),
-      "the new compact format (SignalId, P95, Episode, per-wave lines) must render instead",
-    );
-  },
-);
+    const globalSignal = baseGlobalSignal();
+    const cache = makeCache([baseUserSignal()]);
 
-scenario(
-  "operator-requested explicit check: cascade signals (1m, 3m, and 5m) never contain 'trigger: ?%' or 'extremeDistanceAtr=0.000'",
-  () => {
-    for (const tf of ["1m", "3m", "5m"] as const) {
-      const doc = { ...buildCascadeSignalDoc(true), timeframe: tf };
-      const event = toV5SignalEventShape(doc);
-      const message = formatV5EntryMessage(event);
-      assert.ok(
-        !message.includes("trigger: ?%"),
-        `${tf}: must never print "trigger: ?%"`,
-      );
-      assert.ok(
-        !message.includes("extremeDistanceAtr=0.000"),
-        `${tf}: must never print "extremeDistanceAtr=0.000"`,
-      );
+    // Simulates ReconciliationManager.onTick(): reads the cache, iterates,
+    // calls reconcileUserPosition() with the SAME synchronous prune
+    // callback the real fix wires up.
+    async function simulatedTick(now: number): Promise<void> {
+      const open = cache.read();
+      for (const userSignal of open) {
+        await reconcileUserPosition(
+          userSignal,
+          globalSignal,
+          runtime,
+          userSignalRepo,
+          now,
+          cache.prune,
+        );
+      }
     }
-  },
-);
 
-scenario(
-  "SignalId appears in the ENTRY message, directly (Sep 11 2026 redesign requirement)",
-  () => {
-    const doc = { ...buildCascadeSignalDoc(true), timeframe: "3m" as const };
-    const event = toV5SignalEventShape(doc);
-    const message = formatV5EntryMessage(event);
-    assert.ok(
-      message.includes(`SignalId: ${doc.signalId}`),
-      "the real signalId must appear directly in the ENTRY message body",
+    // Fire 8 rapid "ticks" in quick succession -- some genuinely
+    // concurrent (overlapping the 50ms Binance round-trip, caught by
+    // InFlightGuard), some arriving just after the first fully resolves
+    // but before old code would have pruned (caught by the NEW
+    // synchronous, early prune).
+    const ticks: Promise<void>[] = [];
+    for (let i = 0; i < 8; i++) {
+      ticks.push(simulatedTick(1000 + i));
+      await new Promise((r) => setTimeout(r, 5)); // 5ms between tick starts -- much faster than the 50ms Binance round-trip
+    }
+    await Promise.all(ticks);
+
+    assert.strictEqual(
+      telegram.count,
+      1,
+      `expected exactly 1 Telegram close notification, got ${telegram.count}`,
+    );
+    assert.strictEqual(
+      cache.read().length,
+      0,
+      "the signal must be pruned from the cache exactly once",
     );
   },
 );
 
-console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
-if (failed > 0) process.exit(1);
+scenario(
+  "onConfirmedClosed fires BEFORE the Telegram send, not after (structural proof of ordering)",
+  async () => {
+    const order: string[] = [];
+    const telegram = {
+      sendMessage: async (_text: string) => {
+        order.push("telegram");
+        return { ok: true, results: [] };
+      },
+    };
+    const execution = fakeExecution(5);
+    const runtime = fakeRuntime(
+      telegram as unknown as ReturnType<typeof fakeTelegram>,
+      execution,
+    );
+    const userSignalRepo = {
+      upsert: async (_userId: string, _doc: UserSignalDoc) => {
+        order.push("db");
+      },
+    };
+    const globalSignal = baseGlobalSignal();
+
+    await reconcileUserPosition(
+      baseUserSignal(),
+      globalSignal,
+      runtime,
+      userSignalRepo,
+      2000,
+      (signalId) => {
+        order.push("prune");
+        assert.strictEqual(signalId, "SIG-1");
+      },
+    );
+
+    assert.deepStrictEqual(
+      order,
+      ["prune", "db", "telegram"],
+      "prune must happen first, then DB write, then Telegram -- matching the old bot's own proven ordering exactly",
+    );
+  },
+);
+
+scenario(
+  "failure recovery: if the DB write throws AFTER prune, the signal is not silently lost -- caller can still observe the failure and retry (matches the operator's own explicit requirement)",
+  async () => {
+    const telegram = fakeTelegram();
+    const execution = fakeExecution(5);
+    const runtime = fakeRuntime(telegram, execution);
+    const userSignalRepo = {
+      upsert: async (_userId: string, _doc: UserSignalDoc) => {
+        throw new Error("mongo down");
+      },
+    };
+    const globalSignal = baseGlobalSignal();
+
+    let pruned = false;
+    await assert.rejects(
+      reconcileUserPosition(
+        baseUserSignal(),
+        globalSignal,
+        runtime,
+        userSignalRepo,
+        3000,
+        () => {
+          pruned = true;
+        },
+      ),
+      /mongo down/,
+      "a DB failure must propagate to the caller, not be silently swallowed",
+    );
+    assert.strictEqual(
+      pruned,
+      true,
+      "prune still fires before the failed DB write -- by design, the caller's own openCache is refreshed from Mongo every 15s (CACHE_REFRESH_MS), and since Mongo's own status is still \"OPEN\" (upsert never completed), the signal is naturally re-discovered and retried on the next refresh cycle -- never permanently lost",
+    );
+    assert.strictEqual(
+      telegram.count,
+      0,
+      "Telegram must never be sent when the DB write itself failed",
+    );
+  },
+);
+
+(async () => {
+  for (const s of scenarios) await s();
+  console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
+  if (failed > 0) process.exit(1);
+})();

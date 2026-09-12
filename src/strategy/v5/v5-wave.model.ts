@@ -150,6 +150,16 @@ export interface V5Wave {
   oiStart: number | null;
   oiEnd: number | null;
   oiDeltaPct: number | null;
+  /** Sep 12 2026 (Karo), operator-requested research-persistence
+   *  audit -- ADDITIVE, purely derived from this SAME wave's own
+   *  already-persisted fields (liqNotionalUsd/liqEvents/
+   *  extremeDistanceAtr divided by its own real duration in minutes).
+   *  Never a new data source, never a strategy gate -- observational
+   *  only. Null when duration is zero (cannot divide by zero) or when
+   *  the underlying wave data itself is unavailable. */
+  liqRateUsdPerMin: number | null;
+  eventRatePerMin: number | null;
+  priceSpeedAtrPerMin: number | null;
 }
 
 /** Every way a watch can end, successfully or not -- nothing is ever

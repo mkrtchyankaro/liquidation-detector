@@ -111,6 +111,7 @@ function baseGlobalSignal(): GlobalSignalDoc {
     p95AtW1Qualification: null,
     maxIndividualEventUsdAtW1: null,
     w1QualificationTs: null,
+    marketContextAtEntry: null,
     unitResearch: null,
     unitCompetitionResearch: null,
     commonHorizonResearch: null,

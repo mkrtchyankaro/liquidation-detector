@@ -436,6 +436,9 @@ export class V5WaveService {
       oiStart,
       oiEnd: null,
       oiDeltaPct: null,
+      liqRateUsdPerMin: null,
+      eventRatePerMin: null,
+      priceSpeedAtrPerMin: null,
     };
   }
 

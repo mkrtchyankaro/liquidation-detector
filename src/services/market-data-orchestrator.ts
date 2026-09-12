@@ -917,6 +917,9 @@ export class MarketDataOrchestrator {
         oiStart: null,
         oiEnd: null,
         oiDeltaPct: null,
+        liqRateUsdPerMin: null,
+        eventRatePerMin: null,
+        priceSpeedAtrPerMin: null,
       };
     });
   }
@@ -949,6 +952,9 @@ export class MarketDataOrchestrator {
           ? w.extreme + unitAbs
           : w.extreme - unitAbs
         : null;
+      const extremeDistanceAtr =
+        atr15mAbs > 0 ? Math.abs(anchorPrice - w.extreme) / atr15mAbs : 0;
+      const durationMin = (w.endTime - w.startTime) / 60000;
       return {
         waveNumber: w.waveNumber,
         state: isCompleted ? "COMPLETED" : "ACTIVE",
@@ -966,8 +972,7 @@ export class MarketDataOrchestrator {
         priceEfficiency: w.efficiency,
         liquidationRatioVsDominant: null,
         priceEfficiencyRatioVsDominant: null,
-        extremeDistanceAtr:
-          atr15mAbs > 0 ? Math.abs(anchorPrice - w.extreme) / atr15mAbs : 0,
+        extremeDistanceAtr,
         isMeaningful: true,
         selectedRecoveryPct: null,
         recoveryTargetPrice: null,
@@ -981,6 +986,10 @@ export class MarketDataOrchestrator {
         oiStart: null,
         oiEnd: null,
         oiDeltaPct: null,
+        liqRateUsdPerMin: durationMin > 0 ? w.totalLiqUsd / durationMin : null,
+        eventRatePerMin: durationMin > 0 ? w.totalEvents / durationMin : null,
+        priceSpeedAtrPerMin:
+          durationMin > 0 ? extremeDistanceAtr / durationMin : null,
       };
     });
   }
@@ -1139,6 +1148,22 @@ export class MarketDataOrchestrator {
         atr15mAbs,
       );
 
+      // Sep 12 2026 (Karo), operator-requested research-persistence
+      // audit -- REAL, live, ENTRY-TIME-ONLY snapshots from the
+      // ALREADY-RUNNING AggressiveFlowService/OiTrackerService/
+      // candleStore (confirmed instantiated and fed live data
+      // elsewhere in this class -- see this.aggressiveFlow,
+      // this.oiTracker, this.candleStore). Purely observational reads;
+      // never influences any wave/entry/execution decision above.
+      const flowSnap = this.aggressiveFlow.getRecentFlow(
+        event.symbol,
+        30_000,
+        event.entryTs,
+      );
+      const oiSnap = this.oiTracker.getCachedOI(event.symbol);
+      const btcCandle = this.candleStore.lastClosed("BTCUSDT", "1m");
+      const btcOiSnap = this.oiTracker.getCachedOI("BTCUSDT");
+
       const globalSignal: GlobalSignalDoc = {
         signalId,
         symbol: event.symbol,
@@ -1204,7 +1229,24 @@ export class MarketDataOrchestrator {
           tpMultiplier: 0,
           slDeterminedBy: "physics",
         },
-        btcContext: null,
+        btcContext: {
+          priceAtSignal: btcCandle?.close ?? null,
+          oiAtSignal: btcOiSnap?.contracts ?? null,
+        },
+        marketContextAtEntry: {
+          takerFlowLast30sBuyUsd: flowSnap?.buyUsd ?? null,
+          takerFlowLast30sSellUsd: flowSnap?.sellUsd ?? null,
+          takerFlowLast30sImbalance:
+            flowSnap && flowSnap.buyUsd + flowSnap.sellUsd > 0
+              ? (flowSnap.buyUsd - flowSnap.sellUsd) /
+                (flowSnap.buyUsd + flowSnap.sellUsd)
+              : null,
+          takerVolumeRollingMedianPerMinUsd:
+            this.aggressiveFlow.getRollingMedianTakerVolume(event.symbol, 60),
+          oiCurrentContracts: oiSnap?.contracts ?? null,
+          oiRollingMedianChangeContracts:
+            this.oiTracker.getRollingMedianOiChange(event.symbol),
+        },
         liq24hContext: null,
         wallContext: null,
         entry: plan.entry,
@@ -1577,6 +1619,7 @@ export class MarketDataOrchestrator {
           slDeterminedBy: "physics",
         },
         btcContext: null,
+        marketContextAtEntry: null,
         liq24hContext: null,
         wallContext: null,
         entry: plan.entry,
@@ -2684,6 +2727,7 @@ export class MarketDataOrchestrator {
             }
           : null,
         btcContext: event.btcContext,
+        marketContextAtEntry: null,
         liq24hContext: event.liq24hContext,
         wallContext: event.wallContext,
         entry: event.plan?.entry ?? null,
@@ -2806,6 +2850,7 @@ export class MarketDataOrchestrator {
       p95AtQualification: watch.p95AtQualification,
       physics: null,
       btcContext: null,
+      marketContextAtEntry: null,
       liq24hContext: null,
       wallContext: null,
       entry: null,

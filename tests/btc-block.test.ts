@@ -61,6 +61,7 @@ function baseSignal(overrides: Partial<GlobalSignalDoc>): GlobalSignalDoc {
     p95AtQualification: 0,
     physics: null,
     btcContext: null,
+    marketContextAtEntry: null,
     liq24hContext: null,
     wallContext: null,
     entry: 100,
