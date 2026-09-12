@@ -1689,5 +1689,150 @@ scenario(
   },
 );
 
+// ─── Sep 12 2026 (Karo), operator-requested: BTC_BLOCK redesign --
+// getSeriousEpisodeContext() itself (generic, works for any symbol/
+// victim; BTC-specificity lives in the caller). ───
+
+scenario(
+  "1/3/4. getSeriousEpisodeContext(): ACTIVE, EXHAUSTING, and WAIT_NEXT_PRESSURE all report active+serious once a real W1 exists",
+  () => {
+    const e = new CandlePhysicsEngine();
+    const P95 = 20000;
+    e.onLiquidation(
+      "BTCUSDT",
+      "LONG",
+      liq("BTCUSDT", 100, 25000, 1000),
+      1,
+      100,
+      1000,
+    );
+    e.onLiquidation(
+      "BTCUSDT",
+      "LONG",
+      liq("BTCUSDT", 99, 3000, 10000),
+      1,
+      100,
+      10000,
+    );
+    e.onClosedCandle("BTCUSDT", "LONG", 60000, 100, 100.1, 95, 95.5, P95); // ACTIVE
+    let ctx = e.getSeriousEpisodeContext("BTCUSDT", "LONG")!;
+    assert.strictEqual(ctx.phase, "ACTIVE");
+    assert.strictEqual(ctx.active, true);
+    assert.strictEqual(
+      ctx.serious,
+      false,
+      "not yet -- wave hasn't completed/qualified yet",
+    );
+
+    e.onClosedCandle("BTCUSDT", "LONG", 120000, 95.5, 95.6, 95.6, 96.5, P95); // EXHAUSTING
+    ctx = e.getSeriousEpisodeContext("BTCUSDT", "LONG")!;
+    assert.strictEqual(ctx.phase, "EXHAUSTING");
+
+    e.onClosedCandle("BTCUSDT", "LONG", 180000, 96.5, 96.6, 96.6, 97, P95); // W1 qualifies -> WAIT_NEXT_PRESSURE
+    ctx = e.getSeriousEpisodeContext("BTCUSDT", "LONG")!;
+    assert.strictEqual(ctx.phase, "WAIT_NEXT_PRESSURE");
+    assert.strictEqual(ctx.active, true);
+    assert.strictEqual(
+      ctx.serious,
+      true,
+      "dominantWave is now set -- reused, never recomputed",
+    );
+    assert.strictEqual(ctx.victim, "LONG");
+    assert.strictEqual(ctx.maxIndividualEventUsd, 25000);
+    assert.strictEqual(ctx.p95AtQualification, P95);
+    assert.strictEqual(ctx.eventCount, 2);
+  },
+);
+
+scenario(
+  "2/6. getSeriousEpisodeContext(): NO_WAVE (no meaningful W1 yet) is active but never serious, even with real liquidation activity",
+  () => {
+    const e = new CandlePhysicsEngine();
+    const P95 = 20000;
+    // Small liquidation, well below P95 -- discarded as pre-W1-weak.
+    e.onLiquidation(
+      "BTCUSDT",
+      "SHORT",
+      liq("BTCUSDT", 100, 500, 1000),
+      1,
+      100,
+      1000,
+    );
+    e.onLiquidation(
+      "BTCUSDT",
+      "SHORT",
+      liq("BTCUSDT", 101, 300, 10000),
+      1,
+      100,
+      10000,
+    );
+    e.onClosedCandle("BTCUSDT", "SHORT", 60000, 100, 105, 100, 104.5, P95);
+    e.onClosedCandle("BTCUSDT", "SHORT", 120000, 104.5, 104.6, 104, 104.2, P95);
+    e.onClosedCandle(
+      "BTCUSDT",
+      "SHORT",
+      180000,
+      104.2,
+      104.3,
+      104.2,
+      104.1,
+      P95,
+    ); // discarded, NO_WAVE
+    const ctx = e.getSeriousEpisodeContext("BTCUSDT", "SHORT")!;
+    assert.strictEqual(ctx.phase, "NO_WAVE");
+    assert.strictEqual(
+      ctx.serious,
+      false,
+      "no dominantWave -- never considered serious even with real liquidation activity",
+    );
+  },
+);
+
+scenario(
+  "5. getSeriousEpisodeContext(): TERMINAL_CANCELLED is never active/serious -- the engine's own existing inactivity timeout clears stale state",
+  () => {
+    const e = new CandlePhysicsEngine();
+    const P95 = 20000;
+    e.onLiquidation(
+      "BTCUSDT",
+      "LONG",
+      liq("BTCUSDT", 100, 25000, 0),
+      1,
+      100,
+      0,
+    );
+    e.onLiquidation(
+      "BTCUSDT",
+      "LONG",
+      liq("BTCUSDT", 99, 3000, 30000),
+      1,
+      100,
+      30000,
+    );
+    e.onClosedCandle("BTCUSDT", "LONG", 60000, 100, 100.1, 95, 95.5, P95);
+    e.onClosedCandle("BTCUSDT", "LONG", 120000, 95.5, 95.6, 95.6, 96.5, P95);
+    e.onClosedCandle("BTCUSDT", "LONG", 180000, 96.5, 96.6, 96.6, 97, P95); // W1 qualifies, WAIT_NEXT_PRESSURE
+    // 11 minutes of pure silence -- past the 10-min inactivity timeout.
+    for (let t = 240000; t <= 780000; t += 60000) {
+      e.onClosedCandle("BTCUSDT", "LONG", t, 97, 97, 97, 97, P95);
+    }
+    const ctx = e.getSeriousEpisodeContext("BTCUSDT", "LONG")!;
+    assert.strictEqual(ctx.phase, "TERMINAL_CANCELLED");
+    assert.strictEqual(
+      ctx.active,
+      false,
+      "TERMINAL_CANCELLED must never be reported as active, regardless of serious",
+    );
+  },
+);
+
+scenario(
+  "getSeriousEpisodeContext(): returns null when no watch exists for that symbol/victim at all",
+  () => {
+    const e = new CandlePhysicsEngine();
+    assert.strictEqual(e.getSeriousEpisodeContext("BTCUSDT", "LONG"), null);
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

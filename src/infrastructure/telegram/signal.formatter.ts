@@ -46,7 +46,18 @@ function formatDuration(ms: number): string {
   return m === 0 ? h + "h" : h + "h " + m + "m";
 }
 
-export function formatV5EntryMessage(event: V5SignalEvent): string {
+export function formatV5EntryMessage(
+  event: V5SignalEvent,
+  // Sep 12 2026 (Karo), operator-requested BTC_BLOCK redesign -- MAIN
+  // Telegram shows this diagnostic line UNCONDITIONALLY for every ALT
+  // signal (regardless of any user's own btcBlockEnabled), purely
+  // hypothetical/research. Every other user's own Telegram (karo,
+  // artak, ...) never shows it at all -- their own btcBlockEnabled
+  // already controls real execution eligibility elsewhere; this line
+  // is display-only. Default false so every existing call site other
+  // than MAIN's own stays unaffected without needing to change.
+  showBtcBlockDiagnostic: boolean = false,
+): string {
   const time = new Date(event.signalTs).toISOString().slice(11, 19) + " UTC";
   const executed = event.plan !== null;
   const emoji = executed ? "🟢" : "🟡";
@@ -108,22 +119,28 @@ export function formatV5EntryMessage(event: V5SignalEvent): string {
     lines.push("");
   }
 
-  // Sep 8 2026, operator-approved (Karo) -- ALWAYS shown, on EVERY
-  // instance, regardless of that instance's own v5BtcBlockEnabled()
-  // setting -- see btcIntendedSideAtSignalTime's own doc comment.
-  // Presentation-only change here: same computation, more compact line.
-  if (event.symbol !== "BTCUSDT") {
+  // Sep 12 2026 (Karo), operator-requested BTC_BLOCK redesign.
+  //   - BTCUSDT's own signal: NEVER shows this line at all -- the
+  //     diagnostic is only meaningful when comparing an ALT signal
+  //     against BTC's own state; comparing BTC against itself is not.
+  //   - Every ALT signal on MAIN (showBtcBlockDiagnostic=true): ALWAYS
+  //     shown, based PURELY on the live BTC context vs this signal's
+  //     own side -- never depends on any user's own btcBlockEnabled.
+  //   - Every ALT signal on any other user's own Telegram
+  //     (showBtcBlockDiagnostic=false, the default): never shown --
+  //     that user's own btcBlockEnabled is an execution-eligibility
+  //     setting, not a research-display feature.
+  if (event.symbol !== "BTCUSDT" && showBtcBlockDiagnostic) {
+    const cascadeSide = event.btcContext?.btcActiveCascadeSide ?? null;
     const wouldBlock =
       event.btcIntendedSideAtSignalTime !== null &&
       event.btcIntendedSideAtSignalTime === event.side;
+    const suffix =
+      cascadeSide !== null
+        ? ` · BTC ${cascadeSide} cascade`
+        : " · no serious BTC cascade";
     lines.push(
-      wouldBlock
-        ? `⚠️ BTC_BLOCK would apply here: YES (active ${event.btcIntendedSideAtSignalTime} setup, same side)`
-        : `BTC_BLOCK would apply here: NO`,
-    );
-  } else {
-    lines.push(
-      `BTC_BLOCK would apply here: YES, unconditionally (BTC itself never trades when V5_BTC_BLOCK=true)`,
+      `BTC_BLOCK would apply here: ${wouldBlock ? "YES" : "NO"}${suffix}`,
     );
   }
 

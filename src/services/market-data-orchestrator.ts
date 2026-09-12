@@ -1164,6 +1164,73 @@ export class MarketDataOrchestrator {
       const btcCandle = this.candleStore.lastClosed("BTCUSDT", "1m");
       const btcOiSnap = this.oiTracker.getCachedOI("BTCUSDT");
 
+      // Sep 12 2026 (Karo), operator-requested BTC_BLOCK redesign --
+      // the LIVE, CURRENT serious BTC candle-physics episode at the
+      // exact moment THIS ALT signal fires. Never the last BTC ENTRY
+      // signal, never a stale cached direction -- a synchronous,
+      // in-memory read of CandlePhysicsEngine's own live watch state
+      // (see getSeriousEpisodeContext()'s own doc comment). Checks
+      // BOTH BTC victim sides; btcIntendedSideAtSignalTime is set ONLY
+      // to whichever side (if any) is both "active" (not NO_WAVE/
+      // TERMINAL_CANCELLED) and "serious" (dominantWave !== null,
+      // reusing the EXISTING W1-qualification result, never
+      // recomputed here) AND in a still-unresolved phase (ACTIVE/
+      // EXHAUSTING/WAIT_NEXT_PRESSURE). N/A_BTC for BTC's own signal
+      // (self-comparison is meaningless); CLEAN when no side matches.
+      const btcLongCtx =
+        event.symbol !== "BTCUSDT"
+          ? this.candlePhysics.getSeriousEpisodeContext("BTCUSDT", "LONG")
+          : null;
+      const btcShortCtx =
+        event.symbol !== "BTCUSDT"
+          ? this.candlePhysics.getSeriousEpisodeContext("BTCUSDT", "SHORT")
+          : null;
+      function isBlocking(
+        ctx:
+          | import("../domain/cascade/candle-physics-engine").SeriousEpisodeContext
+          | null,
+      ): boolean {
+        return (
+          ctx !== null &&
+          ctx.active &&
+          ctx.serious &&
+          (["ACTIVE", "EXHAUSTING", "WAIT_NEXT_PRESSURE"] as const).includes(
+            ctx.phase as "ACTIVE" | "EXHAUSTING" | "WAIT_NEXT_PRESSURE",
+          )
+        );
+      }
+      const btcLongBlocking = isBlocking(btcLongCtx);
+      const btcShortBlocking = isBlocking(btcShortCtx);
+      // If BOTH sides are simultaneously serious/active (rare), the
+      // side that actually matches THIS ALT's own side (event.victim)
+      // takes precedence for the block decision -- an ALT can only
+      // ever be blocked by the SAME-side BTC episode, never both at
+      // once from this field's own single-side perspective.
+      let btcIntendedSideAtSignalTime:
+        | import("../shared/common.types").Side
+        | null = null;
+      if (event.symbol !== "BTCUSDT") {
+        if (event.victim === "LONG" && btcLongBlocking)
+          btcIntendedSideAtSignalTime = "LONG";
+        else if (event.victim === "SHORT" && btcShortBlocking)
+          btcIntendedSideAtSignalTime = "SHORT";
+        else if (btcLongBlocking) btcIntendedSideAtSignalTime = "LONG";
+        else if (btcShortBlocking) btcIntendedSideAtSignalTime = "SHORT";
+      }
+      const btcSafetyStatus: "CLEAN" | "WOULD_BLOCK" | "UNKNOWN" | "N/A_BTC" =
+        event.symbol === "BTCUSDT"
+          ? "N/A_BTC"
+          : btcIntendedSideAtSignalTime === event.victim
+            ? "WOULD_BLOCK"
+            : "CLEAN";
+      // The SAME-side-as-this-ALT context is what's persisted for
+      // research reconstruction (see GlobalSignalDoc.btcContext's own
+      // doc comment) -- whichever BTC side matches this ALT's own
+      // side, regardless of whether it ended up blocking or not.
+      const sameSideCtx = event.victim === "LONG" ? btcLongCtx : btcShortCtx;
+      const btcActiveCascadeSide: import("../shared/common.types").Side | null =
+        btcLongBlocking ? "LONG" : btcShortBlocking ? "SHORT" : null;
+
       const globalSignal: GlobalSignalDoc = {
         signalId,
         symbol: event.symbol,
@@ -1232,6 +1299,14 @@ export class MarketDataOrchestrator {
         btcContext: {
           priceAtSignal: btcCandle?.close ?? null,
           oiAtSignal: btcOiSnap?.contracts ?? null,
+          btcSeriousEpisodePhase: sameSideCtx?.phase ?? null,
+          btcSeriousEpisodeP95AtQualification:
+            sameSideCtx?.p95AtQualification ?? null,
+          btcSeriousEpisodeMaxIndividualEventUsd:
+            sameSideCtx?.maxIndividualEventUsd ?? null,
+          btcSeriousEpisodeQualificationTs:
+            sameSideCtx?.w1QualificationTs ?? null,
+          btcActiveCascadeSide,
         },
         marketContextAtEntry: {
           takerFlowLast30sBuyUsd: flowSnap?.buyUsd ?? null,
@@ -1253,8 +1328,8 @@ export class MarketDataOrchestrator {
         tp: plan.tp,
         sl: plan.sl,
         rr: plan.rr,
-        btcSafetyStatus: "UNKNOWN",
-        btcIntendedSideAtSignalTime: null,
+        btcSafetyStatus: btcSafetyStatus,
+        btcIntendedSideAtSignalTime: btcIntendedSideAtSignalTime,
         rejectionReason: null,
         planDiagnostics: null,
         status: "SIGNAL",
@@ -2726,7 +2801,16 @@ export class MarketDataOrchestrator {
               slDeterminedBy: event.plan.slDeterminedBy,
             }
           : null,
-        btcContext: event.btcContext,
+        btcContext: event.btcContext
+          ? {
+              ...event.btcContext,
+              btcSeriousEpisodePhase: null,
+              btcSeriousEpisodeP95AtQualification: null,
+              btcSeriousEpisodeMaxIndividualEventUsd: null,
+              btcSeriousEpisodeQualificationTs: null,
+              btcActiveCascadeSide: null,
+            }
+          : null,
         marketContextAtEntry: null,
         liq24hContext: event.liq24hContext,
         wallContext: event.wallContext,

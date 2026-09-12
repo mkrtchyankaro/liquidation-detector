@@ -131,6 +131,20 @@ export interface CandlePhysicsPreW1DiscardEvent {
   readonly reason: "DISCARDED_SINGLE_EVENT" | "DISCARDED_NO_P95";
 }
 
+/** Sep 12 2026 (Karo), operator-requested -- BTC_BLOCK redesign
+ *  read-only snapshot type. See getSeriousEpisodeContext()'s own doc
+ *  comment for the full semantics. */
+export interface SeriousEpisodeContext {
+  readonly active: boolean;
+  readonly serious: boolean;
+  readonly phase: CandlePhysicsState;
+  readonly victim: Side;
+  readonly eventCount: number | null;
+  readonly maxIndividualEventUsd: number | null;
+  readonly p95AtQualification: number | null;
+  readonly w1QualificationTs: number | null;
+}
+
 export interface CandlePhysicsCancelEvent {
   readonly kind: "CANCEL";
   readonly symbol: string;
@@ -178,6 +192,20 @@ interface Watch {
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 const SAFETY_TIMEOUT_MS = 30 * 60_000;
+
+/** Sep 12 2026 (Karo), operator-requested -- BTC_BLOCK redesign. The
+ *  exact phases a "serious" (dominantWave !== null) episode still
+ *  counts as blocking. NOT NO_WAVE (nothing serious yet), NOT
+ *  TERMINAL_CANCELLED (episode already ended -- the engine's own
+ *  existing 10-min inactivity / 30-min safety timeouts are what clear
+ *  this), NOT ENTERED (BTC's own physics already confirmed exhaustion
+ *  -- a narrow, transient state cleared immediately by clearTerminal()
+ *  right after the caller processes it). */
+export const SERIOUS_BLOCKING_PHASES: readonly CandlePhysicsState[] = [
+  "ACTIVE",
+  "EXHAUSTING",
+  "WAIT_NEXT_PRESSURE",
+];
 
 function keyFor(symbol: string, victim: Side): string {
   return symbol + "|" + victim;
@@ -502,6 +530,39 @@ export class CandlePhysicsEngine {
 
   peekWatch(symbol: string, victim: Side): Readonly<Watch> | null {
     return this.watches.get(keyFor(symbol, victim)) ?? null;
+  }
+
+  /** Sep 12 2026 (Karo), operator-requested -- generic, read-only,
+   *  SMALLEST possible API for the BTC_BLOCK redesign. Reuses the
+   *  EXISTING dominantWave state (never reimplements or duplicates the
+   *  W1-qualification formula): a side is "serious" exactly when
+   *  dominantWave !== null, i.e. some completed wave already passed
+   *  the real eventCount>=2 && maxIndividualEvent>=P95-at-that-moment
+   *  check (see onClosedCandle()'s own W1-qualification branch above).
+   *  This method is NOT BTC-specific -- it works for any symbol/victim
+   *  a caller asks about; the BTC-awareness lives entirely in the
+   *  CALLER (market-data-orchestrator.ts), not here. Never creates a
+   *  second strategy engine, never influences any wave/entry decision
+   *  -- purely a synchronous, in-memory read of already-existing
+   *  state, so there is no race/staleness window between this read
+   *  and the caller's own use of it. */
+  getSeriousEpisodeContext(
+    symbol: string,
+    victim: Side,
+  ): SeriousEpisodeContext | null {
+    const w = this.watches.get(keyFor(symbol, victim));
+    if (!w) return null;
+    const serious = w.dominantWave !== null;
+    return {
+      active: w.state !== "NO_WAVE" && w.state !== "TERMINAL_CANCELLED",
+      serious,
+      phase: w.state,
+      victim: w.victim,
+      eventCount: serious ? w.dominantWave!.totalEvents : null,
+      maxIndividualEventUsd: w.maxIndividualEventUsdAtW1,
+      p95AtQualification: w.p95AtW1Qualification,
+      w1QualificationTs: w.w1QualificationTs,
+    };
   }
 
   clearTerminal(symbol: string, victim: Side): void {

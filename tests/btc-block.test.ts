@@ -265,5 +265,52 @@ scenario(
   },
 );
 
+// ─── Sep 12 2026 (Karo), operator-requested: BTC_BLOCK redesign --
+// canonical signal is never suppressed, and btcBlockEnabled=false
+// never blocks execution regardless of what MAIN's own diagnostic
+// would say. ───
+
+scenario(
+  "7. btcBlockEnabled=false never blocks a user's own execution, even when the live BTC context WOULD have matched (MAIN's own diagnostic saying YES is purely display, never a gate for this user)",
+  () => {
+    const signal = baseSignal({
+      symbol: "SOLUSDT",
+      side: "LONG",
+      btcIntendedSideAtSignalTime: "LONG",
+    });
+    const user = baseUser({ userId: "karo", btcBlockEnabled: false });
+    assert.strictEqual(
+      isBtcBlockedForUser(signal, user),
+      false,
+      "btcBlockEnabled=false must never be overridden by a matching live BTC context",
+    );
+  },
+);
+
+scenario(
+  "8. the canonical/global signal document is inserted UNCONDITIONALLY, before any per-user BTC_BLOCK check runs -- BTC_BLOCK must never suppress signal generation itself",
+  () => {
+    const source = fs.readFileSync(
+      require.resolve("../src/services/signal-distributor.ts"),
+      "utf8",
+    );
+    const idx = source.indexOf("async distribute(");
+    assert.ok(idx > -1);
+    const body = source.slice(
+      idx,
+      source.indexOf("private async persistBlocked", idx),
+    );
+    const insertIdx = body.indexOf(
+      "await this.globalSignalRepo.insert(globalSignal);",
+    );
+    const firstBtcCheckIdx = body.indexOf("isBtcBlockedForUser(");
+    assert.ok(insertIdx > -1, "the canonical signal insert must be present");
+    assert.ok(
+      insertIdx < firstBtcCheckIdx,
+      "the canonical signal must be inserted BEFORE any per-user BTC_BLOCK check runs -- it can never be conditionally suppressed by that check",
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

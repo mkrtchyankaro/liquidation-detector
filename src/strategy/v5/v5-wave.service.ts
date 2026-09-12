@@ -192,7 +192,17 @@ export interface V5SignalEvent {
     tpMultiplier: number;
     slDeterminedBy: "physics" | "sizing-floor";
   } | null;
-  btcContext: { priceAtSignal: number | null; oiAtSignal: number | null };
+  btcContext: {
+    priceAtSignal: number | null;
+    oiAtSignal: number | null;
+    /** Sep 12 2026 (Karo), operator-requested BTC_BLOCK redesign
+     *  Telegram-formatter support -- ADDITIVE, optional (present at
+     *  runtime via toV5SignalEventShape()'s own `...doc` spread for
+     *  every candle-physics signal; undefined for the legacy path).
+     *  See GlobalSignalDoc.btcContext.btcActiveCascadeSide's own doc
+     *  comment for the exact semantics. */
+    btcActiveCascadeSide?: Side | null;
+  };
   liq24hContext: { dayLiqTotalUsd: number; dayLiqEvents: number } | null;
   wallContext: {
     topBidNotional: number;

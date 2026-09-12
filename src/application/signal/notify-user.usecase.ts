@@ -83,7 +83,10 @@ export async function notifyUser(
 ): Promise<boolean> {
   if (!runtime.telegram || !runtime.config.telegram?.enabled) return false;
   try {
-    const message = formatV5EntryMessage(toV5SignalEventShape(globalSignal));
+    const message = formatV5EntryMessage(
+      toV5SignalEventShape(globalSignal),
+      runtime.config.userId === "main",
+    );
     await runtime.telegram.sendMessage(message);
     return true;
   } catch (err) {

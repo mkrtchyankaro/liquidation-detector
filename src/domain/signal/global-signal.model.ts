@@ -137,6 +137,30 @@ export interface GlobalSignalDoc {
   btcContext: {
     priceAtSignal: number | null;
     oiAtSignal: number | null;
+    /** Sep 12 2026 (Karo), operator-requested BTC_BLOCK redesign --
+     *  the SAME-SIDE-as-this-ALT-signal BTC watch's own serious-
+     *  episode context at signal time (whether or not it actually
+     *  matched/blocked -- persisted so later research can reconstruct
+     *  exactly why the MAIN diagnostic line said YES or NO). Null when
+     *  no watch exists for that side at all. These are NOT the ALT
+     *  signal's own W1-qualification fields (see
+     *  p95AtW1Qualification/maxIndividualEventUsdAtW1/
+     *  w1QualificationTs above, which describe THIS signal's own
+     *  episode) -- these describe BTC's own, separate episode. */
+    btcSeriousEpisodePhase: string | null;
+    btcSeriousEpisodeP95AtQualification: number | null;
+    btcSeriousEpisodeMaxIndividualEventUsd: number | null;
+    btcSeriousEpisodeQualificationTs: number | null;
+    /** Sep 12 2026 (Karo), operator-requested -- the side of WHICHEVER
+     *  BTC victim currently has a serious, active (ACTIVE/EXHAUSTING/
+     *  WAIT_NEXT_PRESSURE) episode, if any -- independent of whether
+     *  it matches this ALT signal's own side. Needed ONLY so the MAIN
+     *  Telegram diagnostic line can honestly say "NO * BTC SHORT
+     *  cascade" (a real, opposite-side cascade exists but does not
+     *  block THIS signal) rather than collapsing that case into the
+     *  same "no cascade at all" wording as btcIntendedSideAtSignalTime
+     *  alone would. Null when no side is currently serious+active. */
+    btcActiveCascadeSide: import("../../shared/common.types").Side | null;
   } | null;
   /** Sep 12 2026 (Karo), operator-requested research-persistence audit
    *  -- ADDITIVE, episode-level, ENTRY-TIME-ONLY snapshot (never a
