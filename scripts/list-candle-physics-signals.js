@@ -1,79 +1,62 @@
+/**
+ * Sep 12 2026 (Karo), operator-requested. Main post-trade analysis
+ * tool for candle-physics-engine signals. READ-ONLY, no strategy/
+ * execution/persistence changes. Uses the new persisted research
+ * fields (per-wave rates, marketContextAtEntry, W1-qualification
+ * P95/event/timestamp) where present; falls back to exact-derivation
+ * or omits the row for old signals that predate them.
+ */
 require("dotenv/config");
 const { MongoClient } = require("mongodb");
 
 function fmtTs(ms) {
   return ms
     ? new Date(ms).toISOString().replace("T", " ").slice(0, 19) + "Z"
-    : "n/a";
+    : null;
 }
-function fmt(v, digits) {
-  return v === null || v === undefined
-    ? "NOT_AVAILABLE"
-    : typeof v === "number"
-      ? v.toFixed(digits === undefined ? 6 : digits)
-      : String(v);
+function fmtClock(ms) {
+  return ms ? new Date(ms).toISOString().slice(11, 19) + " UTC" : null;
 }
-function fmtUsd(v) {
-  return v === null || v === undefined
-    ? "NOT_AVAILABLE"
-    : "$" + v.toLocaleString(undefined, { maximumFractionDigits: 2 });
+function fmtUsd(n) {
+  if (n === null || n === undefined) return null;
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return "$" + (n / 1_000_000).toFixed(2) + "M";
+  if (abs >= 1_000)
+    return (
+      "$" +
+      (n / 1_000).toFixed(abs >= 100_000 ? 0 : abs >= 10_000 ? 1 : 2) +
+      "k"
+    );
+  return "$" + n.toFixed(0);
 }
-function fmtPct(v, digits) {
-  return v === null || v === undefined
-    ? "NOT_AVAILABLE"
-    : (v * 100).toFixed(digits === undefined ? 2 : digits) + "%";
+function fmtPrice(n) {
+  if (n === null || n === undefined) return null;
+  const abs = Math.abs(n);
+  const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : 6;
+  return Number(n.toFixed(digits)).toString();
 }
-function na(v) {
-  return v === null || v === undefined ? "NOT_AVAILABLE" : v;
+function fmtPct(n, digits) {
+  if (n === null || n === undefined) return null;
+  return (
+    (n >= 0 ? "+" : "") +
+    (n * 100).toFixed(digits === undefined ? 1 : digits) +
+    "%"
+  );
 }
-
-console.log("=".repeat(90));
-console.log(
-  "KNOWN GAPS -- metrics requested but NOT currently persisted for candle-physics signals",
-);
-console.log("=".repeat(90));
-console.log(`
-- maxIndividualEventUsd (the specific event that PASSED/FAILED the P95 seriousness
-  gate at entry time) is NOT persisted on the signal document. It exists ONLY
-  transiently inside handleCandlePhysicsEntry() (market-data-orchestrator.ts) at the
-  moment of the P95-gate check, and is logged via [NO_P95_EVENT] only when a
-  candidate is REJECTED -- for a SUCCESSFUL entry it is used once, then discarded.
-  Below, this script derives an EPISODE-LEVEL proxy (the max of each wave's own
-  persisted maxSingleEventUsd) and labels it clearly as a derived approximation,
-  not the original gate-time value.
-
-- P95 at qualification is persisted ONLY ONCE per signal (p95AtEntry/p95AtQualification,
-  a single snapshot taken at final entry time) -- NOT per-wave, NOT at each wave's
-  own completion time. The "P95 at that moment" requested for every wave is not
-  separately available; this script uses the single stored p95AtEntry value for
-  every wave's own qualification check below, with that caveat printed each time.
-
-- Taker buy/sell USD, taker imbalance: the V5Wave schema HAS these fields
-  (v5-wave.model.ts), but they are hardcoded null even in the legacy, pre-candle-
-  physics V5 path (v5-wave.service.ts line ~379) -- this data has never been
-  computed anywhere in this project, for any signal, live or legacy.
-
-- Open Interest (OI) at wave start/end, OI delta%: the V5Wave schema also has
-  these fields, and a REAL, live OiTrackerService instance already exists at
-  runtime (market-data-orchestrator.ts's own this.oiTracker) -- but
-  handleCandlePhysicsEntry() never reads it, so these fields are always null for
-  candle-physics signals specifically. This is a genuine "exists at runtime, not
-  wired in" gap, not a "never computed anywhere" gap like taker flow above.
-
-- Account long/short ratio, position long/short ratio, BTC price change / BTC OI
-  context specific to this signal: NOT stored anywhere in GlobalSignalDoc. BTC
-  price/OI context (btcContext field) exists in the schema and IS populated for
-  the legacy V5 path, but is left null in handleCandlePhysicsEntry() (never wired
-  for the new engine).
-
-- episodePlan / waveEfficiencyAnalysis fields exist in the schema (from an earlier
-  strategy iteration) but are always null for current candle-physics signals --
-  superseded by the fixed 0.30% SL / 2.2R TP and the P95 seriousness gate.
-
-- "why dominant was selected" has no stored free-text reason field. This script
-  DERIVES the answer (efficiency comparison) directly from each wave's own
-  persisted priceEfficiency, which is a safe, direct derivation, not an invention.
-`);
+function fmtDuration(ms) {
+  if (ms === null || ms === undefined) return null;
+  const totalMin = Math.round(ms / 60000);
+  if (totalMin < 60) return totalMin + "m";
+  const h = Math.floor(totalMin / 60);
+  const m = totalMin % 60;
+  return m === 0 ? h + "h" : h + "h " + m + "m";
+}
+/** Prints "label: value" only when value is not null/undefined -- the
+ *  core mechanism behind removing noisy NOT_AVAILABLE rows everywhere. */
+function row(lines, label, value) {
+  if (value === null || value === undefined || value === "") return;
+  lines.push(label + ": " + value);
+}
 
 async function main() {
   const uri = process.env.MONGO_URI;
@@ -91,6 +74,16 @@ async function main() {
   const signalIdIdx = args.indexOf("--signalId");
   const signalIdFilter = signalIdIdx !== -1 ? args[signalIdIdx + 1] : null;
 
+  console.log("KNOWN DATA GAPS");
+  console.log("- Per-wave taker flow: not tracked");
+  console.log("- Per-wave OI start/end/delta: not tracked");
+  console.log("- Account/position L/S ratio: service exists but disconnected");
+  console.log("- Funding rate: service exists but disconnected");
+  console.log(
+    "- Real candle-physics reclaim price: not tracked (approximation omitted below)",
+  );
+  console.log("");
+
   const client = new MongoClient(uri);
   await client.connect();
   const db = client.db(process.env.MONGO_OWN_DB || "liquidation_detector");
@@ -105,7 +98,6 @@ async function main() {
     .sort({ signalTs: -1 })
     .limit(limit)
     .toArray();
-  console.log("=".repeat(90));
   console.log(
     "Found " +
       docs.length +
@@ -115,7 +107,7 @@ async function main() {
       limit +
       "):",
   );
-  console.log("=".repeat(90));
+  console.log("");
 
   docs.forEach((d) => printFullSignalReport(d));
 
@@ -123,353 +115,323 @@ async function main() {
 }
 
 function printFullSignalReport(d) {
-  console.log("\n" + "#".repeat(90));
-  console.log("SIGNAL / TRADE");
-  console.log("#".repeat(90));
-  console.log("signalId:          " + d.signalId);
-  console.log("symbol:            " + d.symbol);
-  console.log("direction:         " + d.victim);
-  console.log("status:            " + d.status);
-  console.log("signal timestamp:  " + fmtTs(d.signalTs));
-  console.log("entry:             " + na(d.entry));
-  console.log("SL:                " + na(d.sl));
-  console.log("TP:                " + na(d.tp));
-  console.log("RR:                " + na(d.rr));
+  const lines = [];
+  lines.push("#".repeat(70));
+  lines.push("SIGNAL / TRADE");
+  lines.push("#".repeat(70));
+  row(lines, "signalId", d.signalId);
+  row(lines, "symbol", d.symbol);
+  row(lines, "direction", d.victim);
+  row(lines, "status", d.status);
+  row(lines, "signal timestamp", fmtTs(d.signalTs));
+  row(lines, "entry", fmtPrice(d.entry));
+  row(lines, "SL", fmtPrice(d.sl));
+  row(lines, "TP", fmtPrice(d.tp));
+  row(
+    lines,
+    "RR",
+    d.rr !== null && d.rr !== undefined ? d.rr.toFixed(2) : null,
+  );
   const isClosed = d.status === "CLOSED_TP" || d.status === "CLOSED_SL";
-  console.log(
-    "close timestamp:   " +
-      (isClosed ? fmtTs(d.closedAt) : "NOT_AVAILABLE (not closed)"),
+  if (isClosed) {
+    row(lines, "close timestamp", fmtTs(d.closedAt));
+    row(lines, "close price", fmtPrice(d.closePrice));
+  }
+  row(
+    lines,
+    "maxFavorableR",
+    d.maxFavorableR !== null && d.maxFavorableR !== undefined
+      ? d.maxFavorableR.toFixed(2)
+      : null,
   );
-  console.log(
-    "close price:       " +
-      (isClosed ? na(d.closePrice) : "NOT_AVAILABLE (not closed)"),
+  row(
+    lines,
+    "maxAdverseR",
+    d.maxAdverseR !== null && d.maxAdverseR !== undefined
+      ? d.maxAdverseR.toFixed(2)
+      : null,
   );
-  console.log("maxFavorableR:     " + na(d.maxFavorableR));
-  console.log("maxAdverseR:       " + na(d.maxAdverseR));
-  if (isClosed && d.closedAt && d.signalTs) {
-    const durationSec = (d.closedAt - d.signalTs) / 1000;
-    console.log(
-      "trade duration:    " +
-        durationSec.toFixed(0) +
-        " sec (" +
-        (durationSec / 60).toFixed(2) +
-        " min)",
-    );
-  } else {
-    console.log("trade duration:    NOT_AVAILABLE (not closed)");
+  if (isClosed && d.closedAt && d.signalTs)
+    row(lines, "trade duration", fmtDuration(d.closedAt - d.signalTs));
+
+  // ── W1 qualification ──
+  const w1Lines = [];
+  // Fallback distinguished internally (isFallback), never surfaced as clutter --
+  // just a differently-worded label on the P95 row itself.
+  let isFallback = false;
+  let p95 = d.p95AtW1Qualification;
+  let maxEvent = d.maxIndividualEventUsdAtW1;
+  let qualTs = d.w1QualificationTs;
+  if (p95 === null || p95 === undefined) {
+    isFallback = true;
+    p95 = d.p95AtQualification ?? d.p95AtEntry ?? null;
+  }
+  row(
+    w1Lines,
+    "P95",
+    fmtUsd(p95) === null
+      ? null
+      : fmtUsd(p95) + (isFallback ? " (entry snapshot)" : ""),
+  );
+  row(w1Lines, "Max event", fmtUsd(maxEvent));
+  row(w1Lines, "Time", fmtClock(qualTs));
+  if (w1Lines.length > 0) {
+    lines.push("");
+    lines.push("W1 qualification");
+    lines.push(...w1Lines);
   }
 
-  console.log("\n" + "-".repeat(90));
-  console.log("P95 / LIQUIDATION SERIOUSNESS");
-  console.log("-".repeat(90));
-  console.log(
-    "P95 at qualification (single snapshot, entry time): " +
-      fmtUsd(d.p95AtQualification),
+  // ── Episode summary ──
+  const epLines = [];
+  row(epLines, "Episode total", fmtUsd(d.totalEpisodePressure));
+  const totalEvents = (d.waveHistory || []).reduce(
+    (s, w) => s + (w.liqEvents || 0),
+    0,
   );
-  console.log(
-    "P95 at entry (same snapshot, stored twice):          " +
-      fmtUsd(d.p95AtEntry),
-  );
-  const episodeMaxIndividualEvent = d.waveHistory.length
-    ? Math.max(...d.waveHistory.map((w) => w.maxSingleEventUsd))
-    : null;
-  console.log(
-    "episode max individual event (derived: max of each wave's own maxSingleEventUsd -- NOT the original transient P95-gate value): " +
-      fmtUsd(episodeMaxIndividualEvent),
-  );
-  console.log(
-    "episode total liquidation USD (totalEpisodePressure): " +
-      fmtUsd(d.totalEpisodePressure),
-  );
-  const totalEventCount = d.waveHistory.reduce((s, w) => s + w.liqEvents, 0);
-  console.log(
-    "total event count (sum of every wave's own liqEvents): " + totalEventCount,
-  );
-  console.log(
-    "side-specific liquidation totals (LONG vs SHORT split): NOT_AVAILABLE (this signal document only stores same-victim totals; liq_raw_events has per-victim data but is a separate, unjoined collection)",
-  );
-  console.log(
-    "per-wave: max individual event >= P95(at entry, approximated for all waves):",
-  );
-  d.waveHistory.forEach((w) => {
-    const passes =
-      d.p95AtQualification !== null &&
-      w.maxSingleEventUsd >= d.p95AtQualification;
-    console.log(
-      "  W" +
-        w.waveNumber +
-        ": maxEvent=" +
-        fmtUsd(w.maxSingleEventUsd) +
-        "  >=P95? " +
-        (d.p95AtQualification === null
-          ? "NOT_AVAILABLE"
-          : passes
-            ? "YES"
-            : "NO"),
-    );
-  });
+  row(epLines, "Total events", totalEvents > 0 ? String(totalEvents) : null);
+  if (epLines.length > 0) {
+    lines.push("");
+    lines.push(...epLines);
+  }
 
-  console.log("\n" + "-".repeat(90));
-  console.log("WAVES");
-  console.log("-".repeat(90));
-  d.waveHistory.forEach((w, i) => {
-    console.log("\n  --- Wave " + w.waveNumber + " ---");
-    console.log("  status:                    " + w.state);
-    console.log("  victim side:               " + d.victim);
-    console.log("  start timestamp:           " + fmtTs(w.anchorTs));
-    console.log("  end/completion timestamp:  " + fmtTs(w.extremeTs));
-    const durationSec = (w.extremeTs - w.anchorTs) / 1000;
-    console.log(
-      "  duration:                  " +
-        durationSec.toFixed(0) +
-        " sec (" +
-        (durationSec / 60).toFixed(2) +
-        " min)",
-    );
-    console.log("  anchor price:              " + fmt(w.anchorPrice));
-    console.log("  extreme price:             " + fmt(w.extremePrice));
-    console.log(
-      "  reclaim/recovery price:    " +
-        (w.reclaimPrice !== null
-          ? fmt(w.reclaimPrice) +
-            "  (NOTE: for candle-physics waves this is an APPROXIMATION -- extreme +/- 1 UNIT -- not a live-tracked reclaim price)"
-          : "NOT_AVAILABLE"),
-    );
-    console.log("  frozen UNIT (ATR) used:    " + fmt(d.unitAtStart));
-    const priceDistance = Math.abs(w.anchorPrice - w.extremePrice);
-    console.log("  directional price distance:" + fmt(priceDistance));
-    console.log(
-      "  DistanceATR (extremeDistanceAtr): " + fmt(w.extremeDistanceAtr, 4),
-    );
-    console.log(
-      "  new-extreme extension units: NOT_AVAILABLE (not persisted per-wave on V5Wave -- only extremeDistanceAtr, the wave's OWN incremental ATR progress, is stored)",
-    );
-    console.log("  total liquidation USD:     " + fmtUsd(w.liqNotionalUsd));
-    console.log("  event count:               " + w.liqEvents);
-    console.log("  max individual raw event:  " + fmtUsd(w.maxSingleEventUsd));
-    if (durationSec > 0) {
-      console.log(
-        "  liquidation rate:          " +
-          (w.liqNotionalUsd / durationSec).toFixed(2) +
-          " USD/sec  (" +
-          (w.liqNotionalUsd / (durationSec / 60)).toFixed(2) +
-          " USD/min)",
+  // ── Waves ──
+  if (d.waveHistory && d.waveHistory.length > 0) {
+    lines.push("");
+    lines.push("WAVES");
+    for (const w of d.waveHistory) {
+      lines.push("");
+      lines.push("W" + w.waveNumber);
+      const durationMs =
+        w.extremeTs && w.anchorTs ? w.extremeTs - w.anchorTs : null;
+      row(lines, "  start", fmtTs(w.anchorTs));
+      row(lines, "  end", fmtTs(w.extremeTs));
+      row(lines, "  duration", fmtDuration(durationMs));
+      row(lines, "  anchor", fmtPrice(w.anchorPrice));
+      row(lines, "  extreme", fmtPrice(w.extremePrice));
+      row(
+        lines,
+        "  UNIT",
+        d.unitAtStart !== null && d.unitAtStart !== undefined
+          ? fmtPrice(d.unitAtStart)
+          : null,
       );
-      console.log(
-        "  event rate:                " +
-          (w.liqEvents / (durationSec / 60)).toFixed(3) +
-          " events/min",
+      row(
+        lines,
+        "  DistanceATR",
+        w.extremeDistanceAtr !== null && w.extremeDistanceAtr !== undefined
+          ? w.extremeDistanceAtr.toFixed(3)
+          : null,
       );
-      console.log(
-        "  price speed:               " +
-          (w.extremeDistanceAtr / (durationSec / 60)).toFixed(4) +
-          " ATR/min",
+      row(lines, "  Liq USD", fmtUsd(w.liqNotionalUsd));
+      row(
+        lines,
+        "  Events",
+        w.liqEvents !== null && w.liqEvents !== undefined
+          ? String(w.liqEvents)
+          : null,
       );
-      console.log(
-        "  candle count (derived from duration, 1m candles): " +
-          Math.max(1, Math.round(durationSec / 60) + 1),
+      row(lines, "  Max event", fmtUsd(w.maxSingleEventUsd));
+
+      // Prefer persisted rate fields; fall back to exact derivation ONLY
+      // for old signals that predate them (w.liqRateUsdPerMin === undefined,
+      // not just null -- undefined means the field never existed on this
+      // document at all, distinguishing "old schema" from "computed as null
+      // because duration was zero").
+      const hasPersistedRates = w.liqRateUsdPerMin !== undefined;
+      let liqRate = hasPersistedRates ? w.liqRateUsdPerMin : null;
+      let eventRate = hasPersistedRates ? w.eventRatePerMin : null;
+      let speedRate = hasPersistedRates ? w.priceSpeedAtrPerMin : null;
+      if (!hasPersistedRates && durationMs && durationMs > 0) {
+        const durationMin = durationMs / 60000;
+        if (w.liqNotionalUsd !== null && w.liqNotionalUsd !== undefined)
+          liqRate = w.liqNotionalUsd / durationMin;
+        if (w.liqEvents !== null && w.liqEvents !== undefined)
+          eventRate = w.liqEvents / durationMin;
+        if (w.extremeDistanceAtr !== null && w.extremeDistanceAtr !== undefined)
+          speedRate = w.extremeDistanceAtr / durationMin;
+      }
+      row(
+        lines,
+        "  Liq rate",
+        liqRate !== null
+          ? fmtUsd(liqRate) + "/min" + (!hasPersistedRates ? " (derived)" : "")
+          : null,
       );
-    } else {
-      console.log(
-        "  liquidation rate:          NOT_AVAILABLE (zero-duration wave)",
+      row(
+        lines,
+        "  Event rate",
+        eventRate !== null
+          ? eventRate.toFixed(2) +
+              "/min" +
+              (!hasPersistedRates ? " (derived)" : "")
+          : null,
       );
-      console.log(
-        "  event rate:                NOT_AVAILABLE (zero-duration wave)",
+      row(
+        lines,
+        "  Speed",
+        speedRate !== null
+          ? speedRate.toFixed(3) +
+              " ATR/min" +
+              (!hasPersistedRates ? " (derived)" : "")
+          : null,
       );
-      console.log(
-        "  price speed:               NOT_AVAILABLE (zero-duration wave)",
+      row(
+        lines,
+        "  Efficiency",
+        w.priceEfficiency !== null && w.priceEfficiency !== undefined
+          ? w.priceEfficiency.toFixed(2)
+          : null,
       );
-      console.log(
-        "  candle count:              NOT_AVAILABLE (zero-duration wave)",
-      );
+      // reclaimPrice deliberately OMITTED -- approximation, not real observed data (per operator instruction).
     }
-    console.log(
-      "  priceImpactPer1M / efficiency (priceEfficiency): " +
-        fmt(w.priceEfficiency, 2),
-    );
-    console.log(
-      "  efficiency ratio vs dominant (priceEfficiencyRatioVsDominant): " +
-        (w.priceEfficiencyRatioVsDominant !== null
-          ? fmt(w.priceEfficiencyRatioVsDominant, 4)
-          : "NOT_AVAILABLE (never populated for candle-physics waves -- the dominant-comparison section below derives this instead)"),
-    );
-    console.log(
-      "  exhaustion percentage:     NOT_AVAILABLE (no dedicated stored field for candle-physics waves; the DOMINANT/COMPARISON section below computes an efficiency-based comparison from persisted data)",
-    );
-    console.log(
-      "  recoveryUnits/reclaimUnits: " +
-        (w.recoveryPct !== null
-          ? fmt(w.recoveryPct, 4)
-          : "NOT_AVAILABLE (recoveryPct not populated for candle-physics waves)"),
-    );
+  }
 
-    console.log("\n  FLOW / MARKET CONTEXT (Wave " + w.waveNumber + "):");
-    console.log(
-      "    taker buy USD:           " +
-        (w.takerBuyUsd !== null
-          ? fmtUsd(w.takerBuyUsd)
-          : "NOT_AVAILABLE (never computed anywhere in this project, see KNOWN GAPS above)"),
-    );
-    console.log(
-      "    taker sell USD:          " +
-        (w.takerSellUsd !== null ? fmtUsd(w.takerSellUsd) : "NOT_AVAILABLE"),
-    );
-    console.log(
-      "    taker imbalance:         " +
-        (w.takerImbalance !== null
-          ? fmt(w.takerImbalance, 4)
-          : "NOT_AVAILABLE"),
-    );
-    console.log(
-      "    OI at wave start:        " +
-        (w.oiStart !== null
-          ? fmt(w.oiStart, 2)
-          : "NOT_AVAILABLE (OiTrackerService exists at runtime but is not wired into candle-physics signals yet, see KNOWN GAPS above)"),
-    );
-    console.log(
-      "    OI at wave end:          " +
-        (w.oiEnd !== null ? fmt(w.oiEnd, 2) : "NOT_AVAILABLE"),
-    );
-    console.log(
-      "    OI delta%:               " +
-        (w.oiDeltaPct !== null ? fmtPct(w.oiDeltaPct) : "NOT_AVAILABLE"),
-    );
-
-    console.log("\n  P95/W1 QUALIFICATION DEBUG (Wave " + w.waveNumber + "):");
-    const waveP95 = d.p95AtQualification;
-    console.log(
-      "    P95 at that moment:      " +
-        fmtUsd(waveP95) +
-        "  (APPROXIMATION -- single entry-time snapshot reused for every wave, see KNOWN GAPS above)",
-    );
-    console.log("    max individual event:    " + fmtUsd(w.maxSingleEventUsd));
-    console.log("    cumulative wave liquidity: " + fmtUsd(w.liqNotionalUsd));
-    console.log("    event count:             " + w.liqEvents);
-    const eventCountOk = w.liqEvents >= 2;
-    const p95Ok = waveP95 !== null && w.maxSingleEventUsd >= waveP95;
-    let label;
-    if (!eventCountOk) label = "DISCARDED_SINGLE_EVENT";
-    else if (!p95Ok) label = "DISCARDED_NO_P95";
-    else label = "QUALIFIED_AS_W1";
-    console.log("    label:                   " + label);
-  });
-
-  console.log("\n" + "-".repeat(90));
-  console.log("DOMINANT / COMPARISON");
-  console.log("-".repeat(90));
-  const dominantWave = d.waveHistory.find(
+  // ── Comparison (dominant vs signal wave) ──
+  const dominantWave = (d.waveHistory || []).find(
     (w) => w.waveNumber === d.dominantLayerWaveNumber,
   );
-  const signalWave = d.waveHistory.find(
+  const signalWave = (d.waveHistory || []).find(
     (w) => w.waveNumber === d.exhaustionLayerWaveNumber,
   );
-  console.log(
-    "dominant/reference wave:   W" +
-      na(d.dominantLayerWaveNumber) +
-      "  (" +
-      fmtUsd(d.dominantLayerLiqUsd) +
-      ")",
-  );
-  if (dominantWave && signalWave) {
-    console.log(
-      "why selected:              derived -- the wave with the STRONGEST priceEfficiency among all prior completed waves becomes dominant (see candle-physics-engine.ts); dominant W" +
-        dominantWave.waveNumber +
-        " efficiency=" +
-        fmt(dominantWave.priceEfficiency, 2) +
-        " vs signal W" +
-        signalWave.waveNumber +
-        " efficiency=" +
-        fmt(signalWave.priceEfficiency, 2),
-    );
-  } else {
-    console.log(
-      "why selected:              NOT_AVAILABLE (dominant or signal wave not found in waveHistory)",
-    );
-  }
-  console.log(
-    "signal/exhaustion wave:    W" +
-      na(d.exhaustionLayerWaveNumber) +
-      "  (" +
-      fmtUsd(d.exhaustionLayerLiqUsd) +
-      ")",
-  );
-  if (dominantWave && signalWave) {
-    const liqChangePct =
-      dominantWave.liqNotionalUsd > 0
-        ? (signalWave.liqNotionalUsd - dominantWave.liqNotionalUsd) /
-          dominantWave.liqNotionalUsd
+  if (dominantWave && signalWave && dominantWave !== signalWave) {
+    const compLines = [];
+    row(compLines, "Reference", "W" + dominantWave.waveNumber);
+    row(compLines, "Signal", "W" + signalWave.waveNumber);
+    if (dominantWave.liqNotionalUsd > 0)
+      row(
+        compLines,
+        "Liq",
+        fmtPct(
+          (signalWave.liqNotionalUsd - dominantWave.liqNotionalUsd) /
+            dominantWave.liqNotionalUsd,
+        ),
+      );
+    if (dominantWave.priceEfficiency)
+      row(
+        compLines,
+        "Efficiency",
+        fmtPct(
+          (signalWave.priceEfficiency - dominantWave.priceEfficiency) /
+            dominantWave.priceEfficiency,
+        ),
+      );
+    const domDurMin =
+      dominantWave.extremeTs && dominantWave.anchorTs
+        ? (dominantWave.extremeTs - dominantWave.anchorTs) / 60000
         : null;
-    console.log(
-      "liq change %:              " +
-        (liqChangePct !== null ? fmtPct(liqChangePct) : "NOT_AVAILABLE"),
-    );
-    const effChangePct =
-      dominantWave.priceEfficiency &&
-      dominantWave.priceEfficiency > 0 &&
-      signalWave.priceEfficiency !== null
-        ? (signalWave.priceEfficiency - dominantWave.priceEfficiency) /
-          dominantWave.priceEfficiency
+    const sigDurMin =
+      signalWave.extremeTs && signalWave.anchorTs
+        ? (signalWave.extremeTs - signalWave.anchorTs) / 60000
         : null;
-    console.log(
-      "efficiency change %:      " +
-        (effChangePct !== null
-          ? fmtPct(effChangePct)
-          : "NOT_AVAILABLE (one of the two waves has zero/null efficiency)"),
-    );
-    const domDurationMin =
-      (dominantWave.extremeTs - dominantWave.anchorTs) / 60000;
-    const sigDurationMin = (signalWave.extremeTs - signalWave.anchorTs) / 60000;
-    const domSpeed =
-      domDurationMin > 0
-        ? dominantWave.extremeDistanceAtr / domDurationMin
-        : null;
-    const sigSpeed =
-      sigDurationMin > 0
-        ? signalWave.extremeDistanceAtr / sigDurationMin
-        : null;
-    const speedChangePct =
-      domSpeed !== null && domSpeed > 0 && sigSpeed !== null
-        ? (sigSpeed - domSpeed) / domSpeed
-        : null;
-    console.log(
-      "speed change %:            " +
-        (speedChangePct !== null
-          ? fmtPct(speedChangePct)
-          : "NOT_AVAILABLE (zero-duration wave involved)"),
-    );
-    console.log(
-      "price-impact change %:     same as efficiency change % above (priceImpactPer1M IS priceEfficiency in this schema)",
-    );
-    const domRate =
-      domDurationMin > 0 ? dominantWave.liqNotionalUsd / domDurationMin : null;
-    const sigRate =
-      sigDurationMin > 0 ? signalWave.liqNotionalUsd / sigDurationMin : null;
-    const rateChangePct =
-      domRate !== null && domRate > 0 && sigRate !== null
-        ? (sigRate - domRate) / domRate
-        : null;
-    console.log(
-      "liq-rate change %:         " +
-        (rateChangePct !== null
-          ? fmtPct(rateChangePct)
-          : "NOT_AVAILABLE (zero-duration wave involved)"),
-    );
-    const domEventRate =
-      domDurationMin > 0 ? dominantWave.liqEvents / domDurationMin : null;
-    const sigEventRate =
-      sigDurationMin > 0 ? signalWave.liqEvents / sigDurationMin : null;
-    const eventRateChangePct =
-      domEventRate !== null && domEventRate > 0 && sigEventRate !== null
-        ? (sigEventRate - domEventRate) / domEventRate
-        : null;
-    console.log(
-      "event-rate change %:       " +
-        (eventRateChangePct !== null
-          ? fmtPct(eventRateChangePct)
-          : "NOT_AVAILABLE (zero-duration wave involved)"),
-    );
+    if (domDurMin > 0 && sigDurMin > 0) {
+      const domSpeed = dominantWave.extremeDistanceAtr / domDurMin;
+      const sigSpeed = signalWave.extremeDistanceAtr / sigDurMin;
+      if (domSpeed > 0)
+        row(compLines, "Speed", fmtPct((sigSpeed - domSpeed) / domSpeed));
+      const domRate = dominantWave.liqNotionalUsd / domDurMin;
+      const sigRate = signalWave.liqNotionalUsd / sigDurMin;
+      if (domRate > 0)
+        row(compLines, "Liq rate", fmtPct((sigRate - domRate) / domRate));
+      const domEvtRate = dominantWave.liqEvents / domDurMin;
+      const sigEvtRate = signalWave.liqEvents / sigDurMin;
+      if (domEvtRate > 0)
+        row(
+          compLines,
+          "Event rate",
+          fmtPct((sigEvtRate - domEvtRate) / domEvtRate),
+        );
+    }
+    if (compLines.length > 0) {
+      lines.push("");
+      lines.push("COMPARISON");
+      lines.push(...compLines);
+    }
   }
 
+  // ── Entry market context (new field, omitted entirely for old signals) ──
+  const mc = d.marketContextAtEntry;
+  if (mc) {
+    const takerLines = [];
+    row(takerLines, "  Buy", fmtUsd(mc.takerFlowLast30sBuyUsd));
+    row(takerLines, "  Sell", fmtUsd(mc.takerFlowLast30sSellUsd));
+    row(takerLines, "  Imbalance", fmtPct(mc.takerFlowLast30sImbalance));
+    const baselineLines = [];
+    row(
+      baselineLines,
+      "  Median/min",
+      fmtUsd(mc.takerVolumeRollingMedianPerMinUsd),
+    );
+    const oiLines = [];
+    row(
+      oiLines,
+      "  Current",
+      mc.oiCurrentContracts !== null && mc.oiCurrentContracts !== undefined
+        ? mc.oiCurrentContracts.toFixed(2)
+        : null,
+    );
+    row(
+      oiLines,
+      "  Median change",
+      mc.oiRollingMedianChangeContracts !== null &&
+        mc.oiRollingMedianChangeContracts !== undefined
+        ? mc.oiRollingMedianChangeContracts.toFixed(2)
+        : null,
+    );
+
+    if (
+      takerLines.length > 0 ||
+      baselineLines.length > 0 ||
+      oiLines.length > 0
+    ) {
+      lines.push("");
+      lines.push("ENTRY MARKET CONTEXT");
+      if (takerLines.length > 0) {
+        lines.push("Taker 30s:");
+        lines.push(...takerLines);
+      }
+      if (baselineLines.length > 0) {
+        lines.push("Taker baseline:");
+        lines.push(...baselineLines);
+      }
+      if (oiLines.length > 0) {
+        lines.push("OI:");
+        lines.push(...oiLines);
+      }
+    }
+  }
+
+  // ── BTC context ──
+  if (d.btcContext) {
+    const btcLines = [];
+    // Sep 12 2026 (Karo) -- BTC price is a PRICE, not a liquidation
+    // magnitude: full comma-formatted number (e.g. $115,240), never
+    // the compact k/M notation used for USD liquidation amounts.
+    row(
+      btcLines,
+      "Price",
+      d.btcContext.priceAtSignal !== null &&
+        d.btcContext.priceAtSignal !== undefined
+        ? "$" +
+            d.btcContext.priceAtSignal.toLocaleString(undefined, {
+              maximumFractionDigits: 2,
+            })
+        : null,
+    );
+    row(
+      btcLines,
+      "OI",
+      d.btcContext.oiAtSignal !== null && d.btcContext.oiAtSignal !== undefined
+        ? d.btcContext.oiAtSignal.toFixed(2)
+        : null,
+    );
+    if (btcLines.length > 0) {
+      lines.push("");
+      lines.push("BTC CONTEXT");
+      lines.push(...btcLines);
+    }
+  }
+
+  console.log(lines.join("\n"));
   console.log("");
 }
 
