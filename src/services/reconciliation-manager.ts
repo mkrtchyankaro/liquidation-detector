@@ -147,7 +147,18 @@ export class ReconciliationManager {
               );
             }
           };
-          const { closed, broadcastMessage } = await reconcileUserPosition(
+          // Sep 12 2026 (Karo), operator-reported CRITICAL FIX -- the
+          // cross-user CLOSE broadcast that used to run here (looping
+          // over every OTHER user's own runtime and sending THIS
+          // user's own real-execution CLOSE through their telegram
+          // client too) is REMOVED. Execution CLOSE notifications must
+          // be strictly per-user: reconcileUserPosition() above already
+          // sends notifyUserClose(message, runtime) to the ACTUAL
+          // position owner's own telegram client -- that is the only
+          // send that belongs here. ENTRY's own unconditional fan-out
+          // (SignalDistributor.distribute()) is untouched and
+          // unrelated to this fix.
+          const { closed } = await reconcileUserPosition(
             userSignal,
             globalSignal,
             runtime,
@@ -161,33 +172,6 @@ export class ReconciliationManager {
             // pruneFromCache(), before any DB/Telegram I/O. Filtering an
             // already-pruned array is a harmless no-op.
             pruneFromCache(userSignal.signalId);
-            // Sep 8 2026 (Karo) -- CRITICAL DESIGN FIX, operator-
-            // requested: close notifications used to reach ONLY the
-            // one user who actually had a real Binance position --
-            // every OTHER enabled-telegram user (who correctly
-            // received the matching ENTRY message earlier, since
-            // entries are unconditionally broadcast) never saw the
-            // close at all. Broadcasts the SAME message to every
-            // OTHER user's own telegram client here (the user whose
-            // position this actually was already got it directly,
-            // inside reconcileUserPositionImpl -- skipped here to
-            // avoid a literal double-send to that same runtime).
-            if (broadcastMessage) {
-              for (const other of this.userRuntimes) {
-                if (other.config.userId === runtime.config.userId) continue;
-                if (!other.telegram || !other.config.telegram?.enabled)
-                  continue;
-                try {
-                  await other.telegram.sendMessage(broadcastMessage);
-                } catch (err) {
-                  const msg = err instanceof Error ? err.message : String(err);
-                  log.error(
-                    { err: msg, userId: other.config.userId },
-                    "[CLOSE_BROADCAST_SEND_FAILED] -- isolated",
-                  );
-                }
-              }
-            }
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);

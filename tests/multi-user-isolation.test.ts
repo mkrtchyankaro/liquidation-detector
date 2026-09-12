@@ -257,6 +257,104 @@ async function main(): Promise<void> {
     },
   );
 
+  // ─── Sep 12 2026 (Karo), operator-reported CRITICAL FIX: execution
+  // CLOSE notifications must be strictly per-user -- the cross-user
+  // broadcast that used to send one user's real-execution CLOSE
+  // through every OTHER user's own telegram client is removed. ───
+
+  await scenario(
+    "1. reconcileUserPosition()'s own return shape no longer carries a broadcastMessage -- the only thing it can report is whether it closed",
+    () => {
+      const src = fs.readFileSync(
+        path.join(
+          __dirname,
+          "../src/application/execution/reconcile-user-position.usecase.ts",
+        ),
+        "utf8",
+      );
+      assert.ok(
+        !/broadcastMessage\s*[:,]/.test(src),
+        "broadcastMessage must be gone from the actual interface/return-shape (not merely absent from comments)",
+      );
+      assert.ok(
+        src.includes("Promise<{ closed: boolean }>"),
+        "the return type must be the minimal { closed: boolean } shape",
+      );
+      assert.ok(
+        src.includes("await notifyUserClose(message, runtime)"),
+        "the actual position owner's own per-user notifyUserClose(message, runtime) must remain, unchanged",
+      );
+    },
+  );
+
+  await scenario(
+    "2/3. ReconciliationManager.onTick() no longer loops over other users' runtimes to send a close message -- no cross-user telegram send exists in this file at all",
+    () => {
+      const src = fs.readFileSync(
+        path.join(__dirname, "../src/services/reconciliation-manager.ts"),
+        "utf8",
+      );
+      assert.ok(
+        !src.includes("for (const other of this.userRuntimes)"),
+        "the cross-user broadcast loop must be completely removed",
+      );
+      assert.ok(
+        !src.includes("other.telegram.sendMessage"),
+        "no code path in this file may send to any runtime other than the one that actually owns the position being reconciled",
+      );
+      assert.ok(
+        !src.includes("CLOSE_BROADCAST_SEND_FAILED"),
+        "the broadcast-specific log marker must be gone along with the broadcast code it described",
+      );
+      // The per-user reconcile call itself, which internally sends via
+      // notifyUserClose(message, runtime) to ONLY that same runtime, must
+      // still be present and untouched.
+      assert.ok(
+        src.includes(
+          "await reconcileUserPosition(userSignal, globalSignal, runtime, userSignalRepo, now, pruneFromCache)",
+        ),
+        "the per-user reconcile call (which notifies ONLY the position-owning runtime) must remain exactly as before",
+      );
+    },
+  );
+
+  await scenario(
+    "4. ENTRY fan-out (SignalDistributor.distribute()) is completely untouched by this fix -- still unconditionally loops over every enabled user for every signal, independent of real Binance ownership",
+    () => {
+      const src = fs.readFileSync(
+        path.join(__dirname, "../src/services/signal-distributor.ts"),
+        "utf8",
+      );
+      assert.ok(
+        src.includes("for (const runtime of this.userRuntimes)"),
+        "ENTRY's own unconditional per-enabled-user loop must still be present, unchanged",
+      );
+      assert.ok(
+        src.includes("if (!runtime.config.enabled) continue;"),
+        "the ENTRY loop's own gating condition (enabled only, no execution/ownership check) must be exactly as before",
+      );
+    },
+  );
+
+  await scenario(
+    "5. no duplicate CLOSE mechanism was introduced -- notifyUserClose is actually invoked from exactly one call site",
+    () => {
+      const src = fs.readFileSync(
+        path.join(
+          __dirname,
+          "../src/application/execution/reconcile-user-position.usecase.ts",
+        ),
+        "utf8",
+      );
+      const matches = src.match(/await notifyUserClose\(/g) ?? [];
+      assert.strictEqual(
+        matches.length,
+        1,
+        "notifyUserClose must be invoked from exactly one place -- no second/replacement broadcast call was added",
+      );
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

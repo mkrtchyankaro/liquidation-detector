@@ -40,7 +40,7 @@ export async function reconcileUserPosition(
    *  signal "open" and run the entire reconcile-confirm-notify chain a
    *  second time. */
   onConfirmedClosed: (signalId: string) => void,
-): Promise<{ closed: boolean; broadcastMessage: string | null }> {
+): Promise<{ closed: boolean }> {
   const result = await runtime.reconcileInFlight.run(
     userSignal.signalId,
     async () => {
@@ -58,7 +58,7 @@ export async function reconcileUserPosition(
   // for the same signalId was already in flight (InFlightGuard skipped
   // this one entirely) -- that other call, not this one, is
   // responsible for reporting whether it closed anything.
-  return result ?? { closed: false, broadcastMessage: null };
+  return result ?? { closed: false };
 }
 
 async function reconcileUserPositionImpl(
@@ -68,12 +68,12 @@ async function reconcileUserPositionImpl(
   userSignalRepo: { upsert(userId: string, doc: UserSignalDoc): Promise<void> },
   now: number,
   onConfirmedClosed: (signalId: string) => void,
-): Promise<{ closed: boolean; broadcastMessage: string | null }> {
+): Promise<{ closed: boolean }> {
   const userId = runtime.config.userId;
-  if (!runtime.execution) return { closed: false, broadcastMessage: null };
+  if (!runtime.execution) return { closed: false };
 
   if (runtime.reconcileHealth.shouldSkipRetry(userSignal.signalId, now))
-    return { closed: false, broadcastMessage: null };
+    return { closed: false };
 
   let result: Awaited<
     ReturnType<typeof runtime.execution.reconcileLivePosition>
@@ -112,7 +112,7 @@ async function reconcileUserPositionImpl(
         );
       }
     }
-    return { closed: false, broadcastMessage: null };
+    return { closed: false };
   }
 
   if (runtime.reconcileHealth.recordSuccess(userSignal.signalId)) {
@@ -121,7 +121,7 @@ async function reconcileUserPositionImpl(
     );
   }
 
-  if (result.stillOpen) return { closed: false, broadcastMessage: null };
+  if (result.stillOpen) return { closed: false };
 
   // Sep 9 2026 (Karo), operator-requested -- reproduces the OLD, proven
   // liqwatch-bot pattern EXACTLY: the moment Binance confirms the
@@ -200,15 +200,13 @@ async function reconcileUserPositionImpl(
     globalSignal.entryWaveNumber,
   );
   await notifyUserClose(message, runtime);
-  // Sep 8 2026 (Karo) -- CRITICAL DESIGN FIX, operator-requested: close
-  // notifications used to reach ONLY the one user who actually had a
-  // real Binance position (karo) -- main/artak, who have no execution
-  // of their own, never saw ANY close message at all, even though they
-  // correctly received the matching ENTRY message earlier (entries are
-  // unconditionally broadcast to every enabled-telegram user; closes
-  // were not). The message itself is returned here so the caller
-  // (ReconciliationManager.onTick(), which alone has access to EVERY
-  // user's own runtime) can broadcast it identically -- this function
-  // still only ever reads/writes THIS ONE user's own execution state.
-  return { closed: true, broadcastMessage: message };
+  // Sep 12 2026 (Karo), operator-reported CRITICAL FIX -- this used to
+  // ALSO return `message` as `broadcastMessage` so the caller
+  // (ReconciliationManager.onTick()) could send this SAME real-
+  // execution CLOSE through every OTHER user's own telegram client
+  // too. Execution CLOSE notifications must be strictly per-user: the
+  // notifyUserClose() call directly above (to THIS user's own runtime,
+  // the actual position owner) is the only send that belongs here.
+  // Removed entirely -- no broadcast mechanism replaces it.
+  return { closed: true };
 }
