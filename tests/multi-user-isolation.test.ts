@@ -308,12 +308,18 @@ async function main(): Promise<void> {
       );
       // The per-user reconcile call itself, which internally sends via
       // notifyUserClose(message, runtime) to ONLY that same runtime, must
-      // still be present and untouched.
+      // still be present and untouched -- checked piece-by-piece rather
+      // than as one exact single-line string, so this survives harmless
+      // reformatting (e.g. Prettier wrapping the call across lines).
       assert.ok(
-        src.includes(
-          "await reconcileUserPosition(userSignal, globalSignal, runtime, userSignalRepo, now, pruneFromCache)",
+        src.includes("reconcileUserPosition("),
+        "the per-user reconcile call must remain present",
+      );
+      assert.ok(
+        /reconcileUserPosition\(\s*userSignal,\s*globalSignal,\s*runtime,\s*userSignalRepo,\s*now,\s*pruneFromCache,?\s*\)/.test(
+          src,
         ),
-        "the per-user reconcile call (which notifies ONLY the position-owning runtime) must remain exactly as before",
+        "the per-user reconcile call must still be invoked with exactly (userSignal, globalSignal, runtime, userSignalRepo, now, pruneFromCache) -- the SAME runtime whose position is being checked, never a different one",
       );
     },
   );
