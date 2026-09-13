@@ -225,6 +225,7 @@ async function main() {
   const finalEpisodesD: Record<string, Record<string, any[]>> = {};
   const manualReconLong: any[] = [];
   const manualReconShort: any[] = [];
+  const tightClusterExamples: any[] = [];
 
   for (const symbol of SYMBOLS) {
     console.log("=== " + symbol + " ===");
@@ -250,13 +251,26 @@ async function main() {
     function candleAt(ms: number) {
       return klines.get(Math.floor(ms / 60000) * 60000) || null;
     }
-    function priceJustBefore(ms: number): number | null {
-      const c = candleAt(Math.floor(ms / 60000) * 60000 - 60000);
-      return c ? c.close : null;
+    // CAUSALITY FIX: at any timestamp ms, the candle covering ms's OWN
+    // minute has NOT closed yet (it closes at the start of the NEXT
+    // minute). The only safely-usable candle at ms is the PREVIOUS
+    // minute's, which has already fully closed. This is the sole
+    // source of 1m candle-based price information anywhere in this
+    // script now -- candleAt() itself is only used for the POST-HOC
+    // diagnostic display in the manual reconstruction printout, never
+    // for any segmentation decision.
+    function closedCandleAt(ms: number) {
+      return klines.get(Math.floor(ms / 60000) * 60000 - 60000) || null;
     }
     const atrSeries = computeWilderAtrSeries(candlesAsc, 240);
+    // CAUSALITY FIX: same principle as closedCandleAt() -- start the
+    // backward search at the PREVIOUS minute, never the event's own
+    // (still-forming) minute, since atrSeries was built from the full,
+    // already-fetched historical candle array and would otherwise
+    // silently return an ATR value that already incorporates the
+    // not-yet-closed candle's own true range.
     function atrAt(ms: number): number | null {
-      let t = Math.floor(ms / 60000) * 60000;
+      let t = Math.floor(ms / 60000) * 60000 - 60000;
       for (let i = 0; i < 300; i++) {
         if (atrSeries.has(t)) return atrSeries.get(t)!;
         t -= 60000;
@@ -298,18 +312,28 @@ async function main() {
             // candle low/high at this event's own minute, never from the
             // liquidation event's own execution price -- e.price is a fill
             // price, not necessarily the market extreme at that moment.
-            const c0 = candleAt(e.timestamp);
-            const initExtreme = c0
+            // CAUSALITY FIX: only the closed (previous-minute) candle may
+            // seed the initial extreme; the event's own execution price is
+            // the only valid observation for the still-open current minute.
+            const c0 = closedCandleAt(e.timestamp);
+            const closedExtreme = c0
               ? victim === "LONG"
                 ? c0.low
                 : c0.high
-              : e.price;
+              : null;
+            const initExtreme =
+              closedExtreme !== null
+                ? victim === "LONG"
+                  ? Math.min(closedExtreme, e.price)
+                  : Math.max(closedExtreme, e.price)
+                : e.price;
             current = {
               events: [e],
               runningExtreme: initExtreme,
               runningExtremeTs: e.timestamp,
               lastExtremeUpdateCandleTs:
-                Math.floor(e.timestamp / 60000) * 60000,
+                Math.floor(e.timestamp / 60000) * 60000 -
+                60000 /* previous minute -- current minute not closed yet */,
               atrFrozen: atrAt(e.timestamp) ?? 1,
               peakIntensityPerSec: 0,
             };
@@ -318,14 +342,14 @@ async function main() {
           const lastEv = current.events[current.events.length - 1];
           const gap = e.timestamp - lastEv.timestamp;
 
-          // SEMANTIC FIX: walk every closed candle strictly between the
-          // last processed candle and this event's own minute, updating
-          // the running extreme continuously from real candle low/high.
-          // This is the exact causal-extreme methodology validated in the
-          // prior recovery-fix passes -- reused here, not reinvented.
+          // CAUSALITY FIX: walk only candles that have ACTUALLY CLOSED
+          // relative to this event's own timestamp -- upper bound is the
+          // previous minute, never the event's own (still-forming) minute.
+          const lastClosedCandleTs =
+            Math.floor(e.timestamp / 60000) * 60000 - 60000;
           for (
             let t = current.lastExtremeUpdateCandleTs + 60000;
-            t <= Math.floor(e.timestamp / 60000) * 60000;
+            t <= lastClosedCandleTs;
             t += 60000
           ) {
             const c = candleAt(t);
@@ -378,7 +402,12 @@ async function main() {
           let priceForceSplit = false,
             priceOverrideNoSplit = false;
           if (mode === "C" || mode === "D") {
-            const priceNow = priceJustBefore(e.timestamp) ?? e.price;
+            // CAUSALITY FIX: the event's own execution price is the most
+            // precise, contemporaneous observation available exactly at
+            // this timestamp -- strictly better than falling back to a
+            // stale previous-candle close when a fresher, valid
+            // observation (the event itself) exists.
+            const priceNow = e.price;
             const recoveryUsd =
               victim === "LONG"
                 ? priceNow - current.runningExtreme
@@ -500,13 +529,15 @@ async function main() {
             reason,
           });
 
-          // ── collect up to 5 LONG + 5 SHORT manual-reconstruction examples from mode D specifically ──
+          // ── collect examples from mode D: first 5 per side (broad coverage) + ALL tight (<20s) clusters (targeted proof) ──
           if (
             mode === "D" &&
             ((victim === "LONG" && manualReconLong.length < 5) ||
-              (victim === "SHORT" && manualReconShort.length < 5))
+              (victim === "SHORT" && manualReconShort.length < 5) ||
+              gap < 20000)
           ) {
-            const c = candleAt(e.timestamp);
+            const inProgressCandle = candleAt(e.timestamp); // POST-HOC reference only -- NEVER used in the decision above
+            const lastClosed = closedCandleAt(e.timestamp); // the actual causal price source used above
             const example = {
               symbol,
               victim,
@@ -517,32 +548,60 @@ async function main() {
               gap,
               runningExtremeBefore: current.runningExtreme,
               runningExtremeTs: current.runningExtremeTs,
-              candleAtEvent: c
-                ? { open: c.open, high: c.high, low: c.low, close: c.close }
+              lastClosedCandleUsedInDecision: lastClosed
+                ? {
+                    openTime: Math.floor(e.timestamp / 60000) * 60000 - 60000,
+                    open: lastClosed.open,
+                    high: lastClosed.high,
+                    low: lastClosed.low,
+                    close: lastClosed.close,
+                  }
+                : null,
+              inProgressCandleForReferenceOnly: inProgressCandle
+                ? {
+                    openTime: Math.floor(e.timestamp / 60000) * 60000,
+                    open: inProgressCandle.open,
+                    high: inProgressCandle.high,
+                    low: inProgressCandle.low,
+                    close: inProgressCandle.close,
+                  }
                 : null,
               recoveryAtr,
               atrFrozen: current.atrFrozen,
               decision: split ? "SPLIT" : "MERGE",
               reason,
             };
-            if (victim === "LONG") manualReconLong.push(example);
-            else manualReconShort.push(example);
+            if (victim === "LONG" && manualReconLong.length < 5)
+              manualReconLong.push(example);
+            else if (victim === "SHORT" && manualReconShort.length < 5)
+              manualReconShort.push(example);
+            if (gap < 20000) tightClusterExamples.push(example); // seconds-apart proof, matching the operator's own flagged scenario directly
           }
 
           if (split) {
             episodes.push(current.events);
-            const c0 = candleAt(e.timestamp);
-            const initExtreme = c0
+            // CAUSALITY FIX: only the closed (previous-minute) candle may
+            // seed the initial extreme; the event's own execution price is
+            // the only valid observation for the still-open current minute.
+            const c0 = closedCandleAt(e.timestamp);
+            const closedExtreme = c0
               ? victim === "LONG"
                 ? c0.low
                 : c0.high
-              : e.price;
+              : null;
+            const initExtreme =
+              closedExtreme !== null
+                ? victim === "LONG"
+                  ? Math.min(closedExtreme, e.price)
+                  : Math.max(closedExtreme, e.price)
+                : e.price;
             current = {
               events: [e],
               runningExtreme: initExtreme,
               runningExtremeTs: e.timestamp,
               lastExtremeUpdateCandleTs:
-                Math.floor(e.timestamp / 60000) * 60000,
+                Math.floor(e.timestamp / 60000) * 60000 -
+                60000 /* previous minute -- current minute not closed yet */,
               atrFrozen: atrAt(e.timestamp) ?? 1,
               peakIntensityPerSec: 0,
             };
@@ -678,16 +737,31 @@ async function main() {
         " @ " +
         fmtClock(ex.runningExtremeTs),
     );
-    if (ex.candleAtEvent)
+    if (ex.lastClosedCandleUsedInDecision)
       console.log(
-        "  candle at event minute: O=" +
-          ex.candleAtEvent.open +
+        "  [USED IN DECISION] last CLOSED candle (previous minute): O=" +
+          ex.lastClosedCandleUsedInDecision.open +
           " H=" +
-          ex.candleAtEvent.high +
+          ex.lastClosedCandleUsedInDecision.high +
           " L=" +
-          ex.candleAtEvent.low +
+          ex.lastClosedCandleUsedInDecision.low +
           " C=" +
-          ex.candleAtEvent.close,
+          ex.lastClosedCandleUsedInDecision.close,
+      );
+    else
+      console.log(
+        "  [USED IN DECISION] no closed candle yet -- runningExtreme seeded from event price only.",
+      );
+    if (ex.inProgressCandleForReferenceOnly)
+      console.log(
+        "  [REFERENCE ONLY, NOT used] full in-progress candle for this event's own minute (eventual O/H/L/C): O=" +
+          ex.inProgressCandleForReferenceOnly.open +
+          " H=" +
+          ex.inProgressCandleForReferenceOnly.high +
+          " L=" +
+          ex.inProgressCandleForReferenceOnly.low +
+          " C=" +
+          ex.inProgressCandleForReferenceOnly.close,
       );
     console.log(
       "  atrFrozen=" +
@@ -724,16 +798,31 @@ async function main() {
         " @ " +
         fmtClock(ex.runningExtremeTs),
     );
-    if (ex.candleAtEvent)
+    if (ex.lastClosedCandleUsedInDecision)
       console.log(
-        "  candle at event minute: O=" +
-          ex.candleAtEvent.open +
+        "  [USED IN DECISION] last CLOSED candle (previous minute): O=" +
+          ex.lastClosedCandleUsedInDecision.open +
           " H=" +
-          ex.candleAtEvent.high +
+          ex.lastClosedCandleUsedInDecision.high +
           " L=" +
-          ex.candleAtEvent.low +
+          ex.lastClosedCandleUsedInDecision.low +
           " C=" +
-          ex.candleAtEvent.close,
+          ex.lastClosedCandleUsedInDecision.close,
+      );
+    else
+      console.log(
+        "  [USED IN DECISION] no closed candle yet -- runningExtreme seeded from event price only.",
+      );
+    if (ex.inProgressCandleForReferenceOnly)
+      console.log(
+        "  [REFERENCE ONLY, NOT used] full in-progress candle for this event's own minute (eventual O/H/L/C): O=" +
+          ex.inProgressCandleForReferenceOnly.open +
+          " H=" +
+          ex.inProgressCandleForReferenceOnly.high +
+          " L=" +
+          ex.inProgressCandleForReferenceOnly.low +
+          " C=" +
+          ex.inProgressCandleForReferenceOnly.close,
       );
     console.log(
       "  atrFrozen=" +
@@ -744,6 +833,53 @@ async function main() {
     );
     console.log("  decision: " + ex.decision + " -- " + ex.reason);
   });
+
+  console.log("\n" + "=".repeat(100));
+  console.log(
+    "TIGHT-CLUSTER PROOF -- every transition with gap < 20s (the exact scenario flagged: seconds-apart events must never be split from unfinished-candle look-ahead)",
+  );
+  console.log("=".repeat(100));
+  if (tightClusterExamples.length === 0)
+    console.log("(none found in this window)");
+  tightClusterExamples.slice(0, 30).forEach((ex, i) => {
+    console.log(
+      "\n[" +
+        (i + 1) +
+        "] " +
+        ex.symbol +
+        " " +
+        ex.victim +
+        "  " +
+        fmtClock(ex.prevEventTs) +
+        " -> " +
+        fmtClock(ex.eventTs) +
+        "  gap=" +
+        fmtDur(ex.gap),
+    );
+    console.log(
+      "  recoveryATR=" +
+        (ex.recoveryAtr !== null ? ex.recoveryAtr.toFixed(4) : "n/a") +
+        "  decision=" +
+        ex.decision +
+        " -- " +
+        ex.reason,
+    );
+    if (ex.recoveryAtr !== null && ex.recoveryAtr < 0)
+      console.log("  *** STILL NEGATIVE -- investigate further ***");
+  });
+  console.log(
+    "\nTotal tight-cluster (<20s) transitions found: " +
+      tightClusterExamples.length +
+      ". Split rate among them: " +
+      (tightClusterExamples.length
+        ? (
+            (tightClusterExamples.filter((e) => e.decision === "SPLIT").length /
+              tightClusterExamples.length) *
+            100
+          ).toFixed(1) + "%"
+        : "n/a") +
+      " (should be low/zero if the fix is working -- seconds-apart events should almost never look like a structural recovery).",
+  );
 
   if (
     ASSERT_NEGATIVE_RECOVERY_COUNT > 0 ||
@@ -764,6 +900,7 @@ async function main() {
         {
           manualReconLong,
           manualReconShort,
+          tightClusterExamples,
           ASSERT_NEGATIVE_RECOVERY_COUNT,
           ASSERT_LONG_GAP_WRONG_SIGN_MERGE_COUNT,
         },
@@ -921,6 +1058,9 @@ async function main() {
         summary,
         disagreements: allDisagreements,
         finalEpisodesD,
+        manualReconLong,
+        manualReconShort,
+        tightClusterExamples,
       },
       null,
       2,
