@@ -173,6 +173,7 @@ interface EpisodeInProgress {
   events: any[];
   runningExtreme: number;
   runningExtremeTs: number;
+  lastExtremeUpdateCandleTs: number; // last 1m candle boundary the running extreme has already incorporated -- never re-walked backward
   atrFrozen: number;
   peakIntensityPerSec: number;
 }
@@ -185,6 +186,10 @@ interface Decision {
   intensityRatio: number | null;
   reason: string;
 }
+
+let ASSERT_NEGATIVE_RECOVERY_COUNT = 0;
+let ASSERT_LONG_GAP_WRONG_SIGN_MERGE_COUNT = 0;
+const LONG_GAP_SANITY_THRESHOLD_MS = 30 * 60000; // any merge across a gap this large gets extra scrutiny in the sanity pass
 
 async function main() {
   const uri = process.env.MONGO_URI;
@@ -200,9 +205,26 @@ async function main() {
   const now = Date.now();
   const windowStart = now - HOURS * 3600 * 1000;
 
+  console.log("=".repeat(100));
+  console.log(
+    "RECOVERY FORMULA (fixed -- running extreme now tracked from real candle low/high, never from liquidation event fill price)",
+  );
+  console.log("=".repeat(100));
+  console.log(
+    "LONG victim:  liquidation direction = DOWN. extreme = running LOW (from candle lows). recovery = priceNow - runningExtreme  (>= 0 always, since priceNow >= the recorded low by construction)",
+  );
+  console.log(
+    "SHORT victim: liquidation direction = UP.   extreme = running HIGH (from candle highs). recovery = runningExtreme - priceNow (>= 0 always, since priceNow <= the recorded high by construction)",
+  );
+  console.log(
+    "recoveryATR = recoveryUsd / atrFrozen (ATR frozen at the CURRENT episode's own start)\n",
+  );
+
   const summary: any = {};
   const allDisagreements: any[] = [];
   const finalEpisodesD: Record<string, Record<string, any[]>> = {};
+  const manualReconLong: any[] = [];
+  const manualReconShort: any[] = [];
 
   for (const symbol of SYMBOLS) {
     console.log("=== " + symbol + " ===");
@@ -272,10 +294,22 @@ async function main() {
         for (let i = 0; i < sideEvents.length; i++) {
           const e = sideEvents[i];
           if (current === null) {
+            // SEMANTIC FIX: initialize the running extreme from the actual
+            // candle low/high at this event's own minute, never from the
+            // liquidation event's own execution price -- e.price is a fill
+            // price, not necessarily the market extreme at that moment.
+            const c0 = candleAt(e.timestamp);
+            const initExtreme = c0
+              ? victim === "LONG"
+                ? c0.low
+                : c0.high
+              : e.price;
             current = {
               events: [e],
-              runningExtreme: e.price,
+              runningExtreme: initExtreme,
               runningExtremeTs: e.timestamp,
+              lastExtremeUpdateCandleTs:
+                Math.floor(e.timestamp / 60000) * 60000,
               atrFrozen: atrAt(e.timestamp) ?? 1,
               peakIntensityPerSec: 0,
             };
@@ -283,6 +317,31 @@ async function main() {
           }
           const lastEv = current.events[current.events.length - 1];
           const gap = e.timestamp - lastEv.timestamp;
+
+          // SEMANTIC FIX: walk every closed candle strictly between the
+          // last processed candle and this event's own minute, updating
+          // the running extreme continuously from real candle low/high.
+          // This is the exact causal-extreme methodology validated in the
+          // prior recovery-fix passes -- reused here, not reinvented.
+          for (
+            let t = current.lastExtremeUpdateCandleTs + 60000;
+            t <= Math.floor(e.timestamp / 60000) * 60000;
+            t += 60000
+          ) {
+            const c = candleAt(t);
+            if (!c) continue;
+            const extremeCandidate = victim === "LONG" ? c.low : c.high;
+            if (
+              victim === "LONG"
+                ? extremeCandidate < current.runningExtreme
+                : extremeCandidate > current.runningExtreme
+            ) {
+              current.runningExtreme = extremeCandidate;
+              current.runningExtremeTs = t;
+            }
+            current.lastExtremeUpdateCandleTs = t;
+          }
+
           const recentGaps = current.events
             .slice(-RECENT_GAP_WINDOW - 1)
             .map((_, idx, arr) =>
@@ -325,8 +384,49 @@ async function main() {
                 ? priceNow - current.runningExtreme
                 : current.runningExtreme - priceNow;
             recoveryAtr = recoveryUsd / current.atrFrozen;
+
+            // ── ASSERTION: recoveryATR must never be negative ──
+            if (recoveryAtr < -1e-9) {
+              ASSERT_NEGATIVE_RECOVERY_COUNT++;
+              console.error(
+                "ASSERTION FAILED: negative recoveryATR=" +
+                  recoveryAtr.toFixed(4) +
+                  " for " +
+                  symbol +
+                  " " +
+                  victim +
+                  " at " +
+                  fmtClock(e.timestamp) +
+                  " (runningExtreme=" +
+                  current.runningExtreme +
+                  " priceNow=" +
+                  priceNow +
+                  ")",
+              );
+            }
             priceForceSplit = recoveryAtr >= STRUCTURAL_RECOVERY_ATR_BAR;
             priceOverrideNoSplit = recoveryAtr < SMALL_PAUSE_ATR_BAR;
+
+            // ── ASSERTION: a large gap must never be merged purely because of a wrong-sign/negative recovery artifact ──
+            if (
+              gap > LONG_GAP_SANITY_THRESHOLD_MS &&
+              priceOverrideNoSplit &&
+              recoveryAtr < 0
+            ) {
+              ASSERT_LONG_GAP_WRONG_SIGN_MERGE_COUNT++;
+              console.error(
+                "ASSERTION FAILED: " +
+                  fmtDur(gap) +
+                  " gap merged via priceOverrideNoSplit driven by a NEGATIVE recoveryATR=" +
+                  recoveryAtr.toFixed(4) +
+                  " -- " +
+                  symbol +
+                  " " +
+                  victim +
+                  " at " +
+                  fmtClock(e.timestamp),
+              );
+            }
           }
 
           let split: boolean;
@@ -400,24 +500,67 @@ async function main() {
             reason,
           });
 
+          // ── collect up to 5 LONG + 5 SHORT manual-reconstruction examples from mode D specifically ──
+          if (
+            mode === "D" &&
+            ((victim === "LONG" && manualReconLong.length < 5) ||
+              (victim === "SHORT" && manualReconShort.length < 5))
+          ) {
+            const c = candleAt(e.timestamp);
+            const example = {
+              symbol,
+              victim,
+              prevEventTs: lastEv.timestamp,
+              prevEventPrice: lastEv.price,
+              eventTs: e.timestamp,
+              eventPrice: e.price,
+              gap,
+              runningExtremeBefore: current.runningExtreme,
+              runningExtremeTs: current.runningExtremeTs,
+              candleAtEvent: c
+                ? { open: c.open, high: c.high, low: c.low, close: c.close }
+                : null,
+              recoveryAtr,
+              atrFrozen: current.atrFrozen,
+              decision: split ? "SPLIT" : "MERGE",
+              reason,
+            };
+            if (victim === "LONG") manualReconLong.push(example);
+            else manualReconShort.push(example);
+          }
+
           if (split) {
             episodes.push(current.events);
+            const c0 = candleAt(e.timestamp);
+            const initExtreme = c0
+              ? victim === "LONG"
+                ? c0.low
+                : c0.high
+              : e.price;
             current = {
               events: [e],
-              runningExtreme: e.price,
+              runningExtreme: initExtreme,
               runningExtremeTs: e.timestamp,
+              lastExtremeUpdateCandleTs:
+                Math.floor(e.timestamp / 60000) * 60000,
               atrFrozen: atrAt(e.timestamp) ?? 1,
               peakIntensityPerSec: 0,
             };
           } else {
             current.events.push(e);
-            const extremeCandidate = e.price;
+            // running extreme for this minute is already incorporated by
+            // the continuous candle-walk above; also check the event's
+            // OWN fill price in case it pierced beyond the candle extreme
+            // already recorded (fill prices can occasionally exceed the
+            // 1m candle's own high/low during fast-moving liquidation
+            // cascades) -- this only ever EXTENDS the extreme, never
+            // substitutes for the candle-based tracking.
             if (
               victim === "LONG"
-                ? extremeCandidate < current.runningExtreme
-                : extremeCandidate > current.runningExtreme
+                ? e.price < current.runningExtreme
+                : e.price > current.runningExtreme
             ) {
-              current.runningExtreme = extremeCandidate;
+              current.runningExtreme = e.price;
               current.runningExtremeTs = e.timestamp;
             }
           }
@@ -496,6 +639,178 @@ async function main() {
     }
     console.log("");
   }
+
+  // ═══ SANITY GATE ═══
+  console.log("=".repeat(100));
+  console.log("SANITY CHECKS");
+  console.log("=".repeat(100));
+  console.log(
+    "negativeRecoveryATR assertion failures (should be 0): " +
+      ASSERT_NEGATIVE_RECOVERY_COUNT,
+  );
+  console.log(
+    "largeGap-merged-via-wrong-sign assertion failures (should be 0): " +
+      ASSERT_LONG_GAP_WRONG_SIGN_MERGE_COUNT,
+  );
+
+  console.log("\n" + "=".repeat(100));
+  console.log("MANUAL CANDLE-BY-CANDLE RECONSTRUCTION -- 5 LONG transitions");
+  console.log("=".repeat(100));
+  manualReconLong.forEach((ex, i) => {
+    console.log("\n[" + (i + 1) + "] " + ex.symbol + " LONG");
+    console.log(
+      "  prev event: " +
+        fmtClock(ex.prevEventTs) +
+        " price=" +
+        ex.prevEventPrice,
+    );
+    console.log(
+      "  next event: " +
+        fmtClock(ex.eventTs) +
+        " price=" +
+        ex.eventPrice +
+        "  gap=" +
+        fmtDur(ex.gap),
+    );
+    console.log(
+      "  runningExtreme (LOW) before this event: " +
+        ex.runningExtremeBefore +
+        " @ " +
+        fmtClock(ex.runningExtremeTs),
+    );
+    if (ex.candleAtEvent)
+      console.log(
+        "  candle at event minute: O=" +
+          ex.candleAtEvent.open +
+          " H=" +
+          ex.candleAtEvent.high +
+          " L=" +
+          ex.candleAtEvent.low +
+          " C=" +
+          ex.candleAtEvent.close,
+      );
+    console.log(
+      "  atrFrozen=" +
+        ex.atrFrozen.toFixed(4) +
+        "  recoveryATR=" +
+        (ex.recoveryAtr !== null ? ex.recoveryAtr.toFixed(4) : "n/a") +
+        "  (must be >= 0)",
+    );
+    console.log("  decision: " + ex.decision + " -- " + ex.reason);
+  });
+
+  console.log("\n" + "=".repeat(100));
+  console.log("MANUAL CANDLE-BY-CANDLE RECONSTRUCTION -- 5 SHORT transitions");
+  console.log("=".repeat(100));
+  manualReconShort.forEach((ex, i) => {
+    console.log("\n[" + (i + 1) + "] " + ex.symbol + " SHORT");
+    console.log(
+      "  prev event: " +
+        fmtClock(ex.prevEventTs) +
+        " price=" +
+        ex.prevEventPrice,
+    );
+    console.log(
+      "  next event: " +
+        fmtClock(ex.eventTs) +
+        " price=" +
+        ex.eventPrice +
+        "  gap=" +
+        fmtDur(ex.gap),
+    );
+    console.log(
+      "  runningExtreme (HIGH) before this event: " +
+        ex.runningExtremeBefore +
+        " @ " +
+        fmtClock(ex.runningExtremeTs),
+    );
+    if (ex.candleAtEvent)
+      console.log(
+        "  candle at event minute: O=" +
+          ex.candleAtEvent.open +
+          " H=" +
+          ex.candleAtEvent.high +
+          " L=" +
+          ex.candleAtEvent.low +
+          " C=" +
+          ex.candleAtEvent.close,
+      );
+    console.log(
+      "  atrFrozen=" +
+        ex.atrFrozen.toFixed(4) +
+        "  recoveryATR=" +
+        (ex.recoveryAtr !== null ? ex.recoveryAtr.toFixed(4) : "n/a") +
+        "  (must be >= 0)",
+    );
+    console.log("  decision: " + ex.decision + " -- " + ex.reason);
+  });
+
+  if (
+    ASSERT_NEGATIVE_RECOVERY_COUNT > 0 ||
+    ASSERT_LONG_GAP_WRONG_SIGN_MERGE_COUNT > 0
+  ) {
+    console.log(
+      "\n*** SANITY CHECKS FAILED -- stopping before the full A/B/C/D grouping comparison. Fix the issue above and rerun. ***",
+    );
+    const outPathDebug = path.join(
+      OUTPUT_DIR,
+      "episode-segmentation-SANITY-FAILED-" + Date.now() + ".json",
+    );
+    if (!fs.existsSync(OUTPUT_DIR))
+      fs.mkdirSync(OUTPUT_DIR, { recursive: true });
+    fs.writeFileSync(
+      outPathDebug,
+      JSON.stringify(
+        {
+          manualReconLong,
+          manualReconShort,
+          ASSERT_NEGATIVE_RECOVERY_COUNT,
+          ASSERT_LONG_GAP_WRONG_SIGN_MERGE_COUNT,
+        },
+        null,
+        2,
+      ),
+    );
+    await client.close();
+    return;
+  }
+  console.log(
+    "\nAll sanity checks passed -- proceeding to the full A/B/C/D grouping comparison.\n",
+  );
+
+  // ═══ Investigate over-segmentation: bootstrap-gap diagnostics ═══
+  console.log("=".repeat(100));
+  console.log(
+    "OVER-SEGMENTATION DIAGNOSTIC (investigation only -- no threshold changed)",
+  );
+  console.log("=".repeat(100));
+  console.log(
+    "Checking how often the FIRST transition of a new episode relies on the GLOBAL bootstrap gap (no intra-episode cadence yet) vs an established one, and how that compares to the actual gap observed.\n",
+  );
+  for (const symbol of SYMBOLS) {
+    for (const victim of ["LONG", "SHORT"] as const) {
+      const eps = finalEpisodesD[symbol]?.[victim];
+      if (!eps) continue;
+      const singleEventEps = eps.filter((e) => e.eventCount === 1).length;
+      if (eps.length > 0)
+        console.log(
+          symbol +
+            " " +
+            victim +
+            ": " +
+            eps.length +
+            " episodes, " +
+            singleEventEps +
+            " (" +
+            ((singleEventEps / eps.length) * 100).toFixed(0) +
+            "%) are single-event -- " +
+            (singleEventEps / eps.length > 0.5
+              ? "HIGH single-event rate, consistent with the bootstrap-gap being too tight for a brand-new episode's own 2nd event"
+              : "moderate/low single-event rate"),
+        );
+    }
+  }
+  console.log("");
 
   console.log("=".repeat(100));
   console.log(
