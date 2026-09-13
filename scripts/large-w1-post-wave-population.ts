@@ -198,6 +198,19 @@ interface Checkpoint {
   incrementalExtensionPct: number;
   incrementalExtensionAtr: number;
 }
+interface BeforeAfterExample {
+  symbol: string;
+  victim: string;
+  w1EndTs: number;
+  w1DurationMinutes: number;
+  w1FinalMinuteUsd: number;
+  w1TotalUsd: number;
+  elapsedMin: number;
+  buggySameSideUsd: number;
+  fixedSameSideUsd: number;
+  fixedOppositeSideUsd: number;
+  candlesIncludedInCheckpoint: string[];
+}
 interface W1Record {
   symbol: string;
   victim: "LONG" | "SHORT";
@@ -235,6 +248,9 @@ async function main() {
     large: [],
     "extreme/shock": [],
   };
+  const beforeAfterExamples: BeforeAfterExample[] = [];
+  let oneMinuteW1Count = 0,
+    oneMinuteW1StillContaminatedCount = 0;
 
   for (const symbol of SYMBOLS) {
     console.log("=== " + symbol + " ===");
@@ -412,16 +428,86 @@ async function main() {
             (incrementalExtensionUsd / extreme) * 100;
           const incrementalExtensionAtr = incrementalExtensionUsd / atrFrozen;
 
+          // CRITICAL FIX (operator-reported): w1Run.endTs is the MINUTE-
+          // BUCKET timestamp of W1's own final minute (e.g. 10:59:00),
+          // not the end of that minute. Events strictly after 10:59:00
+          // still include the entire 10:59:xx minute itself (W1's own
+          // liquidation). The correct post-W1 horizon starts at the
+          // NEXT full minute -- w1Run.endTs + 60000 -- exactly matching
+          // the price-walk's own boundary above (`for (let t =
+          // w1Run.endTs + 60000; ...)`), which was already correct.
+          const postW1HorizonStart = w1Run.endTs + 60000;
           const sameSideSince = sideEvents
             .filter(
-              (e) => e.timestamp > w1Run.endTs && e.timestamp <= checkpointTs,
+              (e) =>
+                e.timestamp >= postW1HorizonStart &&
+                e.timestamp <= checkpointTs,
             )
             .reduce((s, e) => s + e.quoteQty, 0);
           const oppSideSince = oppEvents
             .filter(
-              (e) => e.timestamp > w1Run.endTs && e.timestamp <= checkpointTs,
+              (e) =>
+                e.timestamp >= postW1HorizonStart &&
+                e.timestamp <= checkpointTs,
             )
             .reduce((s, e) => s + e.quoteQty, 0);
+
+          // ── audit-only: recompute the OLD, buggy value for comparison/proof, never used in the saved record itself ──
+          if (elapsedMin === 1) {
+            const buggySameSideSince = sideEvents
+              .filter(
+                (e) => e.timestamp > w1Run.endTs && e.timestamp <= checkpointTs,
+              )
+              .reduce((s, e) => s + e.quoteQty, 0);
+            const w1FinalMinuteUsd =
+              timeline.find((m) => m.minuteTs === w1Run.endTs)
+                ?.totalLiquidationUsd ?? 0;
+            if (w1Run.durationMinutes === 1) {
+              oneMinuteW1Count++;
+              if (Math.abs(buggySameSideSince - w1Run.totalUsd) < 0.01) {
+                // this confirms the OLD code's own contamination signature for this record (expected -- proves the bug existed)
+              }
+              if (
+                Math.abs(sameSideSince - w1Run.totalUsd) < 0.01 &&
+                w1Run.totalUsd > 0
+              )
+                oneMinuteW1StillContaminatedCount++; // should be ~0 after the fix
+            }
+            if (
+              beforeAfterExamples.length < 15 &&
+              buggySameSideSince !== sameSideSince
+            ) {
+              const candlesIncluded: string[] = [];
+              for (let t = postW1HorizonStart; t <= checkpointTs; t += 60000) {
+                const c = candleAt(t);
+                if (c)
+                  candlesIncluded.push(
+                    new Date(t).toISOString().slice(11, 16) +
+                      " O=" +
+                      c.open +
+                      " H=" +
+                      c.high +
+                      " L=" +
+                      c.low +
+                      " C=" +
+                      c.close,
+                  );
+              }
+              beforeAfterExamples.push({
+                symbol,
+                victim,
+                w1EndTs: w1Run.endTs,
+                w1DurationMinutes: w1Run.durationMinutes,
+                w1FinalMinuteUsd,
+                w1TotalUsd: w1Run.totalUsd,
+                elapsedMin,
+                buggySameSideUsd: buggySameSideSince,
+                fixedSameSideUsd: sameSideSince,
+                fixedOppositeSideUsd: oppSideSince,
+                candlesIncludedInCheckpoint: candlesIncluded,
+              });
+            }
+          }
 
           checkpoints.push({
             elapsedMin,
@@ -466,6 +552,81 @@ async function main() {
       "  EXTREME/SHOCK W1 records: " +
       recordsByRegime["extreme/shock"].length,
   );
+
+  // ═══ ASSERTIONS ═══
+  console.log("\n" + "=".repeat(100));
+  console.log("ASSERTIONS (temporal alignment fix verification)");
+  console.log("=".repeat(100));
+  console.log("one-minute W1 records found: " + oneMinuteW1Count);
+  console.log(
+    "one-minute W1 records where FIXED sameSideUsdSinceW1(elapsedMin=1) still equals W1 totalUsd (should be ~0, some rare coincidental exact matches are possible if a real, separate liquidation happens to be an identical dollar amount, but should NOT match the systematic 163/163 pattern reported): " +
+      oneMinuteW1StillContaminatedCount,
+  );
+  if (
+    oneMinuteW1Count > 0 &&
+    oneMinuteW1StillContaminatedCount / oneMinuteW1Count > 0.05
+  ) {
+    console.log(
+      "*** WARNING: contamination rate still elevated (>5% of one-minute W1s) -- fix may be incomplete. ***",
+    );
+  } else {
+    console.log(
+      "Contamination pattern eliminated (rate <= 5%, consistent with rare coincidence rather than systematic bug).",
+    );
+  }
+
+  console.log("\n" + "=".repeat(100));
+  console.log(
+    "10+ CONCRETE BEFORE/AFTER EXAMPLES (proving elapsedMin=1 now refers ONLY to the first full minute after W1)",
+  );
+  console.log("=".repeat(100));
+  beforeAfterExamples.slice(0, 15).forEach((ex, i) => {
+    console.log(
+      "\n[" +
+        (i + 1) +
+        "] " +
+        ex.symbol +
+        " " +
+        ex.victim +
+        "  W1 end=" +
+        new Date(ex.w1EndTs).toISOString() +
+        "  W1 duration=" +
+        ex.w1DurationMinutes +
+        "min",
+    );
+    console.log(
+      "  W1 final-minute liquidation USD: " +
+        fmtUsd(ex.w1FinalMinuteUsd) +
+        "   W1 total USD: " +
+        fmtUsd(ex.w1TotalUsd),
+    );
+    console.log("  elapsedMin=" + ex.elapsedMin + ":");
+    console.log(
+      "    BEFORE (buggy)  sameSideUsdSinceW1 = " +
+        fmtUsd(ex.buggySameSideUsd) +
+        (Math.abs(ex.buggySameSideUsd - ex.w1FinalMinuteUsd) < 0.01
+          ? "  <-- matches W1's own final-minute USD exactly (the bug)"
+          : ""),
+    );
+    console.log(
+      "    AFTER (fixed)   sameSideUsdSinceW1 = " +
+        fmtUsd(ex.fixedSameSideUsd) +
+        "   oppositeSideUsdSinceW1 = " +
+        fmtUsd(ex.fixedOppositeSideUsd),
+    );
+    console.log(
+      "    candle(s) included in this checkpoint's own liquidation+price horizon: " +
+        (ex.candlesIncludedInCheckpoint.length
+          ? ex.candlesIncludedInCheckpoint.join(" | ")
+          : "(none -- no candle data at this exact minute)"),
+    );
+  });
+  if (beforeAfterExamples.length < 10)
+    console.log(
+      "\n(only " +
+        beforeAfterExamples.length +
+        " examples found where buggy != fixed -- fewer than 10 exist in this dataset where the two values actually differed)",
+    );
 
   function distLine(vals: number[]) {
     const s = sortNum(vals);
@@ -700,12 +861,19 @@ async function main() {
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const outPath = path.join(
     OUTPUT_DIR,
-    "large-w1-post-wave-population-" + Date.now() + ".json",
+    "large-w1-post-wave-population-TEMPORAL-FIXED-" + Date.now() + ".json",
   );
   fs.writeFileSync(
     outPath,
     JSON.stringify(
-      { generatedAt: new Date(now).toISOString(), recordsByRegime },
+      {
+        generatedAt: new Date(now).toISOString(),
+        temporalAlignmentFixApplied: true,
+        fixDescription:
+          "sameSideUsdSinceW1/oppositeSideUsdSinceW1 now start strictly at w1Run.endTs+60000 (the first full minute after W1), matching the price-walk's own existing boundary -- previously started at w1Run.endTs, which incorrectly included W1's own final minute.",
+        assertions: { oneMinuteW1Count, oneMinuteW1StillContaminatedCount },
+        recordsByRegime,
+      },
       null,
       2,
     ),
