@@ -116,6 +116,15 @@ interface RawEvent {
   quoteQty: number;
   victim: "LONG" | "SHORT";
 }
+interface Transition {
+  eventIdx: number;
+  gap: number;
+  intensityRatio: number;
+  recoveryRatio: number;
+  madeNewExtreme: boolean;
+  flowContinuityAlive: boolean;
+  reason: string;
+}
 interface Episode {
   symbol: string;
   victim: "LONG" | "SHORT";
@@ -123,6 +132,7 @@ interface Episode {
   runningExtreme: number;
   episodeStartPrice: number;
   endReason: string;
+  transitions: Transition[];
 }
 
 function buildEpisodes(
@@ -138,6 +148,7 @@ function buildEpisodes(
     episodeStartPrice: number;
     peakIntensityPerSec: number;
     endReason: string;
+    transitions: Transition[];
   } | null = null;
 
   for (let i = 0; i < sideEvents.length; i++) {
@@ -149,6 +160,7 @@ function buildEpisodes(
         episodeStartPrice: e.price,
         peakIntensityPerSec: 0,
         endReason: "",
+        transitions: [],
       };
       continue;
     }
@@ -202,9 +214,34 @@ function buildEpisodes(
 
     let split = false;
     let reason = "";
-    if (madeNewExtreme) {
+    // CRITICAL FIX (operator-reported): a new directional extreme is
+    // NECESSARY-BUT-NOT-SUFFICIENT for continuation. It can only keep
+    // the episode open when liquidation-FLOW continuity is also still
+    // alive -- otherwise ordinary multi-hour market drift naturally
+    // produces new marginal extremes forever, collapsing an entire
+    // trend into one giant "episode". flowContinuityAlive reuses the
+    // SAME adaptive gap+intensity check as the no-new-extreme branch
+    // below (effectiveMultiplier already shrinks back toward baseline
+    // once intensityRatio has decayed, so no separate decay detector
+    // is needed): "newExtreme supports MERGE only if flow continuity
+    // is still alive", never an unconditional override.
+    const flowContinuityAlive = !gapSplit;
+    if (madeNewExtreme && flowContinuityAlive) {
       split = false;
-      reason = "new extreme -- definitionally continuing";
+      reason =
+        "new extreme AND flow continuity intact (gap " +
+        fmtDur(gap) +
+        " within adaptive cadence, intensityRatio=" +
+        intensityRatio.toFixed(2) +
+        ") -- continuing same burst";
+    } else if (madeNewExtreme && !flowContinuityAlive) {
+      split = true;
+      reason =
+        "new extreme but flow continuity BROKEN -- gap " +
+        fmtDur(gap) +
+        " exceeds adaptive cadence (intensityRatio=" +
+        intensityRatio.toFixed(2) +
+        ") even though price made a fresh extreme; treated as a NEW episode candidate, not a continuation of the same burst";
     } else if (priceForceSplit) {
       split = true;
       reason =
@@ -238,6 +275,17 @@ function buildEpisodes(
       reason = "gap within adaptive cadence";
     }
 
+    const transitionRecord: Transition = {
+      eventIdx: i,
+      gap,
+      intensityRatio,
+      recoveryRatio,
+      madeNewExtreme,
+      flowContinuityAlive,
+      reason,
+    };
+    cur.transitions.push(transitionRecord);
+
     if (split) {
       cur.endReason = reason;
       episodes.push({
@@ -247,6 +295,7 @@ function buildEpisodes(
         runningExtreme: cur.runningExtreme,
         episodeStartPrice: cur.episodeStartPrice,
         endReason: cur.endReason,
+        transitions: cur.transitions,
       });
       cur = {
         events: [e],
@@ -254,6 +303,7 @@ function buildEpisodes(
         episodeStartPrice: e.price,
         peakIntensityPerSec: 0,
         endReason: "",
+        transitions: [],
       };
     } else {
       cur.events.push(e);
@@ -270,6 +320,7 @@ function buildEpisodes(
       runningExtreme: cur.runningExtreme,
       episodeStartPrice: cur.episodeStartPrice,
       endReason: cur.endReason,
+      transitions: cur.transitions,
     });
   }
   return episodes;
@@ -430,6 +481,80 @@ async function main() {
       );
     }
   }
+
+  // ═══ LONG-EPISODE DIAGNOSTIC (the specific check requested) ═══
+  const allEpisodesFlatForLongCheck: Episode[] = [];
+  for (const symbol of SYMBOLS) {
+    if (!allEpisodesBySymbolSide[symbol]) continue;
+    for (const victim of ["LONG", "SHORT"] as const)
+      allEpisodesFlatForLongCheck.push(
+        ...(allEpisodesBySymbolSide[symbol][victim] || []),
+      );
+  }
+  function printLongEpisodes(minMs: number, label: string) {
+    console.log("\n" + "=".repeat(100));
+    console.log(label);
+    console.log("=".repeat(100));
+    const longOnes = allEpisodesFlatForLongCheck.filter(
+      (ep) =>
+        ep.events[ep.events.length - 1].timestamp - ep.events[0].timestamp >=
+        minMs,
+    );
+    if (longOnes.length === 0) {
+      console.log(
+        "(none found -- the fix eliminated all episodes at this duration threshold)",
+      );
+      return;
+    }
+    longOnes.forEach((ep) => {
+      const duration =
+        ep.events[ep.events.length - 1].timestamp - ep.events[0].timestamp;
+      let longestGap = 0,
+        longestGapIdx = -1;
+      ep.transitions.forEach((t, idx) => {
+        if (t.gap > longestGap) {
+          longestGap = t.gap;
+          longestGapIdx = idx;
+        }
+      });
+      console.log(
+        "\n" +
+          ep.symbol +
+          " " +
+          ep.victim +
+          "  duration=" +
+          fmtDur(duration) +
+          "  eventCount=" +
+          ep.events.length,
+      );
+      if (longestGapIdx >= 0) {
+        const t = ep.transitions[longestGapIdx];
+        const beforeIntensity =
+          longestGapIdx > 0
+            ? ep.transitions[longestGapIdx - 1].intensityRatio
+            : (ep.transitions[0]?.intensityRatio ?? 0);
+        console.log(
+          "  longest internal gap: " +
+            fmtDur(longestGap) +
+            " at event index " +
+            t.eventIdx,
+        );
+        console.log(
+          "  intensityRatio just BEFORE this gap: " +
+            beforeIntensity.toFixed(3) +
+            "  intensityRatio at the event AFTER this gap: " +
+            t.intensityRatio.toFixed(3),
+        );
+        console.log(
+          "  why the algorithm kept it merged across this gap: " + t.reason,
+        );
+      } else {
+        console.log("  (single transition or no internal gap data)");
+      }
+    });
+  }
+  printLongEpisodes(30 * 60000, "EPISODES > 30 MINUTES");
+  printLongEpisodes(60 * 60000, "EPISODES > 1 HOUR");
 
   // ═══ 20 real candidate cascades, full raw events ═══
   console.log("\n" + "=".repeat(100));
