@@ -347,6 +347,18 @@ async function main() {
           ) {
             runningExtreme = extremeCandidate;
             runningExtremeTs = t;
+            // CRITICAL FIX: a new, deeper extreme invalidates every
+            // recovery value recorded so far -- they were measured
+            // against a now-superseded reference point. Reset the
+            // running max so it only ever reflects recovery FROM THE
+            // CURRENT extreme going forward. This is the same
+            // "recovery resets to zero on new extreme" rule already
+            // established for this research; the earlier version of
+            // this script applied it to the extreme itself but never
+            // to the recovery-max tracker, which is exactly what the
+            // negativeDetectionDelay sanity check caught.
+            maxRecoveryAtr = -Infinity;
+            maxRecoveryTs = t;
           }
           const recoveryUsd =
             victim === "LONG"
