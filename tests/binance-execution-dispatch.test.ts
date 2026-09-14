@@ -160,16 +160,16 @@ scenario(
     assert.ok(preFlightIdx > -1, "pre-flight must call the shared helper");
     assert.ok(postFillIdx > -1, "post-fill must call the shared helper");
     assert.ok(
-      source.includes(
-        "plan.entryRounded, plan.slRounded, plan.tpRounded, executablePrice",
+      /plan\.entryRounded,\s*plan\.slRounded,\s*plan\.tpRounded,\s*executablePrice/.test(
+        source,
       ),
-      " pre-flight must re-anchor the canonical signal's own SL/TP to the executable price",
+      "pre-flight must re-anchor the canonical signal's own SL/TP to the executable price -- regex tolerant of Prettier line-wrapping, matching the pattern already established elsewhere in this file",
     );
     assert.ok(
-      source.includes(
-        "plan.entryRounded, plan.slRounded, plan.tpRounded, actualEntry",
+      /plan\.entryRounded,\s*plan\.slRounded,\s*plan\.tpRounded,\s*actualEntry/.test(
+        source,
       ),
-      "post-fill must re-anchor the canonical signal's own SL/TP to the actual fill price",
+      "post-fill must re-anchor the canonical signal's own SL/TP to the actual fill price -- regex tolerant of Prettier line-wrapping",
     );
   },
 );
