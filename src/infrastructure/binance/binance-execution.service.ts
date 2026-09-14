@@ -1801,33 +1801,68 @@ export class BinanceExecutionService {
     const slippagePct =
       ((actualEntry - plan.entryRounded) / plan.entryRounded) * 100;
 
-    const standardReplan = planForSymbol({
-      entry: actualEntry,
-      side: input.side,
-      symbol: plan.symbol,
-      w1AnchorPrice: input.w1AnchorPrice,
-      w1ExtremePrice: input.w1ExtremePrice,
-      w1LiqUsd: input.w1LiqUsd,
-      w2LiqUsd: input.w2LiqUsd,
-      atr15mAbs: input.atr15mAbs,
-      p95: input.p95,
-      dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
-    });
-    // Aug 28 2026, operator-approved (Karo) -- CRITICAL FIX. Without
-    // this override, MICRO's own compressed TP/SL (NORMAL's own
-    // distances divided by V3_MICRO_EXIT_DIVISOR) would be silently
-    // DISCARDED here: the standard replan above completely ignores
-    // input.stopLoss/takeProfit and RE-DERIVES fresh TP%/SL% from
-    // structural market conditions (w1AnchorPrice/w1ExtremePrice/atr15mAbs) -- since
-    // MICRO passes the SAME structural context NORMAL used, that
-    // re-derivation would silently regenerate NORMAL-SIZED TP/SL again
-    // (confirmed real bug, operator's own finding). When fixedExitPct
-    // is present, SL/TP are instead computed as FIXED PERCENTAGE
-    // DISTANCES from the actual fill price -- never re-derived from
-    // structural conditions, never re-running the structural trade-
-    // plan's own strategy logic for a "new" trade plan. Absent for
-    // every NORMAL call, so standardReplan is used completely
-    // unchanged there.
+    // Sep 14 2026 (Karo), operator-reported CRITICAL FIX -- confirmed
+    // real-incident root cause (SignalId e5c0fd41-037e-4db6-a956-
+    // d0c477fd5d90, Brother account, ETHUSDT SHORT): planForSymbol()
+    // (deriveLiquidationPhysicsTradePlan()) used to be called here for
+    // EVERY NORMAL post-fill replan, completely IGNORING the canonical
+    // signal's own SL/TP (plan.slRounded/plan.tpRounded, whatever the
+    // STRATEGY layer actually emitted -- fixed 0.30%/0.66% for WAVE,
+    // fixed 0.30%/0.60% for ROTATION, or any other geometry a future
+    // strategy might use) and re-deriving an ENTIRELY DIFFERENT TP/SL
+    // from raw structural market conditions (w1AnchorPrice/
+    // w1ExtremePrice/atr15mAbs/p95) instead. Confirmed via real Binance
+    // order history: canonical TP was 2489.62 (+0.66% from the
+    // canonical 2506.16 entry), but the ACTUAL live TP order that
+    // filled was 2495.62 (+0.39% from the real 2505.41 fill) --
+    // structurally impossible to produce by re-anchoring the canonical
+    // percentage distance, only by an independent re-derivation.
+    //
+    // Fixed: the execution layer now NEVER redesigns the trade plan.
+    // It derives the STRATEGY's own percentage distances directly from
+    // the canonical signal (plan.entryRounded/slRounded/tpRounded --
+    // already tick-rounded, but percentage-accurate to well within
+    // rounding noise), then re-anchors those EXACT percentages to the
+    // real fill price. Whatever geometry the strategy emitted is
+    // EXACTLY what gets executed -- the execution layer is now fully
+    // strategy-agnostic, with zero hardcoded WAVE/ROTATION assumptions
+    // of its own. MICRO's own input.fixedExitPct mechanism (a
+    // deliberately SEPARATE, intentional compression of NORMAL's own
+    // distances by V3_MICRO_EXIT_DIVISOR) is completely untouched --
+    // still checked FIRST, below, exactly as before.
+    const canonicalSlPct =
+      Math.abs(plan.slRounded - plan.entryRounded) / plan.entryRounded;
+    const canonicalTpPct =
+      Math.abs(plan.tpRounded - plan.entryRounded) / plan.entryRounded;
+    const canonicalReanchoredReplan: LiquidityPlanResult = {
+      ok: true,
+      sl:
+        input.side === "LONG"
+          ? actualEntry * (1 - canonicalSlPct)
+          : actualEntry * (1 + canonicalSlPct),
+      tp:
+        input.side === "LONG"
+          ? actualEntry * (1 + canonicalTpPct)
+          : actualEntry * (1 - canonicalTpPct),
+      slPct: canonicalSlPct,
+      tpPct: canonicalTpPct,
+      rr: canonicalSlPct > 0 ? canonicalTpPct / canonicalSlPct : Infinity,
+      // Forensics-only fields -- never read by any downstream logic,
+      // zero-filled since this path derives from the canonical
+      // signal's own percentages, not a market-condition formula.
+      intensityRaw: 0,
+      intensity: 0,
+      atr15mPct: 0,
+      rawTpPct: canonicalTpPct,
+      wallAdjustedTpPct: canonicalTpPct,
+      wallApplied: false,
+      rrCandidate:
+        canonicalSlPct > 0 ? canonicalTpPct / canonicalSlPct : Infinity,
+      slCapApplied: false,
+      slCapValue: canonicalSlPct,
+      profitWallNotionalAtEntry: 0,
+      profitWallNotionalAtAnchor: 0,
+    } as LiquidityPlanResult;
     const replan: LiquidityPlanResult = input.fixedExitPct
       ? ({
           ok: true,
@@ -1865,19 +1900,23 @@ export class BinanceExecutionService {
           profitWallNotionalAtEntry: 0,
           profitWallNotionalAtAnchor: 0,
         } as LiquidityPlanResult)
-      : standardReplan;
+      : canonicalReanchoredReplan;
     // Two independent floors, deliberately kept separate:
-    //   replan.ok            — the STRATEGY's own geometry floors
-    //                          (MIN_TP_PCT, MIN_SL_PCT, RR_MIN inside
-    //                          planForSymbol/deriveLiquidationPhysicsTradePlan).
+    //   replan.ok            — always true now for both branches above
+    //                          (percentage re-anchoring cannot itself
+    //                          fail the way a fresh structural
+    //                          derivation could) -- kept as a field for
+    //                          type-shape compatibility with every
+    //                          existing downstream consumer.
     //   this.minRRAfterFill  — the EXECUTION layer's own, independently
     //                          env-configurable safety floor
-    //                          (BINANCE_MIN_RR_AFTER_FILL). Currently
-    //                          the same numeric value as the strategy's
-    //                          RR_MIN, but kept as a separate check so
-    //                          an operator can tighten execution-side
-    //                          risk tolerance without touching strategy
-    //                          constants, or vice versa.
+    //                          (BINANCE_MIN_RR_AFTER_FILL). Still
+    //                          checked below -- re-anchoring preserves
+    //                          the canonical RR almost exactly (only
+    //                          tick-rounding can move it slightly), so
+    //                          this should now rarely if ever trigger
+    //                          for a signal that already passed its own
+    //                          strategy-level RR floor.
     const decision: "CONTINUE" | "ABORT" =
       replan.ok && replan.rr >= this.minRRAfterFill ? "CONTINUE" : "ABORT";
 
@@ -1889,8 +1928,13 @@ export class BinanceExecutionService {
         actualFill: actualEntry,
         plannedSl: plan.slRounded,
         plannedTp: plan.tpRounded,
+        canonicalSlPct: Number(canonicalSlPct.toFixed(6)),
+        canonicalTpPct: Number(canonicalTpPct.toFixed(6)),
         replannedSl: replan.ok ? replan.sl : null,
         replannedTp: replan.ok ? replan.tp : null,
+        replanSource: input.fixedExitPct
+          ? "MICRO_FIXED_EXIT_PCT"
+          : "CANONICAL_PCT_REANCHOR",
         plannedRR: Number(plannedRR.toFixed(3)),
         replannedRR: replan.ok ? Number(replan.rr.toFixed(3)) : null,
         slippagePct: Number(slippagePct.toFixed(4)),

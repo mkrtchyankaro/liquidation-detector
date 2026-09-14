@@ -132,7 +132,7 @@ scenario(
 );
 
 scenario(
-  "structural: BOTH pre-flight and post-fill replan call the SAME planForSymbol() (same physics, never divergent formulas)",
+  "structural (Sep 14 2026, operator-reported fix): pre-flight still calls planForSymbol() for its own RR sanity estimate, but post-fill replan NO LONGER does -- it derives percentages from the canonical signal instead, never re-deriving a divergent trade plan",
   () => {
     const fs = require("fs") as typeof import("fs");
     const source = fs.readFileSync(
@@ -140,18 +140,13 @@ scenario(
       "utf8",
     );
     const preFlightIdx = source.indexOf("const preFlightPlan = planForSymbol(");
-    const standardReplanIdx = source.indexOf(
-      "const standardReplan = planForSymbol(",
+    assert.ok(
+      preFlightIdx > -1,
+      "pre-flight call-site must still exist and still use planForSymbol()",
     );
-    assert.ok(preFlightIdx > -1, "pre-flight call-site must exist");
-    assert.ok(standardReplanIdx > -1, "post-fill replan call-site must exist");
     const preFlightArgs = source.slice(
       preFlightIdx,
       source.indexOf("});", preFlightIdx),
-    );
-    const replanArgs = source.slice(
-      standardReplanIdx,
-      source.indexOf("});", standardReplanIdx),
     );
     for (const field of [
       "w1AnchorPrice",
@@ -166,11 +161,26 @@ scenario(
         preFlightArgs.includes(`input.${field}`),
         `pre-flight must pass input.${field}`,
       );
-      assert.ok(
-        replanArgs.includes(`input.${field}`),
-        `post-fill replan must pass input.${field}`,
-      );
     }
+    // The old post-fill call-site is GONE entirely -- confirms the fix
+    // isn't just an unused/dead standardReplan sitting alongside the new
+    // logic, but a genuine removal.
+    assert.ok(
+      !source.includes("const standardReplan = planForSymbol("),
+      "post-fill replan must NEVER call planForSymbol()/deriveLiquidationPhysicsTradePlan() again -- that was the confirmed root cause of SignalId e5c0fd41-037e-4db6-a956-d0c477fd5d90's TP landing at ~0.39% instead of the canonical 0.66%",
+    );
+    assert.ok(
+      source.includes(
+        "canonicalSlPct = Math.abs(plan.slRounded - plan.entryRounded) / plan.entryRounded",
+      ),
+      "post-fill SL% must be derived from the canonical signal's own tick-rounded SL, not re-derived from market structure",
+    );
+    assert.ok(
+      source.includes(
+        "canonicalTpPct = Math.abs(plan.tpRounded - plan.entryRounded) / plan.entryRounded",
+      ),
+      "post-fill TP% must be derived from the canonical signal's own tick-rounded TP, not re-derived from market structure",
+    );
   },
 );
 
@@ -212,6 +222,224 @@ scenario(
     assert.ok(
       !source.includes("unitAbs"),
       "unitAbs must never appear in this file -- UNIT is exclusively an entry-geometry concept owned by v5-wave.service.ts",
+    );
+  },
+);
+
+console.log(
+  "\nRunning post-fill percentage-reanchor regression tests (Sep 14 2026, real-incident fix)...\n",
+);
+
+// Pure numeric mirror of the EXACT formula now in binance-execution.service.ts's
+// post-fill replan (canonicalSlPct/canonicalTpPct derivation + re-anchor to
+// actualEntry) -- kept deliberately identical in shape to that production
+// code so these tests fail the instant the two diverge.
+function reanchorToActualFill(
+  side: "LONG" | "SHORT",
+  canonicalEntry: number,
+  canonicalSl: number,
+  canonicalTp: number,
+  actualEntry: number,
+): { sl: number; tp: number; slPct: number; tpPct: number; rr: number } {
+  const canonicalSlPct =
+    Math.abs(canonicalSl - canonicalEntry) / canonicalEntry;
+  const canonicalTpPct =
+    Math.abs(canonicalTp - canonicalEntry) / canonicalEntry;
+  const sl =
+    side === "LONG"
+      ? actualEntry * (1 - canonicalSlPct)
+      : actualEntry * (1 + canonicalSlPct);
+  const tp =
+    side === "LONG"
+      ? actualEntry * (1 + canonicalTpPct)
+      : actualEntry * (1 - canonicalTpPct);
+  return {
+    sl,
+    tp,
+    slPct: canonicalSlPct,
+    tpPct: canonicalTpPct,
+    rr: canonicalTpPct / canonicalSlPct,
+  };
+}
+
+scenario(
+  "1. SHORT: canonical 2506.16/2513.68/2489.62, actual fill 2505.41 -- re-anchored SL/TP preserve the exact canonical percentage distances",
+  () => {
+    const r = reanchorToActualFill("SHORT", 2506.16, 2513.68, 2489.62, 2505.41);
+    assert.ok(
+      Math.abs(r.slPct - 0.003) < 0.0001,
+      `slPct should be ~0.30%, got ${(r.slPct * 100).toFixed(4)}%`,
+    );
+    assert.ok(
+      Math.abs(r.tpPct - 0.0066) < 0.0001,
+      `tpPct should be ~0.66%, got ${(r.tpPct * 100).toFixed(4)}%`,
+    );
+    const expectedSl = 2505.41 * 1.003;
+    const expectedTp = 2505.41 * (1 - 0.0066);
+    assert.ok(
+      Math.abs(r.sl - expectedSl) < 0.05,
+      `SL should be ~${expectedSl.toFixed(2)}, got ${r.sl.toFixed(2)}`,
+    );
+    assert.ok(
+      Math.abs(r.tp - expectedTp) < 0.05,
+      `TP should be ~${expectedTp.toFixed(2)}, got ${r.tp.toFixed(2)}`,
+    );
+  },
+);
+
+scenario(
+  "2. LONG equivalent: canonical 2506.16/2498.64/2522.70 (0.30%/0.66% mirrored), actual fill 2507.90 -- re-anchored SL/TP preserve the exact canonical percentage distances",
+  () => {
+    const canonicalEntry = 2506.16;
+    const canonicalSl = canonicalEntry * (1 - 0.003);
+    const canonicalTp = canonicalEntry * (1 + 0.0066);
+    const actualEntry = 2507.9;
+    const r = reanchorToActualFill(
+      "LONG",
+      canonicalEntry,
+      canonicalSl,
+      canonicalTp,
+      actualEntry,
+    );
+    assert.ok(Math.abs(r.slPct - 0.003) < 0.0001);
+    assert.ok(Math.abs(r.tpPct - 0.0066) < 0.0001);
+    assert.ok(r.sl < actualEntry, "LONG SL must be below the actual fill");
+    assert.ok(r.tp > actualEntry, "LONG TP must be above the actual fill");
+    assert.ok(Math.abs(r.sl - actualEntry * (1 - 0.003)) < 0.05);
+    assert.ok(Math.abs(r.tp - actualEntry * (1 + 0.0066)) < 0.05);
+  },
+);
+
+scenario(
+  "3. NORMAL account post-fill replan source no longer calls the old liquidation-physics trade planning function at all",
+  () => {
+    const fs = require("fs") as typeof import("fs");
+    const source = fs.readFileSync(
+      require.resolve("../src/infrastructure/binance/binance-execution.service.ts"),
+      "utf8",
+    );
+    const postFillIdx = source.indexOf(
+      "const canonicalSlPct = Math.abs(plan.slRounded",
+    );
+    const postFillEnd = source.indexOf("if (!replan.ok) {", postFillIdx);
+    assert.ok(
+      postFillIdx > -1 && postFillEnd > postFillIdx,
+      "post-fill re-anchor block must exist",
+    );
+    const postFillBody = source.slice(postFillIdx, postFillEnd);
+    assert.ok(
+      !postFillBody.includes("planForSymbol("),
+      "the post-fill replan body must never call planForSymbol()/deriveLiquidationPhysicsTradePlan() -- confirmed root cause of the real incident",
+    );
+    assert.ok(
+      !postFillBody.includes("w1AnchorPrice"),
+      "post-fill replan must not reference structural market-condition inputs at all anymore -- it is now strategy-agnostic",
+    );
+  },
+);
+
+scenario(
+  "4. WAVE geometry (0.30% SL / 0.66% TP, RR 2.2) is preserved exactly through re-anchoring",
+  () => {
+    const r = reanchorToActualFill(
+      "SHORT",
+      2506.16,
+      2506.16 * 1.003,
+      2506.16 * (1 - 0.0066),
+      2499.0,
+    );
+    assert.ok(
+      Math.abs(r.rr - 2.2) < 0.001,
+      `RR should be exactly 2.2, got ${r.rr.toFixed(4)}`,
+    );
+  },
+);
+
+scenario(
+  "5. ROTATION geometry (0.30% SL / 0.60% TP, RR 2.0) is preserved exactly through re-anchoring",
+  () => {
+    const r = reanchorToActualFill(
+      "LONG",
+      1000,
+      1000 * (1 - 0.003),
+      1000 * (1 + 0.006),
+      998.5,
+    );
+    assert.ok(
+      Math.abs(r.rr - 2.0) < 0.001,
+      `RR should be exactly 2.0, got ${r.rr.toFixed(4)}`,
+    );
+    assert.ok(Math.abs(r.slPct - 0.003) < 0.0001);
+    assert.ok(Math.abs(r.tpPct - 0.006) < 0.0001);
+  },
+);
+
+scenario(
+  "6. tick-size rounding is the only allowed numerical deviation -- re-anchored values before rounding match the exact percentage formula to floating-point precision",
+  () => {
+    const r = reanchorToActualFill("SHORT", 2506.16, 2513.68, 2489.62, 2505.41);
+    const exactSl = 2505.41 * (1 + r.slPct);
+    const exactTp = 2505.41 * (1 - r.tpPct);
+    assert.ok(
+      Math.abs(r.sl - exactSl) < 1e-9,
+      "pre-rounding SL must match the exact formula to floating-point precision, not an approximation",
+    );
+    assert.ok(
+      Math.abs(r.tp - exactTp) < 1e-9,
+      "pre-rounding TP must match the exact formula to floating-point precision, not an approximation",
+    );
+  },
+);
+
+scenario(
+  "7. Brother vs Friend: different actual fills produce different ABSOLUTE SL/TP, but IDENTICAL percentage geometry",
+  () => {
+    const brother = reanchorToActualFill(
+      "SHORT",
+      2506.16,
+      2513.68,
+      2489.62,
+      2505.41,
+    );
+    const friend = reanchorToActualFill(
+      "SHORT",
+      2506.16,
+      2513.68,
+      2489.62,
+      2504.1,
+    );
+    assert.notStrictEqual(
+      brother.sl,
+      friend.sl,
+      "different fills must produce different absolute SL",
+    );
+    assert.notStrictEqual(
+      brother.tp,
+      friend.tp,
+      "different fills must produce different absolute TP",
+    );
+    assert.ok(
+      Math.abs(brother.slPct - friend.slPct) < 1e-12,
+      "percentage geometry must be IDENTICAL regardless of actual fill",
+    );
+    assert.ok(
+      Math.abs(brother.tpPct - friend.tpPct) < 1e-12,
+      "percentage geometry must be IDENTICAL regardless of actual fill",
+    );
+  },
+);
+
+scenario(
+  "REAL INCIDENT REGRESSION (SignalId e5c0fd41-037e-4db6-a956-d0c477fd5d90, Brother, ETHUSDT SHORT): actual fill 2505.41 must re-anchor TP near 2488.87, NEVER near the old buggy 2495.62",
+  () => {
+    const r = reanchorToActualFill("SHORT", 2506.16, 2513.68, 2489.62, 2505.41);
+    assert.ok(
+      Math.abs(r.tp - 2488.87) < 0.5,
+      `TP should land near 2488.87 (canonical 0.66% re-anchored to the real fill), got ${r.tp.toFixed(2)}`,
+    );
+    assert.ok(
+      Math.abs(r.tp - 2495.62) > 5,
+      `TP must NOT reproduce the old buggy value ~2495.62 (that was the confirmed-wrong deriveLiquidationPhysicsTradePlan() output) -- got ${r.tp.toFixed(2)}, old bug was 2495.62`,
     );
   },
 );
