@@ -826,20 +826,22 @@ scenario(
     const idx = source.indexOf("private async handleCandlePhysicsEntry(");
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
     assert.ok(
-      body.includes(
-        'const sl = event.victim === "LONG" ? entry * (1 - FIXED_SL_PCT) : entry * (1 + FIXED_SL_PCT);',
+      /const\s+sl\s*=\s*event\.victim\s*===\s*"LONG"\s*\?\s*entry\s*\*\s*\(1\s*-\s*FIXED_SL_PCT\)\s*:\s*entry\s*\*\s*\(1\s*\+\s*FIXED_SL_PCT\)/.test(
+        body,
       ),
-      "SL formula must match exactly: LONG=entry*(1-slPct), SHORT=entry*(1+slPct)",
+      "SL formula must match exactly: LONG=entry*(1-slPct), SHORT=entry*(1+slPct) -- regex tolerant of Prettier line-wrapping",
     );
     assert.ok(
-      body.includes(
-        'const tp = event.victim === "LONG" ? entry + rewardDistance : entry - rewardDistance;',
+      /const\s+tp\s*=\s*event\.victim\s*===\s*"LONG"\s*\?\s*entry\s*\+\s*rewardDistance\s*:\s*entry\s*-\s*rewardDistance/.test(
+        body,
       ),
-      "TP direction must match exactly: LONG adds rewardDistance, SHORT subtracts it",
+      "TP direction must match exactly: LONG adds rewardDistance, SHORT subtracts it -- regex tolerant of Prettier line-wrapping",
     );
     assert.ok(
-      body.includes("rewardDistance = isRotation ? entry * v5RotationTpPct()"),
-      "ROTATION TP distance must be the direct config percentage of entry, not re-derived from WAVE mode's own RR",
+      /rewardDistance\s*=\s*isRotation\s*\?\s*entry\s*\*\s*v5RotationTpPct\(\)/.test(
+        body,
+      ),
+      "ROTATION TP distance must be the direct config percentage of entry, not re-derived from WAVE mode's own RR -- regex tolerant of Prettier line-wrapping",
     );
   },
 );

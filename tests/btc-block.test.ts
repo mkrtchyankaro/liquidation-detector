@@ -247,14 +247,16 @@ scenario(
     const idx = source.indexOf("private async handleCandlePhysicsEntry(");
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
     assert.ok(
-      body.includes("FIXED_SL_PCT = isRotation ? v5RotationSlPct() : 0.003"),
-      "WAVE mode's own fixed 0.30% SL must still be present, unchanged (ROTATION mode now reads its own SL% from the single-source-of-truth config, Sep 14 2026 config-wiring pass)",
+      /FIXED_SL_PCT\s*=\s*isRotation\s*\?\s*v5RotationSlPct\(\)\s*:\s*0\.003/.test(
+        body,
+      ),
+      "WAVE mode's own fixed 0.30% SL must still be present, unchanged (ROTATION mode now reads its own SL% from the single-source-of-truth config, Sep 14 2026 config-wiring pass) -- regex tolerant of Prettier line-wrapping, matching the pattern already established in cascade-repository-concurrency.test.ts",
     );
     assert.ok(
-      body.includes(
-        "REWARD_RISK_RATIO = isRotation ? v5RotationTpPct() / FIXED_SL_PCT : 2.2",
+      /REWARD_RISK_RATIO\s*=\s*isRotation\s*\?\s*v5RotationTpPct\(\)\s*\/\s*FIXED_SL_PCT\s*:\s*2\.2/.test(
+        body,
       ),
-      "WAVE mode's own TP=2.2R must still be present, unchanged (ROTATION mode now reads its own ratio from the single-source-of-truth config, Sep 14 2026 config-wiring pass)",
+      "WAVE mode's own TP=2.2R must still be present, unchanged (ROTATION mode now reads its own ratio from the single-source-of-truth config, Sep 14 2026 config-wiring pass) -- regex tolerant of Prettier line-wrapping",
     );
     assert.ok(
       body.includes("event.p95AtW1Qualification"),

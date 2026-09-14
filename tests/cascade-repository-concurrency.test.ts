@@ -521,10 +521,10 @@ async function main(): Promise<void> {
         "fixed 0.30% SL logic must still be present, untouched",
       );
       assert.ok(
-        body.includes(
-          "REWARD_RISK_RATIO = isRotation ? v5RotationTpPct() / FIXED_SL_PCT : 2.2",
+        /REWARD_RISK_RATIO\s*=\s*isRotation\s*\?\s*v5RotationTpPct\(\)\s*\/\s*FIXED_SL_PCT\s*:\s*2\.2/.test(
+          body,
         ),
-        "WAVE mode's TP=2.2R logic must still be present, unchanged for WAVE mode (ROTATION mode now reads its own ratio from the single-source-of-truth config, Sep 14 2026 config-wiring pass)",
+        "WAVE mode's TP=2.2R logic must still be present, unchanged for WAVE mode (ROTATION mode now reads its own ratio from the single-source-of-truth config, Sep 14 2026 config-wiring pass) -- regex tolerant of Prettier line-wrapping",
       );
       assert.ok(
         body.includes("this.v5.hydrateActiveTrade("),
