@@ -315,11 +315,47 @@ async function main(): Promise<void> {
         src.includes("reconcileUserPosition("),
         "the per-user reconcile call must remain present",
       );
+      // Sep 14 2026 (Karo), operator-reported fix -- the PREVIOUS version
+      // of this assertion checked one exact single-line literal string,
+      // which broke the moment the call was Prettier-wrapped across
+      // multiple lines (confirmed: a real, differently-formatted but
+      // functionally identical file failed this exact assertion).
+      // Checking each argument's presence independently, in a way that
+      // tolerates whitespace/newlines between them, actually delivers on
+      // this test's own stated intent ("survives harmless reformatting")
+      // instead of only claiming to.
+      const callSiteMatch = /await reconcileUserPosition\(([\s\S]*?)\);/.exec(
+        src,
+      );
       assert.ok(
-        /reconcileUserPosition\(userSignal, globalSignal, runtime, userSignalRepo, now, pruneFromCache, lastKnownPrice\)/.test(
-          src,
-        ),
-        "the per-user reconcile call must still be invoked with the SAME runtime whose position is being checked, never a different one (Sep 14 2026: lastKnownPrice param added for the UNKNOWN-fallback price fix, same runtime/userSignal invariant unchanged)",
+        callSiteMatch,
+        "must find a reconcileUserPosition(...) call in this file",
+      );
+      const callArgs = callSiteMatch![1].replace(/\s+/g, " ").trim();
+      for (const requiredArg of [
+        "userSignal",
+        "globalSignal",
+        "runtime",
+        "userSignalRepo",
+        "now",
+        "pruneFromCache",
+        "lastKnownPrice",
+      ]) {
+        assert.ok(
+          new RegExp(`\\b${requiredArg}\\b`).test(callArgs),
+          `the per-user reconcile call must pass ${requiredArg} -- got: ${callArgs}`,
+        );
+      }
+      // Order matters for `runtime`/`userSignal` specifically -- the
+      // actual invariant this test protects (never a DIFFERENT runtime
+      // than the one whose position is being checked). Argument order
+      // in general (e.g. lastKnownPrice vs pruneFromCache) is not what
+      // this invariant is about, so only the two that matter are order-
+      // checked, not the full literal sequence.
+      assert.ok(
+        /runtime,\s*userSignalRepo/.test(callArgs) ||
+          /\bruntime\b[\s\S]*\buserSignalRepo\b/.test(callArgs),
+        "runtime must be the SAME runtime passed alongside userSignalRepo -- never a different user's runtime",
       );
     },
   );
