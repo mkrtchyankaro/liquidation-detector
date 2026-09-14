@@ -652,31 +652,41 @@ export class BinanceExecutionService {
     }
 
     // Step 2 — position is confirmed closed. Which order fired?
+    // Sep 14 2026 (Karo), operator-requested fix -- these two lookups
+    // used to run SEQUENTIALLY (await slOrderId, THEN await tpOrderId),
+    // meaning a worst-case slow/degraded Binance API could stack up to
+    // ~20s here alone (each call has its own 10s HTTP timeout, see
+    // binanceRest.client.ts) on top of Step 1's own positionRisk call
+    // -- directly the kind of unexplained-latency stacking that makes
+    // "why did Telegram update 20+ minutes after Binance actually
+    // closed" hard to answer. Run in parallel instead: each query
+    // already has its own independent try/catch (a failure on one
+    // must never affect the other's result), so Promise.allSettled is
+    // the correct primitive -- if either individual promise rejects,
+    // its own catch below still runs and leaves that one null, exactly
+    // matching the prior sequential behavior's own per-order isolation,
+    // just without paying for both timeouts back-to-back.
     interface AlgoOrderQueryResult {
       algoStatus?: string;
       actualOrderId?: string;
       actualPrice?: string;
     }
-    let slInfo: AlgoOrderQueryResult | null = null;
-    let tpInfo: AlgoOrderQueryResult | null = null;
-    if (slOrderId !== null) {
-      try {
-        slInfo = (await this.rest.getAlgoOrder(
-          slOrderId,
-        )) as AlgoOrderQueryResult;
-      } catch {
-        // couldn't query — leave null, handled below
-      }
-    }
-    if (tpOrderId !== null) {
-      try {
-        tpInfo = (await this.rest.getAlgoOrder(
-          tpOrderId,
-        )) as AlgoOrderQueryResult;
-      } catch {
-        // couldn't query — leave null, handled below
-      }
-    }
+    const [slSettled, tpSettled] = await Promise.allSettled([
+      slOrderId !== null
+        ? this.rest.getAlgoOrder(slOrderId)
+        : Promise.resolve(null),
+      tpOrderId !== null
+        ? this.rest.getAlgoOrder(tpOrderId)
+        : Promise.resolve(null),
+    ]);
+    const slInfo: AlgoOrderQueryResult | null =
+      slSettled.status === "fulfilled"
+        ? (slSettled.value as AlgoOrderQueryResult | null)
+        : null;
+    const tpInfo: AlgoOrderQueryResult | null =
+      tpSettled.status === "fulfilled"
+        ? (tpSettled.value as AlgoOrderQueryResult | null)
+        : null;
 
     const fired = (info: AlgoOrderQueryResult | null): boolean =>
       info !== null &&
