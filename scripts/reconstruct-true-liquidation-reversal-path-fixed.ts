@@ -122,6 +122,39 @@ type OutcomeClass =
   | "CONTINUATION"
   | "NO_MOVE"
   | "NO_DATA";
+export type { OutcomeClass };
+
+/** Sep 14 2026 (Karo), operator-requested -- the EXACT Phase-3
+ *  candidate classification logic (dominanceShare quantiles combined
+ *  with true path order), extracted into an importable pure function
+ *  so later scripts reuse this definition unchanged rather than
+ *  re-typing it (and risking drift). `p25`/`p75`/`p90` must be
+ *  derived from the caller's own dataset (never hardcoded) -- see
+ *  this file's own main() for the reference derivation (dominance
+ *  quantiles over VALID-only directional observations). */
+export function classifyCandidate(
+  dom5: number | null,
+  truePath: TruePathResult,
+  p25: number | null,
+  p75: number | null,
+  p90: number | null,
+): OutcomeClass {
+  if (truePath.dataQuality === "NO_DATA") return "NO_DATA";
+  if (truePath.dataQuality === "NO_MOVE") return "NO_MOVE"; // zero/zero can NEVER be REAL_REVERSAL
+  if (dom5 === null || p25 === null || p75 === null || p90 === null)
+    return "AMBIGUOUS";
+  const pathSupportsReversal =
+    truePath.firstDominantMove === "REVERSAL" ||
+    (truePath.firstDominantMove === "INTRAMINUTE_ORDER_UNKNOWN" &&
+      (truePath.maxAdverseBeforeFavorableDominance ?? 0) <=
+        (truePath.maxFavorablePct ?? 0) * 0.5);
+  if (dom5 >= p90 && pathSupportsReversal) return "REAL_REVERSAL";
+  if (dom5 >= p75 && truePath.firstDominantMove !== "CONTINUATION")
+    return "LIKELY_REVERSAL";
+  if (dom5 <= p25 || truePath.firstDominantMove === "CONTINUATION")
+    return "CONTINUATION";
+  return "AMBIGUOUS";
+}
 type SequenceClass =
   | "REAL_REVERSAL"
   | "FAILED_REVERSAL"
@@ -630,31 +663,7 @@ async function main(): Promise<void> {
   );
 
   for (const e of enriched) {
-    const tp = e.truePath;
-    if (tp.dataQuality === "NO_DATA") {
-      e.class = "NO_DATA";
-      continue;
-    }
-    if (tp.dataQuality === "NO_MOVE") {
-      e.class = "NO_MOVE";
-      continue;
-    } // TASK 7 invariant: zero/zero can NEVER be REAL_REVERSAL
-    if (e.dom5 === null || p25 === null || p75 === null || p90 === null) {
-      e.class = "AMBIGUOUS";
-      continue;
-    }
-    const dom = e.dom5;
-    const pathSupportsReversal =
-      tp.firstDominantMove === "REVERSAL" ||
-      (tp.firstDominantMove === "INTRAMINUTE_ORDER_UNKNOWN" &&
-        (tp.maxAdverseBeforeFavorableDominance ?? 0) <=
-          (tp.maxFavorablePct ?? 0) * 0.5);
-    if (dom >= p90 && pathSupportsReversal) e.class = "REAL_REVERSAL";
-    else if (dom >= p75 && tp.firstDominantMove !== "CONTINUATION")
-      e.class = "LIKELY_REVERSAL";
-    else if (dom <= p25 || tp.firstDominantMove === "CONTINUATION")
-      e.class = "CONTINUATION";
-    else e.class = "AMBIGUOUS";
+    e.class = classifyCandidate(e.dom5, e.truePath, p25, p75, p90);
   }
 
   const classCounts: Record<OutcomeClass, number> = {
