@@ -5,17 +5,35 @@
  * fail, across three named populations: ALL3>=P99, totalUSD>=P99,
  * ALL3>=P97.
  *
+ * BUG FIX (this revision): rotationDurationMin could previously go
+ * negative. Root cause: the trough (max liq-direction distortion)
+ * search scanned a FIXED window [episode start, episode end + 30min]
+ * independent of where entry actually landed. Entry fires on a
+ * DIFFERENT condition (theta rising >=15deg from its value at episode
+ * end), so it can occur before the window's true minimum theta is
+ * reached -- making the reported trough timestamp fall chronologically
+ * AFTER entry. Fixed by finding entry FIRST, then bounding the trough
+ * search to [episode start, entryTs] -- this makes minThetaTs <=
+ * entryTs true by construction, not by clamping a bad value. See the
+ * sanity check at the end of the run, which explicitly reports
+ * whether any negative duration survived.
+ *
+ * PART 2 (new in this revision): a direction-aware "rotation force"
+ * test on the SAME 15deg trigger -- percentile-bucketed (bottom25/
+ * 25-50/50-75/top25) outcome reports for rotation speed, recovery-
+ * direction slope, liquidation-direction slope, ShockATR, and time
+ * from extreme to entry, followed by a simple, unweighted composite
+ * (rotationForce = |normalized liq-direction slope| + |normalized
+ * rec-direction slope|, 1m window) and a 2x2 rotationForce x ShockATR
+ * cross-tab compared directly against the unconditioned 15deg-alone
+ * baseline. No coefficients fitted, no new angle threshold searched.
+ *
  * Reuses the identical, unchanged episode/percentile/theta/slope
  * machinery from the rotation-entry pass. "Total rotation degrees"
- * and "rotation duration" are measured from the MAXIMUM liquidation-
- * direction distortion point (the true theta trough within the shock
- * window) to the entry -- not from episode end -- since the operator
- * specifically asked for both the max-distortion state AND the
- * rotation FROM it as separate, named features here. This is a
- * slightly different reference point than the prior pass's entry-
- * search (which anchored at episode-end for causal-search purposes);
- * both are causal, but this one is more physically informative for
- * the "how far did it actually swing back" question being asked now.
+ * and "rotation duration" are measured from the theta trough to
+ * entry -- the more physically informative reference for "how far did
+ * it actually swing back" than the episode-end anchor the entry
+ * *search* itself still uses internally (unchanged).
  *
  * All directional ATR slopes are normalized by PRE-liquidation ATR
  * values, exactly as instructed.
@@ -54,7 +72,6 @@ const OUTPUT_DIR = path.join(__dirname, "..", "research-output");
 const NORM_WALK_CAP_MIN = 120;
 const MIN_PRIOR_SAMPLES = 15;
 const POST_ENTRY_WATCH_MIN = 30;
-const SHOCK_WINDOW_EXTRA_MIN = 30;
 const SL_PCT = 0.3,
   TP_PCT = 0.6;
 const ROTATION_DEG = 15;
@@ -451,27 +468,17 @@ async function main() {
     const thetaPre = thetaDeg(preLiqAtr, preRecAtr);
     const thetaAtEnd = thetaDeg(postLiqAtr, postRecAtr);
 
-    let minTheta = thetaAtEnd,
-      minThetaTs = w.endTs,
-      downAtMaxDist = postDownAtr,
-      upAtMaxDist = postUpAtr;
-    for (
-      let t = w.startTs;
-      t <= w.endTs + SHOCK_WINDOW_EXTRA_MIN * 60000;
-      t += 60000
-    ) {
-      const l = lookupCausal(liqSeries, t),
-        r = lookupCausal(recSeries, t);
-      if (l === null || r === null || r <= 0) continue;
-      const th = thetaDeg(l, r);
-      if (th < minTheta) {
-        minTheta = th;
-        minThetaTs = t;
-        downAtMaxDist = lookupCausal(downV1, t) ?? downAtMaxDist;
-        upAtMaxDist = lookupCausal(upV1, t) ?? upAtMaxDist;
-      }
-    }
-
+    // Entry search runs FIRST -- it only depends on thetaAtEnd, not on the
+    // trough. The trough (max-distortion) search below is then explicitly
+    // bounded to [episode start, entryTs] -- NOT [episode start, episode
+    // end + shock window]. Bug fixed here: the trough search previously
+    // scanned a fixed window independent of where entry landed, so if
+    // entry fired early (soon after episode end, before the window's true
+    // minimum theta was reached), the reported "max distortion" timestamp
+    // could fall chronologically AFTER entry -- producing a structurally
+    // impossible negative rotationDurationMin. Bounding the trough search
+    // to end at entryTs makes minThetaTs <= entryTs true by construction,
+    // not by clamping a bad value after the fact.
     let entryTs: number | null = null,
       entryPrice: number | null = null;
     for (
@@ -493,6 +500,23 @@ async function main() {
       }
     }
     if (entryTs === null || entryPrice === null) return null;
+
+    let minTheta = thetaAtEnd,
+      minThetaTs = w.endTs,
+      downAtMaxDist = postDownAtr,
+      upAtMaxDist = postUpAtr;
+    for (let t = w.startTs; t <= entryTs; t += 60000) {
+      const l = lookupCausal(liqSeries, t),
+        r = lookupCausal(recSeries, t);
+      if (l === null || r === null || r <= 0) continue;
+      const th = thetaDeg(l, r);
+      if (th < minTheta) {
+        minTheta = th;
+        minThetaTs = t;
+        downAtMaxDist = lookupCausal(downV1, t) ?? downAtMaxDist;
+        upAtMaxDist = lookupCausal(upV1, t) ?? upAtMaxDist;
+      }
+    }
 
     const downAtEntry = lookupCausal(downV1, entryTs)!,
       upAtEntry = lookupCausal(upV1, entryTs)!;
@@ -707,6 +731,179 @@ async function main() {
       ),
     );
 
+  // ═══ PART 2: rotation-force test (percentile buckets, then the composite) ═══
+  console.log("\n" + "=".repeat(175));
+  console.log(
+    "PART 2: ROTATION-FORCE TEST (15deg base trigger, all named populations pooled -- no new angle search)",
+  );
+  console.log("=".repeat(175));
+
+  function tradeR(t: Trade15): number {
+    return t.outcome === "TP"
+      ? tpDist(t) / (t.entryPrice * (SL_PCT / 100))
+      : t.outcome === "SL"
+        ? -1
+        : 0;
+  }
+  function tpDist(t: Trade15): number {
+    return t.entryPrice * (TP_PCT / 100);
+  }
+  function bucketReport(
+    featureName: string,
+    getVal: (t: Trade15) => number | null,
+    higherIsStrongerHypothesis: boolean,
+  ) {
+    const vals = sortNum(trades.map(getVal));
+    if (vals.length < 4) {
+      console.log("\n-- " + featureName + ": insufficient data --");
+      return;
+    }
+    const q1 = percentile(vals, 25)!,
+      q2 = percentile(vals, 50)!,
+      q3 = percentile(vals, 75)!;
+    const buckets: [string, (v: number) => boolean][] = [
+      ["bottom25%", (v) => v <= q1],
+      ["25-50%", (v) => v > q1 && v <= q2],
+      ["50-75%", (v) => v > q2 && v <= q3],
+      ["top25%", (v) => v > q3],
+    ];
+    console.log(
+      "\n-- " +
+        featureName +
+        " (quartile cutpoints: " +
+        q1.toFixed(4) +
+        " / " +
+        q2.toFixed(4) +
+        " / " +
+        q3.toFixed(4) +
+        ") -- hypothesis: " +
+        (higherIsStrongerHypothesis
+          ? "higher = stronger signal"
+          : "lower (more negative) = stronger signal"),
+    );
+    for (const [label, pred] of buckets) {
+      const group = trades.filter((t) => {
+        const v = getVal(t);
+        return v !== null && pred(v);
+      });
+      const tpC = group.filter((t) => t.outcome === "TP").length,
+        slC = group.filter((t) => t.outcome === "SL").length,
+        toC = group.filter((t) => t.outcome === "TIMEOUT").length;
+      const totalR = group.reduce((s, t) => s + tradeR(t), 0);
+      console.log(
+        "  " +
+          label.padEnd(10) +
+          " n=" +
+          group.length +
+          "  TP=" +
+          tpC +
+          " SL=" +
+          slC +
+          " TIMEOUT=" +
+          toC +
+          "  totalR=" +
+          totalR.toFixed(2),
+      );
+    }
+  }
+
+  bucketReport(
+    "rotation speed (deg/min)",
+    (t) => t.features.degPerMinute,
+    true,
+  );
+  bucketReport(
+    "recovery-direction slope (1m, normalized) -- higher=stronger rec acceleration",
+    (t) =>
+      t.victim === "LONG" ? t.features.upSlope1m : t.features.downSlope1m,
+    true,
+  );
+  bucketReport(
+    "liquidation-direction slope (1m, normalized) -- lower(more negative)=stronger decay",
+    (t) =>
+      t.victim === "LONG" ? t.features.downSlope1m : t.features.upSlope1m,
+    false,
+  );
+  bucketReport("ShockATR", (t) => t.features.shockAtr, true);
+  bucketReport(
+    "time from extreme to entry (min)",
+    (t) => t.features.timeFromExtremeToEntryMin,
+    true,
+  );
+
+  // composite: rotationForce = |liqSlope1m_norm| + |recSlope1m_norm| -- literal sum of magnitudes, no fitted weighting
+  console.log("\n" + "=".repeat(175));
+  console.log(
+    "ROTATION FORCE COMPOSITE = |normalized liq-direction slope(1m)| + |normalized rec-direction slope(1m)|  (no fitted coefficients)",
+  );
+  console.log("=".repeat(175));
+  const rotationForce = (t: Trade15): number | null => {
+    const liqS =
+      t.victim === "LONG" ? t.features.downSlope1m : t.features.upSlope1m;
+    const recS =
+      t.victim === "LONG" ? t.features.upSlope1m : t.features.downSlope1m;
+    if (liqS === null || recS === null) return null;
+    return Math.abs(liqS) + Math.abs(recS);
+  };
+  bucketReport("rotationForce composite", rotationForce, true);
+
+  // most important question: does rotationForce + ShockATR explain outcomes better than the 15deg angle alone (the unconditioned pooled baseline)?
+  console.log("\n" + "=".repeat(175));
+  console.log(
+    "MOST IMPORTANT QUESTION: rotationForce x ShockATR 2x2 (median split), vs the unconditioned 15deg-alone baseline",
+  );
+  console.log("=".repeat(175));
+  const rfMed = median(trades.map(rotationForce));
+  const shockMed = median(trades.map((t) => t.features.shockAtr));
+  const baselineTotalR = trades.reduce((s, t) => s + tradeR(t), 0);
+  console.log(
+    "  BASELINE (15deg angle alone, no further condition): n=" +
+      trades.length +
+      " TP=" +
+      trades.filter((t) => t.outcome === "TP").length +
+      " SL=" +
+      trades.filter((t) => t.outcome === "SL").length +
+      " TIMEOUT=" +
+      trades.filter((t) => t.outcome === "TIMEOUT").length +
+      " totalR=" +
+      baselineTotalR.toFixed(2),
+  );
+  if (rfMed !== null && shockMed !== null) {
+    for (const hiRf of [true, false])
+      for (const hiShock of [true, false]) {
+        const group = trades.filter((t) => {
+          const rf = rotationForce(t),
+            sh = t.features.shockAtr;
+          return (
+            rf !== null &&
+            sh !== null &&
+            rf >= rfMed === hiRf &&
+            sh >= shockMed === hiShock
+          );
+        });
+        const tpC = group.filter((t) => t.outcome === "TP").length,
+          slC = group.filter((t) => t.outcome === "SL").length,
+          toC = group.filter((t) => t.outcome === "TIMEOUT").length;
+        const totalR = group.reduce((s, t) => s + tradeR(t), 0);
+        console.log(
+          "  rotationForce=" +
+            (hiRf ? "HIGH" : "low") +
+            " x ShockATR=" +
+            (hiShock ? "HIGH" : "low") +
+            ": n=" +
+            group.length +
+            " TP=" +
+            tpC +
+            " SL=" +
+            slC +
+            " TIMEOUT=" +
+            toC +
+            " totalR=" +
+            totalR.toFixed(2),
+        );
+      }
+  }
+
   console.log("\n" + "=".repeat(175));
   console.log("ALL3>=P99 INDIVIDUAL 15deg-ROTATION TRADES (compact table)");
   console.log("=".repeat(175));
@@ -759,12 +956,25 @@ async function main() {
         " | " +
         t.outcome,
     );
+    if ((f.rotationDurationMin ?? 0) < 0)
+      console.log(
+        "    *** WARNING: negative rotationDurationMin survived the fix -- this should never happen; flag for further audit ***",
+      );
   }
+  const anyNegativeDuration = trades.some(
+    (t) => (t.features.rotationDurationMin ?? 0) < 0,
+  );
+  console.log(
+    "\nSanity check across ALL " +
+      trades.length +
+      " trades: any negative rotationDurationMin remaining? " +
+      anyNegativeDuration,
+  );
 
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const outPath = path.join(
     OUTPUT_DIR,
-    "rotation-15deg-feature-diagnosis-" + Date.now() + ".json",
+    "rotation-15deg-fixed-and-force-test-" + Date.now() + ".json",
   );
   fs.writeFileSync(
     outPath,
@@ -775,8 +985,11 @@ async function main() {
         slPct: SL_PCT,
         tpPct: TP_PCT,
         rotationDeg: ROTATION_DEG,
+        fixNote:
+          "rotationDurationMin bug fixed: trough search is now bounded to [episode start, entryTs] instead of a fixed shock window independent of entry timing -- negative durations are now structurally impossible, not clamped.",
         trades,
         separationScores: ranked,
+        anyNegativeDurationRemaining: anyNegativeDuration,
       },
       null,
       2,
