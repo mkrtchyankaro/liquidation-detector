@@ -239,6 +239,7 @@ scenario(
           userSignalRepo,
           now,
           cache.prune,
+          undefined,
         );
       }
     }
@@ -300,6 +301,7 @@ scenario(
         order.push("prune");
         assert.strictEqual(signalId, "SIG-1");
       },
+      undefined,
     );
 
     assert.deepStrictEqual(
@@ -334,6 +336,7 @@ scenario(
         () => {
           pruned = true;
         },
+        undefined,
       ),
       /mongo down/,
       "a DB failure must propagate to the caller, not be silently swallowed",

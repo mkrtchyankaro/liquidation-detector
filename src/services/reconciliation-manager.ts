@@ -17,6 +17,21 @@ const log = childLogger({ mod: "reconciliation-manager" });
  *  (4/min total, not "every tick x every user"). */
 const CACHE_REFRESH_MS = 15_000;
 
+/** Sep 14 2026 (Karo), operator-requested fix. How often the
+ *  deterministic fallback reconciliation loop runs, independent of
+ *  any symbol's own bookTicker tick frequency -- see
+ *  runFallbackReconciliation()'s own doc comment for the full
+ *  incident/rationale this closes. 3s targets "detection within a
+ *  few seconds" as requested, without polling faster than necessary:
+ *  each run only touches whatever is ALREADY cached as open (zero
+ *  Mongo I/O of its own, same as onTick()), and every actual Binance
+ *  call it makes is still governed by the existing InFlightGuard/
+ *  ReconciliationHealthTracker backoff -- so a shorter interval here
+ *  would not increase real Binance call volume during a healthy
+ *  reconcile, only during an active failure episode, which the 5s
+ *  backoff already caps independently of this interval. */
+const FALLBACK_RECONCILE_MS = 3_000;
+
 /**
  * Sep 8 2026 (Karo). Per relevant WS price tick (mirroring
  * liqwatch-bot's own handleV5Tick -> reconcileV5LiveTrade wiring, see
@@ -47,7 +62,21 @@ export class ReconciliationManager {
   /** userId -> that user's own currently-known-open signals. Refreshed
    *  periodically, NOT per-tick. */
   private readonly openCache = new Map<string, UserSignalDoc[]>();
+  /** Sep 14 2026 (Karo), operator-requested fix. symbol -> last known
+   *  real market mid-price, updated on EVERY bookTicker tick this
+   *  manager sees (regardless of whether any user currently has an
+   *  open position on that symbol, so the value is ready the instant
+   *  it's needed). This is what restores the old, proven
+   *  `bestPrice`/`lastMid` fallback behavior for the genuinely-
+   *  ambiguous "UNKNOWN" reconciliation case -- see
+   *  reconcile-user-position.usecase.ts's own doc comment on its
+   *  `lastKnownPrice` parameter for the full history. */
+  private readonly lastKnownPrice = new Map<string, number>();
   private refreshTimer: NodeJS.Timeout | null = null;
+  /** Sep 14 2026 (Karo), operator-requested fix -- see this class's
+   *  own updated doc comment and startFallbackReconciliationLoop()'s
+   *  own doc comment for the full incident/rationale. */
+  private fallbackTimer: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly mongo: MongoClientWrapper,
@@ -55,18 +84,26 @@ export class ReconciliationManager {
   ) {}
 
   /** Call once at startup (after Mongo is connected). Does an
-   *  immediate refresh, then starts the periodic timer. */
+   *  immediate refresh, then starts the periodic timer, then starts
+   *  the fallback reconciliation loop. */
   async start(): Promise<void> {
     await this.refreshCache();
     this.refreshTimer = setInterval(() => {
       void this.refreshCache();
     }, CACHE_REFRESH_MS);
+    this.fallbackTimer = setInterval(() => {
+      void this.runFallbackReconciliation();
+    }, FALLBACK_RECONCILE_MS);
   }
 
   stop(): void {
     if (this.refreshTimer) {
       clearInterval(this.refreshTimer);
       this.refreshTimer = null;
+    }
+    if (this.fallbackTimer) {
+      clearInterval(this.fallbackTimer);
+      this.fallbackTimer = null;
     }
   }
 
@@ -90,13 +127,16 @@ export class ReconciliationManager {
     }
   }
 
-  /** Called once per relevant WS bookTicker tick for `symbol`. Reads
-   *  ONLY the in-memory cache -- zero Mongo I/O in this method itself.
-   *  The actual Binance reconciliation call (reconcileUserPosition)
-   *  still runs per-tick for whatever IS cached as open -- that part
-   *  is unchanged and correct (it's a real, necessary check against
-   *  the authoritative exchange state, and is itself already
-   *  backoff-protected by ReconciliationHealthTracker/InFlightGuard).
+  /** Called once per relevant WS bookTicker tick for `symbol`. Records
+   *  `mid` into lastKnownPrice UNCONDITIONALLY (even if no user has an
+   *  open position on this symbol right now), then reads ONLY the
+   *  in-memory openCache -- zero Mongo I/O in this method itself. The
+   *  actual Binance reconciliation call (reconcileUserPosition) still
+   *  runs per-tick for whatever IS cached as open on THIS symbol --
+   *  that part is unchanged and correct. This tick-driven path is now
+   *  a fast path, not the ONLY path: see runFallbackReconciliation()
+   *  for the deterministic, symbol-tick-independent safety net added
+   *  Sep 14 2026.
    *
    *  CRITICAL FIX (Sep 8 2026, confirmed real production incident --
    *  a single position sent 11+ duplicate "V5 CLOSE ... TP" Telegram
@@ -114,73 +154,147 @@ export class ReconciliationManager {
    *  exactly when it just closed a position; on `true`, this method
    *  immediately prunes that signalId from its OWN cache entry, so no
    *  further tick within the same window can re-discover it. */
-  async onTick(symbol: string, now: number): Promise<void> {
+  async onTick(symbol: string, mid: number, now: number): Promise<void> {
+    this.lastKnownPrice.set(symbol, mid);
     for (const runtime of this.userRuntimes) {
       if (!runtime.config.enabled || !runtime.execution) continue;
       const open = this.openCache.get(runtime.config.userId);
       if (!open || open.length === 0) continue;
-      const userSignalRepo = new UserSignalRepository(
-        this.mongo,
-        runtime.config.userId,
-      );
-
       for (const userSignal of open) {
         if (userSignal.symbol !== symbol) continue;
-        try {
-          const globalSignal = await this.getGlobalSignal(userSignal.signalId);
-          if (!globalSignal) continue;
-          // Sep 9 2026 (Karo), operator-requested -- reproduces the OLD,
-          // proven liqwatch-bot pattern exactly (V5WaveService.closeTrade()'s
-          // own synchronous activeTrades.delete(), confirmed via direct
-          // old-code trace to run BEFORE any DB write or Telegram send).
-          // This callback fires SYNCHRONOUSLY, inside reconcileUserPosition(),
-          // the MOMENT Binance confirms the position closed -- closing the
-          // gap that let a LATER (not concurrent -- InFlightGuard already
-          // covers concurrent) onTick() invocation still find this signal
-          // "open" and run the entire reconcile-confirm-notify chain again.
-          const pruneFromCache = (signalId: string): void => {
-            const stillCached = this.openCache.get(runtime.config.userId);
-            if (stillCached) {
-              this.openCache.set(
-                runtime.config.userId,
-                stillCached.filter((s) => s.signalId !== signalId),
-              );
-            }
-          };
-          // Sep 12 2026 (Karo), operator-reported CRITICAL FIX -- the
-          // cross-user CLOSE broadcast that used to run here (looping
-          // over every OTHER user's own runtime and sending THIS
-          // user's own real-execution CLOSE through their telegram
-          // client too) is REMOVED. Execution CLOSE notifications must
-          // be strictly per-user: reconcileUserPosition() above already
-          // sends notifyUserClose(message, runtime) to the ACTUAL
-          // position owner's own telegram client -- that is the only
-          // send that belongs here. ENTRY's own unconditional fan-out
-          // (SignalDistributor.distribute()) is untouched and
-          // unrelated to this fix.
-          const { closed } = await reconcileUserPosition(
-            userSignal,
-            globalSignal,
-            runtime,
-            userSignalRepo,
-            now,
-            pruneFromCache,
-          );
-          if (closed) {
-            // Sep 9 2026 (Karo) -- defensive safety-net only; the real
-            // removal already happened synchronously above, via
-            // pruneFromCache(), before any DB/Telegram I/O. Filtering an
-            // already-pruned array is a harmless no-op.
-            pruneFromCache(userSignal.signalId);
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log.error(
-            { err: msg, userId: runtime.config.userId, symbol },
-            "[RECONCILIATION_MANAGER_TICK_FAILED] -- isolated",
+        await this.reconcileOneSignal(runtime, userSignal, now, "tick");
+      }
+    }
+  }
+
+  /** Sep 14 2026 (Karo), operator-requested fix. Deterministic
+   *  fallback reconciliation, independent of any specific symbol's
+   *  own bookTicker tick frequency. Root cause this closes: onTick()
+   *  only reconciles a signal when ITS OWN symbol happens to tick --
+   *  for a symbol with sparse bookTicker updates, or during any
+   *  extended span where that symbol's own ticks are delayed, a
+   *  closed position could sit undetected far longer than the fast
+   *  path implies. This loop iterates every cached-open signal for
+   *  every enabled user directly, on a fixed short interval,
+   *  regardless of tick arrival -- reusing the EXACT SAME
+   *  reconcileOneSignal() logic (and therefore the exact same
+   *  InFlightGuard/backoff/idempotency protections) as the tick path,
+   *  so it can never double-process anything the tick path is already
+   *  handling concurrently; it can only pick up what the tick path
+   *  hasn't reached yet. FALLBACK_RECONCILE_MS bounds the worst-case
+   *  additional detection delay to a few seconds, independent of any
+   *  symbol's own tick cadence. */
+  private async runFallbackReconciliation(): Promise<void> {
+    const now = Date.now();
+    for (const runtime of this.userRuntimes) {
+      if (!runtime.config.enabled || !runtime.execution) continue;
+      const open = this.openCache.get(runtime.config.userId);
+      if (!open || open.length === 0) continue;
+      for (const userSignal of open) {
+        await this.reconcileOneSignal(
+          runtime,
+          userSignal,
+          now,
+          "fallback-loop",
+        );
+      }
+    }
+  }
+
+  /** Shared per-signal reconciliation body, used by BOTH onTick()
+   *  (tick-driven fast path) and runFallbackReconciliation() (the
+   *  deterministic, tick-independent safety net) -- kept as one
+   *  function so both paths get identical InFlightGuard/backoff/
+   *  price-fallback/timing-log behavior, never two slightly-
+   *  different implementations to keep in sync. `source` is logged
+   *  only, for observability into which path detected each close. */
+  private async reconcileOneSignal(
+    runtime: UserRuntime,
+    userSignal: UserSignalDoc,
+    now: number,
+    source: "tick" | "fallback-loop",
+  ): Promise<void> {
+    if (!runtime.execution) return;
+    const userSignalRepo = new UserSignalRepository(
+      this.mongo,
+      runtime.config.userId,
+    );
+    try {
+      const globalSignal = await this.getGlobalSignal(userSignal.signalId);
+      if (!globalSignal) {
+        log.debug(
+          {
+            userId: runtime.config.userId,
+            signalId: userSignal.signalId,
+            symbol: userSignal.symbol,
+            source,
+            skipReason: "global-signal-not-found",
+          },
+          "[RECONCILIATION_MANAGER_TICK_SKIPPED]",
+        );
+        return;
+      }
+      // Sep 9 2026 (Karo), operator-requested -- reproduces the OLD,
+      // proven liqwatch-bot pattern exactly (V5WaveService.closeTrade()'s
+      // own synchronous activeTrades.delete(), confirmed via direct
+      // old-code trace to run BEFORE any DB write or Telegram send).
+      // This callback fires SYNCHRONOUSLY, inside reconcileUserPosition(),
+      // the MOMENT Binance confirms the position closed -- closing the
+      // gap that let a LATER (not concurrent -- InFlightGuard already
+      // covers concurrent) invocation still find this signal "open" and
+      // run the entire reconcile-confirm-notify chain again. Shared
+      // between both callers via this one method, so it prunes the
+      // SAME openCache regardless of which path (tick or fallback)
+      // triggered the close.
+      const pruneFromCache = (signalId: string): void => {
+        const stillCached = this.openCache.get(runtime.config.userId);
+        if (stillCached) {
+          this.openCache.set(
+            runtime.config.userId,
+            stillCached.filter((s) => s.signalId !== signalId),
           );
         }
+      };
+      // Sep 12 2026 (Karo), operator-reported CRITICAL FIX -- the
+      // cross-user CLOSE broadcast that used to run here (looping
+      // over every OTHER user's own runtime and sending THIS
+      // user's own real-execution CLOSE through their telegram
+      // client too) is REMOVED. Execution CLOSE notifications must
+      // be strictly per-user: reconcileUserPosition() above already
+      // sends notifyUserClose(message, runtime) to the ACTUAL
+      // position owner's own telegram client -- that is the only
+      // send that belongs here. ENTRY's own unconditional fan-out
+      // (SignalDistributor.distribute()) is untouched and
+      // unrelated to this fix.
+      const lastKnownPrice = this.lastKnownPrice.get(userSignal.symbol);
+      const { closed } = await reconcileUserPosition(
+        userSignal,
+        globalSignal,
+        runtime,
+        userSignalRepo,
+        now,
+        pruneFromCache,
+        lastKnownPrice,
+      );
+      if (closed) {
+        // Sep 9 2026 (Karo) -- defensive safety-net only; the real
+        // removal already happened synchronously above, via
+        // pruneFromCache(), before any DB/Telegram I/O. Filtering an
+        // already-pruned array is a harmless no-op.
+        pruneFromCache(userSignal.signalId);
       }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        {
+          err: msg,
+          userId: runtime.config.userId,
+          symbol: userSignal.symbol,
+          signalId: userSignal.signalId,
+          source,
+        },
+        "[RECONCILIATION_MANAGER_TICK_FAILED] -- isolated",
+      );
     }
   }
 

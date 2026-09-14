@@ -541,7 +541,7 @@ export class MarketDataOrchestrator {
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
       const closes = this.v5.onPriceTickForTrades(b.symbol, mid, b.timestamp);
       for (const close of closes) void this.handleMainTradeClose(close);
-      void this.reconciliation.onTick(b.symbol, b.timestamp);
+      void this.reconciliation.onTick(b.symbol, mid, b.timestamp);
       this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
       // Sep 10 2026 (Karo), operator-requested: DISCONNECTED, same
       // rationale as feedUnitResearchShadowAfter() above -- this call

@@ -619,15 +619,16 @@ export class BinanceExecutionService {
     tpOrderId: number | null,
     signalId: string,
   ): Promise<
-    | { stillOpen: true }
+    | { stillOpen: true; positionAmt: number }
     | {
         stillOpen: false;
         reason: "TP" | "SL";
         actualPrice: number;
         firedOrderId: number;
         siblingOrderId: number | null;
+        positionAmt: number;
       }
-    | { stillOpen: false; reason: "UNKNOWN" }
+    | { stillOpen: false; reason: "UNKNOWN"; positionAmt: number }
   > {
     // Step 1 — is the position still open? Ground truth.
     let positionAmt = 0;
@@ -644,10 +645,10 @@ export class BinanceExecutionService {
         { symbol, signalId, err: msg },
         "[BINANCE_RECONCILE_LIVE_POSITION_QUERY_FAILED] could not check position — treating as still open, will retry next cycle",
       );
-      return { stillOpen: true }; // fail safe: never claim closed on a query error
+      return { stillOpen: true, positionAmt: 0 }; // fail safe: never claim closed on a query error; positionAmt unknown here (query itself failed) -- 0 is the loop-local default, not a confirmed flat position
     }
     if (positionAmt > 0) {
-      return { stillOpen: true };
+      return { stillOpen: true, positionAmt };
     }
 
     // Step 2 — position is confirmed closed. Which order fired?
@@ -709,6 +710,7 @@ export class BinanceExecutionService {
         actualPrice,
         firedOrderId: slOrderId!,
         siblingOrderId: tpOrderId,
+        positionAmt,
       };
     }
     if (tpFired && !slFired) {
@@ -719,6 +721,7 @@ export class BinanceExecutionService {
         actualPrice,
         firedOrderId: tpOrderId!,
         siblingOrderId: slOrderId,
+        positionAmt,
       };
     }
 
@@ -730,7 +733,7 @@ export class BinanceExecutionService {
       { symbol, signalId, slOrderId, tpOrderId, slFired, tpFired },
       "[BINANCE_RECONCILE_LIVE_POSITION_AMBIGUOUS] position closed but could not determine which order fired — caller must use a best-effort fallback",
     );
-    return { stillOpen: false, reason: "UNKNOWN" };
+    return { stillOpen: false, reason: "UNKNOWN", positionAmt };
   }
 
   /** Engages the global halt. Idempotent — a second halt call just

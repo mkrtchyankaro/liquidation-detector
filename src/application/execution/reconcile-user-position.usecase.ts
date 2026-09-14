@@ -40,6 +40,10 @@ export async function reconcileUserPosition(
    *  signal "open" and run the entire reconcile-confirm-notify chain a
    *  second time. */
   onConfirmedClosed: (signalId: string) => void,
+  /** Sep 14 2026 (Karo), operator-requested fix -- see
+   *  reconcileUserPositionImpl's own doc comment on this same
+   *  parameter for the full rationale. */
+  lastKnownPrice: number | undefined,
 ): Promise<{ closed: boolean }> {
   const result = await runtime.reconcileInFlight.run(
     userSignal.signalId,
@@ -51,6 +55,7 @@ export async function reconcileUserPosition(
         userSignalRepo,
         now,
         onConfirmedClosed,
+        lastKnownPrice,
       );
     },
   );
@@ -68,12 +73,50 @@ async function reconcileUserPositionImpl(
   userSignalRepo: { upsert(userId: string, doc: UserSignalDoc): Promise<void> },
   now: number,
   onConfirmedClosed: (signalId: string) => void,
+  /** Sep 14 2026 (Karo), operator-requested fix. Last known real market
+   *  price for this signal's symbol, when the caller has one (a
+   *  bookTicker mid at the moment of this tick, or from the fallback
+   *  loop's own tracked last-seen price). Used ONLY as the closePrice
+   *  approximation in the genuinely-ambiguous "UNKNOWN" reconciliation
+   *  case -- restores the exact historical liqwatch-bot behavior
+   *  (`v5Service.getActiveTrade(signalId)?.bestPrice ?? trade.entry`,
+   *  confirmed via direct old-code trace) that the multi-user port had
+   *  silently dropped, which is what produced the fake exit==entry,
+   *  0.00% PnL close messages. Falls back to entry ONLY if genuinely no
+   *  price is available (e.g. the very first tick after a restart,
+   *  before any bookTicker has arrived for this symbol) -- never
+   *  silently prefers entry over a real known price.
+   */
+  lastKnownPrice: number | undefined,
 ): Promise<{ closed: boolean }> {
   const userId = runtime.config.userId;
-  if (!runtime.execution) return { closed: false };
-
-  if (runtime.reconcileHealth.shouldSkipRetry(userSignal.signalId, now))
+  const reconcileStartTs = Date.now();
+  if (!runtime.execution) {
+    log.debug(
+      {
+        userId,
+        signalId: userSignal.signalId,
+        symbol: userSignal.symbol,
+        skipReason: "no-execution-configured",
+      },
+      "[USER_LIVE_RECONCILE_SKIPPED]",
+    );
     return { closed: false };
+  }
+
+  if (runtime.reconcileHealth.shouldSkipRetry(userSignal.signalId, now)) {
+    log.debug(
+      {
+        userId,
+        signalId: userSignal.signalId,
+        symbol: userSignal.symbol,
+        tickTs: now,
+        skipReason: "backoff-window",
+      },
+      "[USER_LIVE_RECONCILE_SKIPPED]",
+    );
+    return { closed: false };
+  }
 
   let result: Awaited<
     ReturnType<typeof runtime.execution.reconcileLivePosition>
@@ -88,7 +131,14 @@ async function reconcileUserPositionImpl(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error(
-      { err: msg, userId, signalId: userSignal.signalId },
+      {
+        err: msg,
+        userId,
+        signalId: userSignal.signalId,
+        symbol: userSignal.symbol,
+        tickTs: now,
+        reconcileStartTs,
+      },
       "[USER_LIVE_RECONCILE_FAILED] -- will retry after backoff",
     );
     const shouldAlert = runtime.reconcileHealth.recordFailure(
@@ -121,7 +171,22 @@ async function reconcileUserPositionImpl(
     );
   }
 
-  if (result.stillOpen) return { closed: false };
+  if (result.stillOpen) {
+    log.debug(
+      {
+        userId,
+        signalId: userSignal.signalId,
+        symbol: userSignal.symbol,
+        tickTs: now,
+        reconcileStartTs,
+        positionAmt: result.positionAmt,
+      },
+      "[USER_LIVE_RECONCILE_STILL_OPEN]",
+    );
+    return { closed: false };
+  }
+
+  const binanceDetectedCloseTs = Date.now();
 
   // Sep 9 2026 (Karo), operator-requested -- reproduces the OLD, proven
   // liqwatch-bot pattern EXACTLY: the moment Binance confirms the
@@ -137,28 +202,33 @@ async function reconcileUserPositionImpl(
   let closePrice: number;
   let closeReason: "TP" | "SL" | "MANUAL";
   if (result.reason === "UNKNOWN") {
+    // Sep 14 2026 (Karo), operator-reported bug fix. approxPrice is the
+    // best available real-price reference for both the TP-vs-SL best-
+    // effort guess AND the reported closePrice -- lastKnownPrice first
+    // (matches the old, proven `bestPrice` behavior), entry only as an
+    // absolute last resort when no price has ever been observed.
+    const approxPrice = lastKnownPrice ?? userSignal.entry ?? 0;
     const distToTp =
-      userSignal.tp !== null && userSignal.entry !== null
-        ? Math.abs(userSignal.entry - userSignal.tp)
-        : Infinity;
+      userSignal.tp !== null ? Math.abs(approxPrice - userSignal.tp) : Infinity;
     const distToSl =
-      userSignal.sl !== null && userSignal.entry !== null
-        ? Math.abs(userSignal.entry - userSignal.sl)
-        : Infinity;
+      userSignal.sl !== null ? Math.abs(approxPrice - userSignal.sl) : Infinity;
     outcome = distToTp <= distToSl ? "TP" : "SL";
-    closePrice = userSignal.entry ?? 0;
+    closePrice = approxPrice;
     closeReason = "MANUAL";
     log.error(
-      `[USER_LIVE_RECONCILE_AMBIGUOUS] userId=${userId} symbol=${userSignal.symbol} -- best-effort ${outcome}, labeled MANUAL`,
+      `[USER_LIVE_RECONCILE_AMBIGUOUS] userId=${userId} symbol=${userSignal.symbol} -- best-effort ${outcome} at approxPrice=${approxPrice} (usedLastKnownPrice=${lastKnownPrice !== undefined}), labeled MANUAL`,
     );
   } else {
     outcome = result.reason;
-    closePrice = result.actualPrice;
+    closePrice =
+      result.actualPrice > 0
+        ? result.actualPrice
+        : (lastKnownPrice ?? userSignal.entry ?? 0);
     closeReason = result.reason;
   }
 
   log.info(
-    `[USER_LIVE_RECONCILE_CONFIRMED] userId=${userId} symbol=${userSignal.symbol} reason=${outcome} closePrice=${closePrice}`,
+    `[USER_LIVE_RECONCILE_CONFIRMED] userId=${userId} symbol=${userSignal.symbol} reason=${outcome} closePrice=${closePrice} positionAmt=${result.positionAmt} tickTs=${now} reconcileStartTs=${reconcileStartTs} binanceDetectedCloseTs=${binanceDetectedCloseTs}`,
   );
 
   if (
@@ -174,6 +244,7 @@ async function reconcileUserPositionImpl(
     runtime.dailyLossLimit.recordRealizedPnl(grossPnl - fees, now);
   }
 
+  const localDbCloseTs = Date.now();
   const updated: UserSignalDoc = {
     ...userSignal,
     status:
@@ -190,6 +261,15 @@ async function reconcileUserPositionImpl(
   };
   await userSignalRepo.upsert(userId, updated);
   await runtime.execution.recordConfirmedClose(userSignal.signalId, outcome);
+  log.info(
+    {
+      userId,
+      signalId: userSignal.signalId,
+      symbol: userSignal.symbol,
+      localDbCloseTs,
+    },
+    "[USER_LIVE_RECONCILE_DB_CLOSED]",
+  );
 
   const message = formatV5CloseMessage(
     userSignal.symbol,
@@ -200,6 +280,21 @@ async function reconcileUserPositionImpl(
     globalSignal.entryWaveNumber,
   );
   await notifyUserClose(message, runtime);
+  const telegramSentTs = Date.now();
+  log.info(
+    {
+      userId,
+      signalId: userSignal.signalId,
+      symbol: userSignal.symbol,
+      tickTs: now,
+      reconcileStartTs,
+      binanceDetectedCloseTs,
+      localDbCloseTs,
+      telegramSentTs,
+      totalMs: telegramSentTs - reconcileStartTs,
+    },
+    "[USER_LIVE_RECONCILE_TIMING]",
+  );
   // Sep 12 2026 (Karo), operator-reported CRITICAL FIX -- this used to
   // ALSO return `message` as `broadcastMessage` so the caller
   // (ReconciliationManager.onTick()) could send this SAME real-

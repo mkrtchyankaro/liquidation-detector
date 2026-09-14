@@ -316,10 +316,10 @@ async function main(): Promise<void> {
         "the per-user reconcile call must remain present",
       );
       assert.ok(
-        /reconcileUserPosition\(\s*userSignal,\s*globalSignal,\s*runtime,\s*userSignalRepo,\s*now,\s*pruneFromCache,?\s*\)/.test(
+        /reconcileUserPosition\(userSignal, globalSignal, runtime, userSignalRepo, now, pruneFromCache, lastKnownPrice\)/.test(
           src,
         ),
-        "the per-user reconcile call must still be invoked with exactly (userSignal, globalSignal, runtime, userSignalRepo, now, pruneFromCache) -- the SAME runtime whose position is being checked, never a different one",
+        "the per-user reconcile call must still be invoked with the SAME runtime whose position is being checked, never a different one (Sep 14 2026: lastKnownPrice param added for the UNKNOWN-fallback price fix, same runtime/userSignal invariant unchanged)",
       );
     },
   );
