@@ -78,13 +78,18 @@ interface CausalHistoryFixedJson {
   };
 }
 
-async function fetchAllLiquidations(
+async function fetchLiquidationsInWindow(
   mongo: MongoClientWrapper,
   symbol: string,
+  windowFromMs: number,
+  windowToMs: number,
 ): Promise<Liquidation[]> {
   const col = await mongo.rawLiquidationEvents();
   if (!col) return [];
-  const docs = await col.find({ symbol }).sort({ timestamp: 1 }).toArray();
+  const docs = await col
+    .find({ symbol, timestamp: { $gte: windowFromMs, $lt: windowToMs } })
+    .sort({ timestamp: 1 })
+    .toArray();
   return docs.map((d) => ({
     symbol: d.symbol,
     side: d.victim === "LONG" ? ("SELL" as const) : ("BUY" as const),
@@ -169,27 +174,58 @@ function segmentAllSequences(
   return sequences;
 }
 
-function parseArgs(argv: string[]): { causalHistoryFixedPath: string } {
-  const hit = argv.find((a) => a.startsWith("--causal-history-fixed="));
-  if (!hit) {
+function parseArgs(argv: string[]): {
+  causalHistoryFixedPath: string;
+  marketResponsePath: string;
+} {
+  const get = (name: string): string | undefined => {
+    const hit = argv.find((a) => a.startsWith(`--${name}=`));
+    return hit ? hit.slice(name.length + 3) : undefined;
+  };
+  const causalHistoryFixedPath = get("causal-history-fixed");
+  const marketResponsePath = get("market-response");
+  if (!causalHistoryFixedPath || !marketResponsePath) {
     console.error(
-      "Usage: build-real-reversal-candidate-ladders.ts --causal-history-fixed=/path/to/real-reversal-causal-history-fixed-3d-<ts>.json",
+      "Usage: build-real-reversal-candidate-ladders.ts --causal-history-fixed=/path/to/real-reversal-causal-history-fixed-3d-<ts>.json --market-response=/path/to/liquidation-market-response-3d-<ts>.json",
     );
     process.exit(1);
   }
-  return {
-    causalHistoryFixedPath: hit.slice("--causal-history-fixed=".length),
-  };
+  return { causalHistoryFixedPath, marketResponsePath };
 }
 
 async function main(): Promise<void> {
-  const { causalHistoryFixedPath } = parseArgs(process.argv.slice(2));
+  const { causalHistoryFixedPath, marketResponsePath } = parseArgs(
+    process.argv.slice(2),
+  );
   const source: CausalHistoryFixedJson = JSON.parse(
     fs.readFileSync(causalHistoryFixedPath, "utf8"),
   );
   const targets = source.canonicalObservations.reversal;
   console.log(
     `Loaded ${targets.length} canonical reversal observations to reconstruct ladders for.\n`,
+  );
+
+  // Sep 14 2026 (Karo), operator-reported CRITICAL FIX -- the raw
+  // liquidation fetch MUST be bounded to the EXACT SAME window the
+  // original segmentation used (windowFromMs/windowToMs from the
+  // authoritative liquidation-market-response-3d-*.json), never an
+  // unbounded fetch. Positional sequenceIds (BTCUSDT-LONG-0, etc.)
+  // are only stable given the identical input event set -- confirmed
+  // root cause of the prior 386/389 mismatch (an unbounded 60-day
+  // fetch produced a completely different run distribution than the
+  // original 3-day-bounded segmentation).
+  const marketResponse: { windowFromMs: number; windowToMs: number } =
+    JSON.parse(fs.readFileSync(marketResponsePath, "utf8"));
+  const windowFromMs = marketResponse.windowFromMs;
+  const windowToMs = marketResponse.windowToMs;
+  if (typeof windowFromMs !== "number" || typeof windowToMs !== "number") {
+    console.error(
+      `FATAL: ${marketResponsePath} does not contain valid windowFromMs/windowToMs -- cannot proceed without the authoritative window.`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `Authoritative window from ${marketResponsePath}: windowFromMs=${windowFromMs} (${new Date(windowFromMs).toISOString()})  windowToMs=${windowToMs} (${new Date(windowToMs).toISOString()})\n`,
   );
 
   const mongoCfg: MongoDetectorConfig = {
@@ -214,8 +250,25 @@ async function main(): Promise<void> {
   >();
 
   for (const symbol of symbols) {
-    console.log(`Fetching raw liquidation history for ${symbol} (once)...`);
-    const liqs = await fetchAllLiquidations(mongo, symbol);
+    console.log(
+      `Fetching raw liquidation history for ${symbol}, bounded to the authoritative window (once)...`,
+    );
+    const liqs = await fetchLiquidationsInWindow(
+      mongo,
+      symbol,
+      windowFromMs,
+      windowToMs,
+    );
+    // Permanent safety assertion: every fetched event must fall
+    // inside the exact authoritative window used -- fails immediately
+    // if this script's own fetch ever silently diverges from it.
+    for (const l of liqs) {
+      if (l.timestamp < windowFromMs || l.timestamp >= windowToMs) {
+        throw new Error(
+          `ASSERTION FAILED: fetched liquidation for ${symbol} at ts=${l.timestamp} falls outside the authoritative window [${windowFromMs}, ${windowToMs})`,
+        );
+      }
+    }
     liqBySymbol.set(symbol, liqs);
     sequencesBySymbol.set(symbol, segmentAllSequences(liqs));
     const symTargets = targets.filter((t) => t.symbol === symbol);
@@ -655,7 +708,14 @@ async function main(): Promise<void> {
   const outPath = `/mnt/data/real-reversal-candidate-ladders-3d-${Date.now()}.json`;
   const output = {
     methodology: {
-      note: "Reuses causalPercentileFamily/percentileRank/reconstructCausalEpisodeTotals/durationMatchedSeries unchanged from build-real-reversal-causal-history.ts. sequenceId regenerated by re-segmenting the FULL raw liquidation history per symbol+victim (not just target sequences) using the identical counter convention, to guarantee deterministic ID matching.",
+      note: "Reuses causalPercentileFamily/percentileRank/reconstructCausalEpisodeTotals/durationMatchedSeries unchanged from build-real-reversal-causal-history.ts. sequenceId regenerated by re-segmenting the raw liquidation history per symbol+victim, bounded to the EXACT authoritative window (windowFromMs/windowToMs) the original segmentation used -- an unbounded fetch was the confirmed root cause of the prior 386/389 mismatch, since positional sequenceIds are only stable given the identical input event set.",
+      authoritativeWindowSource: marketResponsePath,
+    },
+    windowUsed: {
+      windowFromMs,
+      windowToMs,
+      windowFromIso: new Date(windowFromMs).toISOString(),
+      windowToIso: new Date(windowToMs).toISOString(),
     },
     validation: {
       sequences: targets.length,
