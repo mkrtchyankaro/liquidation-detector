@@ -435,12 +435,16 @@ async function main(): Promise<void> {
       assert.ok(idx > -1, "handleCandlePhysicsEntry must be defined");
       const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
       assert.ok(
-        /FIXED_SL_PCT\s*=\s*0\.003/.test(body),
-        "must use a fixed 0.30% SL constant",
+        /FIXED_SL_PCT\s*=\s*isRotation\s*\?\s*v5RotationSlPct\(\)\s*:\s*0\.003/.test(
+          body,
+        ),
+        "must use a fixed 0.30% SL constant for WAVE mode (ROTATION mode now reads its own SL% from the single-source-of-truth config, Sep 14 2026 config-wiring pass)",
       );
       assert.ok(
-        /REWARD_RISK_RATIO\s*=\s*2\.2/.test(body),
-        "must keep TP at exactly 2.2R",
+        /REWARD_RISK_RATIO\s*=\s*isRotation\s*\?\s*v5RotationTpPct\(\)\s*\/\s*FIXED_SL_PCT\s*:\s*2\.2/.test(
+          body,
+        ),
+        "WAVE mode must keep TP at exactly 2.2R (ROTATION mode now derives its own ratio from the single-source-of-truth v5RotationTpPct()/v5RotationSlPct() config, Sep 14 2026 config-wiring pass)",
       );
       assert.ok(
         /const\s+sl\s*=[\s\S]{0,120}?FIXED_SL_PCT/.test(body) &&
@@ -517,8 +521,10 @@ async function main(): Promise<void> {
         "fixed 0.30% SL logic must still be present, untouched",
       );
       assert.ok(
-        body.includes("REWARD_RISK_RATIO = 2.2"),
-        "TP=2.2R logic must still be present, untouched",
+        body.includes(
+          "REWARD_RISK_RATIO = isRotation ? v5RotationTpPct() / FIXED_SL_PCT : 2.2",
+        ),
+        "WAVE mode's TP=2.2R logic must still be present, unchanged for WAVE mode (ROTATION mode now reads its own ratio from the single-source-of-truth config, Sep 14 2026 config-wiring pass)",
       );
       assert.ok(
         body.includes("this.v5.hydrateActiveTrade("),

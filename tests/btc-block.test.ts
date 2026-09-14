@@ -246,8 +246,16 @@ scenario(
     );
     const idx = source.indexOf("private async handleCandlePhysicsEntry(");
     const body = source.slice(idx, source.indexOf("\n  private ", idx + 50));
-    assert.ok(body.includes("FIXED_SL_PCT = 0.003"));
-    assert.ok(body.includes("REWARD_RISK_RATIO = 2.2"));
+    assert.ok(
+      body.includes("FIXED_SL_PCT = isRotation ? v5RotationSlPct() : 0.003"),
+      "WAVE mode's own fixed 0.30% SL must still be present, unchanged (ROTATION mode now reads its own SL% from the single-source-of-truth config, Sep 14 2026 config-wiring pass)",
+    );
+    assert.ok(
+      body.includes(
+        "REWARD_RISK_RATIO = isRotation ? v5RotationTpPct() / FIXED_SL_PCT : 2.2",
+      ),
+      "WAVE mode's own TP=2.2R must still be present, unchanged (ROTATION mode now reads its own ratio from the single-source-of-truth config, Sep 14 2026 config-wiring pass)",
+    );
     assert.ok(
       body.includes("event.p95AtW1Qualification"),
       "the P95-at-W1-qualification value (from the new engine-level rule) must still be logged",

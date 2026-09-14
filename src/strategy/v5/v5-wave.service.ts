@@ -105,6 +105,7 @@ export interface V5SignalEvent {
    *  with normal type safety instead of an `as any` cast. */
   p95AtW1Qualification?: number | null;
   maxIndividualEventUsdAtW1?: number | null;
+
   plan: {
     entry: number;
     tp: number;
@@ -147,7 +148,7 @@ export interface V5SignalEvent {
     dynamicPhysicsScore: number;
     selectedRR: number;
     tpMultiplier: number;
-    slDeterminedBy: "physics" | "sizing-floor";
+    slDeterminedBy: "physics" | "sizing-floor" | "rotation-fixed";
   } | null;
   rejectionReason: string | null;
   /** Sep 9 2026 (Karo), operator-requested diagnostics-only fix --
@@ -190,7 +191,7 @@ export interface V5SignalEvent {
     dynamicPhysicsScore: number;
     selectedRR: number;
     tpMultiplier: number;
-    slDeterminedBy: "physics" | "sizing-floor";
+    slDeterminedBy: "physics" | "sizing-floor" | "rotation-fixed";
   } | null;
   btcContext: {
     priceAtSignal: number | null;
