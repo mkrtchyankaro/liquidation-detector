@@ -1,48 +1,35 @@
 /**
- * Sep 14 2026 (Karo), operator-requested. READ-ONLY, multi-symbol,
- * exact 72-hour window. Tests an alternative causal ENTRY concept to
- * ATR-normalization: DIRECTIONAL ATR ROTATION, treating (liqDirATR,
- * recDirATR) as a 2D vector and tracking its angle theta = atan2(
- * recDirATR, liqDirATR) in degrees. Liquidation-dominant states sit
- * near 0 deg (liq axis dominant); recovery-dominant states sit near
- * 90 deg. Rotation entry = first causal timestamp where theta has
- * risen by >= X degrees from its value AT EPISODE END (the same
- * causal reference point used for the normalization search
- * throughout this thread -- chosen for the same reason: it's known
- * the moment episode end is reached, no hindsight required).
+ * Sep 14 2026 (Karo), operator-requested. READ-ONLY, diagnostic ONLY
+ * on the 15-degree directional ATR rotation entry -- no new angle
+ * search. Focused on WHY some 15deg rotations succeed and others
+ * fail, across three named populations: ALL3>=P99, totalUSD>=P99,
+ * ALL3>=P97.
  *
- * liq/rec framing is fully generic across victim direction (as
- * established throughout this project): for LONG, liq=DownATR,
- * rec=UpATR; for SHORT, liq=UpATR, rec=DownATR. Theta rising always
- * means "rotating toward recovery dominance" regardless of side --
- * one code path, no hand-mirrored duplicate logic.
+ * Reuses the identical, unchanged episode/percentile/theta/slope
+ * machinery from the rotation-entry pass. "Total rotation degrees"
+ * and "rotation duration" are measured from the MAXIMUM liquidation-
+ * direction distortion point (the true theta trough within the shock
+ * window) to the entry -- not from episode end -- since the operator
+ * specifically asked for both the max-distortion state AND the
+ * rotation FROM it as separate, named features here. This is a
+ * slightly different reference point than the prior pass's entry-
+ * search (which anchored at episode-end for causal-search purposes);
+ * both are causal, but this one is more physically informative for
+ * the "how far did it actually swing back" question being asked now.
  *
- * Slopes (for the simple slope-cross variant and for rotation speed)
- * use a 3-minute causal trailing window: slope = (value_t -
- * value_{t-3min}) / 3, in ATR-units/minute.
+ * All directional ATR slopes are normalized by PRE-liquidation ATR
+ * values, exactly as instructed.
  *
- * rotationStrength = normalized rise of recATR (from its post-episode
- * value, divided by pre-episode recATR) + normalized fall of liqATR
- * (from its post-episode value, divided by pre-episode liqATR) --
- * pre-liquidation values only for normalization, no invented
- * coefficient.
+ * Distributions (median/P25/P75) are reported per feature, split by
+ * TP/SL/TIMEOUT outcome, over the pooled union of the three named
+ * populations (deduplicated by symbol+victim+episode). Each named
+ * population's own count is also reported separately. A separation
+ * score (|median(TP)-median(SL)| / pooled IQR) ranks features by how
+ * cleanly they separate outcomes -- purely descriptive, not a
+ * classifier and not a threshold recommendation.
  *
- * Entry search is strictly causal: at any candidate timestamp, only
- * theta/slope/ATR values computable from data <= that timestamp are
- * used to decide whether the entry condition is met. Post-entry ATR
- * trajectory (next 1/2/3/5 candles) is computed and reported ONLY as
- * diagnostic information, explicitly never used to choose the entry
- * itself.
- *
- * Populations: totalUSD>=P95/97/99 and ALL3>=P95/97/99, using the
- * same causal rolling percentile ranks established in the prior
- * passes. Trade simulation is identical to the prior passes: SL=
- * 0.30%, TP in {0.60,0.66,0.75}%, 30min horizon, first-hit ordering,
- * genuine AMBIGUOUS when a single candle touches both levels (never
- * guessed).
- *
- * READ-ONLY. No production code changed, no Mongo writes, no PM2
- * restart. No production rule chosen here.
+ * No threshold optimized. No production rule created. No production
+ * code touched.
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -67,10 +54,10 @@ const OUTPUT_DIR = path.join(__dirname, "..", "research-output");
 const NORM_WALK_CAP_MIN = 120;
 const MIN_PRIOR_SAMPLES = 15;
 const POST_ENTRY_WATCH_MIN = 30;
-const SL_PCT = 0.3;
-const TP_PCTS = [0.6, 0.66, 0.75];
-const ROTATION_ANGLES_DEG = [15, 30, 45, 60, 75, 90];
-const SLOPE_WINDOW_MIN = 3;
+const SHOCK_WINDOW_EXTRA_MIN = 30;
+const SL_PCT = 0.3,
+  TP_PCT = 0.6;
+const ROTATION_DEG = 15;
 
 function sortNum(a: (number | null)[]) {
   return a
@@ -228,35 +215,15 @@ interface Wave {
   events: RawEvent[];
 }
 
-interface EntryCandidate {
-  ts: number;
-  price: number;
-  rotationStrength: number | null;
-  thetaAtEntry: number | null;
-  degPerMinute: number | null;
-}
-interface Episode {
+interface Trade15 {
   symbol: string;
   victim: Victim;
   waveIndex: number;
-  startTs: number;
-  endTs: number;
-  extremePrice: number;
-  extremeTs: number;
-  preLiqAtr: number;
-  preRecAtr: number;
-  postLiqAtr: number;
-  postRecAtr: number;
-  thetaAtEnd: number;
-  totalUsdPercentile: number | null;
-  maxEventPercentile: number | null;
-  usdPerMinPercentile: number | null;
-  liqSeries: Map<number, number>;
-  recSeries: Map<number, number>;
-  klines: Map<number, Candle>;
-  normalizationEntry: EntryCandidate | null;
-  rotationEntries: Record<number, EntryCandidate | null>;
-  slopeCrossEntry: EntryCandidate | null;
+  entryTs: number;
+  entryPrice: number;
+  populations: string[];
+  outcome: "TP" | "SL" | "TIMEOUT" | "AMBIGUOUS";
+  features: Record<string, number | null>;
 }
 
 async function main() {
@@ -274,7 +241,7 @@ async function main() {
   const windowStart = Math.floor((now - HOURS * 3600 * 1000) / 60000) * 60000;
   const windowEnd = now;
 
-  const allEpisodes: Episode[] = [];
+  const trades: Trade15[] = [];
 
   for (const symbol of SYMBOLS) {
     console.log("=== " + symbol + " ===");
@@ -417,20 +384,33 @@ async function main() {
             w.totalUsd / w.durationMinutes,
           );
         }
+        const pops: string[] = [];
+        if (totalUsdPercentile !== null && totalUsdPercentile >= 99)
+          pops.push("totalUSD>=P99");
+        if (
+          totalUsdPercentile !== null &&
+          totalUsdPercentile >= 99 &&
+          maxEventPercentile !== null &&
+          maxEventPercentile >= 99 &&
+          usdPerMinPercentile !== null &&
+          usdPerMinPercentile >= 99
+        )
+          pops.push("ALL3>=P99");
+        if (
+          totalUsdPercentile !== null &&
+          totalUsdPercentile >= 97 &&
+          maxEventPercentile !== null &&
+          maxEventPercentile >= 97 &&
+          usdPerMinPercentile !== null &&
+          usdPerMinPercentile >= 97
+        )
+          pops.push("ALL3>=P97");
         if (
           (w.regime === "large" || w.regime === "extreme") &&
-          totalUsdPercentile !== null
+          pops.length > 0
         ) {
-          const ep = computeEpisode(
-            w,
-            downV1,
-            upV1,
-            klines,
-            totalUsdPercentile,
-            maxEventPercentile,
-            usdPerMinPercentile,
-          );
-          if (ep) allEpisodes.push(ep);
+          const t = computeTrade(w, downV1, upV1, klines, events, pops);
+          if (t) trades.push(t);
         }
         priorTotalUsd.push(w.totalUsd);
         priorMaxEvent.push(w.maxSingleEventUsd);
@@ -439,57 +419,61 @@ async function main() {
     }
   }
 
-  function computeEpisode(
+  function computeTrade(
     w: Wave,
     downV1: Map<number, number>,
     upV1: Map<number, number>,
     klines: Map<number, Candle>,
-    totalUsdPercentile: number | null,
-    maxEventPercentile: number | null,
-    usdPerMinPercentile: number | null,
-  ): Episode | null {
+    allEvents: any[],
+    pops: string[],
+  ): Trade15 | null {
     const victim = w.victim;
-    const preDown = lookupCausal(downV1, w.startTs),
-      preUp = lookupCausal(upV1, w.startTs);
-    const postDown = lookupCausal(downV1, w.endTs),
-      postUp = lookupCausal(upV1, w.endTs);
+    const preDownAtr = lookupCausal(downV1, w.startTs),
+      preUpAtr = lookupCausal(upV1, w.startTs);
+    const postDownAtr = lookupCausal(downV1, w.endTs),
+      postUpAtr = lookupCausal(upV1, w.endTs);
     if (
-      preDown === null ||
-      preUp === null ||
-      postDown === null ||
-      postUp === null ||
-      preDown <= 0 ||
-      preUp <= 0
+      preDownAtr === null ||
+      preUpAtr === null ||
+      postDownAtr === null ||
+      postUpAtr === null ||
+      preDownAtr <= 0 ||
+      preUpAtr <= 0
     )
       return null;
-    const preLiqAtr = victim === "LONG" ? preDown : preUp,
-      preRecAtr = victim === "LONG" ? preUp : preDown;
-    const postLiqAtr = victim === "LONG" ? postDown : postUp,
-      postRecAtr = victim === "LONG" ? postUp : postDown;
+    const preLiqAtr = victim === "LONG" ? preDownAtr : preUpAtr,
+      preRecAtr = victim === "LONG" ? preUpAtr : preDownAtr;
+    const postLiqAtr = victim === "LONG" ? postDownAtr : postUpAtr,
+      postRecAtr = victim === "LONG" ? postUpAtr : postDownAtr;
     if (postRecAtr <= 0) return null;
-    const thetaAtEnd = thetaDeg(postLiqAtr, postRecAtr);
     const liqSeries = victim === "LONG" ? downV1 : upV1,
       recSeries = victim === "LONG" ? upV1 : downV1;
-    const preRatio = preLiqAtr / preRecAtr,
-      postRatio = postLiqAtr / postRecAtr;
+    const thetaPre = thetaDeg(preLiqAtr, preRecAtr);
+    const thetaAtEnd = thetaDeg(postLiqAtr, postRecAtr);
 
-    function slopeAt(series: Map<number, number>, t: number): number | null {
-      const cur = lookupCausal(series, t),
-        past = lookupCausal(series, t - SLOPE_WINDOW_MIN * 60000);
-      if (cur === null || past === null) return null;
-      return (cur - past) / SLOPE_WINDOW_MIN;
+    let minTheta = thetaAtEnd,
+      minThetaTs = w.endTs,
+      downAtMaxDist = postDownAtr,
+      upAtMaxDist = postUpAtr;
+    for (
+      let t = w.startTs;
+      t <= w.endTs + SHOCK_WINDOW_EXTRA_MIN * 60000;
+      t += 60000
+    ) {
+      const l = lookupCausal(liqSeries, t),
+        r = lookupCausal(recSeries, t);
+      if (l === null || r === null || r <= 0) continue;
+      const th = thetaDeg(l, r);
+      if (th < minTheta) {
+        minTheta = th;
+        minThetaTs = t;
+        downAtMaxDist = lookupCausal(downV1, t) ?? downAtMaxDist;
+        upAtMaxDist = lookupCausal(upV1, t) ?? upAtMaxDist;
+      }
     }
-    function rotationStrengthAt(curLiq: number, curRec: number): number {
-      const normalizedRiseOfRec = (curRec - postRecAtr) / preRecAtr;
-      const normalizedFallOfLiq = (postLiqAtr - curLiq) / preLiqAtr;
-      return normalizedRiseOfRec + normalizedFallOfLiq;
-    }
 
-    let normalizationEntry: EntryCandidate | null = null;
-    const rotationEntries: Record<number, EntryCandidate | null> = {};
-    ROTATION_ANGLES_DEG.forEach((a) => (rotationEntries[a] = null));
-    let slopeCrossEntry: EntryCandidate | null = null;
-
+    let entryTs: number | null = null,
+      entryPrice: number | null = null;
     for (
       let t = Math.floor(w.endTs / 60000) * 60000;
       t <= w.endTs + NORM_WALK_CAP_MIN * 60000;
@@ -498,410 +482,289 @@ async function main() {
       const curLiq = lookupCausal(liqSeries, t),
         curRec = lookupCausal(recSeries, t);
       if (curLiq === null || curRec === null || curRec <= 0) continue;
+      const curTheta = thetaDeg(curLiq, curRec);
+      if (curTheta - thetaAtEnd >= ROTATION_DEG) {
+        const c = candleAt(klines, t);
+        if (c) {
+          entryTs = t;
+          entryPrice = c.close;
+        }
+        break;
+      }
+    }
+    if (entryTs === null || entryPrice === null) return null;
+
+    const downAtEntry = lookupCausal(downV1, entryTs)!,
+      upAtEntry = lookupCausal(upV1, entryTs)!;
+    const thetaAtEntry = thetaDeg(
+      victim === "LONG" ? downAtEntry : upAtEntry,
+      victim === "LONG" ? upAtEntry : downAtEntry,
+    );
+    const totalRotationDeg = thetaAtEntry - minTheta;
+    const rotationDurationMin = (entryTs - minThetaTs) / 60000;
+    const degPerMinute =
+      rotationDurationMin > 0 ? totalRotationDeg / rotationDurationMin : null;
+
+    function slopeNorm(
+      series: Map<number, number>,
+      preAtr: number,
+      windowMin: number,
+    ): number | null {
+      const cur = lookupCausal(series, entryTs!),
+        past = lookupCausal(series, entryTs! - windowMin * 60000);
+      if (cur === null || past === null || preAtr <= 0) return null;
+      return (cur - past) / windowMin / preAtr;
+    }
+
+    const sameSideEvents = allEvents.filter((e) => e.victim === victim);
+    const beforeEntry = sameSideEvents
+      .filter((e) => e.timestamp <= entryTs!)
+      .sort((a, b) => b.timestamp - a.timestamp);
+    const secondsSinceLastLiq =
+      beforeEntry.length > 0
+        ? (entryTs - beforeEntry[0].timestamp) / 1000
+        : null;
+    const usdInWindow = (sec: number) =>
+      sameSideEvents
+        .filter(
+          (e) => e.timestamp <= entryTs! && e.timestamp > entryTs! - sec * 1000,
+        )
+        .reduce((s, e) => s + e.quoteQty, 0);
+    const countInWindow = (sec: number) =>
+      sameSideEvents.filter(
+        (e) => e.timestamp <= entryTs! && e.timestamp > entryTs! - sec * 1000,
+      ).length;
+
+    const distFromExtremeToEntryAtr =
+      Math.abs(entryPrice - w.extremePrice) / preRecAtr;
+    const timeFromExtremeToEntryMin = (entryTs - w.extremeTs) / 60000;
+    const shockAtr = Math.abs(w.events[0].price - w.extremePrice) / preLiqAtr;
+
+    const slDist = entryPrice * (SL_PCT / 100),
+      tpDist = entryPrice * (TP_PCT / 100);
+    const slLevel =
+      victim === "LONG" ? entryPrice - slDist : entryPrice + slDist;
+    const tpLevel =
+      victim === "LONG" ? entryPrice + tpDist : entryPrice - tpDist;
+    let outcome: Trade15["outcome"] = "TIMEOUT";
+    for (
+      let t = entryTs + 60000;
+      t <= entryTs + POST_ENTRY_WATCH_MIN * 60000;
+      t += 60000
+    ) {
       const c = candleAt(klines, t);
       if (!c) continue;
-      const curTheta = thetaDeg(curLiq, curRec);
-      const deltaTheta = curTheta - thetaAtEnd;
-      const rs = rotationStrengthAt(curLiq, curRec);
-
-      if (normalizationEntry === null) {
-        const curRatio = curLiq / curRec;
-        const ratioFrac =
-          postRatio !== preRatio
-            ? ((postRatio - curRatio) / (postRatio - preRatio)) * 100
-            : null;
-        if (ratioFrac !== null && ratioFrac >= 100)
-          normalizationEntry = {
-            ts: t,
-            price: c.close,
-            rotationStrength: rs,
-            thetaAtEntry: curTheta,
-            degPerMinute: null,
-          };
-      }
-      for (const a of ROTATION_ANGLES_DEG) {
-        if (rotationEntries[a] === null && deltaTheta >= a) {
-          const minutesElapsed = (t - w.endTs) / 60000;
-          rotationEntries[a] = {
-            ts: t,
-            price: c.close,
-            rotationStrength: rs,
-            thetaAtEntry: curTheta,
-            degPerMinute:
-              minutesElapsed > 0 ? deltaTheta / minutesElapsed : null,
-          };
-        }
-      }
-      if (slopeCrossEntry === null) {
-        const liqSlope = slopeAt(liqSeries, t),
-          recSlope = slopeAt(recSeries, t);
-        if (
-          liqSlope !== null &&
-          recSlope !== null &&
-          liqSlope < 0 &&
-          recSlope > 0
-        )
-          slopeCrossEntry = {
-            ts: t,
-            price: c.close,
-            rotationStrength: rs,
-            thetaAtEntry: curTheta,
-            degPerMinute: null,
-          };
-      }
-      if (
-        normalizationEntry !== null &&
-        ROTATION_ANGLES_DEG.every((a) => rotationEntries[a] !== null) &&
-        slopeCrossEntry !== null
-      )
+      const hitTp = victim === "LONG" ? c.high >= tpLevel : c.low <= tpLevel;
+      const hitSl = victim === "LONG" ? c.low <= slLevel : c.high >= slLevel;
+      if (hitTp && hitSl) {
+        outcome = "AMBIGUOUS";
         break;
+      }
+      if (hitSl) {
+        outcome = "SL";
+        break;
+      }
+      if (hitTp) {
+        outcome = "TP";
+        break;
+      }
     }
+
+    const features: Record<string, number | null> = {
+      thetaPre,
+      minTheta,
+      thetaAtEntry,
+      totalRotationDeg,
+      rotationDurationMin,
+      degPerMinute,
+      preDownAtr,
+      preUpAtr,
+      downAtMaxDist,
+      upAtMaxDist,
+      downAtEntry,
+      upAtEntry,
+      downSlope1m: slopeNorm(downV1, preDownAtr, 1),
+      upSlope1m: slopeNorm(upV1, preUpAtr, 1),
+      downSlope2m: slopeNorm(downV1, preDownAtr, 2),
+      upSlope2m: slopeNorm(upV1, preUpAtr, 2),
+      downSlope3m: slopeNorm(downV1, preDownAtr, 3),
+      upSlope3m: slopeNorm(upV1, preUpAtr, 3),
+      secondsSinceLastLiq,
+      usd30s: usdInWindow(30),
+      usd60s: usdInWindow(60),
+      usd120s: usdInWindow(120),
+      count30s: countInWindow(30),
+      count60s: countInWindow(60),
+      count120s: countInWindow(120),
+      totalEpisodeUsd: w.totalUsd,
+      largestEventSoFar: w.maxSingleEventUsd,
+      usdPerMinSoFar: w.totalUsd / w.durationMinutes,
+      shockAtr,
+      distFromExtremeToEntryAtr,
+      timeFromExtremeToEntryMin,
+      ratioAtEntry:
+        (victim === "LONG" ? downAtEntry : upAtEntry) /
+        (victim === "LONG" ? upAtEntry : downAtEntry),
+    };
 
     return {
       symbol: w.symbol,
       victim,
       waveIndex: w.waveIndex,
-      startTs: w.startTs,
-      endTs: w.endTs,
-      extremePrice: w.extremePrice,
-      extremeTs: w.extremeTs,
-      preLiqAtr,
-      preRecAtr,
-      postLiqAtr,
-      postRecAtr,
-      thetaAtEnd,
-      totalUsdPercentile,
-      maxEventPercentile,
-      usdPerMinPercentile,
-      liqSeries,
-      recSeries,
-      klines,
-      normalizationEntry,
-      rotationEntries,
-      slopeCrossEntry,
+      entryTs,
+      entryPrice,
+      populations: pops,
+      outcome,
+      features,
     };
   }
 
   console.log(
-    "\nTotal qualifying episodes (large+extreme, with percentile): " +
-      allEpisodes.length,
+    "\nTotal 15deg-rotation trades found (any of the 3 named populations): " +
+      trades.length,
   );
-
-  function simulateTrade(
-    ep: Episode,
-    entry: EntryCandidate,
-    tpPct: number,
-  ): {
-    outcome: "TP" | "SL" | "TIMEOUT" | "AMBIGUOUS";
-    rMultiple: number | null;
-  } {
-    const slDist = entry.price * (SL_PCT / 100),
-      tpDist = entry.price * (tpPct / 100);
-    const slLevel =
-      ep.victim === "LONG" ? entry.price - slDist : entry.price + slDist;
-    const tpLevel =
-      ep.victim === "LONG" ? entry.price + tpDist : entry.price - tpDist;
-    for (
-      let t = entry.ts + 60000;
-      t <= entry.ts + POST_ENTRY_WATCH_MIN * 60000;
-      t += 60000
-    ) {
-      const c = candleAt(ep.klines, t);
-      if (!c) continue;
-      const hitTp = ep.victim === "LONG" ? c.high >= tpLevel : c.low <= tpLevel;
-      const hitSl = ep.victim === "LONG" ? c.low <= slLevel : c.high >= slLevel;
-      if (hitTp && hitSl) return { outcome: "AMBIGUOUS", rMultiple: null };
-      if (hitSl) return { outcome: "SL", rMultiple: -1 };
-      if (hitTp) return { outcome: "TP", rMultiple: tpDist / slDist };
-    }
-    return { outcome: "TIMEOUT", rMultiple: 0 };
-  }
-  function summarize(
-    episodes: Episode[],
-    getEntry: (ep: Episode) => EntryCandidate | null,
-    tpPct: number,
-  ) {
-    const withEntry = episodes
-      .map((ep) => ({ ep, entry: getEntry(ep) }))
-      .filter(
-        (x): x is { ep: Episode; entry: EntryCandidate } => x.entry !== null,
-      );
-    const trades = withEntry.map((x) => ({
-      ...x,
-      result: simulateTrade(x.ep, x.entry, tpPct),
-    }));
-    const tpCount = trades.filter((t) => t.result.outcome === "TP").length,
-      slCount = trades.filter((t) => t.result.outcome === "SL").length,
-      toCount = trades.filter((t) => t.result.outcome === "TIMEOUT").length,
-      ambCount = trades.filter((t) => t.result.outcome === "AMBIGUOUS").length;
-    const totalR = trades.reduce((s, t) => s + (t.result.rMultiple ?? 0), 0);
-    const medDelayMin = median(
-      withEntry.map((x) => (x.entry.ts - x.ep.endTs) / 60000),
-    );
-    return {
-      n: withEntry.length,
-      tpCount,
-      slCount,
-      toCount,
-      ambCount,
-      totalR,
-      medDelayMin,
-    };
-  }
-
-  interface PopDef {
-    name: string;
-    pred: (ep: Episode) => boolean;
-  }
-  const populations: PopDef[] = [
-    {
-      name: "totalUSD>=P95",
-      pred: (ep) => (ep.totalUsdPercentile ?? -1) >= 95,
-    },
-    {
-      name: "totalUSD>=P97",
-      pred: (ep) => (ep.totalUsdPercentile ?? -1) >= 97,
-    },
-    {
-      name: "totalUSD>=P99",
-      pred: (ep) => (ep.totalUsdPercentile ?? -1) >= 99,
-    },
-    {
-      name: "ALL3>=P95",
-      pred: (ep) =>
-        (ep.totalUsdPercentile ?? -1) >= 95 &&
-        (ep.maxEventPercentile ?? -1) >= 95 &&
-        (ep.usdPerMinPercentile ?? -1) >= 95,
-    },
-    {
-      name: "ALL3>=P97",
-      pred: (ep) =>
-        (ep.totalUsdPercentile ?? -1) >= 97 &&
-        (ep.maxEventPercentile ?? -1) >= 97 &&
-        (ep.usdPerMinPercentile ?? -1) >= 97,
-    },
-    {
-      name: "ALL3>=P99",
-      pred: (ep) =>
-        (ep.totalUsdPercentile ?? -1) >= 99 &&
-        (ep.maxEventPercentile ?? -1) >= 99 &&
-        (ep.usdPerMinPercentile ?? -1) >= 99,
-    },
-  ];
-
-  console.log("\n" + "=".repeat(175));
-  console.log(
-    "MAIN OUTPUT: TRADE GROUPS PER POPULATION x ENTRY METHOD x TP LEVEL",
-  );
-  console.log("=".repeat(175));
-  const jsonResults: any[] = [];
-  for (const pop of populations) {
-    const popEpisodes = allEpisodes.filter(pop.pred);
-    console.log("\n" + "#".repeat(100));
-    console.log(
-      "POPULATION: " + pop.name + "  (n episodes=" + popEpisodes.length + ")",
-    );
-    console.log("#".repeat(100));
-
-    const methods: {
-      name: string;
-      getEntry: (ep: Episode) => EntryCandidate | null;
-    }[] = [
-      {
-        name: "100% ATR normalization",
-        getEntry: (ep) => ep.normalizationEntry,
-      },
-      ...ROTATION_ANGLES_DEG.map((a) => ({
-        name: a + "deg rotation",
-        getEntry: (ep: Episode) => ep.rotationEntries[a],
-      })),
-      { name: "simple slope-cross", getEntry: (ep) => ep.slopeCrossEntry },
-    ];
-
-    const popResults: any[] = [];
-    for (const m of methods) {
-      const n = popEpisodes.filter((ep) => m.getEntry(ep) !== null).length;
-      console.log(
-        "\n  -- " +
-          m.name +
-          " -- N=" +
-          n +
-          " (signals/72h=" +
-          n.toFixed(0) +
-          ")",
-      );
-      const tpResults: any[] = [];
-      for (const tp of TP_PCTS) {
-        const s = summarize(popEpisodes, m.getEntry, tp);
-        console.log(
-          "    TP=" +
-            tp +
-            "%: TP=" +
-            s.tpCount +
-            " SL=" +
-            s.slCount +
-            " TIMEOUT=" +
-            s.toCount +
-            " AMBIGUOUS=" +
-            s.ambCount +
-            "  totalR=" +
-            s.totalR.toFixed(2) +
-            "  medEntryDelay=" +
-            (s.medDelayMin?.toFixed(2) ?? "n/a") +
-            "min",
-        );
-        tpResults.push({ tpPct: tp, ...s });
-      }
-      popResults.push({ method: m.name, n, tpResults });
-    }
-    jsonResults.push({
-      population: pop.name,
-      nEpisodes: popEpisodes.length,
-      methodResults: popResults,
-    });
-  }
-
-  for (const popName of ["totalUSD>=P97", "ALL3>=P97"]) {
-    const pop = populations.find((p) => p.name === popName)!;
-    const popEpisodes = allEpisodes.filter(pop.pred);
-    console.log("\n" + "=".repeat(175));
-    console.log(
-      "FINAL COMPARISON TABLE -- population=" +
-        popName +
-        " (TP=0.66%, SL=0.30%)",
-    );
-    console.log("=".repeat(175));
-    console.log(
-      "METHOD | N | medEntryDelay(min) | TP | SL | TIMEOUT | AMBIGUOUS | totalR",
-    );
-    const methods: {
-      name: string;
-      getEntry: (ep: Episode) => EntryCandidate | null;
-    }[] = [
-      {
-        name: "100% ATR normalization",
-        getEntry: (ep) => ep.normalizationEntry,
-      },
-      ...ROTATION_ANGLES_DEG.map((a) => ({
-        name: a + "deg rotation",
-        getEntry: (ep: Episode) => ep.rotationEntries[a],
-      })),
-      { name: "simple slope-cross", getEntry: (ep) => ep.slopeCrossEntry },
-    ];
-    for (const m of methods) {
-      const s = summarize(popEpisodes, m.getEntry, 0.66);
-      console.log(
-        "  " +
-          m.name.padEnd(24) +
-          " | " +
-          String(s.n).padStart(3) +
-          " | " +
-          (s.medDelayMin !== null
-            ? s.medDelayMin.toFixed(2).padStart(8)
-            : "n/a".padStart(8)) +
-          " | " +
-          s.tpCount +
-          " | " +
-          s.slCount +
-          " | " +
-          s.toCount +
-          " | " +
-          s.ambCount +
-          " | " +
-          s.totalR.toFixed(2),
-      );
-    }
-  }
-
-  console.log("\n" + "=".repeat(175));
-  console.log(
-    "ROTATION vs NORMALIZATION ENTRY DELAY (from episode extreme), all qualifying episodes with BOTH entries found",
-  );
-  console.log("=".repeat(175));
-  const bothFound = allEpisodes.filter(
-    (ep) => ep.normalizationEntry !== null && ep.rotationEntries[45] !== null,
-  );
-  const normDelays = bothFound.map(
-    (ep) => (ep.normalizationEntry!.ts - ep.extremeTs) / 60000,
-  );
-  const rotDelays = bothFound.map(
-    (ep) => (ep.rotationEntries[45]!.ts - ep.extremeTs) / 60000,
-  );
-  const normLost = bothFound.map(
-    (ep) =>
-      ((ep.victim === "LONG"
-        ? ep.normalizationEntry!.price - ep.extremePrice
-        : ep.extremePrice - ep.normalizationEntry!.price) /
-        ep.extremePrice) *
-      100,
-  );
-  const rotLost = bothFound.map(
-    (ep) =>
-      ((ep.victim === "LONG"
-        ? ep.rotationEntries[45]!.price - ep.extremePrice
-        : ep.extremePrice - ep.rotationEntries[45]!.price) /
-        ep.extremePrice) *
-      100,
-  );
-  console.log("  n=" + bothFound.length);
-  console.log(
-    "  median delay from extreme: normalization=" +
-      (median(normDelays)?.toFixed(2) ?? "n/a") +
-      "min  45deg-rotation=" +
-      (median(rotDelays)?.toFixed(2) ?? "n/a") +
-      "min",
-  );
-  console.log(
-    "  median reversal-% already lost before entry: normalization=" +
-      (median(normLost)?.toFixed(4) ?? "n/a") +
-      "%  45deg-rotation=" +
-      (median(rotLost)?.toFixed(4) ?? "n/a") +
-      "%",
-  );
-
-  console.log("\n" + "=".repeat(175));
-  console.log(
-    "DIAGNOSTIC (future info, NOT used for entry decision): post-entry liq/rec ATR trajectory, 45deg rotation entries, ALL3>=P97 population",
-  );
-  console.log("=".repeat(175));
-  const diagPop = allEpisodes.filter(
-    (ep) =>
-      (ep.totalUsdPercentile ?? -1) >= 97 &&
-      (ep.maxEventPercentile ?? -1) >= 97 &&
-      (ep.usdPerMinPercentile ?? -1) >= 97 &&
-      ep.rotationEntries[45] !== null,
-  );
-  for (const ep of diagPop) {
-    const entry = ep.rotationEntries[45]!;
-    const trade66 = simulateTrade(ep, entry, 0.66);
-    const traj = [1, 2, 3, 5].map((m) => {
-      const l = lookupCausal(ep.liqSeries, entry.ts + m * 60000),
-        r = lookupCausal(ep.recSeries, entry.ts + m * 60000);
-      return l !== null && r !== null
-        ? "liq=" + l.toFixed(3) + "/rec=" + r.toFixed(3)
-        : "n/a";
-    });
+  for (const popName of ["ALL3>=P99", "totalUSD>=P99", "ALL3>=P97"])
     console.log(
       "  " +
-        ep.symbol +
-        " " +
-        ep.victim +
-        " @" +
-        fmtClock(entry.ts) +
-        " outcome(0.66%)=" +
-        trade66.outcome +
-        " rotationStrength=" +
-        (entry.rotationStrength?.toFixed(3) ?? "n/a") +
-        " degPerMin=" +
-        (entry.degPerMinute?.toFixed(2) ?? "n/a"),
+        popName +
+        ": n=" +
+        trades.filter((t) => t.populations.includes(popName)).length,
     );
-    console.log("    +1/2/3/5min liq/rec: " + traj.join(" | "));
+
+  const featureNames = Object.keys(trades[0]?.features ?? {});
+  const byOutcome = (o: string) => trades.filter((t) => t.outcome === o);
+  const tpTrades = byOutcome("TP"),
+    slTrades = byOutcome("SL"),
+    toTrades = byOutcome("TIMEOUT");
+  console.log(
+    "\nOutcome counts (pooled, union of 3 populations): TP=" +
+      tpTrades.length +
+      " SL=" +
+      slTrades.length +
+      " TIMEOUT=" +
+      toTrades.length +
+      " AMBIGUOUS=" +
+      byOutcome("AMBIGUOUS").length,
+  );
+
+  console.log("\n" + "=".repeat(175));
+  console.log("FEATURE DISTRIBUTIONS: TP vs SL vs TIMEOUT (median [P25, P75])");
+  console.log("=".repeat(175));
+  function fmtDist(vals: (number | null)[]): string {
+    const s = sortNum(vals);
+    if (s.length === 0) return "n/a";
+    return (
+      (percentile(s, 50)?.toFixed(3) ?? "n/a") +
+      " [" +
+      (percentile(s, 25)?.toFixed(3) ?? "n/a") +
+      "," +
+      (percentile(s, 75)?.toFixed(3) ?? "n/a") +
+      "]"
+    );
+  }
+  const separationScores: { feature: string; score: number | null }[] = [];
+  for (const f of featureNames) {
+    const allVals = sortNum(trades.map((t) => t.features[f]));
+    const iqr =
+      allVals.length > 0
+        ? percentile(allVals, 75)! - percentile(allVals, 25)!
+        : null;
+    const tpVals = tpTrades.map((t) => t.features[f]),
+      slVals = slTrades.map((t) => t.features[f]),
+      toVals = toTrades.map((t) => t.features[f]);
+    const medTp = median(tpVals),
+      medSl = median(slVals);
+    const score =
+      medTp !== null && medSl !== null && iqr !== null && iqr > 0
+        ? Math.abs(medTp - medSl) / iqr
+        : null;
+    separationScores.push({ feature: f, score });
+    console.log(
+      "  " +
+        f.padEnd(24) +
+        " TP: " +
+        fmtDist(tpVals) +
+        "   SL: " +
+        fmtDist(slVals) +
+        "   TIMEOUT: " +
+        fmtDist(toVals),
+    );
+  }
+
+  console.log("\n" + "=".repeat(175));
+  console.log(
+    "TOP FEATURES BY SEPARATION SCORE (|median(TP)-median(SL)| / pooled IQR) -- descriptive only, not a classifier",
+  );
+  console.log("=".repeat(175));
+  const ranked = separationScores
+    .filter((s) => s.score !== null)
+    .sort((a, b) => b.score! - a.score!);
+  ranked
+    .slice(0, 8)
+    .forEach((s, i) =>
+      console.log(
+        "  " + (i + 1) + ". " + s.feature + "  score=" + s.score!.toFixed(3),
+      ),
+    );
+
+  console.log("\n" + "=".repeat(175));
+  console.log("ALL3>=P99 INDIVIDUAL 15deg-ROTATION TRADES (compact table)");
+  console.log("=".repeat(175));
+  console.log(
+    "symbol | side | tradeDir | entry time | entryPrice | rotDeg | rotDurMin | degPerMin | liqSlope1m(norm) | recSlope1m(norm) | secSinceLastLiq | usd60s | distExtremeATR | ShockATR | ratioAtEntry | result",
+  );
+  const all3p99Trades = trades
+    .filter((t) => t.populations.includes("ALL3>=P99"))
+    .sort((a, b) => a.entryTs - b.entryTs);
+  console.log(
+    "(n=" +
+      all3p99Trades.length +
+      " -- if this isn't 11, that's real information: check whether some episodes were excluded for insufficient prior percentile history, or whether the underlying liquidation data has changed since the earlier estimate)",
+  );
+  for (const t of all3p99Trades) {
+    const f = t.features;
+    const liqSlope1m = t.victim === "LONG" ? f.downSlope1m : f.upSlope1m;
+    const recSlope1m = t.victim === "LONG" ? f.upSlope1m : f.downSlope1m;
+    const tradeDirection = t.victim === "LONG" ? "LONG" : "SHORT"; // reversal trade direction mirrors victim side, per the established entry rule
+    console.log(
+      t.symbol +
+        " | " +
+        t.victim +
+        " | " +
+        tradeDirection +
+        " | " +
+        fmtClock(t.entryTs) +
+        " | " +
+        t.entryPrice.toFixed(4) +
+        " | " +
+        (f.totalRotationDeg?.toFixed(1) ?? "n/a") +
+        " | " +
+        (f.rotationDurationMin?.toFixed(1) ?? "n/a") +
+        " | " +
+        (f.degPerMinute?.toFixed(2) ?? "n/a") +
+        " | " +
+        (liqSlope1m?.toFixed(4) ?? "n/a") +
+        " | " +
+        (recSlope1m?.toFixed(4) ?? "n/a") +
+        " | " +
+        (f.secondsSinceLastLiq?.toFixed(0) ?? "n/a") +
+        " | $" +
+        ((f.usd60s ?? 0) / 1000).toFixed(1) +
+        "k | " +
+        (f.distFromExtremeToEntryAtr?.toFixed(3) ?? "n/a") +
+        " | " +
+        (f.shockAtr?.toFixed(3) ?? "n/a") +
+        " | " +
+        (f.ratioAtEntry?.toFixed(3) ?? "n/a") +
+        " | " +
+        t.outcome,
+    );
   }
 
   if (!fs.existsSync(OUTPUT_DIR)) fs.mkdirSync(OUTPUT_DIR, { recursive: true });
   const outPath = path.join(
     OUTPUT_DIR,
-    "directional-atr-rotation-entry-" + Date.now() + ".json",
+    "rotation-15deg-feature-diagnosis-" + Date.now() + ".json",
   );
   fs.writeFileSync(
     outPath,
@@ -910,10 +773,10 @@ async function main() {
         generatedAt: new Date().toISOString(),
         hoursWindow: HOURS,
         slPct: SL_PCT,
-        tpPcts: TP_PCTS,
-        rotationAnglesDeg: ROTATION_ANGLES_DEG,
-        slopeWindowMin: SLOPE_WINDOW_MIN,
-        results: jsonResults,
+        tpPct: TP_PCT,
+        rotationDeg: ROTATION_DEG,
+        trades,
+        separationScores: ranked,
       },
       null,
       2,
