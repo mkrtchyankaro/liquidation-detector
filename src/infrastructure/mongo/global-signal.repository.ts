@@ -427,7 +427,7 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
     symbol: string,
     victim: "LONG" | "SHORT",
     beforeTs: number,
-    limit = 500,
+    limit = 50_000,
   ): Promise<{ totalUsd: number; completedAt: number }[]> {
     try {
       const col = await this.mongo.globalSignals();

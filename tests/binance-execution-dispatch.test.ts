@@ -132,54 +132,44 @@ scenario(
 );
 
 scenario(
-  "structural (Sep 14 2026, operator-reported fix): pre-flight still calls planForSymbol() for its own RR sanity estimate, but post-fill replan NO LONGER does -- it derives percentages from the canonical signal instead, never re-deriving a divergent trade plan",
+  "structural (Sep 14 2026, operator-reported fix, now applied to BOTH call sites): neither pre-flight nor post-fill replan call planForSymbol()/deriveLiquidationPhysicsTradePlan() anymore -- both re-anchor the SAME canonical signal geometry via the shared reanchorCanonicalGeometry() helper",
   () => {
     const fs = require("fs") as typeof import("fs");
     const source = fs.readFileSync(
       require.resolve("../src/infrastructure/binance/binance-execution.service.ts"),
       "utf8",
     );
-    const preFlightIdx = source.indexOf("const preFlightPlan = planForSymbol(");
     assert.ok(
-      preFlightIdx > -1,
-      "pre-flight call-site must still exist and still use planForSymbol()",
+      !source.includes("const preFlightPlan = planForSymbol("),
+      "pre-flight must no longer independently re-derive a trade plan",
     );
-    const preFlightArgs = source.slice(
-      preFlightIdx,
-      source.indexOf("});", preFlightIdx),
-    );
-    for (const field of [
-      "w1AnchorPrice",
-      "w1ExtremePrice",
-      "w1LiqUsd",
-      "w2LiqUsd",
-      "atr15mAbs",
-      "p95",
-      "dailyLiqPerMinBaseline",
-    ]) {
-      assert.ok(
-        preFlightArgs.includes(`input.${field}`),
-        `pre-flight must pass input.${field}`,
-      );
-    }
-    // The old post-fill call-site is GONE entirely -- confirms the fix
-    // isn't just an unused/dead standardReplan sitting alongside the new
-    // logic, but a genuine removal.
     assert.ok(
       !source.includes("const standardReplan = planForSymbol("),
-      "post-fill replan must NEVER call planForSymbol()/deriveLiquidationPhysicsTradePlan() again -- that was the confirmed root cause of SignalId e5c0fd41-037e-4db6-a956-d0c477fd5d90's TP landing at ~0.39% instead of the canonical 0.66%",
+      "post-fill replan must never call planForSymbol()/deriveLiquidationPhysicsTradePlan() again -- that was the confirmed root cause of SignalId e5c0fd41-037e-4db6-a956-d0c477fd5d90's TP landing at ~0.39% instead of the canonical 0.66%",
+    );
+    assert.ok(
+      source.includes("private reanchorCanonicalGeometry("),
+      "the shared re-anchor helper must exist",
+    );
+    const preFlightIdx = source.indexOf(
+      "const preFlightGeom = this.reanchorCanonicalGeometry(",
+    );
+    const postFillIdx = source.indexOf(
+      "const canonicalGeom = this.reanchorCanonicalGeometry(",
+    );
+    assert.ok(preFlightIdx > -1, "pre-flight must call the shared helper");
+    assert.ok(postFillIdx > -1, "post-fill must call the shared helper");
+    assert.ok(
+      source.includes(
+        "plan.entryRounded, plan.slRounded, plan.tpRounded, executablePrice",
+      ),
+      " pre-flight must re-anchor the canonical signal's own SL/TP to the executable price",
     );
     assert.ok(
       source.includes(
-        "canonicalSlPct = Math.abs(plan.slRounded - plan.entryRounded) / plan.entryRounded",
+        "plan.entryRounded, plan.slRounded, plan.tpRounded, actualEntry",
       ),
-      "post-fill SL% must be derived from the canonical signal's own tick-rounded SL, not re-derived from market structure",
-    );
-    assert.ok(
-      source.includes(
-        "canonicalTpPct = Math.abs(plan.tpRounded - plan.entryRounded) / plan.entryRounded",
-      ),
-      "post-fill TP% must be derived from the canonical signal's own tick-rounded TP, not re-derived from market structure",
+      "post-fill must re-anchor the canonical signal's own SL/TP to the actual fill price",
     );
   },
 );
@@ -319,7 +309,7 @@ scenario(
       "utf8",
     );
     const postFillIdx = source.indexOf(
-      "const canonicalSlPct = Math.abs(plan.slRounded",
+      "const canonicalGeom = this.reanchorCanonicalGeometry(",
     );
     const postFillEnd = source.indexOf("if (!replan.ok) {", postFillIdx);
     assert.ok(
@@ -440,6 +430,34 @@ scenario(
     assert.ok(
       Math.abs(r.tp - 2495.62) > 5,
       `TP must NOT reproduce the old buggy value ~2495.62 (that was the confirmed-wrong deriveLiquidationPhysicsTradePlan() output) -- got ${r.tp.toFixed(2)}, old bug was 2495.62`,
+    );
+  },
+);
+
+scenario(
+  "8. Pre-flight uses the SAME canonical percentage geometry as post-fill -- re-anchoring to a different reference price (executable price, not fill price) still preserves the exact canonical RR",
+  () => {
+    // Pre-flight's own reference price is the current executable
+    // (best bid/ask) at decision time, BEFORE any order is sent --
+    // still just a re-anchor of the same canonical percentages, per
+    // reanchorCanonicalGeometry()'s own shared contract.
+    const preFlight = reanchorToActualFill(
+      "SHORT",
+      2506.16,
+      2513.68,
+      2489.62,
+      2506.5,
+    ); // executable price slightly different from either the canonical entry or the eventual real fill
+    assert.ok(
+      Math.abs(preFlight.rr - preFlight.tpPct / preFlight.slPct) < 1e-9,
+    );
+    assert.ok(
+      Math.abs(preFlight.slPct - 0.003) < 0.0001,
+      "pre-flight's own re-anchored SL% must match the canonical signal's SL%, regardless of reference price",
+    );
+    assert.ok(
+      Math.abs(preFlight.tpPct - 0.0066) < 0.0001,
+      "pre-flight's own re-anchored TP% must match the canonical signal's TP%, regardless of reference price",
     );
   },
 );

@@ -335,6 +335,29 @@ export class V5WaveService {
     );
   }
 
+  /** Sep 14 2026 (Karo), operator-reported CRITICAL FIX. The distinct
+   *  set of symbols currently holding a NON-LIVE (paper/MAIN,
+   *  isLive===false) active trade -- the ONLY category
+   *  onPriceTickForTrades() itself can actually close (live trades are
+   *  explicitly skipped there; their real close comes from Binance
+   *  reconciliation instead, unrelated to this). Used by
+   *  market-data-orchestrator.ts's own new fallback timer (mirroring
+   *  ReconciliationManager's own already-proven runFallbackReconciliation()
+   *  pattern) to periodically re-check each such symbol's own last
+   *  known price even when NO bookTicker tick has arrived for it
+   *  recently -- closing the exact same "must wait for a fresh tick on
+   *  this specific symbol" gap that was already found and fixed for
+   *  the LIVE reconciliation path, but had never been extended to this
+   *  separate, tick-only paper-trade close-simulation path. Root cause
+   *  of "MAIN never got a CLOSE update" for a quiet-tick symbol. */
+  getSymbolsWithNonLiveActiveTrades(): string[] {
+    const symbols = new Set<string>();
+    for (const t of this.activeTrades.values()) {
+      if (!t.isLive) symbols.add(t.symbol);
+    }
+    return [...symbols];
+  }
+
   /** Sep 7 2026, operator-approved (Karo) -- called by app.ts AFTER a
    *  real Binance order has been confirmed for an ALREADY-installed
    *  trade (evaluateSignal() always installs the trade first, for

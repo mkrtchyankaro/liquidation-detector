@@ -1474,32 +1474,36 @@ export class BinanceExecutionService {
     } else {
       const executablePrice =
         input.side === "LONG" ? bookTicker.askPrice : bookTicker.bidPrice;
-      const preFlightPlan = planForSymbol({
-        entry: executablePrice,
-        side: input.side,
-        symbol: plan.symbol,
-        w1AnchorPrice: input.w1AnchorPrice,
-        w1ExtremePrice: input.w1ExtremePrice,
-        w1LiqUsd: input.w1LiqUsd,
-        w2LiqUsd: input.w2LiqUsd,
-        atr15mAbs: input.atr15mAbs,
-        p95: input.p95,
-        dailyLiqPerMinBaseline: input.dailyLiqPerMinBaseline,
-      });
+      // Sep 14 2026 (Karo), operator-reported CRITICAL FIX -- pre-
+      // flight used to call planForSymbol() (deriveLiquidationPhysicsTradePlan())
+      // here too, independently re-deriving ANOTHER trade plan from
+      // raw market structure purely to estimate RR at the executable
+      // price -- the exact same duplication that caused the post-fill
+      // bug (SignalId e5c0fd41-037e-4db6-a956-d0c477fd5d90), just for
+      // a skip/enter decision instead of the real order price. The
+      // canonical GlobalSignal (plan.entryRounded/slRounded/tpRounded)
+      // is the single source of truth for exit geometry; pre-flight
+      // now re-anchors those SAME percentages to the executable price,
+      // via the identical helper post-fill uses -- never a second,
+      // independently-derived plan.
+      const preFlightGeom = this.reanchorCanonicalGeometry(
+        input.side,
+        plan.entryRounded,
+        plan.slRounded,
+        plan.tpRounded,
+        executablePrice,
+      );
       const deviationPct =
         ((executablePrice - plan.entryRounded) / plan.entryRounded) * 100;
       const estimatedRoundTripFeeUsd =
         plan.quantityRounded * executablePrice * this.takerFeeRateEstimate * 2;
-      const preFlightPass =
-        preFlightPlan.ok && preFlightPlan.rr >= this.minRRAfterFill;
+      const preFlightPass = preFlightGeom.rr >= this.minRRAfterFill;
       const preFlightDecision: "ENTER" | "SKIP" = preFlightPass
         ? "ENTER"
         : "SKIP";
-      const preFlightReason = preFlightPlan.ok
-        ? preFlightPass
-          ? "ok"
-          : `RR ${preFlightPlan.rr.toFixed(3)} < minRRAfterFill ${this.minRRAfterFill}`
-        : `plan invalid: ${preFlightPlan.cancelReason}`;
+      const preFlightReason = preFlightPass
+        ? "ok"
+        : `RR ${preFlightGeom.rr.toFixed(3)} < minRRAfterFill ${this.minRRAfterFill}`;
 
       log.info(
         {
@@ -1508,17 +1512,13 @@ export class BinanceExecutionService {
           plannedEntry: plan.entryRounded,
           executablePrice,
           deviationPct: Number(deviationPct.toFixed(4)),
-          estimatedRR: preFlightPlan.ok
-            ? Number(preFlightPlan.rr.toFixed(3))
-            : null,
-          estimatedRiskUsd: preFlightPlan.ok
-            ? Number(
-                (
-                  Math.abs(executablePrice - preFlightPlan.sl) *
-                  plan.quantityRounded
-                ).toFixed(2),
-              )
-            : null,
+          estimatedRR: Number(preFlightGeom.rr.toFixed(3)),
+          estimatedRiskUsd: Number(
+            (
+              Math.abs(executablePrice - preFlightGeom.sl) *
+              plan.quantityRounded
+            ).toFixed(2),
+          ),
           estimatedRoundTripFeeUsd: Number(estimatedRoundTripFeeUsd.toFixed(4)),
           decision: preFlightDecision,
           reason: preFlightReason,
@@ -1830,36 +1830,32 @@ export class BinanceExecutionService {
     // deliberately SEPARATE, intentional compression of NORMAL's own
     // distances by V3_MICRO_EXIT_DIVISOR) is completely untouched --
     // still checked FIRST, below, exactly as before.
-    const canonicalSlPct =
-      Math.abs(plan.slRounded - plan.entryRounded) / plan.entryRounded;
-    const canonicalTpPct =
-      Math.abs(plan.tpRounded - plan.entryRounded) / plan.entryRounded;
+    const canonicalGeom = this.reanchorCanonicalGeometry(
+      input.side,
+      plan.entryRounded,
+      plan.slRounded,
+      plan.tpRounded,
+      actualEntry,
+    );
     const canonicalReanchoredReplan: LiquidityPlanResult = {
       ok: true,
-      sl:
-        input.side === "LONG"
-          ? actualEntry * (1 - canonicalSlPct)
-          : actualEntry * (1 + canonicalSlPct),
-      tp:
-        input.side === "LONG"
-          ? actualEntry * (1 + canonicalTpPct)
-          : actualEntry * (1 - canonicalTpPct),
-      slPct: canonicalSlPct,
-      tpPct: canonicalTpPct,
-      rr: canonicalSlPct > 0 ? canonicalTpPct / canonicalSlPct : Infinity,
+      sl: canonicalGeom.sl,
+      tp: canonicalGeom.tp,
+      slPct: canonicalGeom.slPct,
+      tpPct: canonicalGeom.tpPct,
+      rr: canonicalGeom.rr,
       // Forensics-only fields -- never read by any downstream logic,
       // zero-filled since this path derives from the canonical
       // signal's own percentages, not a market-condition formula.
       intensityRaw: 0,
       intensity: 0,
       atr15mPct: 0,
-      rawTpPct: canonicalTpPct,
-      wallAdjustedTpPct: canonicalTpPct,
+      rawTpPct: canonicalGeom.tpPct,
+      wallAdjustedTpPct: canonicalGeom.tpPct,
       wallApplied: false,
-      rrCandidate:
-        canonicalSlPct > 0 ? canonicalTpPct / canonicalSlPct : Infinity,
+      rrCandidate: canonicalGeom.rr,
       slCapApplied: false,
-      slCapValue: canonicalSlPct,
+      slCapValue: canonicalGeom.slPct,
       profitWallNotionalAtEntry: 0,
       profitWallNotionalAtAnchor: 0,
     } as LiquidityPlanResult;
@@ -1928,8 +1924,8 @@ export class BinanceExecutionService {
         actualFill: actualEntry,
         plannedSl: plan.slRounded,
         plannedTp: plan.tpRounded,
-        canonicalSlPct: Number(canonicalSlPct.toFixed(6)),
-        canonicalTpPct: Number(canonicalTpPct.toFixed(6)),
+        canonicalSlPct: Number(canonicalGeom.slPct.toFixed(6)),
+        canonicalTpPct: Number(canonicalGeom.tpPct.toFixed(6)),
         replannedSl: replan.ok ? replan.sl : null,
         replannedTp: replan.ok ? replan.tp : null,
         replanSource: input.fixedExitPct
@@ -2889,6 +2885,46 @@ export class BinanceExecutionService {
     const s = step.toString();
     const dot = s.indexOf(".");
     return dot === -1 ? 0 : s.length - dot - 1;
+  }
+
+  /** Sep 14 2026 (Karo), operator-reported CRITICAL FIX -- shared by
+   *  BOTH pre-flight (re-anchored to the current executable price,
+   *  before the order is even sent) and post-fill replan (re-anchored
+   *  to the real confirmed fill). The canonical GlobalSignal
+   *  (entryRounded/slRounded/tpRounded, whatever percentage geometry
+   *  the STRATEGY layer actually emitted) is the single source of
+   *  truth for exit geometry -- this execution layer NEVER derives a
+   *  second, independent trade plan of its own. Re-anchoring the
+   *  SAME canonical percentages to a different reference price is the
+   *  only operation performed here, for both callers, so pre-flight's
+   *  own RR estimate and post-fill's own real replan can never
+   *  silently diverge onto two different formulas again (the exact
+   *  class of bug confirmed via SignalId e5c0fd41-037e-4db6-a956-
+   *  d0c477fd5d90). Kept as one small, focused method rather than two
+   *  near-duplicate inline computations. */
+  private reanchorCanonicalGeometry(
+    side: "LONG" | "SHORT",
+    canonicalEntryRounded: number,
+    canonicalSlRounded: number,
+    canonicalTpRounded: number,
+    referencePrice: number,
+  ): { sl: number; tp: number; slPct: number; tpPct: number; rr: number } {
+    const slPct =
+      Math.abs(canonicalSlRounded - canonicalEntryRounded) /
+      canonicalEntryRounded;
+    const tpPct =
+      Math.abs(canonicalTpRounded - canonicalEntryRounded) /
+      canonicalEntryRounded;
+    const sl =
+      side === "LONG"
+        ? referencePrice * (1 - slPct)
+        : referencePrice * (1 + slPct);
+    const tp =
+      side === "LONG"
+        ? referencePrice * (1 + tpPct)
+        : referencePrice * (1 - tpPct);
+    const rr = slPct > 0 ? tpPct / slPct : Infinity;
+    return { sl, tp, slPct, tpPct, rr };
   }
 
   private roundToTick(value: number, tick: number, precision: number): number {

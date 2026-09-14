@@ -7,6 +7,7 @@ import type { GlobalSignalDoc } from "../../domain/signal/global-signal.model";
 import type { CascadeDoc } from "../../domain/cascade/cascade.model";
 import type { RawLiquidationEventDoc } from "./raw-liquidation-event.repository";
 import type { UserSignalDoc } from "../../domain/signal/user-signal.model";
+import type { RotationEpisodeHistoryDoc } from "../../domain/signal/rotation-episode-history.model";
 import type { ExecutionRecordDoc } from "./execution-record.model";
 import type { ExecutionClaimDoc } from "./execution-claim.model";
 
@@ -182,6 +183,20 @@ export class MongoClientWrapper {
     const dbs = await this.ensure();
     return dbs
       ? dbs.own.collection<RawLiquidationEventDoc>("liq_raw_events")
+      : null;
+  }
+
+  /** Sep 14 2026 (Karo), operator-requested -- historical ROTATION
+   *  episode backfill. GLOBAL, own database. See
+   *  rotation-episode-history.model.ts's own doc comment for the full
+   *  rationale (separate from v5_global_signals, never mixed with
+   *  WAVE-mode episode totals). */
+  async rotationEpisodeHistory(): Promise<Collection<RotationEpisodeHistoryDoc> | null> {
+    const dbs = await this.ensure();
+    return dbs
+      ? dbs.own.collection<RotationEpisodeHistoryDoc>(
+          "rotation_episode_history",
+        )
       : null;
   }
 

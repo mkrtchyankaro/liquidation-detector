@@ -222,6 +222,12 @@ interface Watch {
    *  WAVE mode resets every candle close) and from any per-wave sum
    *  (ROTATION has no wave concept at all). */
   cumulativeSameSideLiqUsd: number;
+  /** Sep 14 2026 (Karo), operator-requested -- raw count of same-side
+   *  liquidation events seen since watch creation, ROTATION mode
+   *  only. Purely diagnostic/reporting (used by the historical
+   *  backfill's own per-episode record) -- never read by any entry
+   *  decision. */
+  rotationEventCount: number;
   /** Updated on every same-side liquidation event (onLiquidation()),
    *  regardless of candle boundaries. This -- NOT lastWaveCompletedAt
    *  -- is what ROTATION's own 15-minute inactivity timer measures
@@ -404,6 +410,7 @@ export class CandlePhysicsEngine {
         w1QualificationTs: null,
         mode,
         cumulativeSameSideLiqUsd: 0,
+        rotationEventCount: 0,
         lastSameSideLiquidationTs: ts,
         adverseExtremeTs: ts,
         preLiqDownAtr: mode === "ROTATION" ? preLiqDownAtrForNewEpisode : null,
@@ -431,6 +438,7 @@ export class CandlePhysicsEngine {
     // frozen at creation and this branch is a pure no-op for them).
     if (w.mode === "ROTATION") {
       w.cumulativeSameSideLiqUsd += liq.quoteQty;
+      w.rotationEventCount += 1;
       w.lastSameSideLiquidationTs = liq.timestamp;
     }
   }

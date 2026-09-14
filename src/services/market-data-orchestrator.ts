@@ -58,6 +58,7 @@ import type { SignalDistributor } from "./signal-distributor";
 import type { ReconciliationManager } from "./reconciliation-manager";
 import type { MongoClientWrapper } from "../infrastructure/mongo/mongo.client";
 import { GlobalSignalRepository } from "../infrastructure/mongo/global-signal.repository";
+import { RotationEpisodeHistoryRepository } from "../infrastructure/mongo/rotation-episode-history.repository";
 import { RawLiquidationEventRepository } from "../infrastructure/mongo/raw-liquidation-event.repository";
 import { formatV5CloseMessage } from "../infrastructure/telegram/signal.formatter";
 import { childLogger } from "../infrastructure/logging/logger";
@@ -203,6 +204,7 @@ export class MarketDataOrchestrator {
     }
   >();
   private readonly globalSignalRepo: GlobalSignalRepository;
+  private readonly rotationEpisodeHistoryRepo: RotationEpisodeHistoryRepository;
   private readonly cascadeRepo: CascadeRepository;
   private readonly rawLiquidationEventRepo: RawLiquidationEventRepository;
   private readonly mainSymbolLocks = new Set<string>();
@@ -273,6 +275,9 @@ export class MarketDataOrchestrator {
     this.liqFeedWatchdog = new LiqFeedWatchdogService(log, broadcastTelegram);
     this.oiTracker = new OiTrackerService(symbols);
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
+    this.rotationEpisodeHistoryRepo = new RotationEpisodeHistoryRepository(
+      mongo,
+    );
     this.cascadeRepo = new CascadeRepository(mongo);
     this.rawLiquidationEventRepo = new RawLiquidationEventRepository(mongo);
     this.mainTelegram = mainTelegram;
@@ -414,6 +419,19 @@ export class MarketDataOrchestrator {
       `[CASCADES_HYDRATED] ${activeCascades.length} active cascade(s), ${restoredCandidates} candidate(s) resumed from Mongo, symbols locked: [${activeCascades.map((c) => c.symbol).join(", ")}]`,
     );
   }
+
+  /** Sep 14 2026 (Karo), operator-reported CRITICAL FIX -- see
+   *  V5WaveService.getSymbolsWithNonLiveActiveTrades()'s own doc
+   *  comment for the full root-cause writeup. Updated on EVERY
+   *  bookTicker tick this orchestrator sees (mirroring
+   *  ReconciliationManager's own identical lastKnownPrice pattern),
+   *  so the fallback timer below always has the freshest price
+   *  available even for a symbol whose own ticks have gone quiet. */
+  private readonly lastKnownPriceForMain = new Map<string, number>();
+  /** Same interval as ReconciliationManager's own FALLBACK_RECONCILE_MS
+   *  -- no reason for these two, structurally-identical safety nets to
+   *  disagree on cadence. */
+  private static readonly MAIN_CLOSE_FALLBACK_MS = 3_000;
 
   start(): void {
     this.ws.subscribe({
@@ -635,6 +653,7 @@ export class MarketDataOrchestrator {
 
     this.ws.on("bookTicker", (b) => {
       const mid = (b.bid + b.ask) / 2;
+      this.lastKnownPriceForMain.set(b.symbol, mid);
       const outcomes = this.v5.onTick(b.symbol, mid, b.timestamp);
       for (const outcome of outcomes) void this.handleTickOutcome(outcome);
       const closes = this.v5.onPriceTickForTrades(b.symbol, mid, b.timestamp);
@@ -665,7 +684,44 @@ export class MarketDataOrchestrator {
       this.aggressiveFlow.ingest(t);
     });
 
+    // Sep 14 2026 (Karo), operator-reported CRITICAL FIX -- see
+    // V5WaveService.getSymbolsWithNonLiveActiveTrades()'s own doc
+    // comment for the full root-cause writeup this closes.
+    setInterval(() => {
+      this.runMainCloseFallback();
+    }, MarketDataOrchestrator.MAIN_CLOSE_FALLBACK_MS);
+
     this.ws.start();
+  }
+
+  /** Sep 14 2026 (Karo), operator-reported CRITICAL FIX. Deterministic
+   *  fallback for MAIN's own (isLive===false) paper-trade CLOSE
+   *  detection, independent of any specific symbol's own bookTicker
+   *  tick frequency -- structurally the EXACT SAME fix already proven
+   *  for the live-Binance reconciliation path (see
+   *  ReconciliationManager.runFallbackReconciliation()'s own doc
+   *  comment), just applied to the completely separate paper-trade
+   *  price-crossing-simulation path, which had no equivalent safety
+   *  net until now. Root cause: onPriceTickForTrades() only runs
+   *  inside the bookTicker handler above -- for a symbol with sparse
+   *  ticks, or any span where that symbol's own ticks are delayed, a
+   *  paper trade that already crossed its own TP/SL in price could sit
+   *  undetected far longer than the fast (tick-driven) path implies,
+   *  since MAIN has no live Binance position to reconcile against as
+   *  a backstop. Reuses the SAME onPriceTickForTrades()/
+   *  handleMainTradeClose() call shape the tick path already uses --
+   *  a no-op for any symbol with zero active non-live trades, and
+   *  naturally idempotent (onPriceTickForTrades() itself is a safe,
+   *  repeatable no-op once a trade has already closed and been
+   *  removed from activeTrades). */
+  private runMainCloseFallback(): void {
+    const now = Date.now();
+    for (const symbol of this.v5.getSymbolsWithNonLiveActiveTrades()) {
+      const price = this.lastKnownPriceForMain.get(symbol);
+      if (price === undefined) continue; // no tick ever seen for this symbol yet -- nothing to re-check against
+      const closes = this.v5.onPriceTickForTrades(symbol, price, now);
+      for (const close of closes) void this.handleMainTradeClose(close);
+    }
   }
 
   private tickResearchCheckpoints(
@@ -2882,17 +2938,36 @@ export class MarketDataOrchestrator {
    *  matching the research thread's own percentile() convention.
    *  Public so main.ts's placeholder-indirection callback (matching
    *  every other V5 dependency's own wiring pattern) can reach it. */
+  /** Sep 14 2026 (Karo), operator-requested -- reads causal ROTATION
+   *  episode history from BOTH sources and combines them into one
+   *  population before computing the percentile: the offline backfill
+   *  (rotation_episode_history, reconstructed from historical raw
+   *  liquidation + candle data) and any live-observed ROTATION
+   *  episodes already persisted to v5_global_signals (unchanged from
+   *  before this backfill work). Neither source alone is sufficient
+   *  once the backfill exists -- combining them is what lets a new
+   *  live watch see the FULL causal population (backfilled +
+   *  previously-live) immediately, with no 20-live-episode warmup. */
   async getRotationCausalP95(
     symbol: string,
     victim: "LONG" | "SHORT",
     beforeTs: number,
   ): Promise<{ p95: number | null; sampleCount: number }> {
-    const rows = await this.globalSignalRepo.findCompletedRotationEpisodeTotals(
-      symbol,
-      victim,
-      beforeTs,
-    );
-    const sorted = rows.map((r) => r.totalUsd).sort((a, b) => a - b);
+    const [liveRows, historyRows] = await Promise.all([
+      this.globalSignalRepo.findCompletedRotationEpisodeTotals(
+        symbol,
+        victim,
+        beforeTs,
+      ),
+      this.rotationEpisodeHistoryRepo.findCausalPriorEpisodes(
+        symbol,
+        victim,
+        beforeTs,
+      ),
+    ]);
+    const sorted = [...liveRows, ...historyRows]
+      .map((r) => r.totalUsd)
+      .sort((a, b) => a - b);
     if (sorted.length === 0) return { p95: null, sampleCount: 0 };
     const idx = 0.95 * (sorted.length - 1);
     const lo = Math.floor(idx),
