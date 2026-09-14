@@ -153,24 +153,45 @@ export function formatV5EntryMessage(
 export function formatV5CloseMessage(
   symbol: string,
   side: string,
-  outcome: "TP" | "SL",
+  // Sep 14 2026 (Karo), operator-reported bug fix -- "MANUAL" added.
+  // Previously this parameter only accepted "TP"|"SL", so the
+  // genuinely-ambiguous reconciliation case (Binance confirms the
+  // position closed but could not determine which order fired) had
+  // NO way to be represented honestly -- callers were forced to pass
+  // a best-effort GUESS as if it were a confirmed TP/SL, paired with
+  // a placeholder closePrice (the entry price itself), producing a
+  // message that falsely claimed a confirmed TP or SL fill with a
+  // fabricated 0.00% PnL. "MANUAL" is now a real, distinct outcome
+  // that renders honestly instead of masquerading as TP or SL.
+  outcome: "TP" | "SL" | "MANUAL",
   entry: number,
   closePrice: number,
   entryWaveNumber: number,
-  // Sep 10 2026 (Karo), operator-requested -- ADDITIVE, optional
-  // (default null/undefined keeps every EXISTING call-site's own
-  // output byte-identical). Kept as a parameter (unused, "Candidate:"
-  // line removed per Sep 11 2026 redesign) so no call-site needs to
-  // change its own argument list.
   timeframe?: "1m" | "3m" | "5m" | null,
   signalId?: string,
-  // Sep 11 2026 (Karo), operator-requested -- ADDITIVE, optional
-  // (default undefined keeps every call-site not yet passing it
-  // byte-identical). Trade duration in ms, when the caller has both
-  // the open and close timestamps available.
   durationMs?: number,
 ): string {
   void timeframe;
+  if (outcome === "MANUAL") {
+    // Sep 14 2026 (Karo) -- honest rendering for the ambiguous-reconciliation
+    // case. closePrice is a PLACEHOLDER here (equals entry, by construction
+    // in the caller) -- it is never a real fill, so it is never shown as
+    // Exit/PnL, which would otherwise silently fabricate a 0.00% result.
+    const lines = [`\u26a0\ufe0f V5 CLOSE ${symbol} ${side} · UNCONFIRMED`, ""];
+    lines.push(`Entry: ${formatPrice(entry)}`);
+    lines.push(
+      `Position confirmed CLOSED on Binance, but the exact TP/SL fill could not be verified.`,
+    );
+    lines.push(
+      `Exit price / PnL: NOT CONFIRMED -- please check this position on Binance directly.`,
+    );
+    lines.push(`Entered: W${entryWaveNumber}`);
+    if (signalId) lines.push("", `SignalId: ${signalId}`);
+    return lines
+      .join("\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
   const emoji = outcome === "TP" ? "✅" : "❌";
   const pnlPct =
     side === "LONG"

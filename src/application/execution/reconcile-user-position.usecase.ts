@@ -194,7 +194,7 @@ async function reconcileUserPositionImpl(
   const message = formatV5CloseMessage(
     userSignal.symbol,
     userSignal.side,
-    outcome,
+    closeReason,
     userSignal.entry ?? 0,
     closePrice,
     globalSignal.entryWaveNumber,
