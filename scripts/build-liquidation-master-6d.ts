@@ -673,21 +673,72 @@ async function main(): Promise<void> {
     }
   }
 
-  const FORBIDDEN = [
-    "favorable",
-    "adverse",
-    "dominanceShare",
+  // ASSERTION 12 (fixed): structural, exact-key-name leakage check --
+  // not a substring search, which previously false-flagged legitimate
+  // causal fields like adverseExtremePrice/newAdverseExtreme simply
+  // for containing the word "adverse". This checks the causal
+  // object's own key names (recursively, since singleEventPercentiles
+  // etc. are nested) against the EXACT set of keys that only ever
+  // appear in the outcome/future-response schema -- never a prefix or
+  // substring match.
+  const FORBIDDEN_OUTCOME_KEYS = new Set([
+    "path",
+    "timeToFirstFavorableMin",
+    "timeToFirstAdverseMin",
+    "timeToMaxFavorableMin",
+    "timeToMaxAdverseMin",
+    "maxFavorablePct",
+    "maxAdversePct",
+    "maxAdverseBeforeFavorableDominance",
+    "maxFavorableBeforeAdverseDominance",
     "firstDirectionalMove",
     "firstDominantMove",
-  ];
-  for (const seq of allSequences.slice(0, 5)) {
+    "dominanceShare5m",
+    "dataQuality",
+    "candidateOutcomeClass",
+    "sequenceClass",
+    "sequenceOutcomeClass",
+    "favorablePct",
+    "adversePct",
+    "responseRatio",
+    "minute",
+  ]);
+  function collectKeysRecursively(obj: unknown, acc: Set<string>): void {
+    if (obj === null || typeof obj !== "object") return;
+    for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
+      acc.add(k);
+      if (Array.isArray(v)) {
+        for (const item of v) collectKeysRecursively(item, acc);
+      } else collectKeysRecursively(v, acc);
+    }
+  }
+  for (const seq of allSequences) {
     for (const c of seq.candidates) {
-      const flat = JSON.stringify(c.causal);
-      for (const key of FORBIDDEN)
-        if (flat.includes(`"${key}`))
+      const keysInCausal = new Set<string>();
+      collectKeysRecursively(c.causal, keysInCausal);
+      for (const key of keysInCausal) {
+        if (FORBIDDEN_OUTCOME_KEYS.has(key))
           violations.push(
-            `ASSERTION 12 FAILED: ${seq.sequenceId} candidate ${c.candidateIndex} causal block contains outcome-shaped key ${key}`,
+            `ASSERTION 12 FAILED: ${seq.sequenceId} candidate ${c.candidateIndex} causal block contains exact outcome-schema key "${key}"`,
           );
+      }
+      // independent T-boundary re-verification (per operator request):
+      // every raw event this candidate references, and its own
+      // recorded adverse-extreme timestamp, must not exceed T.
+      for (const idx of c.rawEventIndexes) {
+        if (seq.events[idx]!.timestamp > c.timestamp)
+          violations.push(
+            `ASSERTION 12 FAILED: ${seq.sequenceId} candidate ${c.candidateIndex} references a raw event timestamped after T`,
+          );
+      }
+      const cf = c.causal as { adverseExtremeTs?: number };
+      if (
+        cf.adverseExtremeTs !== undefined &&
+        cf.adverseExtremeTs > c.timestamp
+      )
+        violations.push(
+          `ASSERTION 12 FAILED: ${seq.sequenceId} candidate ${c.candidateIndex} adverseExtremeTs exceeds T`,
+        );
     }
   }
 
