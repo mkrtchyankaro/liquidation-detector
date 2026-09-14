@@ -114,4 +114,31 @@ export class RotationEpisodeHistoryRepository {
       return [];
     }
   }
+
+  /** Sep 14 2026 (Karo), operator-requested -- read-only diagnostic
+   *  support for scripts/inspect-rotation-episodes.ts. Top N episodes
+   *  for one symbol+victim, ordered by cumulativeLiqUsd descending.
+   *  Never writes anything; a plain find/sort/limit. */
+  async findTopEpisodesByLiqUsd(
+    symbol: string,
+    victim: Side,
+    limit: number,
+  ): Promise<RotationEpisodeHistoryDoc[]> {
+    try {
+      const col = await this.mongo.rotationEpisodeHistory();
+      if (!col) return [];
+      return await col
+        .find({ symbol, victim })
+        .sort({ cumulativeLiqUsd: -1 })
+        .limit(limit)
+        .toArray();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { symbol, victim, err: msg },
+        "[ROTATION_EPISODE_HISTORY_FIND_TOP_FAILED]",
+      );
+      return [];
+    }
+  }
 }
