@@ -39,7 +39,7 @@ import type { Side, Liquidation } from "../src/shared/common.types";
  * than every closed candle, to keep output size reasonable.
  */
 
-const LOOKBACK_WINDOWS_MS: { label: string; ms: number | null }[] = [
+export const LOOKBACK_WINDOWS_MS: { label: string; ms: number | null }[] = [
   { label: "6h", ms: 6 * 3600_000 },
   { label: "12h", ms: 12 * 3600_000 },
   { label: "24h", ms: 24 * 3600_000 },
@@ -49,7 +49,7 @@ const LOOKBACK_WINDOWS_MS: { label: string; ms: number | null }[] = [
 ];
 const MIN_SAMPLES_FOR_PERCENTILE = 20;
 
-interface HistoricalCandle {
+export interface HistoricalCandle {
   symbol: string;
   openTime: number;
   open: number;
