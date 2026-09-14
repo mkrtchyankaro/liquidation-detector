@@ -8,6 +8,7 @@ import type {
   ResearchCheckpointGroup,
   ResearchCheckpoint,
 } from "./research-checkpoint.model";
+import type { RotationDiagnosticsSnapshot } from "../cascade/candle-physics-engine";
 
 /**
  * Sep 8 2026 (Karo). Split from liqwatch-bot's own single, mixed
@@ -131,7 +132,7 @@ export interface GlobalSignalDoc {
     dynamicPhysicsScore: number;
     selectedRR: number;
     tpMultiplier: number;
-    slDeterminedBy: "physics" | "sizing-floor";
+    slDeterminedBy: "physics" | "sizing-floor" | "rotation-fixed";
   } | null;
 
   btcContext: {
@@ -244,7 +245,7 @@ export interface GlobalSignalDoc {
     dynamicPhysicsScore: number;
     selectedRR: number;
     tpMultiplier: number;
-    slDeterminedBy: "physics" | "sizing-floor";
+    slDeterminedBy: "physics" | "sizing-floor" | "rotation-fixed";
   } | null;
 
   /** Sep 8 2026 (Karo) -- REVISED (was: V5TerminalReason | "SIGNAL",
@@ -385,6 +386,17 @@ export interface GlobalSignalDoc {
   } | null;
 
   createdAt: number;
+
+  /** Sep 14 2026 (Karo), operator-approved -- ROTATION mode only,
+   *  additive diagnostics so a signal can be inspected later by
+   *  signalId and understood: why it entered (or, for a terminal
+   *  non-signal, the state at expiry). Optional and undefined/null
+   *  for every WAVE-mode record and every pre-existing document --
+   *  existing WAVE-mode signals/schema are completely unaffected.
+   *  Reuses candle-physics-engine.ts's own RotationDiagnosticsSnapshot
+   *  type directly (not a hand-duplicated shape) so the two can never
+   *  drift out of sync again. */
+  rotationDiagnostics?: RotationDiagnosticsSnapshot | null;
 }
 
 /** Sep 10 2026 (Karo), operator-requested RESEARCH-ONLY ATR-timeframe

@@ -407,4 +407,52 @@ export class GlobalSignalRepository implements GlobalSignalRepositoryPort {
       return [];
     }
   }
+
+  /** Sep 14 2026 (Karo), operator-approved -- V5 ROTATION mode causal
+   *  cumulative-episode-total P95 history. Reads the SAME already-
+   *  persisted GlobalSignalDoc records every terminal outcome (signal
+   *  or non-signal) already writes -- no new collection, no new
+   *  write path. Filtered to `rotationDiagnostics.entryMode ===
+   *  "ROTATION"` so WAVE-mode episode totals (a structurally
+   *  different quantity -- Wave1/Wave2 chains vs one continuous
+   *  watch) never leak into this distribution. `beforeTs` must be the
+   *  CURRENT watch's own createdAt -- only episodes with `createdAt <
+   *  beforeTs` are ever included, so a live process can never see
+   *  its own or a future episode's total. `totalEpisodePressure` on
+   *  every one of these records already reflects the correct
+   *  snapshot for its own outcome (at-entry for a fired signal, since
+   *  evaluateSignal() reads it synchronously before the watch is
+   *  released; final-at-expiry for a terminal non-signal). */
+  async findCompletedRotationEpisodeTotals(
+    symbol: string,
+    victim: "LONG" | "SHORT",
+    beforeTs: number,
+    limit = 500,
+  ): Promise<{ totalUsd: number; completedAt: number }[]> {
+    try {
+      const col = await this.mongo.globalSignals();
+      if (!col) return [];
+      const docs = (await col
+        .find({
+          symbol,
+          victim,
+          createdAt: { $lt: beforeTs },
+          "rotationDiagnostics.entryMode": "ROTATION",
+        })
+        .sort({ createdAt: -1 })
+        .limit(limit)
+        .toArray()) as unknown as GlobalSignalDoc[];
+      return docs.map((d) => ({
+        totalUsd: d.totalEpisodePressure,
+        completedAt: d.createdAt,
+      }));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { symbol, victim, err: msg },
+        "[GLOBAL_SIGNAL_FIND_ROTATION_EPISODES_FAILED]",
+      );
+      return [];
+    }
+  }
 }

@@ -1,4 +1,12 @@
 import type { Side, Liquidation } from "../../shared/common.types";
+import {
+  v5RotationDegreesRequired,
+  v5RotationShockAtrRequired,
+  v5RotationMaxTimeFromExtremeMin,
+  v5RotationForceRequired,
+  v5RotationMinPriorEpisodeSamples,
+  v5RotationInactivityMs,
+} from "../../strategy/v5/v5.config";
 
 /**
  * Sep 11 2026 (Karo), operator-requested. Production wave-detection
@@ -110,6 +118,17 @@ export interface CandlePhysicsEntryEvent {
   readonly p95AtW1Qualification: number | null;
   readonly maxIndividualEventUsdAtW1: number | null;
   readonly w1QualificationTs: number | null;
+  /** Sep 14 2026 (Karo), operator-approved -- ROTATION mode only.
+   *  Null for every WAVE-mode entry (the vast majority of entries
+   *  today) -- populated only when this event came from the new
+   *  ROTATION decision branch in onClosedCandle(). signalWave/
+   *  dominantWave/allWaves above are populated with a single
+   *  SYNTHETIC CompletedWaveSummary representing the whole watch
+   *  (ROTATION has no real wave concept) purely so existing
+   *  downstream code (candlePhysicsWavesToV5Waves(), Telegram
+   *  formatting) keeps working unmodified -- rotationDiagnostics
+   *  below is the real, honest record of why this entry fired. */
+  readonly rotationDiagnostics: RotationDiagnosticsSnapshot | null;
 }
 
 /** Sep 11 2026 (Karo), operator-requested -- diagnostic-only event for
@@ -188,10 +207,95 @@ interface Watch {
   p95AtW1Qualification: number | null;
   maxIndividualEventUsdAtW1: number | null;
   w1QualificationTs: number | null;
+
+  /** Sep 14 2026 (Karo), operator-approved -- ROTATION mode. Frozen
+   *  ONCE at watch creation, based on the global mode flag AT THAT
+   *  MOMENT -- deliberately immutable per-watch (never re-read mid-
+   *  life), so a mode flag change can never corrupt an already-active
+   *  watch's own decision logic. "WAVE" watches are completely
+   *  unaffected by anything below; every field stays at its harmless
+   *  default and is never read by WAVE-mode code paths. */
+  mode: "WAVE" | "ROTATION";
+  /** Never resets -- true cumulative same-side liquidation USD across
+   *  the entire ROTATION watch life, from the first liquidation
+   *  through to entry or expiry. Distinct from pendingLiqUsd (which
+   *  WAVE mode resets every candle close) and from any per-wave sum
+   *  (ROTATION has no wave concept at all). */
+  cumulativeSameSideLiqUsd: number;
+  /** Updated on every same-side liquidation event (onLiquidation()),
+   *  regardless of candle boundaries. This -- NOT lastWaveCompletedAt
+   *  -- is what ROTATION's own 15-minute inactivity timer measures
+   *  from, per explicit operator instruction. */
+  lastSameSideLiquidationTs: number;
+  /** Timestamp of the last update to episodeExtreme (the existing,
+   *  shared, causal price-extreme field -- reused unchanged for
+   *  ROTATION's own "adverse extreme price"). Only ROTATION mode
+   *  reads or writes this; WAVE mode has no equivalent concept and is
+   *  unaffected. */
+  adverseExtremeTs: number;
+  /** Frozen once at watch creation, from the last fully-closed 1m
+   *  candle available at that moment -- the v1 directional-ATR
+   *  baseline (see directional-atr.ts). Null until the caller
+   *  supplies a real value (e.g. insufficient candle history yet);
+   *  ENTRY is naturally blocked while null (ShockATR/rotation degrees
+   *  cannot be computed without it). */
+  preLiqDownAtr: number | null;
+  preLiqUpAtr: number | null;
+  /** Populated by the caller (market-data-orchestrator.ts) via
+   *  onClosedCandle()'s own new optional rotation parameters --
+   *  refreshed every closed candle, never computed inside this
+   *  engine (keeps this engine free of any DB/repository dependency,
+   *  matching its existing, deliberately dependency-free design). */
+  rotationCausalP95: number | null;
+  rotationPriorSampleCount: number;
+  /** Sep 14 2026 (Karo), operator-approved -- ROTATION mode only. The
+   *  real price at watch creation (priceForNewEpisode), frozen and
+   *  never touched again -- needed to compute ShockATR (displacement
+   *  from episode start to the adverse extreme), which episodeExtreme
+   *  alone cannot recover once it has moved. */
+  episodeStartPrice: number;
 }
 
 const INACTIVITY_TIMEOUT_MS = 10 * 60_000;
 const SAFETY_TIMEOUT_MS = 30 * 60_000;
+// Sep 14 2026 (Karo), operator-approved -- ROTATION mode thresholds
+// were previously duplicated here as local constants; REMOVED in
+// favor of a single source of truth -- v5.config.ts's own
+// v5Rotation*() functions (imported above), called fresh at each use
+// site below, exactly matching the pattern this whole codebase
+// already uses for every other env-configurable constant. Nothing
+// about WAVE mode's own INACTIVITY_TIMEOUT_MS/SAFETY_TIMEOUT_MS above
+// changed -- still hardcoded, still 10min/30min, untouched.
+
+/** Sep 14 2026 (Karo), operator-approved -- ROTATION mode. Diagnostic
+ *  snapshot of WHY (or why not yet) a ROTATION watch is eligible for
+ *  entry at a given closed candle -- computed fresh every candle,
+ *  returned alongside (never gating) every onClosedCandle() call so
+ *  the caller can log full state even when no outcome event fires. */
+export interface RotationDiagnosticsSnapshot {
+  entryMode: "ROTATION";
+  causalP95Threshold: number | null;
+  priorEpisodeSampleCount: number;
+  cumulativeSameSideLiqUsd: number;
+  preLiqDownAtr: number | null;
+  preLiqUpAtr: number | null;
+  currentDownAtr: number | null;
+  currentUpAtr: number | null;
+  theta: number | null;
+  rotationDeg: number | null;
+  downSlope2m: number | null;
+  upSlope2m: number | null;
+  liqDecay: number | null;
+  recRise: number | null;
+  rotationForce: number | null;
+  shockAtr: number | null;
+  adverseExtremePrice: number;
+  adverseExtremeTs: number;
+  timeFromExtremeMin: number;
+  lastSameSideLiquidationTs: number;
+  secondsSinceLastSameSideLiq: number;
+  watchCreatedAt: number;
+}
 
 /** Sep 12 2026 (Karo), operator-requested -- BTC_BLOCK redesign. The
  *  exact phases a "serious" (dominantWave !== null) episode still
@@ -259,6 +363,21 @@ export class CandlePhysicsEngine {
     unitAbsForNewEpisode: number,
     priceForNewEpisode: number,
     ts: number,
+    /** Sep 14 2026 (Karo), operator-approved -- ROTATION mode. Mode is
+     *  frozen once, at watch creation, from whatever the caller passes
+     *  on THIS call (the caller reads the global flag fresh each
+     *  time, but only the value seen at creation ever matters for a
+     *  given watch -- see Watch.mode's own doc comment). Defaults to
+     *  "WAVE" so every existing call site (tests included) is
+     *  byte-identical unless a caller explicitly opts in. */
+    mode: "WAVE" | "ROTATION" = "WAVE",
+    /** Frozen ONCE, only read when a NEW watch is created in ROTATION
+     *  mode. Null-safe -- if the caller can't supply a real ATR yet
+     *  (candle history not warm), the watch is still created; ENTRY
+     *  is simply blocked until preLiqDownAtr/preLiqUpAtr are non-null
+     *  (ShockATR/rotation degrees cannot be computed without them). */
+    preLiqDownAtrForNewEpisode: number | null = null,
+    preLiqUpAtrForNewEpisode: number | null = null,
   ): void {
     const key = keyFor(symbol, victim);
     let w = this.watches.get(key);
@@ -283,6 +402,15 @@ export class CandlePhysicsEngine {
         p95AtW1Qualification: null,
         maxIndividualEventUsdAtW1: null,
         w1QualificationTs: null,
+        mode,
+        cumulativeSameSideLiqUsd: 0,
+        lastSameSideLiquidationTs: ts,
+        adverseExtremeTs: ts,
+        preLiqDownAtr: mode === "ROTATION" ? preLiqDownAtrForNewEpisode : null,
+        preLiqUpAtr: mode === "ROTATION" ? preLiqUpAtrForNewEpisode : null,
+        rotationCausalP95: null,
+        rotationPriorSampleCount: 0,
+        episodeStartPrice: priceForNewEpisode,
       };
       this.watches.set(key, w);
     }
@@ -293,6 +421,18 @@ export class CandlePhysicsEngine {
       w.episodeMaxIndividualEventUsd,
       liq.quoteQty,
     );
+
+    // Sep 14 2026 (Karo), operator-approved -- ROTATION mode. Every
+    // same-side liquidation accumulates into the watch's own true
+    // running total, regardless of whether the individual event is
+    // itself large (many smaller events are explicitly allowed to
+    // cumulatively cross P95, per instruction). No effect on WAVE-
+    // mode watches (w.mode === "WAVE" here always, since mode is
+    // frozen at creation and this branch is a pure no-op for them).
+    if (w.mode === "ROTATION") {
+      w.cumulativeSameSideLiqUsd += liq.quoteQty;
+      w.lastSameSideLiquidationTs = liq.timestamp;
+    }
   }
 
   onClosedCandle(
@@ -309,8 +449,28 @@ export class CandlePhysicsEngine {
      *  this.liquidationStats.notionalPercentile(...) fresh on every
      *  call -- never an entry-time-only snapshot). Only consulted at
      *  the moment a candidate wave completes AND no meaningful W1
-     *  exists yet (dominantWave === null) -- never afterward. */
+     *  exists yet (dominantWave === null) -- never afterward. WAVE
+     *  mode only; ROTATION mode uses the separate rotationCausalP95
+     *  parameter below instead (a genuinely different statistical
+     *  object -- individual-event vs cumulative-episode-total). */
     currentP95: number | null,
+    /** Sep 14 2026 (Karo), operator-approved -- ROTATION mode only.
+     *  Read fresh by the caller EVERY closed candle (directional ATR
+     *  / 2m slopes from directional-atr.ts) and passed in, exactly
+     *  the same "caller supplies live values, engine stays
+     *  dependency-free" pattern currentP95 above already uses.
+     *  rotationCausalP95/rotationPriorSampleCount are DELIBERATELY
+     *  NOT parameters here -- they're populated once, fire-and-forget,
+     *  via setRotationCausalP95() at watch creation, and read directly
+     *  from watch state below. Re-passing them as a per-candle
+     *  parameter (defaulting to null/0 on most calls, since a fresh
+     *  DB read every candle would defeat the point of caching) would
+     *  silently overwrite the real cached value back to null on the
+     *  very next candle -- a real bug caught while wiring this up. */
+    rotationCurrentDownAtr: number | null = null,
+    rotationCurrentUpAtr: number | null = null,
+    rotationDownSlope2m: number | null = null,
+    rotationUpSlope2m: number | null = null,
   ):
     | CandlePhysicsEntryEvent
     | CandlePhysicsCancelEvent
@@ -320,6 +480,160 @@ export class CandlePhysicsEngine {
     const w = this.watches.get(key);
     if (!w || w.state === "TERMINAL_CANCELLED" || w.state === "ENTERED")
       return null;
+
+    if (w.mode === "ROTATION") {
+      const rotationCausalP95 = w.rotationCausalP95;
+      const rotationPriorSampleCount = w.rotationPriorSampleCount;
+
+      // 15-minute inactivity, measured from the last RAW same-side
+      // liquidation event -- NOT lastWaveCompletedAt (that field is
+      // never touched for a ROTATION watch). Reset implicitly on
+      // every onLiquidation() call via lastSameSideLiquidationTs.
+      if (
+        candleStart - w.lastSameSideLiquidationTs >=
+        v5RotationInactivityMs()
+      ) {
+        w.state = "TERMINAL_CANCELLED";
+        return {
+          kind: "CANCEL",
+          symbol,
+          victim,
+          reason: "EPISODE_EXPIRED_INACTIVITY",
+          cancelTs: candleStart,
+          episodeStartTs: w.episodeStartTs,
+          allWaves: [],
+        };
+      }
+
+      // Causal adverse-extreme update -- closed-candle high/low only,
+      // never a forming candle. Reuses the SAME episodeExtreme field
+      // WAVE mode already maintains (identical causal price logic),
+      // adding only the timestamp WAVE mode has no use for.
+      const forcedDown = victim === "LONG";
+      const priorExtreme = w.episodeExtreme;
+      const newExtreme = forcedDown
+        ? Math.min(priorExtreme, low)
+        : Math.max(priorExtreme, high);
+      if (newExtreme !== priorExtreme) {
+        w.episodeExtreme = newExtreme;
+        w.adverseExtremeTs = candleStart;
+      }
+
+      const liqAtr =
+        victim === "LONG" ? rotationCurrentDownAtr : rotationCurrentUpAtr;
+      const recAtr =
+        victim === "LONG" ? rotationCurrentUpAtr : rotationCurrentDownAtr;
+      const preLiqAtr = victim === "LONG" ? w.preLiqDownAtr : w.preLiqUpAtr;
+      const preRecAtr = victim === "LONG" ? w.preLiqUpAtr : w.preLiqDownAtr;
+      const theta =
+        liqAtr !== null && recAtr !== null
+          ? Math.atan2(recAtr, liqAtr) * (180 / Math.PI)
+          : null;
+      const thetaPre =
+        preLiqAtr !== null && preRecAtr !== null && preLiqAtr > 0
+          ? Math.atan2(preRecAtr, preLiqAtr) * (180 / Math.PI)
+          : null;
+      const rotationDeg =
+        theta !== null && thetaPre !== null ? theta - thetaPre : null;
+      const shockAtr =
+        preLiqAtr !== null && preLiqAtr > 0
+          ? Math.abs(w.episodeStartPrice - w.episodeExtreme) / preLiqAtr
+          : null;
+      const timeFromExtremeMin = (candleStart - w.adverseExtremeTs) / 60000;
+
+      const liqSlopeRaw =
+        victim === "LONG" ? rotationDownSlope2m : rotationUpSlope2m;
+      const recSlopeRaw =
+        victim === "LONG" ? rotationUpSlope2m : rotationDownSlope2m;
+      const liqDecay = liqSlopeRaw !== null ? -liqSlopeRaw : null;
+      const recRise = recSlopeRaw;
+      const rotationForce =
+        liqDecay !== null && recRise !== null
+          ? Math.max(liqDecay, 0) + Math.max(recRise, 0)
+          : null;
+
+      const hasEnoughSamples =
+        rotationPriorSampleCount >= v5RotationMinPriorEpisodeSamples();
+      const p95Reached =
+        hasEnoughSamples &&
+        rotationCausalP95 !== null &&
+        w.cumulativeSameSideLiqUsd >= rotationCausalP95;
+      const rotationOk =
+        rotationDeg !== null && rotationDeg >= v5RotationDegreesRequired();
+      const shockOk =
+        shockAtr !== null && shockAtr >= v5RotationShockAtrRequired();
+      const timeOk = timeFromExtremeMin <= v5RotationMaxTimeFromExtremeMin();
+      const liqDecaying = liqSlopeRaw !== null && liqSlopeRaw < 0;
+      const recRising = recSlopeRaw !== null && recSlopeRaw > 0;
+      const forceOk =
+        rotationForce !== null && rotationForce >= v5RotationForceRequired();
+
+      if (
+        p95Reached &&
+        rotationOk &&
+        shockOk &&
+        timeOk &&
+        liqDecaying &&
+        recRising &&
+        forceOk
+      ) {
+        w.state = "ENTERED";
+        const syntheticWave: CompletedWaveSummary = {
+          waveNumber: 1,
+          startTime: w.episodeStartTs,
+          endTime: candleStart,
+          totalLiqUsd: w.cumulativeSameSideLiqUsd,
+          totalEvents: 0,
+          maxEvent: w.episodeMaxIndividualEventUsd,
+          extreme: w.episodeExtreme,
+          totalExtensionUnits: 0,
+          efficiency: null,
+          candles: [],
+        };
+        return {
+          kind: "ENTRY",
+          symbol,
+          victim,
+          entryPrice: close,
+          entryTs: candleStart,
+          unitAbs: w.unitAbs,
+          episodeStartTs: w.episodeStartTs,
+          signalWave: syntheticWave,
+          dominantWave: syntheticWave,
+          allWaves: [syntheticWave],
+          maxIndividualEventUsd: w.episodeMaxIndividualEventUsd,
+          p95AtW1Qualification: null,
+          maxIndividualEventUsdAtW1: null,
+          w1QualificationTs: null,
+          rotationDiagnostics: {
+            entryMode: "ROTATION",
+            causalP95Threshold: rotationCausalP95,
+            priorEpisodeSampleCount: rotationPriorSampleCount,
+            cumulativeSameSideLiqUsd: w.cumulativeSameSideLiqUsd,
+            preLiqDownAtr: w.preLiqDownAtr,
+            preLiqUpAtr: w.preLiqUpAtr,
+            currentDownAtr: rotationCurrentDownAtr,
+            currentUpAtr: rotationCurrentUpAtr,
+            theta,
+            rotationDeg,
+            downSlope2m: rotationDownSlope2m,
+            upSlope2m: rotationUpSlope2m,
+            liqDecay,
+            recRise,
+            rotationForce,
+            shockAtr,
+            adverseExtremePrice: w.episodeExtreme,
+            adverseExtremeTs: w.adverseExtremeTs,
+            timeFromExtremeMin,
+            lastSameSideLiquidationTs: w.lastSameSideLiquidationTs,
+            secondsSinceLastSameSideLiq:
+              (candleStart - w.lastSameSideLiquidationTs) / 1000,
+            watchCreatedAt: w.episodeStartTs,
+          },
+        };
+      }
+      return null;
+    }
 
     const forcedDown = victim === "LONG";
     const sameSideLiqUsd = w.pendingLiqUsd;
@@ -522,6 +836,7 @@ export class CandlePhysicsEngine {
         p95AtW1Qualification: w.p95AtW1Qualification,
         maxIndividualEventUsdAtW1: w.maxIndividualEventUsdAtW1,
         w1QualificationTs: w.w1QualificationTs,
+        rotationDiagnostics: null,
       };
     }
 
@@ -530,6 +845,25 @@ export class CandlePhysicsEngine {
 
   peekWatch(symbol: string, victim: Side): Readonly<Watch> | null {
     return this.watches.get(keyFor(symbol, victim)) ?? null;
+  }
+
+  /** Sep 14 2026 (Karo), operator-approved -- ROTATION mode only.
+   *  Fire-and-forget target: the causal P95 lookup is a DB query
+   *  (async), but onLiquidation()/onClosedCandle() must stay
+   *  synchronous (this engine has always been dependency-free and
+   *  synchronous by design). The caller kicks off the lookup at watch
+   *  creation and calls this setter once it resolves -- a harmless
+   *  no-op if the watch has since expired/entered/been replaced. */
+  setRotationCausalP95(
+    symbol: string,
+    victim: Side,
+    p95: number | null,
+    sampleCount: number,
+  ): void {
+    const w = this.watches.get(keyFor(symbol, victim));
+    if (!w || w.mode !== "ROTATION") return;
+    w.rotationCausalP95 = p95;
+    w.rotationPriorSampleCount = sampleCount;
   }
 
   /** Sep 12 2026 (Karo), operator-requested -- generic, read-only,

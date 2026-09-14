@@ -48,6 +48,12 @@ import {
 } from "../domain/cascade/candle-physics-engine";
 import { evaluateDragon } from "../domain/research/unit-competition-dragon";
 import type { V5Wave } from "../strategy/v5/v5-wave.model";
+import { DirectionalAtrTracker } from "../strategy/v5/directional-atr";
+import {
+  v5EntryMode,
+  v5RotationSlPct,
+  v5RotationTpPct,
+} from "../strategy/v5/v5.config";
 import type { SignalDistributor } from "./signal-distributor";
 import type { ReconciliationManager } from "./reconciliation-manager";
 import type { MongoClientWrapper } from "../infrastructure/mongo/mongo.client";
@@ -223,6 +229,15 @@ export class MarketDataOrchestrator {
    *  operator's own "do not delete" convention. This is the ONLY
    *  engine that can now produce a live ENTRY. */
   private readonly candlePhysics = new CandlePhysicsEngine();
+  /** Sep 14 2026 (Karo), operator-approved -- V5 ROTATION mode.
+   *  Self-instantiated, mirroring candlePhysics's own pattern above --
+   *  fed at the existing closed-1m-candle site in the kline handler
+   *  (see this.ws.on("kline", ...)), read by V5WaveService via a
+   *  small adapter (see main.ts's own wiring, matching the existing
+   *  orchestratorPlaceholder pattern every other V5 callback uses).
+   *  Genuinely separate state from atrTracker; a no-op cost if
+   *  V5_ENTRY_MODE is never "ROTATION". */
+  readonly directionalAtr = new DirectionalAtrTracker();
   private readonly cascadeCandidate3m = new CascadeCandidateService();
   private readonly cascadeCandidate5m = new CascadeCandidateService();
   private readonly cascadeRegistry = new CascadeRegistry(
@@ -422,12 +437,45 @@ export class MarketDataOrchestrator {
       // sides of this symbol. onClosedCandle() is a cheap no-op for
       // any (symbol,victim) with no active watch.
       if (c.interval === "1m" && c.isClosed) {
+        // Sep 14 2026 (Karo), operator-approved -- V5 ROTATION mode.
+        // Fed at the SAME closed-1m-candle site as candlePhysics above
+        // -- no new candle subscription, no new pipeline. Genuinely
+        // separate state from atrTracker/candlePhysics; a no-op if
+        // ROTATION mode is never enabled (this.directionalAtr is
+        // still constructed unconditionally, cheap, isolated).
+        this.directionalAtr.onCandle(c);
         for (const victim of ["LONG", "SHORT"] as const) {
           const currentP95 = this.liquidationStats.notionalPercentile(
             c.symbol,
             victim,
             95,
           );
+          // Sep 14 2026 (Karo), operator-approved -- ROTATION mode.
+          // Only bother computing these when the watch is actually a
+          // ROTATION watch (peekWatch is a cheap synchronous map read)
+          // -- zero extra cost for WAVE-mode watches, which is the
+          // overwhelming majority of traffic today.
+          const existingWatch = this.candlePhysics.peekWatch(c.symbol, victim);
+          let rotDownAtr: number | null = null,
+            rotUpAtr: number | null = null,
+            rotDownSlope: number | null = null,
+            rotUpSlope: number | null = null;
+          if (existingWatch?.mode === "ROTATION") {
+            rotDownAtr = this.directionalAtr.getDownAtr(c.symbol);
+            rotUpAtr = this.directionalAtr.getUpAtr(c.symbol);
+            if (existingWatch.preLiqDownAtr !== null)
+              rotDownSlope = this.directionalAtr.getDownSlopeNormalized(
+                c.symbol,
+                2,
+                existingWatch.preLiqDownAtr,
+              );
+            if (existingWatch.preLiqUpAtr !== null)
+              rotUpSlope = this.directionalAtr.getUpSlopeNormalized(
+                c.symbol,
+                2,
+                existingWatch.preLiqUpAtr,
+              );
+          }
           const result = this.candlePhysics.onClosedCandle(
             c.symbol,
             victim,
@@ -437,11 +485,15 @@ export class MarketDataOrchestrator {
             c.low,
             c.close,
             currentP95,
+            rotDownAtr,
+            rotUpAtr,
+            rotDownSlope,
+            rotUpSlope,
           );
           if (result?.kind === "ENTRY")
             void this.handleCandlePhysicsEntry(result);
           else if (result?.kind === "CANCEL")
-            this.handleCandlePhysicsCancel(result);
+            void this.handleCandlePhysicsCancel(result);
           else if (result?.kind === "PRE_W1_DISCARD")
             this.handleCandlePhysicsPreW1Discard(result);
         }
@@ -474,6 +526,24 @@ export class MarketDataOrchestrator {
           )
         : null;
       if (unit1m !== null && unit1m > 0) {
+        // Sep 14 2026 (Karo), operator-approved -- ROTATION mode.
+        // Mode is read fresh here but only matters for a NEW watch
+        // (frozen thereafter inside the engine itself -- see
+        // Watch.mode's own doc comment). preLiq baselines are only
+        // read/used when this liquidation is about to open a brand
+        // new watch in ROTATION mode; harmless (and unread) otherwise.
+        const entryMode = v5EntryMode();
+        const preLiqDownAtr =
+          entryMode === "ROTATION"
+            ? this.directionalAtr.getDownAtr(l.symbol)
+            : null;
+        const preLiqUpAtr =
+          entryMode === "ROTATION"
+            ? this.directionalAtr.getUpAtr(l.symbol)
+            : null;
+        const isNewWatch =
+          entryMode === "ROTATION" &&
+          this.candlePhysics.peekWatch(l.symbol, victimForShadow) === null;
         this.candlePhysics.onLiquidation(
           l.symbol,
           victimForShadow,
@@ -481,7 +551,35 @@ export class MarketDataOrchestrator {
           unit1m,
           l.price,
           l.timestamp,
+          entryMode,
+          preLiqDownAtr,
+          preLiqUpAtr,
         );
+        // Sep 14 2026 (Karo), operator-approved -- ROTATION mode.
+        // Fire-and-forget causal P95 lookup, kicked off exactly once
+        // per new watch (checked BEFORE onLiquidation() creates it,
+        // above). Writes onto the SAME watch via setRotationCausalP95()
+        // once resolved -- a harmless no-op if the watch has since
+        // expired/entered. onLiquidation()/onClosedCandle() stay
+        // synchronous; this never blocks either.
+        if (isNewWatch) {
+          this.getRotationCausalP95(l.symbol, victimForShadow, l.timestamp)
+            .then((res) =>
+              this.candlePhysics.setRotationCausalP95(
+                l.symbol,
+                victimForShadow,
+                res.p95,
+                res.sampleCount,
+              ),
+            )
+            .catch((err) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              log.error(
+                { symbol: l.symbol, victim: victimForShadow, err: msg },
+                "[ROTATION_P95_LOOKUP_FAILED]",
+              );
+            });
+        }
       }
       // OLD 1x-UNIT-recovery cascade engine -- DISCONNECTED, no longer
       // the production decision path. Left in place, unused, per the
@@ -1101,17 +1199,32 @@ export class MarketDataOrchestrator {
       );
 
       // Sep 11 2026 (Karo), operator-requested -- THE executable SL/TP.
-      // Fixed 0.30% risk, 2.2R reward. Never derived from wave
-      // structure, never clamped/rejected based on it.
-      const FIXED_SL_PCT = 0.003;
-      const REWARD_RISK_RATIO = 2.2;
+      // WAVE mode: fixed 0.30% risk, 2.2R reward, unchanged -- still
+      // hardcoded here, untouched by the Sep 14 2026 ROTATION work.
+      // ROTATION mode (Sep 14 2026, operator-approved): reads its own
+      // SL%/TP% from v5.config.ts's v5RotationSlPct()/v5RotationTpPct()
+      // -- the single source of truth also used inside
+      // candle-physics-engine.ts's own entry-condition thresholds, so
+      // there is exactly one place these values are ever defined.
+      // Neither mode's SL/TP is ever derived from wave structure or
+      // clamped/rejected based on it.
+      const isRotation = event.rotationDiagnostics !== null;
       const entry = event.entryPrice;
+      const FIXED_SL_PCT = isRotation ? v5RotationSlPct() : 0.003;
       const sl =
         event.victim === "LONG"
           ? entry * (1 - FIXED_SL_PCT)
           : entry * (1 + FIXED_SL_PCT);
       const riskDistance = Math.abs(entry - sl);
-      const rewardDistance = riskDistance * REWARD_RISK_RATIO;
+      // ROTATION: TP is the DIRECT percentage from config (matching
+      // entry*(1+tpPct)/entry*(1-tpPct) exactly). WAVE: unchanged,
+      // still RR-derived from riskDistance*2.2.
+      const REWARD_RISK_RATIO = isRotation
+        ? v5RotationTpPct() / FIXED_SL_PCT
+        : 2.2;
+      const rewardDistance = isRotation
+        ? entry * v5RotationTpPct()
+        : riskDistance * REWARD_RISK_RATIO;
       const tp =
         event.victim === "LONG"
           ? entry + rewardDistance
@@ -1136,6 +1249,7 @@ export class MarketDataOrchestrator {
           rewardDistance,
           takeProfit: tp,
           rewardRiskRatio: REWARD_RISK_RATIO,
+          entryMode: isRotation ? "ROTATION" : "WAVE",
         },
         "[FIXED_RISK_TRADE_PLAN]",
       );
@@ -1267,6 +1381,7 @@ export class MarketDataOrchestrator {
         entryWaveNumber: event.signalWave.waveNumber,
         waveHistory: v5Waves,
         w1Diagnostics: null,
+        rotationDiagnostics: event.rotationDiagnostics,
         totalEpisodePressure: totalLiq,
         dominantLayerLiqUsd: event.dominantWave.totalLiqUsd,
         dominantLayerWaveNumber: event.dominantWave.waveNumber,
@@ -1320,7 +1435,7 @@ export class MarketDataOrchestrator {
           dynamicPhysicsScore: 0,
           selectedRR: plan.rr,
           tpMultiplier: 0,
-          slDeterminedBy: "physics",
+          slDeterminedBy: isRotation ? "rotation-fixed" : "physics",
         },
         btcContext: {
           priceAtSignal: btcCandle?.close ?? null,
@@ -1442,13 +1557,119 @@ export class MarketDataOrchestrator {
    *  beyond what CandlePhysicsEngine already did internally (the watch
    *  is already TERMINAL_CANCELLED by the time this is called; this
    *  just makes the reason visible and releases the engine's own map
-   *  entry so a fresh episode can start immediately). */
-  private handleCandlePhysicsCancel(
+   *  entry so a fresh episode can start immediately).
+   *
+   *  Sep 14 2026 (Karo), operator-approved -- ROTATION mode ADDITIVE
+   *  persistence. WAVE-mode cancels remain log-only, completely
+   *  unchanged. A ROTATION-mode cancel gets ONE small, additive
+   *  GlobalSignal insert -- a historical/statistical terminal record
+   *  only (no Telegram, no execution, no hydrateActiveTrade), so
+   *  findCompletedRotationEpisodeTotals() has a durable, DB-backed
+   *  sample of this completed-without-entry episode for future causal
+   *  P95 history. peekWatch() is called BEFORE clearTerminal() below
+   *  (which deletes the watch), so the watch's own final state is
+   *  still readable here. */
+  private async handleCandlePhysicsCancel(
     event: import("../domain/cascade/candle-physics-engine").CandlePhysicsCancelEvent,
-  ): void {
+  ): Promise<void> {
     log.info(
       `[CANDLE_PHYSICS_CANCEL] ${event.symbol} ${event.victim} reason=${event.reason} episodeStartTs=${event.episodeStartTs} cancelTs=${event.cancelTs} completedWaves=${event.allWaves.length}`,
     );
+
+    const watch = this.candlePhysics.peekWatch(event.symbol, event.victim);
+    if (watch?.mode === "ROTATION") {
+      try {
+        const doc: GlobalSignalDoc = {
+          signalId: randomUUID(),
+          symbol: event.symbol,
+          side: event.victim,
+          cascadeId: null,
+          timeframe: null,
+          episodePlan: null,
+          waveEfficiencyAnalysis: null,
+          p95AtW1Qualification: null,
+          maxIndividualEventUsdAtW1: null,
+          w1QualificationTs: null,
+          isMainExecuted: false,
+          victim: event.victim,
+          signalTs: watch.episodeStartTs,
+          entryPrice: 0,
+          entryWaveNumber: 0,
+          waveHistory: [],
+          w1Diagnostics: null,
+          rotationDiagnostics: {
+            entryMode: "ROTATION",
+            causalP95Threshold: watch.rotationCausalP95,
+            priorEpisodeSampleCount: watch.rotationPriorSampleCount,
+            cumulativeSameSideLiqUsd: watch.cumulativeSameSideLiqUsd,
+            preLiqDownAtr: watch.preLiqDownAtr,
+            preLiqUpAtr: watch.preLiqUpAtr,
+            currentDownAtr: null,
+            currentUpAtr: null,
+            theta: null,
+            rotationDeg: null,
+            downSlope2m: null,
+            upSlope2m: null,
+            liqDecay: null,
+            recRise: null,
+            rotationForce: null,
+            shockAtr: null,
+            adverseExtremePrice: watch.episodeExtreme,
+            adverseExtremeTs: watch.adverseExtremeTs,
+            timeFromExtremeMin:
+              (event.cancelTs - watch.adverseExtremeTs) / 60000,
+            lastSameSideLiquidationTs: watch.lastSameSideLiquidationTs,
+            secondsSinceLastSameSideLiq:
+              (event.cancelTs - watch.lastSameSideLiquidationTs) / 1000,
+            watchCreatedAt: watch.episodeStartTs,
+          },
+          totalEpisodePressure: watch.cumulativeSameSideLiqUsd,
+          dominantLayerLiqUsd: null,
+          dominantLayerWaveNumber: null,
+          exhaustionLayerLiqUsd: null,
+          exhaustionLayerWaveNumber: null,
+          unitAtStart: watch.unitAbs,
+          p95AtEntry: 0,
+          dailyLiqPerMinBaselineAtEntry: 0,
+          atr15mAtEntry: 0,
+          qualifyingEventUsd: 0,
+          qualifyingEventTs: watch.episodeStartTs,
+          p95AtQualification: 0,
+          physics: null,
+          btcContext: null,
+          marketContextAtEntry: null,
+          liq24hContext: null,
+          wallContext: null,
+          entry: null,
+          tp: null,
+          sl: null,
+          rr: null,
+          btcSafetyStatus: "UNKNOWN",
+          btcIntendedSideAtSignalTime: null,
+          rejectionReason: event.reason,
+          planDiagnostics: null,
+          status: event.reason as GlobalSignalDoc["status"],
+          closedAt: null,
+          closePrice: null,
+          maxFavorableR: null,
+          maxAdverseR: null,
+          liquidationStatsContext: null,
+          researchCheckpoints: [],
+          unitResearch: null,
+          unitCompetitionResearch: null,
+          commonHorizonResearch: null,
+          createdAt: Date.now(),
+        };
+        await this.globalSignalRepo.insert(doc);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(
+          { symbol: event.symbol, victim: event.victim, err: msg },
+          "[ROTATION_CANCEL_PERSIST_FAILED]",
+        );
+      }
+    }
+
     this.candlePhysics.clearTerminal(event.symbol, event.victim);
   }
 
@@ -2651,6 +2872,36 @@ export class MarketDataOrchestrator {
     const atrPct = this.atrTracker.getATR(symbol, "15m");
     if (!atrPct || !(atrPct > 0)) return null;
     return atrPct * referencePrice;
+  }
+
+  /** Sep 14 2026 (Karo), operator-approved -- V5 ROTATION mode. Causal
+   *  cumulative-episode-total P95, computed from the existing
+   *  GlobalSignal persistence via findCompletedRotationEpisodeTotals()
+   *  (reads only records with createdAt < beforeTs -- no future
+   *  leakage). Linear-interpolated P95 over the returned totals,
+   *  matching the research thread's own percentile() convention.
+   *  Public so main.ts's placeholder-indirection callback (matching
+   *  every other V5 dependency's own wiring pattern) can reach it. */
+  async getRotationCausalP95(
+    symbol: string,
+    victim: "LONG" | "SHORT",
+    beforeTs: number,
+  ): Promise<{ p95: number | null; sampleCount: number }> {
+    const rows = await this.globalSignalRepo.findCompletedRotationEpisodeTotals(
+      symbol,
+      victim,
+      beforeTs,
+    );
+    const sorted = rows.map((r) => r.totalUsd).sort((a, b) => a - b);
+    if (sorted.length === 0) return { p95: null, sampleCount: 0 };
+    const idx = 0.95 * (sorted.length - 1);
+    const lo = Math.floor(idx),
+      hi = Math.ceil(idx);
+    const p95 =
+      lo === hi
+        ? sorted[lo]!
+        : sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (idx - lo);
+    return { p95, sampleCount: sorted.length };
   }
 
   private async handleMainTradeClose(close: V5TradeCloseEvent): Promise<void> {

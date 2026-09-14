@@ -53,7 +53,8 @@
     "test:wave-efficiency-analysis": "tsx tests/wave-efficiency-analysis.test.ts",
     "test:candle-physics-engine": "tsx tests/candle-physics-engine.test.ts",
     "test:legacy-v5-shadow-cleanup": "tsx tests/legacy-v5-shadow-cleanup.test.ts",
-    "test:reconciliation-price-and-fallback": "tsx tests/reconciliation-price-and-fallback.test.ts"
+    "test:reconciliation-price-and-fallback": "tsx tests/reconciliation-price-and-fallback.test.ts",
+    "test:candle-physics-rotation": "tsx tests/candle-physics-rotation.test.ts"
   },
   "engines": {
     "node": ">=18.17"
