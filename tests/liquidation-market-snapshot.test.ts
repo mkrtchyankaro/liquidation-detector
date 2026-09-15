@@ -734,6 +734,126 @@ scenario(
   },
 );
 
+// ============================================================
+// Sep 15 2026, operator-reported THIRD gap. Root cause: the raw
+// bookTicker/depth ring (used for CURRENT bestBid/bestAsk/midPrice/
+// depthBands) was evicting by a fixed ENTRY COUNT (50), not a time
+// window. On a high-frequency symbol, 50 entries can represent well
+// under a second of real time -- so any realistic processing lag
+// between a liquidation's own timestamp and when the handler actually
+// runs could mean EVERY retained raw entry already postdates T, even
+// though the SAME data was clearly available a moment earlier (as
+// proven by the 5-minute, time-windowed derived-summary ring still
+// having it -- which is exactly why priceChange*Pct kept working
+// while bestBid/midPrice/depthBands did not). Fixed by switching the
+// raw ring to the SAME time-window retention model already proven
+// correct for the derived-summary ring.
+// ============================================================
+
+scenario(
+  "BURST: current bestBid/bestAsk/midPrice survive a rapid-fire update burst that would have exceeded the old fixed-count ring",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    // 200 bookTicker/depth updates in the 2 seconds before T -- far more
+    // than the OLD ring's fixed cap of 50 entries, which would have
+    // evicted the T-2000ms..T range entirely by the time T is queried
+    for (let i = 0; i < 200; i++) {
+      const ts = T - 2000 + i * 10; // every 10ms
+      deps.orderbookStore.setBookTicker({
+        symbol: SYMBOL,
+        bid: 999 + i * 0.001,
+        bidQty: 1,
+        ask: 1001 + i * 0.001,
+        askQty: 1,
+        timestamp: ts,
+      });
+      deps.orderbookStore.setDepth({
+        symbol: SYMBOL,
+        bids: [{ price: 999 + i * 0.001, quantity: 5 }],
+        asks: [{ price: 1001 + i * 0.001, quantity: 5 }],
+        timestamp: ts,
+      } as any);
+    }
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.ok(
+      snap.priceState.bestBid !== null,
+      "bestBid must survive a 200-update burst that would have overflowed a 50-entry count-capped ring",
+    );
+    assert.ok(
+      snap.orderBook.depthBands !== null,
+      "depthBands must survive the same burst",
+    );
+    assert.ok(
+      snap.orderBook.orderBookUpdatedAt <= T,
+      "the selected sample must never postdate T",
+    );
+    assert.ok(snap.orderBook.orderBookAgeMs >= 0);
+  },
+);
+
+scenario(
+  "BURST: historical priceChange AND current bestBid/midPrice are BOTH available from the same burst (the exact real-world symptom)",
+  () => {
+    const deps = freshDeps();
+    const T = 5 * 60_000 + 2000;
+    // steady updates for 5 minutes, then a burst in the last 2 seconds
+    for (let i = 0; i < 50; i++) {
+      const ts = T - 300_000 + i * 6_000;
+      deps.orderbookStore.setBookTicker({
+        symbol: SYMBOL,
+        bid: 999,
+        bidQty: 1,
+        ask: 1001,
+        askQty: 1,
+        timestamp: ts,
+      });
+      deps.orderbookStore.setDepth({
+        symbol: SYMBOL,
+        bids: [{ price: 999, quantity: 5000 }],
+        asks: [{ price: 1001, quantity: 4000 }],
+        timestamp: ts,
+      } as any);
+    }
+    for (let i = 0; i < 200; i++) {
+      const ts = T - 2000 + i * 10;
+      deps.orderbookStore.setBookTicker({
+        symbol: SYMBOL,
+        bid: 1009,
+        bidQty: 1,
+        ask: 1011,
+        askQty: 1,
+        timestamp: ts,
+      });
+      deps.orderbookStore.setDepth({
+        symbol: SYMBOL,
+        bids: [{ price: 1009, quantity: 6000 }],
+        asks: [{ price: 1011, quantity: 3000 }],
+        timestamp: ts,
+      } as any);
+    }
+    const event = liq("SELL", 1010, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.ok(
+      snap.priceState.priceChange1mPct !== null,
+      "historical priceChange1mPct must be available",
+    );
+    assert.ok(
+      snap.priceState.bestBid !== null,
+      "current bestBid must ALSO be available -- this is the exact real-world symptom: history worked, current state did not",
+    );
+    assert.ok(
+      snap.orderBook.bookImbalanceChangeVs1mAgo !== null,
+      "historical depth delta must be available",
+    );
+    assert.ok(
+      snap.orderBook.depthBands !== null,
+      "current depthBands must ALSO be available",
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 // Explicit exit regardless of outcome -- freshDeps() constructs
 // OiTrackerService/FundingRateService instances (each with their own

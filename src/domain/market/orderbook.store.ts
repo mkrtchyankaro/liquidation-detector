@@ -1,25 +1,27 @@
 import type { BookTicker, OrderBookSnapshot } from "../../shared/common.types";
 
-/** Sep 15 2026 (Karo), operator-reported CRITICAL FIX. The liquidation-
- *  snapshot enrichment was reading getBookTicker()/getDepth()/
- *  midPrice() -- "whatever is CURRENTLY latest in RAM" -- with zero
- *  timestamp awareness. Since the WS liquidation stream and the WS
- *  bookTicker/depth streams are separate, asynchronous message flows,
- *  by the time the liquidation handler actually executes (network
- *  latency, event-loop scheduling), a NEWER depth/bookTicker update
- *  can already have overwritten "latest" -- confirmed in a real
- *  production document: orderBookAgeMs=-923 (order-book state used
- *  was 923ms AFTER the liquidation's own timestamp). Fix: a SHORT
- *  bounded ring of RAW bookTicker/depth snapshots (last
- *  RAW_RING_SIZE updates -- NOT the 5-minute derived-summary ring
- *  below, which stays unchanged and was already causal), with new
- *  *AtOrBefore() accessors that select the latest entry whose OWN
- *  timestamp <= the requested cutoff. The plain getBookTicker()/
- *  getDepth()/midPrice() methods are left unchanged (nothing else in
- *  the codebase calls them -- confirmed via full-repo search -- so
- *  this is purely additive, not a behavior change for any other
- *  caller). */
-const RAW_RING_SIZE = 50;
+/** Sep 15 2026 (Karo), operator-reported CRITICAL FIX #2 (root cause
+ *  of a SECOND recorder gap, distinct from the wiring fix above).
+ *  RAW_RING_SIZE was a fixed ENTRY COUNT, not a time window. On a
+ *  high-frequency symbol (BTCUSDT bookTicker can update many times
+ *  per second), 50 entries can represent well under a second of real
+ *  elapsed time -- so if the liquidation handler has ANY processing
+ *  lag at all (network, event-loop scheduling -- the exact same class
+ *  of lag that caused the original -923ms bug), by the time it calls
+ *  getBookTickerAtOrBefore(T), every one of the 50 currently-retained
+ *  entries could already postdate T, since enough newer updates had
+ *  already evicted everything older within that tiny lag window.
+ *  This is why priceChange*Pct (reading the 5-minute, TIME-windowed,
+ *  coarsely-sampled `history` ring below) kept working while the RAW
+ *  ring came up empty for the SAME instant -- `history`'s retention
+ *  is generous specifically because it's time-based, not count-based.
+ *  Fix: switch the raw rings to the SAME time-window retention model
+ *  (30s, comfortably larger than any realistic processing lag), with
+ *  RAW_RING_MAX_ENTRIES as a defensive absolute cap only for a
+ *  pathological burst scenario -- not the primary eviction mechanism
+ *  anymore. */
+const RAW_RING_RETENTION_MS = 30_000;
+const RAW_RING_MAX_ENTRIES = 5000;
 
 /** Sep 15 2026 (Karo), operator-requested -- compact derived summary
  *  retained per market update, NOT the raw 20-level snapshot (that
@@ -61,13 +63,15 @@ const MIN_SAMPLE_SPACING_MS = 1000;
  * Holds the most recent book-ticker (top of book) and the most recent
  * partial-depth snapshot per symbol (unchanged, "latest" semantics,
  * used by nothing else in the codebase today), PLUS:
- *   - a SHORT bounded ring of RAW bookTicker/depth updates, used ONLY
- *     for causal (timestamp <= T) lookups
+ *   - a TIME-windowed bounded ring of RAW bookTicker/depth updates
+ *     (last RAW_RING_RETENTION_MS, see that constant's own doc
+ *     comment for why time-based eviction replaced a fixed entry
+ *     count), used ONLY for causal (timestamp <= T) lookups
  *   - a compact, coarsely-sampled history of DERIVED price/bid/ask
  *     totals for computing recent-change deltas (5min retention,
- *     already causal, unchanged by this fix)
- * No reconstruction of full order-book depth beyond the last 50
- * updates, no new Binance request of any kind.
+ *     already causal, unaffected by this fix)
+ * No reconstruction of full order-book depth beyond the raw ring's own
+ * retention window, no new Binance request of any kind.
  */
 export class OrderbookStore {
   private bookTicker = new Map<string, BookTicker>();
@@ -85,7 +89,10 @@ export class OrderbookStore {
       this.bookTickerRing.set(bt.symbol, ring);
     }
     ring.push(bt);
-    if (ring.length > RAW_RING_SIZE) ring.shift();
+    const cutoff = bt.timestamp - RAW_RING_RETENTION_MS;
+    while (ring.length > 0 && ring[0]!.timestamp < cutoff) ring.shift(); // primary eviction: time-based
+    if (ring.length > RAW_RING_MAX_ENTRIES)
+      ring.splice(0, ring.length - RAW_RING_MAX_ENTRIES); // safety valve only
     this.sampleIfDue(bt.symbol, bt.timestamp);
   }
 
@@ -97,7 +104,10 @@ export class OrderbookStore {
       this.depthRing.set(snap.symbol, ring);
     }
     ring.push(snap);
-    if (ring.length > RAW_RING_SIZE) ring.shift();
+    const cutoff = snap.timestamp - RAW_RING_RETENTION_MS;
+    while (ring.length > 0 && ring[0]!.timestamp < cutoff) ring.shift(); // primary eviction: time-based
+    if (ring.length > RAW_RING_MAX_ENTRIES)
+      ring.splice(0, ring.length - RAW_RING_MAX_ENTRIES); // safety valve only
     this.sampleIfDue(snap.symbol, snap.timestamp);
   }
 
