@@ -402,6 +402,7 @@ async function main(): Promise<void> {
   process.on("SIGINT", async () => {
     log.info("shutting down (SIGINT)");
     reconciliation.stop();
+    orchestrator.stop();
     await liqAggregateOrchestrator.stop();
     await wallAggregateOrchestrator.stop();
     await mongo.close();
@@ -410,6 +411,7 @@ async function main(): Promise<void> {
   process.on("SIGTERM", async () => {
     log.info("shutting down (SIGTERM)");
     reconciliation.stop();
+    orchestrator.stop();
     await liqAggregateOrchestrator.stop();
     await wallAggregateOrchestrator.stop();
     await mongo.close();

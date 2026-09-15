@@ -21,7 +21,7 @@
  *   rate ≈ 0  → no significant directional pressure
  */
 
-import { childLogger } from '../../infrastructure/logging/logger';
+import { childLogger } from "../../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "funding-rate" });
 
@@ -64,6 +64,18 @@ export class FundingRateService {
     if (!entry) return null;
     if (Date.now() - entry.fetchedAt > STALE_MS) return null;
     return entry.rate;
+  }
+
+  /** Sep 15 2026 (Karo), operator-requested -- liquidation-snapshot
+   *  enrichment needs the freshness timestamp, not just the rate.
+   *  Same staleness rule as getFundingRate() above (kept as a
+   *  separate method rather than changing that one's return shape,
+   *  since its existing callers only want the bare number). */
+  getFundingRateFetchedAt(symbol: string): number | null {
+    const entry = this.cache.get(symbol);
+    if (!entry) return null;
+    if (Date.now() - entry.fetchedAt > STALE_MS) return null;
+    return entry.fetchedAt;
   }
 
   /** Refresh all tracked symbols sequentially. Sequential rather than

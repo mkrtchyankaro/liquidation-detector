@@ -6,6 +6,8 @@ import {
   type V5TradeCloseEvent,
 } from "../strategy/v5/v5-wave.service";
 import { OiTrackerService } from "../domain/liquidation/oi-tracker.service";
+import { FundingStatsService } from "../domain/liquidation/funding-stats.service";
+import { FundingRateService } from "../domain/liquidation/funding-rate.service";
 import { LiquidationStore } from "../domain/liquidation/liquidation.store";
 import { LiquidationStatsService } from "../domain/liquidation/liquidation-stats.service";
 import { LiqFeedWatchdogService } from "../domain/liquidation/liq-feed-watchdog.service";
@@ -60,6 +62,7 @@ import type { MongoClientWrapper } from "../infrastructure/mongo/mongo.client";
 import { GlobalSignalRepository } from "../infrastructure/mongo/global-signal.repository";
 import { RotationEpisodeHistoryRepository } from "../infrastructure/mongo/rotation-episode-history.repository";
 import { RawLiquidationEventRepository } from "../infrastructure/mongo/raw-liquidation-event.repository";
+import { buildMarketSnapshot } from "../domain/liquidation/liquidation-market-snapshot.builder";
 import { formatV5CloseMessage } from "../infrastructure/telegram/signal.formatter";
 import { childLogger } from "../infrastructure/logging/logger";
 
@@ -120,6 +123,17 @@ export class MarketDataOrchestrator {
   readonly orderbookStore = new OrderbookStore();
   readonly atrTracker = new ATRTrackerService();
   readonly oiTracker: OiTrackerService;
+  /** Sep 15 2026 (Karo), operator-requested -- discovered during this
+   *  wiring that neither FundingStatsService nor FundingRateService
+   *  was actually instantiated anywhere in the running bot despite
+   *  both classes being fully built (research-only, shadow telemetry,
+   *  per their own doc comments). Wired here for the first time,
+   *  following the exact same construction pattern as oiTracker
+   *  above. FundingRateService self-starts its own timer in its
+   *  constructor (matching OiTrackerService); FundingStatsService
+   *  requires an explicit start() call, issued in this.start() below. */
+  private readonly fundingStats: FundingStatsService;
+  private readonly fundingRate: FundingRateService;
   readonly aggressiveFlow = new AggressiveFlowService();
   readonly researchCheckpoints = new ResearchCheckpointTracker();
   private readonly shadow3m = new UnitResearchShadowService((symbol, victim) =>
@@ -240,6 +254,14 @@ export class MarketDataOrchestrator {
    *  Genuinely separate state from atrTracker; a no-op cost if
    *  V5_ENTRY_MODE is never "ROTATION". */
   readonly directionalAtr = new DirectionalAtrTracker();
+  /** Sep 15 2026 (Karo), operator-requested -- liquidation-snapshot
+   *  enrichment's 3m/5m directional ATR. Genuinely separate state
+   *  from `directionalAtr` above (the 1m instance, which continues
+   *  to serve V5 ROTATION unchanged) -- fed at the existing 3m/5m
+   *  kline-close sites already present in this.ws.on("kline", ...)
+   *  for the standard (non-directional) ATR; no new subscription. */
+  private readonly directionalAtr3m = new DirectionalAtrTracker();
+  private readonly directionalAtr5m = new DirectionalAtrTracker();
   private readonly cascadeCandidate3m = new CascadeCandidateService();
   private readonly cascadeCandidate5m = new CascadeCandidateService();
   private readonly cascadeRegistry = new CascadeRegistry(
@@ -274,6 +296,12 @@ export class MarketDataOrchestrator {
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
     this.liqFeedWatchdog = new LiqFeedWatchdogService(log, broadcastTelegram);
     this.oiTracker = new OiTrackerService(symbols);
+    this.fundingStats = new FundingStatsService(symbols);
+    this.fundingRate = new FundingRateService(symbols);
+    log.info(
+      { symbols: symbols.length },
+      "[market-snapshot] enrichment components initialized -- taker-flow history(5m), order-book+price history(5m), OI tracker, funding-rate tracker, directional ATR 1m/3m/5m, enriched liquidation snapshot enabled",
+    );
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
     this.rotationEpisodeHistoryRepo = new RotationEpisodeHistoryRepository(
       mongo,
@@ -433,7 +461,29 @@ export class MarketDataOrchestrator {
    *  disagree on cadence. */
   private static readonly MAIN_CLOSE_FALLBACK_MS = 3_000;
 
+  /** Sep 15 2026 (Karo), operator-requested -- graceful shutdown for
+   *  the REST-polling services this class owns. Discovered while
+   *  wiring fundingStats/fundingRate that oiTracker's own timer was
+   *  ALREADY never explicitly stopped anywhere (main.ts's SIGINT/
+   *  SIGTERM handlers call process.exit(0) immediately after, which
+   *  does kill pending timers regardless -- so this was never a
+   *  functional hang -- but it's inconsistent with the explicit
+   *  .stop() pattern every other lifecycle-owning service in main.ts
+   *  already follows). Call from main.ts's shutdown handlers,
+   *  alongside reconciliation.stop()/liqAggregateOrchestrator.stop().
+   *  FundingRateService (like oiTracker) has no async work to await --
+   *  stop() on all three is synchronous, clearing their own timers. */
+  stop(): void {
+    this.oiTracker.stop();
+    this.fundingStats.stop();
+    this.fundingRate.stop();
+  }
+
   start(): void {
+    // Sep 15 2026 (Karo), operator-requested -- see this.fundingStats's
+    // own field doc comment for why this call is new. FundingRateService
+    // needs no equivalent call -- it self-starts in its constructor.
+    this.fundingStats.start();
     this.ws.subscribe({
       symbols: this.symbols,
       intervals: ["15m", "5m", "3m", "1m"],
@@ -450,6 +500,14 @@ export class MarketDataOrchestrator {
     this.ws.on("kline", (c) => {
       this.atrTracker.onCandle(c);
       this.candleStore.ingest(c);
+      // Sep 15 2026 (Karo), operator-requested -- liquidation-snapshot
+      // enrichment's 3m/5m directional ATR. Fed here, at the SAME
+      // kline-close event already driving atrTracker.onCandle() above
+      // -- no new subscription. onCandle() itself rejects any candle
+      // that is not fully closed, so this is a no-op for forming
+      // candles regardless of the isClosed check below.
+      if (c.interval === "3m" && c.isClosed) this.directionalAtr3m.onCandle(c);
+      if (c.interval === "5m" && c.isClosed) this.directionalAtr5m.onCandle(c);
       // Sep 11 2026 (Karo), operator-requested -- THE production wave
       // engine now runs on CLOSED 1m candles only, for both victim
       // sides of this symbol. onClosedCandle() is a cheap no-op for
@@ -522,12 +580,66 @@ export class MarketDataOrchestrator {
       this.liqFeedWatchdog.recordEvent(l.symbol);
       this.liquidationStore.ingest(l);
       this.liquidationStats.ingest(l);
+      // Sep 15 2026 (Karo), operator-requested -- market-state
+      // enrichment. Computed AFTER liquidationStore.ingest(l) above so
+      // the rolling liquidation-context windows correctly include this
+      // very event (matching the "cumulative includes current event"
+      // convention this whole research thread has used throughout).
+      // Wrapped defensively: buildMarketSnapshot() is pure/synchronous
+      // and should never throw, but a second line of defense here
+      // guarantees the base liquidation write (below) NEVER fails or
+      // blocks because of anything in the enrichment path.
+      let marketSnapshot: Record<string, unknown> | undefined;
+      try {
+        marketSnapshot = buildMarketSnapshot(
+          {
+            aggressiveFlow: this.aggressiveFlow,
+            oiTracker: this.oiTracker,
+            orderbookStore: this.orderbookStore,
+            wallTracker: this.wallTracker,
+            candleStore: this.candleStore,
+            liquidationStore: this.liquidationStore,
+            atrTracker: this.atrTracker,
+            directionalAtr1m: this.directionalAtr,
+            directionalAtr3m: this.directionalAtr3m,
+            directionalAtr5m: this.directionalAtr5m,
+            fundingStats: this.fundingStats,
+            fundingRate: this.fundingRate,
+          },
+          l,
+          l.timestamp,
+        );
+        const ms = marketSnapshot as {
+          openInterest: { oiAgeMs: number | null };
+          positioning: { positioningAgeMs: number | null };
+          funding: { fundingAgeMs: number | null };
+        };
+        log.debug(
+          {
+            symbol: l.symbol,
+            victim: l.side === "SELL" ? "LONG" : "SHORT",
+            quoteQty: l.quoteQty,
+            oiAgeMs: ms.openInterest.oiAgeMs,
+            positioningAgeMs: ms.positioning.positioningAgeMs,
+            fundingAgeMs: ms.funding.fundingAgeMs,
+          },
+          "[market-snapshot] enriched liquidation event saved",
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log.error(
+          { err: msg, symbol: l.symbol },
+          "[MARKET_SNAPSHOT_BUILD_FAILED] -- base liquidation write proceeds without enrichment",
+        );
+        marketSnapshot = undefined;
+      }
       void this.rawLiquidationEventRepo.insert({
         symbol: l.symbol,
         victim: l.side === "SELL" ? "LONG" : "SHORT",
         price: l.price,
         quoteQty: l.quoteQty,
         timestamp: l.timestamp,
+        ...(marketSnapshot !== undefined ? { marketSnapshot } : {}),
       });
       const victimForShadow: Side = l.side === "SELL" ? "LONG" : "SHORT";
       // Sep 11 2026 (Karo), operator-requested -- THE production wave

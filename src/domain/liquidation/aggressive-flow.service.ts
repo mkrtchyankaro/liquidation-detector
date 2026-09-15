@@ -51,16 +51,23 @@
  * - No persistence — RAM only
  */
 
-import type { Trade } from '../../shared/common.types';
-import { childLogger } from '../../infrastructure/logging/logger';
+import type { Trade } from "../../shared/common.types";
+import { childLogger } from "../../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "agg-flow" });
 
-/** Number of 1-second slots in the ring. Caps the maximum supported
- *  lookback at 30 seconds (the typical use case). Callers requesting a
- *  longer lookback receive only the last 30s of data — they are
- *  responsible for matching their expectations to this window. */
-const RING_SIZE = 30;
+/** Number of 1-second slots in the ring. Sep 15 2026 (Karo),
+ *  operator-requested extension: widened from 30 (30s) to 300 (5
+ *  minutes) so getRecentFlow() can serve the liquidation-snapshot
+ *  enrichment's 10s/30s/1m/2m/3m/5m taker-flow windows from this SAME
+ *  ring, without a second data structure. Existing callers (V3's
+ *  cascade-exhaustion gate, which only ever requests 30_000ms) are
+ *  unaffected -- they simply now read from a larger ring that still
+ *  contains their own 30s window intact. Memory cost at 300 slots is
+ *  still trivially small (~12KB/symbol worst case, same order of
+ *  magnitude class as OiTrackerService's/FundingStatsService's own
+ *  retention). */
+const RING_SIZE = 300;
 
 /** One 1-second bucket in the ring. */
 interface FlowBucket {

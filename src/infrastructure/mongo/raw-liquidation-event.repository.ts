@@ -32,6 +32,19 @@ export interface RawLiquidationEventDoc {
   price: number;
   quoteQty: number;
   timestamp: number;
+  /** Sep 15 2026 (Karo), operator-requested. Additive-only field --
+   *  every field above this line is completely unchanged, so every
+   *  existing reader of this collection (there are none in production
+   *  code today, only offline research scripts) continues to work
+   *  identically whether or not this field is present. Built
+   *  synchronously from already-known RAM state at the moment of
+   *  insertion by buildMarketSnapshot() (see that file's own doc
+   *  comment for the full field-by-field causality and freshness
+   *  contract). Optional because: (a) older documents written before
+   *  this change will never have it, (b) the insert call defensively
+   *  omits it entirely if snapshot construction throws, rather than
+   *  ever blocking or corrupting the base liquidation write. */
+  marketSnapshot?: Record<string, unknown>;
 }
 
 export class RawLiquidationEventRepository {
