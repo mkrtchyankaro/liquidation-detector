@@ -79,6 +79,24 @@ const OI_DELTA_WINDOWS_MS: { label: string; ms: number }[] = [
   { label: "5m", ms: 300_000 },
   { label: "15m", ms: 900_000 },
 ];
+/** Sep 15 2026 (Karo), operator-approved high-resolution OI research.
+ *  Deliberately SEPARATE from OI_DELTA_WINDOWS_MS above (which stays
+ *  completely unchanged, per "do not remove or rename existing
+ *  fields") -- these feed the NEW oiDelta*Pct/oiDelta*Usd fields,
+ *  named with a distinct "oiDelta" prefix (vs the existing
+ *  "oiChange" prefix) specifically so nothing here can be confused
+ *  with, or accidentally overwrite, the pre-existing fields. */
+const OI_DELTA_WINDOWS_V2_MS: { label: string; ms: number }[] = [
+  { label: "5s", ms: 5_000 },
+  { label: "10s", ms: 10_000 },
+  { label: "15s", ms: 15_000 },
+  { label: "30s", ms: 30_000 },
+  { label: "1m", ms: 60_000 },
+  { label: "2m", ms: 120_000 },
+  { label: "3m", ms: 180_000 },
+  { label: "5m", ms: 300_000 },
+  { label: "10m", ms: 600_000 },
+];
 const BOOK_DISTANCE_BANDS_PCT = [0.05, 0.1, 0.25, 0.5];
 
 function pctChange(from: number | null, to: number | null): number | null {
@@ -151,11 +169,57 @@ export function buildMarketSnapshot(
       oiEntryAtOrBefore(now - w.ms)?.contracts ?? null,
       oiNowEntry?.contracts ?? null,
     );
+
+  // ---- Sep 15 2026 (Karo), operator-approved high-resolution OI deltas ----
+  // USD-delta design choice (documented, not silently assumed): both
+  // the past and current contract readings are converted to USD using
+  // the SAME current `midPrice`, rather than looking up a separate
+  // historical price for the past sample. A single consistent price
+  // basis keeps this delta reflecting ONLY the contracts change --
+  // mixing in a second, different historical price would conflate an
+  // OI change with a price change, which priceChange*Pct already
+  // tracks separately. If midPrice is unavailable, the USD variant is
+  // null while the Pct variant (price-independent) can still populate.
+  const oiDeltasV2: Record<string, number | null> = {};
+  const oiVelocityByWindow: Record<string, number | null> = {};
+  for (const w of OI_DELTA_WINDOWS_V2_MS) {
+    const pastEntry = oiEntryAtOrBefore(now - w.ms);
+    const pctDelta = pctChange(
+      pastEntry?.contracts ?? null,
+      oiNowEntry?.contracts ?? null,
+    );
+    oiDeltasV2[`oiDelta${w.label}Pct`] = pctDelta;
+    oiDeltasV2[`oiDelta${w.label}Usd`] =
+      pastEntry !== null && oiNowEntry !== null && midPrice !== null
+        ? (oiNowEntry.contracts - pastEntry.contracts) * midPrice
+        : null;
+    if (w.label === "10s" || w.label === "30s" || w.label === "1m") {
+      oiVelocityByWindow[w.label] =
+        pctDelta !== null ? pctDelta / (w.ms / 1000) : null;
+    }
+  }
+  // Numerical rate-of-change-of-velocity only -- NEVER a semantic label
+  // (accelerating/decelerating/etc). (velocity10s - velocity30s) over
+  // the 20s gap between the two window endpoints gives a genuine,
+  // causal, purely numeric second-derivative-style measure: positive
+  // means the most-recent 10s rate is running faster (more positive)
+  // than the preceding 30s rate: negative means it's running slower.
+  // Interpretation/labeling is left entirely to future research.
+  const oiAccelerationPctPerSecSq =
+    oiVelocityByWindow["10s"] !== null && oiVelocityByWindow["30s"] !== null
+      ? (oiVelocityByWindow["10s"]! - oiVelocityByWindow["30s"]!) / 20
+      : null;
+
   const openInterest = {
     openInterest: oiNowEntry?.contracts ?? null,
     openInterestUsd:
       oiNowEntry && midPrice ? oiNowEntry.contracts * midPrice : null,
     ...oiDeltas,
+    ...oiDeltasV2,
+    oiVelocity10sPctPerSec: oiVelocityByWindow["10s"] ?? null,
+    oiVelocity30sPctPerSec: oiVelocityByWindow["30s"] ?? null,
+    oiVelocity1mPctPerSec: oiVelocityByWindow["1m"] ?? null,
+    oiAccelerationPctPerSecSq,
     oiUpdatedAt: oiNowEntry?.fetchedAt ?? null,
     oiAgeMs: oiNowEntry ? now - oiNowEntry.fetchedAt : null,
   };

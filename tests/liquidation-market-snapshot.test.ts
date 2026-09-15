@@ -1004,6 +1004,217 @@ scenario(
   },
 );
 
+// ============================================================
+// Sep 15 2026, operator-approved high-resolution OI research.
+// Tests for the new oiDelta*Pct/oiDelta*Usd/oiVelocity*/
+// oiAccelerationPctPerSecSq fields added to openInterest.
+// ============================================================
+
+scenario("OI: exact-T sample is allowed (not treated as future)", () => {
+  const deps = freshDeps();
+  const T = 1_000_000;
+  (deps.oiTracker as any).history.set(SYMBOL, [
+    { contracts: 5000, fetchedAt: T },
+  ]); // fetchedAt === T exactly
+  const event = liq("SELL", 1000, 10_000, T);
+  const snap = buildMarketSnapshot(deps, event, T) as any;
+  assert.strictEqual(
+    snap.openInterest.openInterest,
+    5000,
+    "a sample fetched at exactly T must be usable, not rejected",
+  );
+  assert.strictEqual(
+    snap.openInterest.oiAgeMs,
+    0,
+    "age must be exactly 0, never negative, for a sample fetched at exactly T",
+  );
+});
+
+scenario(
+  "OI: historical target uses the LATEST sample <= target, not the nearest overall",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 4000, fetchedAt: T - 35_000 }, // older, should be ignored in favor of the closer one below
+      { contracts: 4500, fetchedAt: T - 31_000 }, // this is the latest sample <= (T-30s), should be used for the 30s-ago comparison
+      { contracts: 5000, fetchedAt: T }, // current
+    ]);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    const expectedPct = ((5000 - 4500) / 4500) * 100;
+    assert.ok(
+      Math.abs(snap.openInterest.oiDelta30sPct - expectedPct) < 1e-9,
+      `oiDelta30sPct must use the 4500 sample (latest <= T-30s), not the 4000 one -- expected ~${expectedPct}, got ${snap.openInterest.oiDelta30sPct}`,
+    );
+  },
+);
+
+scenario(
+  "OI: insufficient history returns null, never a fabricated value",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 5000, fetchedAt: T },
+    ]); // only the current sample exists -- no history far enough back
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.openInterest.oiDelta10mPct,
+      null,
+      "with no sample 10 minutes back, oiDelta10mPct must be null, not fabricated",
+    );
+    assert.strictEqual(snap.openInterest.oiDelta10mUsd, null);
+  },
+);
+
+scenario(
+  "OI: all new delta windows (5s..10m) are causal -- a future sample never leaks into any of them",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 4000, fetchedAt: T - 700_000 }, // far enough back to serve as the "past" reference for every window up to 10m
+      { contracts: 5000, fetchedAt: T - 500 }, // "current" (at-or-before T)
+      { contracts: 999_999, fetchedAt: T + 300 }, // future -- must never be selected as "current" for any window
+    ]);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    const expectedPct = ((5000 - 4000) / 4000) * 100;
+    for (const w of [
+      "5s",
+      "10s",
+      "15s",
+      "30s",
+      "1m",
+      "2m",
+      "3m",
+      "5m",
+      "10m",
+    ]) {
+      assert.ok(
+        Math.abs(snap.openInterest[`oiDelta${w}Pct`] - expectedPct) < 1e-9,
+        `oiDelta${w}Pct must use the 4000 sample as its past reference and 5000 as current, never the future 999999 -- expected ~${expectedPct}, got ${snap.openInterest[`oiDelta${w}Pct`]}`,
+      );
+    }
+    assert.strictEqual(
+      snap.openInterest.openInterest,
+      5000,
+      "current OI must be the T-500 sample, never the future 999999 one",
+    );
+  },
+);
+
+scenario(
+  "OI: zero delta remains 0, not null (the exact bug class caught earlier in this project)",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 5000, fetchedAt: T - 10_000 },
+      { contracts: 5000, fetchedAt: T }, // unchanged -- delta should be exactly 0
+    ]);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.openInterest.oiDelta10sPct,
+      0,
+      "unchanged OI must produce delta=0, not null",
+    );
+    assert.strictEqual(
+      snap.openInterest.oiVelocity10sPctPerSec,
+      0,
+      "zero delta must produce zero velocity, not null",
+    );
+  },
+);
+
+scenario(
+  "OI: oiAgeMs is never negative even when history contains a future sample",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 5000, fetchedAt: T - 100 },
+      { contracts: 6000, fetchedAt: T + 5000 }, // future
+    ]);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.ok(
+      snap.openInterest.oiAgeMs >= 0,
+      `oiAgeMs must never be negative, got ${snap.openInterest.oiAgeMs}`,
+    );
+    assert.strictEqual(
+      snap.openInterest.oiAgeMs,
+      100,
+      "must reflect the causal T-100 sample's age, not the future sample's",
+    );
+  },
+);
+
+scenario(
+  "OI: oiVelocity and oiAcceleration are purely numeric -- no semantic classification string anywhere in the output",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 5100, fetchedAt: T - 30_000 },
+      { contracts: 5050, fetchedAt: T - 10_000 },
+      { contracts: 5000, fetchedAt: T },
+    ]);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    const serialized = JSON.stringify(snap.openInterest);
+    for (const forbidden of [
+      "accelerating",
+      "decelerating",
+      "stabilizing",
+      "rebuilding",
+    ]) {
+      assert.ok(
+        !serialized.toLowerCase().includes(forbidden),
+        `openInterest must never contain the semantic label "${forbidden}" -- classification is explicitly out of scope for this recorder`,
+      );
+    }
+    assert.strictEqual(
+      typeof snap.openInterest.oiVelocity10sPctPerSec,
+      "number",
+    );
+    assert.strictEqual(
+      typeof snap.openInterest.oiAccelerationPctPerSecSq,
+      "number",
+    );
+  },
+);
+
+scenario(
+  "OI: USD delta uses a single consistent current midPrice basis (documented design choice)",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 999,
+      bidQty: 1,
+      ask: 1001,
+      askQty: 1,
+      timestamp: T - 100,
+    }); // midPrice = 1000
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 4900, fetchedAt: T - 10_000 },
+      { contracts: 5000, fetchedAt: T },
+    ]);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.openInterest.oiDelta10sUsd,
+      (5000 - 4900) * 1000,
+      "USD delta must equal (contracts delta) x (current midPrice), the documented single-basis design",
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 // Explicit exit regardless of outcome -- freshDeps() constructs
 // OiTrackerService/FundingRateService instances (each with their own
