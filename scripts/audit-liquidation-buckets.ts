@@ -37,6 +37,8 @@ const RESOLUTION_MINUTES: Record<string, number> = {
   "1m": 1,
   "3m": 3,
   "5m": 5,
+  "10m": 10,
+  "15m": 15,
 };
 
 interface RawEvent {

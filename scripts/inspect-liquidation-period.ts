@@ -35,7 +35,7 @@ import type { RawLiquidationEventDoc } from "../src/infrastructure/mongo/raw-liq
  * are printed before querying so the window can be verified.
  *
  * RESOLUTION (Sep 15 2026, operator-requested): optional 5th CLI arg,
- * one of "1m"/"3m"/"5m", defaulting to "1m" when omitted -- and when
+ * one of "1m"/"3m"/"5m"/"10m"/"15m", defaulting to "1m" when omitted -- and when
  * omitted, output/filenames are byte-identical to the prior 1m-only
  * behavior (no suffix), so nothing that already depends on this
  * script's output breaks. All bucketing is built DIRECTLY from
@@ -49,6 +49,8 @@ const RESOLUTION_MINUTES: Record<string, number> = {
   "1m": 1,
   "3m": 3,
   "5m": 5,
+  "10m": 10,
+  "15m": 15,
 };
 
 function parseUtcDatetime(input: string): number {
@@ -137,7 +139,7 @@ async function main(): Promise<void> {
   const [, , symbolArg, fromArg, toArg, resolutionArgRaw] = process.argv;
   if (!symbolArg || !fromArg) {
     console.error(
-      'Usage: inspect-liquidation-period.ts <SYMBOL> "<FROM datetime>" ["<TO datetime>" | "now"] [1m|3m|5m]',
+      'Usage: inspect-liquidation-period.ts <SYMBOL> "<FROM datetime>" ["<TO datetime>" | "now"] [1m|3m|5m|10m|15m]',
     );
     process.exit(1);
   }
