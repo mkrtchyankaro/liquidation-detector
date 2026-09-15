@@ -15,6 +15,8 @@ import type { RawLiquidationEventDoc } from "../src/infrastructure/mongo/raw-liq
  * aggregation.
  *
  *   npx tsx scripts/inspect-liquidation-period.ts BTCUSDT "2026-09-15 13:20" "2026-09-15 15:10"
+ *   npx tsx scripts/inspect-liquidation-period.ts BTCUSDT "2026-09-15 13:20" "2026-09-15 15:10" 3m
+ *   npx tsx scripts/inspect-liquidation-period.ts BTCUSDT "2026-09-15 13:20" "2026-09-15 15:10" 5m
  *   npx tsx scripts/inspect-liquidation-period.ts XRPUSDT "2026-09-15 12:00" "now"
  *
  * MONGO CONFIG REUSE: constructs the SAME MongoDetectorConfig shape
@@ -31,7 +33,23 @@ import type { RawLiquidationEventDoc } from "../src/infrastructure/mongo/raw-liq
  * "+HH:MM"/"-HH:MM" suffix is respected as given. "now" (case-
  * insensitive) resolves to the current instant. Parsed UTC start/end
  * are printed before querying so the window can be verified.
+ *
+ * RESOLUTION (Sep 15 2026, operator-requested): optional 5th CLI arg,
+ * one of "1m"/"3m"/"5m", defaulting to "1m" when omitted -- and when
+ * omitted, output/filenames are byte-identical to the prior 1m-only
+ * behavior (no suffix), so nothing that already depends on this
+ * script's output breaks. All bucketing is built DIRECTLY from
+ * rawEvents (never resampled from a pre-built 1m table) and aligned
+ * to true UTC wall-clock boundaries divisible by the resolution
+ * (e.g. 3m buckets start at :00/:03/:06/.../:57, never relative to
+ * the first event's own timestamp) -- see bucketKey() below.
  */
+
+const RESOLUTION_MINUTES: Record<string, number> = {
+  "1m": 1,
+  "3m": 3,
+  "5m": 5,
+};
 
 function parseUtcDatetime(input: string): number {
   if (input.trim().toLowerCase() === "now") return Date.now();
@@ -48,8 +66,35 @@ function parseUtcDatetime(input: string): number {
 function fmtUtc(ms: number): string {
   return new Date(ms).toISOString();
 }
-function fmtMinute(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+/** True UTC wall-clock-aligned bucket key for the given resolution.
+ *  For resMinutes=1 this is IDENTICAL to the prior fmtMinute() (simple
+ *  truncation to the minute) -- for resMinutes=3/5, the minute is
+ *  floored to the nearest multiple of resMinutes (0,3,6,... or
+ *  0,5,10,...), matching the operator's own examples exactly (13:30-
+ *  13:32:59, 13:33-13:35:59, ... for 3m), never a rolling window
+ *  relative to the first event. */
+function bucketKey(ms: number, resMinutes: number): string {
+  const d = new Date(ms);
+  const alignedMinute = Math.floor(d.getUTCMinutes() / resMinutes) * resMinutes;
+  const aligned = new Date(
+    Date.UTC(
+      d.getUTCFullYear(),
+      d.getUTCMonth(),
+      d.getUTCDate(),
+      d.getUTCHours(),
+      alignedMinute,
+      0,
+      0,
+    ),
+  );
+  return aligned.toISOString().slice(0, 16).replace("T", " ");
+}
+/** Human-readable end-of-bucket label (e.g. "13:32:59") for console
+ *  display only -- purely cosmetic, not used for any bucketing logic. */
+function bucketEndLabel(bucketStartKey: string, resMinutes: number): string {
+  const startMs = Date.parse(bucketStartKey.replace(" ", "T") + ":00Z");
+  const endMs = startMs + resMinutes * 60_000 - 1000;
+  return new Date(endMs).toISOString().slice(11, 19);
 }
 function filenameSafe(ms: number): string {
   return new Date(ms).toISOString().slice(0, 16).replace(/[:T]/g, "-");
@@ -89,13 +134,22 @@ function n(v: unknown, digits = 2): string {
 }
 
 async function main(): Promise<void> {
-  const [, , symbolArg, fromArg, toArg] = process.argv;
+  const [, , symbolArg, fromArg, toArg, resolutionArgRaw] = process.argv;
   if (!symbolArg || !fromArg) {
     console.error(
-      'Usage: inspect-liquidation-period.ts <SYMBOL> "<FROM datetime>" ["<TO datetime>" | "now"]',
+      'Usage: inspect-liquidation-period.ts <SYMBOL> "<FROM datetime>" ["<TO datetime>" | "now"] [1m|3m|5m]',
     );
     process.exit(1);
   }
+  const resolutionArg = resolutionArgRaw?.trim().toLowerCase();
+  if (resolutionArg && !(resolutionArg in RESOLUTION_MINUTES)) {
+    console.error(
+      `Invalid resolution "${resolutionArgRaw}" -- must be one of: ${Object.keys(RESOLUTION_MINUTES).join(", ")}`,
+    );
+    process.exit(1);
+  }
+  const resolution = resolutionArg ?? "1m";
+  const resMinutes = RESOLUTION_MINUTES[resolution]!;
   const symbol = symbolArg.toUpperCase();
   const fromMs = parseUtcDatetime(fromArg);
   const toMs = toArg ? parseUtcDatetime(toArg) : Date.now();
@@ -107,6 +161,7 @@ async function main(): Promise<void> {
   }
 
   console.log(`Symbol: ${symbol}`);
+  console.log(`Resolution: ${resolution}`);
   console.log(`Parsed UTC window: ${fmtUtc(fromMs)} -> ${fmtUtc(toMs)}`);
 
   const mongoCfg: MongoDetectorConfig = {
@@ -250,9 +305,9 @@ async function main(): Promise<void> {
   console.log("\n=== SUMMARY ===");
   for (const [k, v] of Object.entries(summary)) console.log(`  ${k}: ${v}`);
 
-  // ---- 1-minute buckets ----
-  interface MinuteBucket {
-    minute: string;
+  // ---- buckets, built DIRECTLY from rawEvents at the requested resolution (never resampled from a pre-built table) ----
+  interface Bucket {
+    bucketStart: string;
     longCount: number;
     longUsd: number;
     shortCount: number;
@@ -266,21 +321,21 @@ async function main(): Promise<void> {
     maxPrice: number;
     latestSnapshot: CompactEvent;
   }
-  const byMinute = new Map<string, CompactEvent[]>();
+  const byBucket = new Map<string, CompactEvent[]>();
   for (const e of compact) {
-    const key = fmtMinute(e.timestamp);
-    let arr = byMinute.get(key);
+    const key = bucketKey(e.timestamp, resMinutes);
+    let arr = byBucket.get(key);
     if (!arr) {
       arr = [];
-      byMinute.set(key, arr);
+      byBucket.set(key, arr);
     }
     arr.push(e);
   }
-  const minuteKeys = [...byMinute.keys()].sort();
+  const bucketKeys = [...byBucket.keys()].sort();
   let cumLong = 0,
     cumShort = 0;
-  const minuteBuckets: MinuteBucket[] = minuteKeys.map((minute) => {
-    const events = byMinute.get(minute)!;
+  const buckets: Bucket[] = bucketKeys.map((bucketStart) => {
+    const events = byBucket.get(bucketStart)!;
     const longs = events.filter((e) => e.victim === "LONG"),
       shorts = events.filter((e) => e.victim === "SHORT");
     const longUsd = longs.reduce((s, e) => s + e.quoteQty, 0),
@@ -289,7 +344,7 @@ async function main(): Promise<void> {
     cumShort += shortUsd;
     const prices_ = events.map((e) => e.price);
     return {
-      minute,
+      bucketStart,
       longCount: longs.length,
       longUsd,
       shortCount: shorts.length,
@@ -306,8 +361,8 @@ async function main(): Promise<void> {
   });
 
   // bucket-sum validation
-  const bucketLongTotal = minuteBuckets.reduce((s, b) => s + b.longUsd, 0);
-  const bucketShortTotal = minuteBuckets.reduce((s, b) => s + b.shortUsd, 0);
+  const bucketLongTotal = buckets.reduce((s, b) => s + b.longUsd, 0);
+  const bucketShortTotal = buckets.reduce((s, b) => s + b.shortUsd, 0);
   if (Math.abs(bucketLongTotal - totalLongUsd) > 1e-6)
     violations.push(
       `bucket LONG total (${bucketLongTotal}) != raw LONG total (${totalLongUsd})`,
@@ -318,17 +373,19 @@ async function main(): Promise<void> {
     );
 
   // ---- console table ----
-  console.log("\n=== MINUTE-BY-MINUTE ===");
-  for (const b of minuteBuckets) {
+  console.log(`\n=== ${resolution.toUpperCase()} BUCKETS ===`);
+  for (const b of buckets) {
     const s = b.latestSnapshot;
-    console.log(`\n-- ${b.minute} UTC --`);
+    console.log(
+      `\n-- ${b.bucketStart}:00 to ${bucketEndLabel(b.bucketStart, resMinutes)} UTC --`,
+    );
     console.log(
       `  LIQUIDATION  long: ${b.longCount}ev $${n(b.longUsd, 0)}  short: ${b.shortCount}ev $${n(b.shortUsd, 0)}  total: $${n(b.totalUsd, 0)}  cumLong: $${n(b.cumulativeLongUsd, 0)}  cumShort: $${n(b.cumulativeShortUsd, 0)}`,
     );
     console.log(
       `  PRICE        first: ${n(b.firstPrice, 2)}  last: ${n(b.lastPrice, 2)}  min: ${n(b.minPrice, 2)}  max: ${n(b.maxPrice, 2)}`,
     );
-    const oiFirst = byMinute.get(b.minute)![0]!.openInterest,
+    const oiFirst = byBucket.get(b.bucketStart)![0]!.openInterest,
       oiLast = s.openInterest;
     const oiFirstUsd = get(oiFirst, "openInterestUsd") as number | null,
       oiLastUsd = get(oiLast, "openInterestUsd") as number | null;
@@ -346,7 +403,7 @@ async function main(): Promise<void> {
       `  OI           first: ${n(oiFirstUsd, 0)}  last: ${n(oiLastUsd, 0)}  absChange: ${n(oiAbsChange, 0)}  pctChange: ${n(oiPctChange)}  oi1m%: ${n(get(oiLast, "oiChange1mPct"))}  oi3m%: ${n(get(oiLast, "oiChange3mPct"))}  oi5m%: ${n(get(oiLast, "oiChange5mPct"))}`,
     );
     console.log(
-      `  TAKER        10s buy/sell/imb: ${n(get(s.takerFlow, "10s.takerBuyPct"), 1)}/${n(get(s.takerFlow, "10s.takerSellPct"), 1)}/${n(get(s.takerFlow, "10s.imbalance"), 3)}  30s: ${n(get(s.takerFlow, "30s.takerBuyPct"), 1)}/${n(get(s.takerFlow, "30s.takerSellPct"), 1)}/${n(get(s.takerFlow, "30s.imbalance"), 3)}  1m: ${n(get(s.takerFlow, "1m.takerBuyPct"), 1)}/${n(get(s.takerFlow, "1m.takerSellPct"), 1)}/${n(get(s.takerFlow, "1m.imbalance"), 3)}`,
+      `  TAKER        10s buy/sell/imb: ${n(get(s.takerFlow, "10s.takerBuyPct"), 1)}/${n(get(s.takerFlow, "10s.takerSellPct"), 1)}/${n(get(s.takerFlow, "10s.imbalance"), 3)}  30s: ${n(get(s.takerFlow, "30s.takerBuyPct"), 1)}/${n(get(s.takerFlow, "30s.takerSellPct"), 1)}/${n(get(s.takerFlow, "30s.imbalance"), 3)}  1m: ${n(get(s.takerFlow, "1m.takerBuyPct"), 1)}/${n(get(s.takerFlow, "1m.takerSellPct"), 1)}/${n(get(s.takerFlow, "1m.imbalance"), 3)}  2m: ${n(get(s.takerFlow, "2m.takerBuyPct"), 1)}/${n(get(s.takerFlow, "2m.takerSellPct"), 1)}/${n(get(s.takerFlow, "2m.imbalance"), 3)}  3m: ${n(get(s.takerFlow, "3m.takerBuyPct"), 1)}/${n(get(s.takerFlow, "3m.takerSellPct"), 1)}/${n(get(s.takerFlow, "3m.imbalance"), 3)}  5m: ${n(get(s.takerFlow, "5m.takerBuyPct"), 1)}/${n(get(s.takerFlow, "5m.takerSellPct"), 1)}/${n(get(s.takerFlow, "5m.imbalance"), 3)}`,
     );
     console.log(
       `  ORDERBOOK    bidD5bp: ${n(get(s.orderBook, "bidDepth5bpUsd"), 0)}  askD5bp: ${n(get(s.orderBook, "askDepth5bpUsd"), 0)}  imb5bp: ${n(get(s.orderBook, "imbalance5bp"), 3)}  imbΔ30s: ${n(get(s.orderBook, "bookImbalanceChangeVs30sAgo"), 3)}  imbΔ1m: ${n(get(s.orderBook, "bookImbalanceChangeVs1mAgo"), 3)}  bidΔ30s: ${n(get(s.orderBook, "bidDepthChangeVs30sAgoUsd"), 0)}  askΔ30s: ${n(get(s.orderBook, "askDepthChangeVs30sAgoUsd"), 0)}  bidΔ1m: ${n(get(s.orderBook, "bidDepthChangeVs1mAgoUsd"), 0)}  askΔ1m: ${n(get(s.orderBook, "askDepthChangeVs1mAgoUsd"), 0)}`,
@@ -355,10 +412,10 @@ async function main(): Promise<void> {
       `  ATR 1m       normal%: ${n(get(s.atr, "1m.normalAtrPct"))}  liq%: ${n(get(s.atr, "1m.liquidationDirectionAtrPct"))}  rec%: ${n(get(s.atr, "1m.recoveryDirectionAtrPct"))}  rec/liq: ${n(get(s.atr, "1m.recoveryToLiquidationAtrRatio"))}`,
     );
     console.log(
-      `  ATR 3m       liq%: ${n(get(s.atr, "3m.liquidationDirectionAtrPct"))}  rec%: ${n(get(s.atr, "3m.recoveryDirectionAtrPct"))}  rec/liq: ${n(get(s.atr, "3m.recoveryToLiquidationAtrRatio"))}`,
+      `  ATR 3m       normal%: ${n(get(s.atr, "3m.normalAtrPct"))}  liq%: ${n(get(s.atr, "3m.liquidationDirectionAtrPct"))}  rec%: ${n(get(s.atr, "3m.recoveryDirectionAtrPct"))}  rec/liq: ${n(get(s.atr, "3m.recoveryToLiquidationAtrRatio"))}`,
     );
     console.log(
-      `  ATR 5m       liq%: ${n(get(s.atr, "5m.liquidationDirectionAtrPct"))}  rec%: ${n(get(s.atr, "5m.recoveryDirectionAtrPct"))}  rec/liq: ${n(get(s.atr, "5m.recoveryToLiquidationAtrRatio"))}`,
+      `  ATR 5m       normal%: ${n(get(s.atr, "5m.normalAtrPct"))}  liq%: ${n(get(s.atr, "5m.liquidationDirectionAtrPct"))}  rec%: ${n(get(s.atr, "5m.recoveryDirectionAtrPct"))}  rec/liq: ${n(get(s.atr, "5m.recoveryToLiquidationAtrRatio"))}`,
     );
     console.log(
       `  POSITIONING  gLong%: ${n(get(s.positioning, "globalLongPct"), 1)}  gShort%: ${n(get(s.positioning, "globalShortPct"), 1)}  tLong%: ${n(get(s.positioning, "topTraderLongPositionPct"), 1)}  tShort%: ${n(get(s.positioning, "topTraderShortPositionPct"), 1)}`,
@@ -378,13 +435,19 @@ async function main(): Promise<void> {
   // ---- JSON export ----
   const outDir = path.join(process.cwd(), "research-output");
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
+  // Backward-compat: omitting the resolution arg produces the EXACT
+  // same filename as before (no suffix). Explicitly passing a
+  // resolution (including "1m") adds a "-Xm" suffix, matching the
+  // operator's own example (...-3m.json).
+  const resolutionSuffix = resolutionArg ? `-${resolution}` : "";
   const outPath = path.join(
     outDir,
-    `${symbol}-${filenameSafe(fromMs)}_to_${filenameSafe(toMs)}.json`,
+    `${symbol}-${filenameSafe(fromMs)}_to_${filenameSafe(toMs)}${resolutionSuffix}.json`,
   );
   const exportPayload = {
     metadata: {
       symbol,
+      resolution,
       requestedUtcFrom: fmtUtc(fromMs),
       requestedUtcTo: fmtUtc(toMs),
       generatedAt: fmtUtc(Date.now()),
@@ -393,8 +456,8 @@ async function main(): Promise<void> {
     },
     summary,
     rawEvents: compact,
-    minuteBuckets: minuteBuckets.map((b) => ({
-      minute: b.minute,
+    buckets: buckets.map((b) => ({
+      bucketStart: b.bucketStart,
       longCount: b.longCount,
       longUsd: b.longUsd,
       shortCount: b.shortCount,

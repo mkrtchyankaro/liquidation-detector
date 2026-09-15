@@ -23,7 +23,21 @@ import * as fs from "fs";
  * formula used everywhere in the codebase (victim===LONG -> SELL,
  * victim===SHORT -> BUY) -- it is not read from an independent field,
  * because no such field was ever persisted.
+ *
+ * RESOLUTION (Sep 15 2026, operator-requested multi-resolution
+ * support in inspect-liquidation-period.ts): this audit reads the
+ * export's own `metadata.resolution` and rebuilds buckets at that
+ * SAME resolution, using the identical UTC wall-clock alignment
+ * (floor-to-nearest-multiple-of-N-minutes) -- so running this audit
+ * against a 3m or 5m export cross-checks correctly instead of
+ * comparing against a hardcoded 1-minute rebuild.
  */
+
+const RESOLUTION_MINUTES: Record<string, number> = {
+  "1m": 1,
+  "3m": 3,
+  "5m": 5,
+};
 
 interface RawEvent {
   _id: string;
@@ -32,16 +46,17 @@ interface RawEvent {
   price: number;
   quoteQty: number;
 }
-interface MinuteBucketExport {
-  minute: string;
+interface BucketExport {
+  bucketStart: string;
   longCount: number;
   longUsd: number;
   shortCount: number;
   shortUsd: number;
 }
 interface ExportFile {
+  metadata: { resolution?: string };
   rawEvents: RawEvent[];
-  minuteBuckets: MinuteBucketExport[];
+  buckets: BucketExport[];
 }
 
 function parseUtcDatetime(input: string): number {
@@ -56,8 +71,21 @@ function parseUtcDatetime(input: string): number {
 function fmtMs(ts: number): string {
   return new Date(ts).toISOString();
 }
-function fmtMinute(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+function bucketKey(ms: number, resMinutes: number): string {
+  const d = new Date(ms);
+  const alignedMinute = Math.floor(d.getUTCMinutes() / resMinutes) * resMinutes;
+  const aligned = new Date(
+    Date.UTC(
+      d.getUTCFullYear(),
+      d.getUTCMonth(),
+      d.getUTCDate(),
+      d.getUTCHours(),
+      alignedMinute,
+      0,
+      0,
+    ),
+  );
+  return aligned.toISOString().slice(0, 16).replace("T", " ");
 }
 
 function main(): void {
@@ -71,6 +99,9 @@ function main(): void {
   const fromMs = parseUtcDatetime(fromArg),
     toMs = parseUtcDatetime(toArg);
   const raw: ExportFile = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  const resolution = raw.metadata?.resolution ?? "1m";
+  const resMinutes = RESOLUTION_MINUTES[resolution] ?? 1;
+  console.log(`Export resolution: ${resolution}`);
 
   const inWindow = raw.rawEvents
     .filter((e) => e.timestamp >= fromMs && e.timestamp <= toMs)
@@ -95,43 +126,45 @@ function main(): void {
     `\nDuplicate _id check: ${dupes.length === 0 ? "PASS (no duplicates)" : `FAIL -- ${JSON.stringify(dupes)}`}`,
   );
 
-  const byMinute = new Map<string, RawEvent[]>();
+  const byBucket = new Map<string, RawEvent[]>();
   for (const e of inWindow) {
-    const key = fmtMinute(e.timestamp);
-    let arr = byMinute.get(key);
+    const key = bucketKey(e.timestamp, resMinutes);
+    let arr = byBucket.get(key);
     if (!arr) {
       arr = [];
-      byMinute.set(key, arr);
+      byBucket.set(key, arr);
     }
     arr.push(e);
   }
-  console.log(`\n=== INDEPENDENTLY REBUILT MINUTE BUCKETS ===`);
-  const rebuiltBuckets: MinuteBucketExport[] = [];
-  for (const minute of [...byMinute.keys()].sort()) {
-    const events = byMinute.get(minute)!;
+  console.log(
+    `\n=== INDEPENDENTLY REBUILT ${resolution.toUpperCase()} BUCKETS ===`,
+  );
+  const rebuiltBuckets: BucketExport[] = [];
+  for (const bucketStart of [...byBucket.keys()].sort()) {
+    const events = byBucket.get(bucketStart)!;
     const longs = events.filter((e) => e.victim === "LONG"),
       shorts = events.filter((e) => e.victim === "SHORT");
     const longUsd = longs.reduce((s, e) => s + e.quoteQty, 0),
       shortUsd = shorts.reduce((s, e) => s + e.quoteQty, 0);
     rebuiltBuckets.push({
-      minute,
+      bucketStart,
       longCount: longs.length,
       longUsd,
       shortCount: shorts.length,
       shortUsd,
     });
     console.log(
-      `${minute} UTC: LONG ${longs.length}ev $${longUsd.toFixed(2)}  SHORT ${shorts.length}ev $${shortUsd.toFixed(2)}`,
+      `${bucketStart} UTC: LONG ${longs.length}ev $${longUsd.toFixed(2)}  SHORT ${shorts.length}ev $${shortUsd.toFixed(2)}`,
     );
   }
 
-  console.log(`\n=== CROSS-CHECK vs exporter's own minuteBuckets ===`);
+  console.log(`\n=== CROSS-CHECK vs exporter's own buckets ===`);
   let allMatch = true;
   for (const rb of rebuiltBuckets) {
-    const exported = raw.minuteBuckets.find((b) => b.minute === rb.minute);
+    const exported = raw.buckets.find((b) => b.bucketStart === rb.bucketStart);
     if (!exported) {
       console.log(
-        `${rb.minute}: FAIL -- no matching bucket in exported minuteBuckets`,
+        `${rb.bucketStart}: FAIL -- no matching bucket in exported buckets`,
       );
       allMatch = false;
       continue;
@@ -143,11 +176,11 @@ function main(): void {
       exported.shortCount === rb.shortCount &&
       Math.abs(exported.shortUsd - rb.shortUsd) < 1e-6;
     if (longMatch && shortMatch) {
-      console.log(`${rb.minute}: MATCH`);
+      console.log(`${rb.bucketStart}: MATCH`);
     } else {
       allMatch = false;
       console.log(
-        `${rb.minute}: MISMATCH -- rebuilt(long=${rb.longCount}/$${rb.longUsd.toFixed(2)}, short=${rb.shortCount}/$${rb.shortUsd.toFixed(2)}) vs exported(long=${exported.longCount}/$${exported.longUsd.toFixed(2)}, short=${exported.shortCount}/$${exported.shortUsd.toFixed(2)})`,
+        `${rb.bucketStart}: MISMATCH -- rebuilt(long=${rb.longCount}/$${rb.longUsd.toFixed(2)}, short=${rb.shortCount}/$${rb.shortUsd.toFixed(2)}) vs exported(long=${exported.longCount}/$${exported.longUsd.toFixed(2)}, short=${exported.shortCount}/$${exported.shortUsd.toFixed(2)})`,
       );
     }
   }
@@ -160,10 +193,10 @@ function main(): void {
     return s === 0 || s === 59;
   });
   if (boundaryEvents.length > 0) {
-    console.log(`\n=== MINUTE-BOUNDARY EVENTS (sanity check) ===`);
+    console.log(`\n=== BUCKET-BOUNDARY EVENTS (sanity check) ===`);
     for (const e of boundaryEvents)
       console.log(
-        `${fmtMs(e.timestamp)} -> bucketed as "${fmtMinute(e.timestamp)}"`,
+        `${fmtMs(e.timestamp)} -> bucketed as "${bucketKey(e.timestamp, resMinutes)}"`,
       );
   }
 }
