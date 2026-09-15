@@ -1,5 +1,26 @@
 import type { BookTicker, OrderBookSnapshot } from "../../shared/common.types";
 
+/** Sep 15 2026 (Karo), operator-reported CRITICAL FIX. The liquidation-
+ *  snapshot enrichment was reading getBookTicker()/getDepth()/
+ *  midPrice() -- "whatever is CURRENTLY latest in RAM" -- with zero
+ *  timestamp awareness. Since the WS liquidation stream and the WS
+ *  bookTicker/depth streams are separate, asynchronous message flows,
+ *  by the time the liquidation handler actually executes (network
+ *  latency, event-loop scheduling), a NEWER depth/bookTicker update
+ *  can already have overwritten "latest" -- confirmed in a real
+ *  production document: orderBookAgeMs=-923 (order-book state used
+ *  was 923ms AFTER the liquidation's own timestamp). Fix: a SHORT
+ *  bounded ring of RAW bookTicker/depth snapshots (last
+ *  RAW_RING_SIZE updates -- NOT the 5-minute derived-summary ring
+ *  below, which stays unchanged and was already causal), with new
+ *  *AtOrBefore() accessors that select the latest entry whose OWN
+ *  timestamp <= the requested cutoff. The plain getBookTicker()/
+ *  getDepth()/midPrice() methods are left unchanged (nothing else in
+ *  the codebase calls them -- confirmed via full-repo search -- so
+ *  this is purely additive, not a behavior change for any other
+ *  caller). */
+const RAW_RING_SIZE = 50;
+
 /** Sep 15 2026 (Karo), operator-requested -- compact derived summary
  *  retained per market update, NOT the raw 20-level snapshot (that
  *  would be the "300MB problem" this whole research thread has
@@ -12,7 +33,8 @@ import type { BookTicker, OrderBookSnapshot } from "../../shared/common.types";
  *  arrives first in a given second creates the sample, reading
  *  whatever the OTHER side's latest known value already is (so price
  *  history stays populated even if depth updates lag, and vice
- *  versa). */
+ *  versa). Already causal (getHistorySampleNear filters by
+ *  timestamp <= atOrBeforeMs) -- unaffected by this fix. */
 interface MarketHistoryEntry {
   timestamp: number;
   midPrice: number | null;
@@ -37,26 +59,45 @@ const MIN_SAMPLE_SPACING_MS = 1000;
 
 /**
  * Holds the most recent book-ticker (top of book) and the most recent
- * partial-depth snapshot per symbol, PLUS a compact, coarsely-sampled
- * history of derived price/bid/ask totals for computing recent-change
- * deltas. No reconstruction of full book, no raw-level history
- * retained, no new Binance request of any kind -- purely a retained
- * summary of data the bot already receives via its existing WS
- * subscriptions.
+ * partial-depth snapshot per symbol (unchanged, "latest" semantics,
+ * used by nothing else in the codebase today), PLUS:
+ *   - a SHORT bounded ring of RAW bookTicker/depth updates, used ONLY
+ *     for causal (timestamp <= T) lookups
+ *   - a compact, coarsely-sampled history of DERIVED price/bid/ask
+ *     totals for computing recent-change deltas (5min retention,
+ *     already causal, unchanged by this fix)
+ * No reconstruction of full order-book depth beyond the last 50
+ * updates, no new Binance request of any kind.
  */
 export class OrderbookStore {
   private bookTicker = new Map<string, BookTicker>();
   private depthSnap = new Map<string, OrderBookSnapshot>();
+  private bookTickerRing = new Map<string, BookTicker[]>();
+  private depthRing = new Map<string, OrderBookSnapshot[]>();
   private history = new Map<string, MarketHistoryEntry[]>();
   private lastSampleMs = new Map<string, number>();
 
   setBookTicker(bt: BookTicker): void {
     this.bookTicker.set(bt.symbol, bt);
+    let ring = this.bookTickerRing.get(bt.symbol);
+    if (!ring) {
+      ring = [];
+      this.bookTickerRing.set(bt.symbol, ring);
+    }
+    ring.push(bt);
+    if (ring.length > RAW_RING_SIZE) ring.shift();
     this.sampleIfDue(bt.symbol, bt.timestamp);
   }
 
   setDepth(snap: OrderBookSnapshot): void {
     this.depthSnap.set(snap.symbol, snap);
+    let ring = this.depthRing.get(snap.symbol);
+    if (!ring) {
+      ring = [];
+      this.depthRing.set(snap.symbol, ring);
+    }
+    ring.push(snap);
+    if (ring.length > RAW_RING_SIZE) ring.shift();
     this.sampleIfDue(snap.symbol, snap.timestamp);
   }
 
@@ -73,6 +114,49 @@ export class OrderbookStore {
     const bt = this.bookTicker.get(symbol);
     if (!bt) return null;
     return (bt.bid + bt.ask) / 2;
+  }
+
+  /** CAUSAL bookTicker: the latest retained update whose OWN
+   *  timestamp <= atOrBeforeMs. Returns null if every retained
+   *  update is after atOrBeforeMs (or none exist yet) -- NEVER falls
+   *  back to a future update just to avoid returning null. */
+  getBookTickerAtOrBefore(
+    symbol: string,
+    atOrBeforeMs: number,
+  ): BookTicker | null {
+    const ring = this.bookTickerRing.get(symbol);
+    if (!ring || ring.length === 0) return null;
+    let best: BookTicker | null = null;
+    for (const bt of ring)
+      if (
+        bt.timestamp <= atOrBeforeMs &&
+        (best === null || bt.timestamp > best.timestamp)
+      )
+        best = bt;
+    return best;
+  }
+
+  /** CAUSAL depth snapshot -- same contract as getBookTickerAtOrBefore. */
+  getDepthAtOrBefore(
+    symbol: string,
+    atOrBeforeMs: number,
+  ): OrderBookSnapshot | null {
+    const ring = this.depthRing.get(symbol);
+    if (!ring || ring.length === 0) return null;
+    let best: OrderBookSnapshot | null = null;
+    for (const snap of ring)
+      if (
+        snap.timestamp <= atOrBeforeMs &&
+        (best === null || snap.timestamp > best.timestamp)
+      )
+        best = snap;
+    return best;
+  }
+
+  /** CAUSAL mid price, derived from getBookTickerAtOrBefore(). */
+  midPriceAtOrBefore(symbol: string, atOrBeforeMs: number): number | null {
+    const bt = this.getBookTickerAtOrBefore(symbol, atOrBeforeMs);
+    return bt ? (bt.bid + bt.ask) / 2 : null;
   }
 
   /** Nearest retained history sample at or before `atOrBeforeMs`, or

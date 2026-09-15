@@ -95,8 +95,9 @@ export function buildMarketSnapshot(
   const symbol = liq.symbol;
   const victim: Side = liq.side === "SELL" ? "LONG" : "SHORT";
 
-  const bookTicker = deps.orderbookStore.getBookTicker(symbol);
-  const midPrice = deps.orderbookStore.midPrice(symbol);
+  // ---- CAUSAL order-book state: latest update at-or-before `now`, never "whatever is currently latest in RAM" ----
+  const bookTicker = deps.orderbookStore.getBookTickerAtOrBefore(symbol, now);
+  const midPrice = deps.orderbookStore.midPriceAtOrBefore(symbol, now);
   const spread = bookTicker ? bookTicker.ask - bookTicker.bid : null;
   const spreadPct =
     spread !== null && midPrice && midPrice > 0
@@ -129,9 +130,11 @@ export function buildMarketSnapshot(
     ...priceDeltas,
   };
 
-  const oiNow = deps.oiTracker.getCachedOI(symbol);
+  // ---- CAUSAL OI: current reading also goes through the at-or-before lookup, not getCachedOI()'s own "latest" semantics ----
   const oiHistory = deps.oiTracker.getOiHistory(symbol);
-  const oiAtOrBefore = (atOrBeforeMs: number): number | null => {
+  const oiEntryAtOrBefore = (
+    atOrBeforeMs: number,
+  ): { contracts: number; fetchedAt: number } | null => {
     let best: { contracts: number; fetchedAt: number } | null = null;
     for (const h of oiHistory)
       if (
@@ -139,20 +142,22 @@ export function buildMarketSnapshot(
         (best === null || h.fetchedAt > best.fetchedAt)
       )
         best = h;
-    return best?.contracts ?? null;
+    return best;
   };
+  const oiNowEntry = oiEntryAtOrBefore(now);
   const oiDeltas: Record<string, number | null> = {};
   for (const w of OI_DELTA_WINDOWS_MS)
     oiDeltas[`oiChange${w.label}Pct`] = pctChange(
-      oiAtOrBefore(now - w.ms),
-      oiNow?.contracts ?? null,
+      oiEntryAtOrBefore(now - w.ms)?.contracts ?? null,
+      oiNowEntry?.contracts ?? null,
     );
   const openInterest = {
-    openInterest: oiNow?.contracts ?? null,
-    openInterestUsd: oiNow && midPrice ? oiNow.contracts * midPrice : null,
+    openInterest: oiNowEntry?.contracts ?? null,
+    openInterestUsd:
+      oiNowEntry && midPrice ? oiNowEntry.contracts * midPrice : null,
     ...oiDeltas,
-    oiUpdatedAt: oiNow?.ts ?? null,
-    oiAgeMs: oiNow ? now - oiNow.ts : null,
+    oiUpdatedAt: oiNowEntry?.fetchedAt ?? null,
+    oiAgeMs: oiNowEntry ? now - oiNowEntry.fetchedAt : null,
   };
 
   const takerFlow: Record<string, unknown> = {};
@@ -175,7 +180,7 @@ export function buildMarketSnapshot(
           };
   }
 
-  const depth = deps.orderbookStore.getDepth(symbol);
+  const depth = deps.orderbookStore.getDepthAtOrBefore(symbol, now);
   const depthBands: Record<string, unknown> = {};
   if (depth && midPrice) {
     for (const pct of BOOK_DISTANCE_BANDS_PCT) {
@@ -201,7 +206,21 @@ export function buildMarketSnapshot(
     now - 30_000,
   );
   const hist1m = deps.orderbookStore.getHistorySampleNear(symbol, now - 60_000);
-  const wallSnap = deps.wallTracker.snapshot(symbol);
+  const wallSnapRaw = deps.wallTracker.snapshot(symbol);
+  // CAUSAL wall guard: WallTrackerService.snapshot() returns its own
+  // CURRENT internal state (no timestamp-bounded lookup exists there --
+  // full historization of wall tracking is out of scope for this fix,
+  // see this file's own final report). A wall whose own lastSeenAt is
+  // AFTER `now` reflects an update the liquidation handler could not
+  // have known about yet -- treat it as unavailable rather than leak it.
+  const topBidWall =
+    wallSnapRaw.topBidWall && wallSnapRaw.topBidWall.lastSeenAt <= now
+      ? wallSnapRaw.topBidWall
+      : null;
+  const topAskWall =
+    wallSnapRaw.topAskWall && wallSnapRaw.topAskWall.lastSeenAt <= now
+      ? wallSnapRaw.topAskWall
+      : null;
   const orderBook = {
     bestBid: bookTicker?.bid ?? null,
     bestAsk: bookTicker?.ask ?? null,
@@ -248,29 +267,25 @@ export function buildMarketSnapshot(
       hist1m?.askUsdTotal !== undefined
         ? histNow.askUsdTotal - hist1m.askUsdTotal
         : null,
-    nearestBidWallPrice: wallSnap.topBidWall?.representativePrice ?? null,
-    nearestBidWallUsd: wallSnap.topBidWall?.currentNotional ?? null,
+    nearestBidWallPrice: topBidWall?.representativePrice ?? null,
+    nearestBidWallUsd: topBidWall?.currentNotional ?? null,
     nearestBidWallDistancePct:
-      wallSnap.topBidWall && midPrice
-        ? (Math.abs(wallSnap.topBidWall.representativePrice - midPrice) /
-            midPrice) *
-          100
+      topBidWall && midPrice
+        ? (Math.abs(topBidWall.representativePrice - midPrice) / midPrice) * 100
         : null,
-    nearestBidWallPersistent: wallSnap.topBidWall?.isPersistent ?? null,
-    nearestBidWallAgeMs: wallSnap.topBidWall?.ageMs ?? null,
-    nearestBidWallPeakNotional: wallSnap.topBidWall?.peakNotional ?? null,
-    nearestAskWallPrice: wallSnap.topAskWall?.representativePrice ?? null,
-    nearestAskWallUsd: wallSnap.topAskWall?.currentNotional ?? null,
+    nearestBidWallPersistent: topBidWall?.isPersistent ?? null,
+    nearestBidWallAgeMs: topBidWall ? now - topBidWall.lastSeenAt : null,
+    nearestBidWallPeakNotional: topBidWall?.peakNotional ?? null,
+    nearestAskWallPrice: topAskWall?.representativePrice ?? null,
+    nearestAskWallUsd: topAskWall?.currentNotional ?? null,
     nearestAskWallDistancePct:
-      wallSnap.topAskWall && midPrice
-        ? (Math.abs(wallSnap.topAskWall.representativePrice - midPrice) /
-            midPrice) *
-          100
+      topAskWall && midPrice
+        ? (Math.abs(topAskWall.representativePrice - midPrice) / midPrice) * 100
         : null,
-    nearestAskWallPersistent: wallSnap.topAskWall?.isPersistent ?? null,
-    nearestAskWallAgeMs: wallSnap.topAskWall?.ageMs ?? null,
-    nearestAskWallPeakNotional: wallSnap.topAskWall?.peakNotional ?? null,
-    wallsPulled1m: wallSnap.pulled1mCount,
+    nearestAskWallPersistent: topAskWall?.isPersistent ?? null,
+    nearestAskWallAgeMs: topAskWall ? now - topAskWall.lastSeenAt : null,
+    nearestAskWallPeakNotional: topAskWall?.peakNotional ?? null,
+    wallsPulled1m: wallSnapRaw.pulled1mCount,
     orderBookUpdatedAt: depth?.timestamp ?? null,
     orderBookAgeMs: depth ? now - depth.timestamp : null,
   };
@@ -278,9 +293,10 @@ export function buildMarketSnapshot(
   const atrFor = (
     tracker: DirectionalAtrTracker,
     normalAtr: number | null,
+    intervalMs: number,
   ): Record<string, unknown> => {
-    const down = tracker.getDownAtr(symbol),
-      up = tracker.getUpAtr(symbol);
+    const down = tracker.getDownAtrAtOrBefore(symbol, now, intervalMs),
+      up = tracker.getUpAtrAtOrBefore(symbol, now, intervalMs);
     const liqDirAtr = victim === "LONG" ? down : up,
       recDirAtr = victim === "LONG" ? up : down;
     return {
@@ -303,28 +319,53 @@ export function buildMarketSnapshot(
           : null,
     };
   };
+  const lastClosedAtOrBefore = (
+    interval: "1m" | "3m" | "5m",
+  ): number | null => {
+    const closed = deps.candleStore.getClosed(symbol, interval);
+    let best: number | null = null;
+    for (const c of closed)
+      if (c.closeTime <= now && (best === null || c.openTime > best))
+        best = c.openTime;
+    return best;
+  };
   const atr = {
     "1m": atrFor(
       deps.directionalAtr1m,
-      deps.atrTracker.getWilderATR(symbol, "1m", 14),
+      deps.atrTracker.getWilderATRAtOrBefore(symbol, "1m", 14, now),
+      60_000,
     ),
     "3m": atrFor(
       deps.directionalAtr3m,
-      deps.atrTracker.getWilderATR(symbol, "3m", 14),
+      deps.atrTracker.getWilderATRAtOrBefore(symbol, "3m", 14, now),
+      180_000,
     ),
     "5m": atrFor(
       deps.directionalAtr5m,
-      deps.atrTracker.getWilderATR(symbol, "5m", 14),
+      deps.atrTracker.getWilderATRAtOrBefore(symbol, "5m", 14, now),
+      300_000,
     ),
     lastClosedCandleTs: {
-      "1m": deps.candleStore.lastClosed(symbol, "1m")?.openTime ?? null,
-      "3m": deps.candleStore.lastClosed(symbol, "3m")?.openTime ?? null,
-      "5m": deps.candleStore.lastClosed(symbol, "5m")?.openTime ?? null,
+      "1m": lastClosedAtOrBefore("1m"),
+      "3m": lastClosedAtOrBefore("3m"),
+      "5m": lastClosedAtOrBefore("5m"),
     },
   };
 
-  const globalRatio = deps.fundingStats.getLongShortRatio(symbol);
-  const topPositionRatio = deps.fundingStats.getPositionRatio(symbol);
+  const globalRatioRaw = deps.fundingStats.getLongShortRatio(symbol);
+  const topPositionRatioRaw = deps.fundingStats.getPositionRatio(symbol);
+  // CAUSAL guard: FundingStatsService keeps only ONE cached value per
+  // symbol (no history ring -- unlike OI, adding one is out of
+  // proportionate scope for a 5-minute-cadence poll, see this file's
+  // own final report). Reject rather than use if its own fetchedAt is
+  // somehow after `now` (REST response landed in the same instant the
+  // liquidation handler ran).
+  const globalRatio =
+    globalRatioRaw && globalRatioRaw.fetchedAt <= now ? globalRatioRaw : null;
+  const topPositionRatio =
+    topPositionRatioRaw && topPositionRatioRaw.fetchedAt <= now
+      ? topPositionRatioRaw
+      : null;
   const positioning = {
     globalLongShortAccountRatio: globalRatio?.ratio ?? null,
     globalLongPct: globalRatio ? globalRatio.longAccount * 100 : null,
@@ -341,8 +382,13 @@ export function buildMarketSnapshot(
     positioningAgeMs: globalRatio ? now - globalRatio.fetchedAt : null,
   };
 
-  const fundingRateValue = deps.fundingRate.getFundingRate(symbol);
-  const fundingFetchedAt = deps.fundingRate.getFundingRateFetchedAt(symbol);
+  const fundingRateValueRaw = deps.fundingRate.getFundingRate(symbol);
+  const fundingFetchedAtRaw = deps.fundingRate.getFundingRateFetchedAt(symbol);
+  // Same causal guard as positioning above.
+  const fundingIsCausal =
+    fundingFetchedAtRaw !== null && fundingFetchedAtRaw <= now;
+  const fundingRateValue = fundingIsCausal ? fundingRateValueRaw : null;
+  const fundingFetchedAt = fundingIsCausal ? fundingFetchedAtRaw : null;
   const funding = {
     fundingRate: fundingRateValue,
     fundingUpdatedAt: fundingFetchedAt,

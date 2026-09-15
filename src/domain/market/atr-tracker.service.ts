@@ -191,6 +191,30 @@ export class ATRTrackerService {
     return v > 0 ? v : null;
   }
 
+  /** Sep 15 2026 (Karo), operator-reported causality audit. Same
+   *  reasoning as DirectionalAtrTracker's getDownAtrAtOrBefore() --
+   *  getWilderATR() above uses whatever candles are CURRENTLY in
+   *  researchState with zero timestamp awareness. This variant
+   *  filters to candles whose OWN closeTime <= atOrBeforeMs before
+   *  recomputing (researchState candles carry their real closeTime,
+   *  unlike DirectionalAtrTracker's compact {t,v} history, so no
+   *  interval-duration reconstruction is needed here). Returns null
+   *  if fewer than period+1 candles closed by atOrBeforeMs. */
+  getWilderATRAtOrBefore(
+    symbol: string,
+    interval: KlineInterval,
+    period: number,
+    atOrBeforeMs: number,
+  ): number | null {
+    const key = this.keyFor(symbol, interval);
+    const candles = this.researchState.get(key);
+    if (!candles) return null;
+    const causal = candles.filter((c) => c.closeTime <= atOrBeforeMs);
+    if (causal.length < period + 1) return null;
+    const v = wilderAtr(causal, period);
+    return v > 0 ? v : null;
+  }
+
   /** Diagnostic only -- how many candles the SEPARATE research buffer
    *  currently holds for this (symbol, interval), so a caller (or the
    *  monitoring report) can tell "cold, still warming up" from "warm,

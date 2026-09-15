@@ -38,6 +38,11 @@ function scenario(name: string, fn: () => void): void {
 
 const SYMBOL = "BTCUSDT";
 
+const INTERVAL_MS: Record<"1m" | "3m" | "5m", number> = {
+  "1m": 60_000,
+  "3m": 180_000,
+  "5m": 300_000,
+};
 function mkCandle(
   interval: "1m" | "3m" | "5m",
   openTime: number,
@@ -50,7 +55,7 @@ function mkCandle(
     symbol: SYMBOL,
     interval,
     openTime,
-    closeTime: openTime + 59999,
+    closeTime: openTime + INTERVAL_MS[interval] - 1,
     open: o,
     high: h,
     low: l,
@@ -322,6 +327,298 @@ scenario(
         body.includes("fundingStats.stop()") &&
         body.includes("fundingRate.stop()"),
     );
+  },
+);
+
+// ============================================================
+// CAUSALITY REGRESSION TESTS -- Sep 15 2026, operator-reported.
+// A real production document showed orderBookAgeMs=-923: the
+// snapshot builder used order-book state 923ms AFTER the
+// liquidation's own timestamp. Every scenario below proves ONE
+// specific source can never leak future information, using the
+// EXACT reproduction the operator specified: state A at T-500ms,
+// state B at T+300ms, liquidation at T, snapshot MUST use state A.
+// ============================================================
+
+scenario(
+  "CAUSALITY: future order-book (bookTicker+depth) update excluded, state at T-500ms used instead",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 999,
+      bidQty: 1,
+      ask: 1001,
+      askQty: 1,
+      timestamp: T - 500,
+    }); // state A
+    deps.orderbookStore.setDepth({
+      symbol: SYMBOL,
+      bids: [{ price: 999, quantity: 5 }],
+      asks: [{ price: 1001, quantity: 5 }],
+      timestamp: T - 500,
+    } as any);
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 5999,
+      bidQty: 1,
+      ask: 6001,
+      askQty: 1,
+      timestamp: T + 300,
+    }); // state B -- future, must be rejected
+    deps.orderbookStore.setDepth({
+      symbol: SYMBOL,
+      bids: [{ price: 5999, quantity: 999 }],
+      asks: [{ price: 6001, quantity: 999 }],
+      timestamp: T + 300,
+    } as any);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.priceState.bestBid,
+      999,
+      "must use state A's bid (999), never state B's future bid (5999)",
+    );
+    assert.strictEqual(
+      snap.orderBook.orderBookUpdatedAt,
+      T - 500,
+      "orderBookUpdatedAt must be state A's timestamp",
+    );
+    assert.ok(
+      snap.orderBook.orderBookAgeMs >= 0,
+      `orderBookAgeMs must never be negative, got ${snap.orderBook.orderBookAgeMs}`,
+    );
+  },
+);
+
+scenario(
+  "CAUSALITY: future price-history sample excluded from priceChange deltas",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 999,
+      bidQty: 1,
+      ask: 1001,
+      askQty: 1,
+      timestamp: T - 60_000 - 500,
+    }); // ~1m ago, state A
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 99999,
+      bidQty: 1,
+      ask: 100001,
+      askQty: 1,
+      timestamp: T + 300,
+    }); // future, must never affect any delta
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.ok(
+      Math.abs(snap.priceState.priceChange1mPct) < 1,
+      `priceChange1mPct must reflect state A (~0%), not the future spike -- got ${snap.priceState.priceChange1mPct}`,
+    );
+  },
+);
+
+scenario(
+  "CAUSALITY: future aggTrade excluded from taker-flow windows (pre-existing AggressiveFlowService guard)",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.aggressiveFlow.ingest({
+      symbol: SYMBOL,
+      quoteQty: 1000,
+      aggressor: "BUY",
+      timestamp: T - 5_000,
+    } as any);
+    deps.aggressiveFlow.ingest({
+      symbol: SYMBOL,
+      quoteQty: 999_999,
+      aggressor: "SELL",
+      timestamp: T + 5_000,
+    } as any); // future
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.takerFlow["10s"].takerSellUsd,
+      0,
+      "future SELL trade must not appear in the 10s window",
+    );
+    assert.strictEqual(snap.takerFlow["10s"].takerBuyUsd, 1000);
+  },
+);
+
+scenario(
+  "CAUSALITY: future OI update excluded, historical OI at-or-before T used instead",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 5000, fetchedAt: T - 500 }, // state A
+      { contracts: 999_999, fetchedAt: T + 300 }, // future -- must be rejected
+    ]);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.openInterest.openInterest,
+      5000,
+      "must use the OI reading from T-500ms, never the future one",
+    );
+    assert.strictEqual(snap.openInterest.oiUpdatedAt, T - 500);
+    assert.ok(
+      snap.openInterest.oiAgeMs >= 0,
+      `oiAgeMs must never be negative, got ${snap.openInterest.oiAgeMs}`,
+    );
+  },
+);
+
+scenario("CAUSALITY: future positioning update excluded", () => {
+  const deps = freshDeps();
+  const T = 1_000_000;
+  (deps.fundingStats as any).cache.set(SYMBOL, {
+    symbol: SYMBOL,
+    ratio: 1.5,
+    longAccount: 0.6,
+    shortAccount: 0.4,
+    bucketTime: T + 300,
+    fetchedAt: T + 300,
+  }); // future
+  const event = liq("SELL", 1000, 10_000, T);
+  const snap = buildMarketSnapshot(deps, event, T) as any;
+  assert.strictEqual(
+    snap.positioning.globalLongShortAccountRatio,
+    null,
+    "a positioning reading fetched AFTER T must be rejected, not used",
+  );
+  assert.strictEqual(snap.positioning.positioningAgeMs, null);
+});
+
+scenario("CAUSALITY: future funding update excluded", () => {
+  const deps = freshDeps();
+  const T = 1_000_000;
+  (deps.fundingRate as any).cache.set(SYMBOL, {
+    rate: 0.0005,
+    fetchedAt: T + 300,
+  }); // future
+  const event = liq("SELL", 1000, 10_000, T);
+  const snap = buildMarketSnapshot(deps, event, T) as any;
+  assert.strictEqual(
+    snap.funding.fundingRate,
+    null,
+    "a funding rate fetched AFTER T must be rejected, not used",
+  );
+  assert.strictEqual(snap.funding.fundingAgeMs, null);
+});
+
+scenario(
+  "CAUSALITY: future liquidation event excluded from same-side/opposite-side context",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.liquidationStore.ingest(liq("SELL", 999, 5000, T - 500)); // state A, valid
+    deps.liquidationStore.ingest(liq("BUY", 1001, 999_999, T + 5_000)); // future, must be excluded even though it's a real store entry
+    const event = liq("SELL", 1000, 10_000, T);
+    deps.liquidationStore.ingest(event);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.liquidationContext.oppositeSideLiqUsd30s,
+      0,
+      "the future opposite-side liquidation must not be counted",
+    );
+    assert.strictEqual(
+      snap.liquidationContext.sameSideLiqUsd30s,
+      15_000,
+      "only the two same-side events at/before T (5000+10000)",
+    );
+  },
+);
+
+scenario(
+  "CAUSALITY: ATR candle closing after T excluded, causal ATR-at-T used instead",
+  () => {
+    const deps = freshDeps();
+    const T = 5 * 60_000; // T = 5 minutes in
+    // 5 closed 1m candles well before T
+    let t = 0;
+    for (let i = 0; i < 5; i++) {
+      const c = mkCandle("1m", t, 1000, 1000, 1000 - i, 1000 - i);
+      deps.directionalAtr1m.onCandle(c);
+      t += 60_000;
+    }
+    const preT_downAtr = deps.directionalAtr1m.getDownAtrAtOrBefore(
+      SYMBOL,
+      T,
+      60_000,
+    );
+    // a candle that CLOSES after T (openTime=T, closes at T+59999) -- must not affect an AtOrBefore(T) read
+    deps.directionalAtr1m.onCandle(mkCandle("1m", T, 1000, 1000, 1, 1)); // dramatic low -- would swing ATR if wrongly included
+    const postFutureCandle_downAtr = deps.directionalAtr1m.getDownAtrAtOrBefore(
+      SYMBOL,
+      T,
+      60_000,
+    );
+    assert.strictEqual(
+      postFutureCandle_downAtr,
+      preT_downAtr,
+      "a candle closing after T must not change the AtOrBefore(T) ATR reading",
+    );
+  },
+);
+
+scenario(
+  "CAUSALITY: no ageMs field is ever negative, across a full snapshot with mixed past/future sources",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 999,
+      bidQty: 1,
+      ask: 1001,
+      askQty: 1,
+      timestamp: T - 100,
+    });
+    deps.orderbookStore.setDepth({
+      symbol: SYMBOL,
+      bids: [{ price: 999, quantity: 5 }],
+      asks: [{ price: 1001, quantity: 5 }],
+      timestamp: T - 100,
+    } as any);
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 5999,
+      bidQty: 1,
+      ask: 6001,
+      askQty: 1,
+      timestamp: T + 9000,
+    }); // future
+    (deps.oiTracker as any).history.set(SYMBOL, [
+      { contracts: 5000, fetchedAt: T - 100 },
+      { contracts: 1, fetchedAt: T + 9000 },
+    ]); // future
+    (deps.fundingStats as any).cache.set(SYMBOL, {
+      symbol: SYMBOL,
+      ratio: 1,
+      longAccount: 0.5,
+      shortAccount: 0.5,
+      bucketTime: T + 9000,
+      fetchedAt: T + 9000,
+    }); // future
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    const ageFields: [string, number | null][] = [
+      ["openInterest.oiAgeMs", snap.openInterest.oiAgeMs],
+      ["orderBook.orderBookAgeMs", snap.orderBook.orderBookAgeMs],
+      ["positioning.positioningAgeMs", snap.positioning.positioningAgeMs],
+      ["funding.fundingAgeMs", snap.funding.fundingAgeMs],
+    ];
+    for (const [name, v] of ageFields)
+      assert.ok(
+        v === null || v >= 0,
+        `${name} must never be negative, got ${v}`,
+      );
   },
 );
 

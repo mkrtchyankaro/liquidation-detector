@@ -1,4 +1,4 @@
-import type { Liquidation, OrderSide } from '../../shared/common.types';
+import type { Liquidation, OrderSide } from "../../shared/common.types";
 
 export class LiquidationStore {
   private byMap = new Map<string, Liquidation[]>();
@@ -10,7 +10,10 @@ export class LiquidationStore {
 
   ingest(liq: Liquidation): void {
     let arr = this.byMap.get(liq.symbol);
-    if (!arr) { arr = []; this.byMap.set(liq.symbol, arr); }
+    if (!arr) {
+      arr = [];
+      this.byMap.set(liq.symbol, arr);
+    }
     arr.push(liq);
     if (arr.length > this.hardCap) arr.splice(0, arr.length - this.hardCap);
   }
@@ -25,10 +28,22 @@ export class LiquidationStore {
     return arr;
   }
 
-  inWindow(symbol: string, ms: number, now: number = Date.now()): Liquidation[] {
+  /** Sep 15 2026 (Karo), operator-reported causality audit -- added
+   *  the upper bound (`l.timestamp <= now`) that was previously
+   *  missing here. Same bug CLASS as the order-book fix: without this,
+   *  a different liquidation for the same symbol that got ingest()'d
+   *  moments after this one (but with an earlier or equal timestamp
+   *  relative to the caller's own `now`) could never leak forward, but
+   *  one ingested with a LATER timestamp than the window being asked
+   *  about absolutely could. Defensive, zero real-world cost. */
+  inWindow(
+    symbol: string,
+    ms: number,
+    now: number = Date.now(),
+  ): Liquidation[] {
     const arr = this.all(symbol, now);
     const cutoff = now - ms;
-    return arr.filter((l) => l.timestamp >= cutoff);
+    return arr.filter((l) => l.timestamp >= cutoff && l.timestamp <= now);
   }
 
   /**

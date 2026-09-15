@@ -111,6 +111,45 @@ export class DirectionalAtrTracker implements DirectionalAtrReader {
     return this.state.get(symbol)?.upAtr ?? null;
   }
 
+  /** Sep 15 2026 (Karo), operator-reported causality audit. Same bug
+   *  CLASS as the order-book fix: getDownAtr()/getUpAtr() above return
+   *  the value as-of the LAST candle fed in, with zero timestamp
+   *  awareness -- if a candle closes chronologically after a
+   *  liquidation event's own timestamp but gets WS-delivered and
+   *  processed before that liquidation's own handler runs, "latest"
+   *  would silently include future information. Reuses the ALREADY-
+   *  retained downHistory/upHistory (no new state) -- `t` is the
+   *  candle's openTime, so `t + intervalMs` reconstructs its
+   *  closeTime without needing to store it separately. Returns null
+   *  if every retained entry closed after atOrBeforeMs (or none
+   *  exist), never falling back to a future value. */
+  getDownAtrAtOrBefore(
+    symbol: string,
+    atOrBeforeMs: number,
+    intervalMs: number,
+  ): number | null {
+    const hist = this.state.get(symbol)?.downHistory;
+    if (!hist || hist.length === 0) return null;
+    let best: { t: number; v: number } | null = null;
+    for (const h of hist)
+      if (h.t + intervalMs <= atOrBeforeMs && (best === null || h.t > best.t))
+        best = h;
+    return best?.v ?? null;
+  }
+  getUpAtrAtOrBefore(
+    symbol: string,
+    atOrBeforeMs: number,
+    intervalMs: number,
+  ): number | null {
+    const hist = this.state.get(symbol)?.upHistory;
+    if (!hist || hist.length === 0) return null;
+    let best: { t: number; v: number } | null = null;
+    for (const h of hist)
+      if (h.t + intervalMs <= atOrBeforeMs && (best === null || h.t > best.t))
+        best = h;
+    return best?.v ?? null;
+  }
+
   /** Normalized N-minute slope: (current - value N candles back) / N
    *  / preAtr. Null if history doesn't yet reach back N candles, or
    *  preAtr <= 0 (division guard). Looked up by CANDLE COUNT, not
