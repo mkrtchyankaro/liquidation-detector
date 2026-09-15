@@ -622,6 +622,118 @@ scenario(
   },
 );
 
+// ============================================================
+// Sep 15 2026, operator-reported second gap. Root cause: the
+// orchestrator's own "bookTicker" WS handler never called
+// orderbookStore.setBookTicker() -- only "orderbook" (depth) called
+// its own setDepth(). OrderbookStore's causal ring/accessors
+// themselves were always correct (proven by the CAUSALITY tests
+// above); they simply never received bookTicker data to serve in
+// production. Fixed with a single added call, not a design change.
+// ============================================================
+
+scenario(
+  "WIRING: orchestrator's bookTicker WS handler feeds orderbookStore.setBookTicker() (the actual root cause)",
+  () => {
+    const src = fs.readFileSync(
+      require.resolve("../src/services/market-data-orchestrator.ts"),
+      "utf8",
+    );
+    const idx = src.indexOf('this.ws.on("bookTicker"');
+    assert.ok(idx > -1, "bookTicker handler must exist");
+    const body = src.slice(idx, idx + 1200);
+    assert.ok(
+      body.includes("this.orderbookStore.setBookTicker(b)"),
+      "the bookTicker handler must feed orderbookStore.setBookTicker() -- this was the actual root cause of bestBid/bestAsk/midPrice/priceChange*Pct always being null in production",
+    );
+  },
+);
+
+scenario(
+  "END-TO-END: realistic bookTicker+depth sequence -> liquidation -> every previously-null field is now populated and causal",
+  () => {
+    const deps = freshDeps();
+    let t = 0;
+    // warm up 1m candles so ATR (and thus the *Pct fields) has something real to normalize
+    for (let i = 0; i < 20; i++) {
+      const price = 1.4 - i * 0.0001;
+      const c = mkCandle("1m", t, price, price + 0.0002, price - 0.0002, price);
+      deps.candleStore.ingest(c);
+      deps.atrTracker.onCandle(c);
+      deps.directionalAtr1m.onCandle(c);
+      t += 60_000;
+    }
+    // realistic bookTicker + depth sequence covering the full 5-minute
+    // window (one sample every 6s), so every priceChange*Pct window has
+    // a real historical sample to compare against
+    for (let i = 0; i < 50; i++) {
+      const ts = t - (50 - i) * 6_000;
+      const price = 1.4 - i * 0.00002;
+      deps.orderbookStore.setBookTicker({
+        symbol: SYMBOL,
+        bid: price - 0.0001,
+        bidQty: 10,
+        ask: price + 0.0001,
+        askQty: 10,
+        timestamp: ts,
+      });
+      deps.orderbookStore.setDepth({
+        symbol: SYMBOL,
+        bids: [{ price: price - 0.0001, quantity: 5000 }],
+        asks: [{ price: price + 0.0001, quantity: 4000 }],
+        timestamp: ts,
+      } as any);
+    }
+    const event = liq("SELL", 1.399, 5000, t);
+    const snap = buildMarketSnapshot(deps, event, t) as any;
+
+    assert.ok(
+      snap.priceState.bestBid !== null,
+      "bestBid must now be populated",
+    );
+    assert.ok(
+      snap.priceState.bestAsk !== null,
+      "bestAsk must now be populated",
+    );
+    assert.ok(
+      snap.priceState.midPrice !== null,
+      "midPrice must now be populated",
+    );
+    assert.ok(snap.priceState.spread !== null, "spread must now be populated");
+    assert.ok(
+      snap.priceState.spreadPct !== null,
+      "spreadPct must now be populated",
+    );
+    for (const w of ["10s", "30s", "1m", "2m", "3m", "5m"])
+      assert.ok(
+        snap.priceState[`priceChange${w}Pct`] !== null,
+        `priceChange${w}Pct must now be populated`,
+      );
+
+    assert.ok(snap.orderBook.bestBid !== null);
+    assert.ok(
+      snap.orderBook.depthBands !== null,
+      "depthBands must now be populated",
+    );
+
+    assert.ok(
+      snap.atr["1m"].normalAtrPct !== null,
+      "normalAtrPct must now be populated once midPrice is available",
+    );
+    assert.ok(snap.atr["1m"].atrDownPct !== null);
+    assert.ok(snap.atr["1m"].atrUpPct !== null);
+    assert.ok(snap.atr["1m"].liquidationDirectionAtrPct !== null);
+    assert.ok(snap.atr["1m"].recoveryDirectionAtrPct !== null);
+
+    // causality still holds throughout
+    assert.ok(snap.orderBook.orderBookAgeMs >= 0);
+    assert.ok(
+      snap.priceState.bestBid < 1.4 && snap.priceState.bestBid > 1.38,
+      "must reflect the LAST bookTicker sample at-or-before t, not a future or unrelated value",
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 // Explicit exit regardless of outcome -- freshDeps() constructs
 // OiTrackerService/FundingRateService instances (each with their own

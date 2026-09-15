@@ -764,6 +764,18 @@ export class MarketDataOrchestrator {
     });
 
     this.ws.on("bookTicker", (b) => {
+      // Sep 15 2026 (Karo), operator-reported -- ROOT CAUSE of the
+      // second causality gap: this handler was feeding v5.onTick /
+      // reconciliation.onTick / etc (all unchanged below) but NEVER
+      // fed orderbookStore itself -- setDepth() below (in the
+      // "orderbook" handler) WAS wired, setBookTicker() never was.
+      // That's why depth-derived fields (bookImbalanceChangeVs30sAgo,
+      // orderBookUpdatedAt) were populated while bestBid/bestAsk/
+      // midPrice/priceChange*Pct were always null: OrderbookStore's
+      // causal ring/accessors were already correct (see
+      // orderbook.store.ts), they simply never received any data to
+      // serve. Single missing call, not a design gap.
+      this.orderbookStore.setBookTicker(b);
       const mid = (b.bid + b.ask) / 2;
       this.lastKnownPriceForMain.set(b.symbol, mid);
       const outcomes = this.v5.onTick(b.symbol, mid, b.timestamp);
