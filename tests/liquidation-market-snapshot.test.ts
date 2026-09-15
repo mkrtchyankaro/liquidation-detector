@@ -854,6 +854,156 @@ scenario(
   },
 );
 
+// ============================================================
+// Sep 15 2026, operator-reported FOURTH gap. Root cause: NOT the
+// builder or causality -- the depthBands["0.05pct"] key contains a
+// literal embedded dot, which the research exporter's naive
+// path.split(".") parser could not traverse ("depthBands.0.05pct.
+// bidDepthUsd" splits into 4 segments instead of 3). The builder's
+// own causal computation was already correct throughout. Fixed by
+// adding flat, explicitly-named aliases (bidDepth5bpUsd/
+// askDepth5bpUsd/imbalance5bp) alongside the existing depthBands
+// object (unchanged, all 4 bands, nested) -- additive, not a
+// restructure -- and pointing the exporter at the flat names.
+// ============================================================
+
+scenario(
+  "5BP DEPTH: bidDepth5bpUsd/askDepth5bpUsd/imbalance5bp are populated with valid causal depth",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 999,
+      bidQty: 1,
+      ask: 1001,
+      askQty: 1,
+      timestamp: T - 100,
+    });
+    // mid = 1000, 5bp = 0.05% = 0.5 -- levels within [999.5, 1000.5] should count; further levels should not
+    deps.orderbookStore.setDepth({
+      symbol: SYMBOL,
+      bids: [
+        { price: 999.7, quantity: 10 },
+        { price: 990, quantity: 999 },
+      ], // 990 is outside the 5bp band, must be excluded
+      asks: [
+        { price: 1000.3, quantity: 6 },
+        { price: 1010, quantity: 999 },
+      ], // 1010 is outside the 5bp band, must be excluded
+      timestamp: T - 100,
+    } as any);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.orderBook.bidDepth5bpUsd,
+      999.7 * 10,
+      "bidDepth5bpUsd must sum only levels within 5bp of mid, excluding the far level",
+    );
+    assert.strictEqual(
+      snap.orderBook.askDepth5bpUsd,
+      1000.3 * 6,
+      "askDepth5bpUsd must sum only levels within 5bp of mid, excluding the far level",
+    );
+    const expectedImbalance =
+      (999.7 * 10 - 1000.3 * 6) / (999.7 * 10 + 1000.3 * 6);
+    assert.ok(
+      Math.abs(snap.orderBook.imbalance5bp - expectedImbalance) < 1e-9,
+      `imbalance5bp must equal (bid-ask)/(bid+ask), expected ${expectedImbalance}, got ${snap.orderBook.imbalance5bp}`,
+    );
+  },
+);
+
+scenario(
+  "5BP DEPTH: matches depthBands['0.05pct'] exactly -- flat fields are aliases, not a separate computation",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 999,
+      bidQty: 1,
+      ask: 1001,
+      askQty: 1,
+      timestamp: T - 100,
+    });
+    deps.orderbookStore.setDepth({
+      symbol: SYMBOL,
+      bids: [{ price: 999.7, quantity: 10 }],
+      asks: [{ price: 1000.3, quantity: 6 }],
+      timestamp: T - 100,
+    } as any);
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    const band = snap.orderBook.depthBands["0.05pct"];
+    assert.strictEqual(snap.orderBook.bidDepth5bpUsd, band.bidDepthUsd);
+    assert.strictEqual(snap.orderBook.askDepth5bpUsd, band.askDepthUsd);
+    assert.strictEqual(snap.orderBook.imbalance5bp, band.bookImbalance);
+  },
+);
+
+scenario(
+  "5BP DEPTH: a future depth snapshot is never used for bidDepth5bpUsd/askDepth5bpUsd/imbalance5bp",
+  () => {
+    const deps = freshDeps();
+    const T = 1_000_000;
+    deps.orderbookStore.setBookTicker({
+      symbol: SYMBOL,
+      bid: 999,
+      bidQty: 1,
+      ask: 1001,
+      askQty: 1,
+      timestamp: T - 500,
+    });
+    deps.orderbookStore.setDepth({
+      symbol: SYMBOL,
+      bids: [{ price: 999.7, quantity: 10 }],
+      asks: [{ price: 1000.3, quantity: 6 }],
+      timestamp: T - 500,
+    } as any); // state A, valid
+    deps.orderbookStore.setDepth({
+      symbol: SYMBOL,
+      bids: [{ price: 999.7, quantity: 99999 }],
+      asks: [{ price: 1000.3, quantity: 99999 }],
+      timestamp: T + 300,
+    } as any); // state B, future -- must be rejected
+    const event = liq("SELL", 1000, 10_000, T);
+    const snap = buildMarketSnapshot(deps, event, T) as any;
+    assert.strictEqual(
+      snap.orderBook.bidDepth5bpUsd,
+      999.7 * 10,
+      "must use state A's depth, never the future state B's inflated quantity",
+    );
+    assert.strictEqual(snap.orderBook.askDepth5bpUsd, 1000.3 * 6);
+  },
+);
+
+scenario(
+  "5BP DEPTH: research exporter prints the values instead of '-' (reproduces the exact reported symptom)",
+  () => {
+    const src = fs.readFileSync(
+      require.resolve("../scripts/inspect-liquidation-period.ts"),
+      "utf8",
+    );
+    assert.ok(
+      !src.includes('"depthBands.0.05pct'),
+      "the exporter must no longer use the broken dotted-path lookup for the 5bp band",
+    );
+    assert.ok(
+      src.includes('get(s.orderBook, "bidDepth5bpUsd")'),
+      "the exporter must read the new flat bidDepth5bpUsd field",
+    );
+    assert.ok(
+      src.includes('get(s.orderBook, "askDepth5bpUsd")'),
+      "the exporter must read the new flat askDepth5bpUsd field",
+    );
+    assert.ok(
+      src.includes('get(s.orderBook, "imbalance5bp")'),
+      "the exporter must read the new flat imbalance5bp field",
+    );
+  },
+);
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 // Explicit exit regardless of outcome -- freshDeps() constructs
 // OiTrackerService/FundingRateService instances (each with their own

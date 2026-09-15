@@ -225,6 +225,24 @@ export function buildMarketSnapshot(
     bestBid: bookTicker?.bid ?? null,
     bestAsk: bookTicker?.ask ?? null,
     depthBands: Object.keys(depthBands).length > 0 ? depthBands : null,
+    // Sep 15 2026 (Karo), operator-reported -- flat, explicitly-named
+    // aliases for the 0.05% band's own values (already computed
+    // above, same causal `depth` snapshot, no duplicate calculation).
+    // Added because the nested depthBands["0.05pct"] key contains a
+    // literal dot, which the research exporter's naive dot-split path
+    // parser could not traverse -- these flat names sidestep that
+    // entirely for the most commonly needed band. depthBands itself
+    // is left completely unchanged (all 4 bands, nested), preserving
+    // exact backward compatibility with anything already reading it.
+    bidDepth5bpUsd:
+      (depthBands["0.05pct"] as { bidDepthUsd: number } | undefined)
+        ?.bidDepthUsd ?? null,
+    askDepth5bpUsd:
+      (depthBands["0.05pct"] as { askDepthUsd: number } | undefined)
+        ?.askDepthUsd ?? null,
+    imbalance5bp:
+      (depthBands["0.05pct"] as { bookImbalance: number | null } | undefined)
+        ?.bookImbalance ?? null,
     bookImbalanceChangeVs30sAgo:
       histNow?.imbalance !== null &&
       histNow?.imbalance !== undefined &&
