@@ -6,6 +6,7 @@ import {
   type V5TradeCloseEvent,
 } from "../strategy/v5/v5-wave.service";
 import { OiTrackerService } from "../domain/liquidation/oi-tracker.service";
+import { OiSecondObservationRepository } from "../infrastructure/mongo/oi-second-observation.repository";
 import { FundingStatsService } from "../domain/liquidation/funding-stats.service";
 import { FundingRateService } from "../domain/liquidation/funding-rate.service";
 import { LiquidationStore } from "../domain/liquidation/liquidation.store";
@@ -123,6 +124,10 @@ export class MarketDataOrchestrator {
   readonly orderbookStore = new OrderbookStore();
   readonly atrTracker = new ATRTrackerService();
   readonly oiTracker: OiTrackerService;
+  /** Sep 16 2026 (Karo), operator-requested -- data collection only.
+   *  See oi-second-observation.repository.ts's own module doc
+   *  comment. */
+  readonly oiSecondObservationRepo: OiSecondObservationRepository;
   /** Sep 15 2026 (Karo), operator-requested -- discovered during this
    *  wiring that neither FundingStatsService nor FundingRateService
    *  was actually instantiated anywhere in the running bot despite
@@ -300,7 +305,22 @@ export class MarketDataOrchestrator {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
     this.liqFeedWatchdog = new LiqFeedWatchdogService(log, broadcastTelegram);
-    this.oiTracker = new OiTrackerService(symbols);
+    this.oiSecondObservationRepo = new OiSecondObservationRepository(mongo);
+    this.oiTracker = new OiTrackerService(
+      symbols,
+      (obs) =>
+        this.oiSecondObservationRepo.bufferedInsert({
+          symbol: obs.symbol,
+          timestamp: new Date(obs.fetchedAt),
+          oiUpdatedAt:
+            obs.oiUpdatedAtMs !== null ? new Date(obs.oiUpdatedAtMs) : null,
+          openInterest: obs.contracts,
+          openInterestUsd:
+            obs.price !== null ? obs.contracts * obs.price : null,
+          price: obs.price,
+        }),
+      (symbol) => this.orderbookStore.midPrice(symbol),
+    );
     this.fundingStats = new FundingStatsService(symbols);
     this.fundingRate = new FundingRateService(symbols);
     log.info(
@@ -336,6 +356,8 @@ export class MarketDataOrchestrator {
     // index on cascadeId, see CascadeRepository.ensureIndexes()'s own
     // doc comment for the duplicate-cascade-document race it fixes.
     await this.cascadeRepo.ensureIndexes();
+    // Sep 16 2026 (Karo), operator-requested -- data collection only.
+    await this.oiSecondObservationRepo.ensureIndexes();
   }
 
   async hydrateMainLocks(): Promise<void> {
@@ -480,6 +502,7 @@ export class MarketDataOrchestrator {
    *  stop() on all three is synchronous, clearing their own timers. */
   stop(): void {
     this.oiTracker.stop();
+    this.oiSecondObservationRepo.stop();
     this.fundingStats.stop();
     this.fundingRate.stop();
   }

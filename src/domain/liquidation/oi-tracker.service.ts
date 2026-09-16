@@ -80,7 +80,28 @@ export class OiTrackerService {
    *  skipped entirely rather than starting an overlapping cycle. */
   private cycleRunning = false;
 
-  constructor(private readonly symbols: ReadonlyArray<string>) {
+  /** Sep 16 2026 (Karo), operator-requested -- data collection only,
+   *  additive. Both optional and both SYNCHRONOUS (never awaited,
+   *  never able to block or slow a poll tick): `onObservation` is
+   *  called once per successful fetchOne(), after the existing
+   *  cache/history update is complete and unchanged; `getCausalPrice`
+   *  is a synchronous, already-cached price lookup (e.g.
+   *  OrderbookStore.midPrice) the caller supplies -- never a new REST
+   *  call. Neither parameter changes any existing OI calculation:
+   *  getCachedOI(), getRollingMedianOiChange(), and getOiHistory() all
+   *  read the exact same cache/history this constructor already
+   *  populated before this change. */
+  constructor(
+    private readonly symbols: ReadonlyArray<string>,
+    private readonly onObservation?: (obs: {
+      symbol: string;
+      contracts: number;
+      fetchedAt: number;
+      oiUpdatedAtMs: number | null;
+      price: number | null;
+    }) => void,
+    private readonly getCausalPrice?: (symbol: string) => number | null,
+  ) {
     // Kick off an immediate fetch so the cache is warm before the
     // first V3 watch state is created. setInterval handles ongoing
     // refreshes.
@@ -177,7 +198,10 @@ export class OiTrackerService {
         log.warn(`[oi-tracker] ${symbol} HTTP ${res.status}`);
         return;
       }
-      const data = (await res.json()) as { openInterest?: string };
+      const data = (await res.json()) as {
+        openInterest?: string;
+        time?: number;
+      };
       if (!data.openInterest) return;
       const contracts = parseFloat(data.openInterest);
       if (!Number.isFinite(contracts) || contracts <= 0) return;
@@ -193,6 +217,37 @@ export class OiTrackerService {
       // time-based eviction -- see HISTORY_RETENTION_MS's own doc comment
       const cutoff = entry.fetchedAt - HISTORY_RETENTION_MS;
       while (hist.length > 0 && hist[0]!.fetchedAt < cutoff) hist.shift();
+
+      // Sep 16 2026 (Karo), operator-requested -- data collection
+      // only, purely additive below this line. Does not touch
+      // cache/history above, does not change what this method returns
+      // (it returns nothing), and is fully isolated: onObservation is
+      // synchronous and any exception it throws would only affect
+      // THIS symbol's fetchOne() call, already wrapped by the
+      // existing try/catch below -- it can never affect another
+      // symbol's fetch in the same Promise.all() cycle.
+      if (this.onObservation) {
+        try {
+          const price = this.getCausalPrice?.(symbol) ?? null;
+          this.onObservation({
+            symbol,
+            contracts,
+            fetchedAt: entry.fetchedAt,
+            oiUpdatedAtMs: typeof data.time === "number" ? data.time : null,
+            price,
+          });
+        } catch (obsErr) {
+          // Isolated on purpose: the OI fetch itself already succeeded
+          // and cache/history are already updated above -- a failure
+          // in the OPTIONAL persistence hook must never be reported as
+          // (or behave like) a failed OI fetch, and must never affect
+          // this or any other symbol's polling.
+          const msg = obsErr instanceof Error ? obsErr.message : String(obsErr);
+          log.warn(
+            `[oi-tracker] ${symbol} onObservation hook failed (OI fetch itself succeeded, unaffected): ${msg}`,
+          );
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.warn(`[oi-tracker] ${symbol} fetch failed: ${msg}`);
