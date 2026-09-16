@@ -19,6 +19,14 @@ import {
   type OiWaypoint,
 } from "../src/domain/research/episode-oi-trajectory";
 import {
+  computeOiPhaseChangeUsd,
+  computeOiPhaseChangeQuantity,
+  computeOiLiquidationRatios,
+  type OiPhaseChangeUsd,
+  type OiPhaseChangeQuantity,
+  type OiLiquidationRatios,
+} from "../src/domain/research/episode-oi-liquidation-ratios";
+import {
   computeCausalHistoricalPercentile,
   type CompletedEpisodeRef,
   type HistoricalPercentileContext,
@@ -142,6 +150,9 @@ interface EpisodeResearchRecord {
   } | null;
   oiAtEnd: { waypoint: OiWaypoint; offsetMs: number; quality: string } | null;
   oiMovement: ReturnType<typeof computeOiMovementSummary>;
+  oiPhaseChangeUsd: OiPhaseChangeUsd;
+  oiPhaseChangeQuantity: OiPhaseChangeQuantity;
+  oiLiquidationRatios: OiLiquidationRatios;
   clearingTransitionAtEnd: ReturnType<typeof clearingTransitionFeatures>;
   outcomes: EpisodeOutcomeLabels["outcomes"];
   madeAdverseNewExtremeAfterEnd: boolean | null;
@@ -267,6 +278,24 @@ async function buildRecordsForSymbol(
         startWp,
         nearExtreme?.waypoint ?? null,
         atEnd?.waypoint ?? null,
+      ),
+      oiPhaseChangeUsd: computeOiPhaseChangeUsd(
+        startWp,
+        nearExtreme?.waypoint ?? null,
+        atEnd?.waypoint ?? null,
+      ),
+      oiPhaseChangeQuantity: computeOiPhaseChangeQuantity(
+        startWp,
+        nearExtreme?.waypoint ?? null,
+        atEnd?.waypoint ?? null,
+      ),
+      oiLiquidationRatios: computeOiLiquidationRatios(
+        sameDirUsd,
+        computeOiPhaseChangeUsd(
+          startWp,
+          nearExtreme?.waypoint ?? null,
+          atEnd?.waypoint ?? null,
+        ).oiStartToEndUsd,
       ),
       clearingTransitionAtEnd: clearingTransitionFeatures(
         atEnd?.waypoint ?? null,
@@ -413,6 +442,68 @@ async function main(): Promise<void> {
     );
   }
 
+  console.log(
+    `\n=== OI-CHANGE-TO-LIQUIDATION RATIO vs OUTCOME (quantile buckets, LONG and SHORT separately, high-quality OI-at-END only i.e. offset<=60s) ===`,
+  );
+  const ratioHighQuality = allRecords.filter(
+    (r) =>
+      r.oiAtEnd !== null &&
+      Math.abs(r.oiAtEnd.offsetMs) <= 60_000 &&
+      r.oiLiquidationRatios.oiNetChangeToLiqRatio !== null,
+  );
+  for (const direction of ["LONG", "SHORT"] as const) {
+    const dirRecords = ratioHighQuality
+      .filter((r) => r.direction === direction)
+      .sort(
+        (a, b) =>
+          a.oiLiquidationRatios.oiNetChangeToLiqRatio! -
+          b.oiLiquidationRatios.oiNetChangeToLiqRatio!,
+      );
+    console.log(
+      `  ${direction} (n=${dirRecords.length} with usable ratio + high-quality OI-at-END):`,
+    );
+    if (dirRecords.length === 0) {
+      console.log(`    (no episodes meet the high-quality threshold)`);
+      continue;
+    }
+    const bucketCount = Math.min(4, dirRecords.length);
+    const bucketSize = Math.ceil(dirRecords.length / bucketCount);
+    for (let b = 0; b < bucketCount; b++) {
+      const bucket = dirRecords.slice(b * bucketSize, (b + 1) * bucketSize);
+      if (bucket.length === 0) continue;
+      const ratios = bucket.map(
+        (r) => r.oiLiquidationRatios.oiNetChangeToLiqRatio!,
+      );
+      const mfe5 = bucket
+        .map((r) => r.outcomes[5]?.mfePct)
+        .filter((v): v is number => v !== null && v !== undefined);
+      const mae5 = bucket
+        .map((r) => r.outcomes[5]?.maePct)
+        .filter((v): v is number => v !== null && v !== undefined);
+      console.log(
+        `    ratio ${median(ratios)?.toFixed(2)} (n=${bucket.length}): medianMFE5m=${median(mfe5)?.toFixed(3)}% medianMAE5m=${median(mae5)?.toFixed(3)}%`,
+      );
+    }
+  }
+
+  console.log(
+    `\n=== START->EXTREME vs EXTREME->END OI phase behavior (n=${allRecords.length}) ===`,
+  );
+  const phaseAvailable = allRecords.filter(
+    (r) =>
+      r.oiPhaseChangeUsd.oiStartToExtremeUsd !== null &&
+      r.oiPhaseChangeUsd.oiExtremeToEndUsd !== null,
+  );
+  console.log(
+    `  Episodes with both phases measurable: n=${phaseAvailable.length}`,
+  );
+  console.log(
+    `  Contraction start->extreme THEN stabilize/rebuild extreme->end: n=${phaseAvailable.filter((r) => r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 && r.oiPhaseChangeUsd.oiExtremeToEndUsd! >= 0).length}`,
+  );
+  console.log(
+    `  Contraction start->extreme, continued contraction extreme->end: n=${phaseAvailable.filter((r) => r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 && r.oiPhaseChangeUsd.oiExtremeToEndUsd! < 0).length}`,
+  );
+
   const outDir = path.join(process.cwd(), "research-output");
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
   const tag = `${new Date(args.fromMs).toISOString().slice(0, 10)}_to_${new Date(args.toMs).toISOString().slice(0, 10)}`;
@@ -447,7 +538,14 @@ async function main(): Promise<void> {
     "betweenP90P95",
     "atOrAboveP95",
     "oiAtEndQuality",
-    "oiChangeStartToEndPct",
+    "oiAtEndOffsetMs",
+    "oiStartToEndUsd",
+    "oiStartToEndPct",
+    "oiQuantityStartToEndPct",
+    "oiNetChangeToLiqRatio",
+    "oiClearingRatio",
+    "oiStartToExtremeUsd",
+    "oiExtremeToEndUsd",
     "clearingThenStabilization",
     "mfe5mPct",
     "mae5mPct",
@@ -469,7 +567,14 @@ async function main(): Promise<void> {
       r.betweenP90P95 ?? "",
       r.atOrAboveP95 ?? "",
       r.oiAtEnd?.quality ?? "no_waypoint",
-      r.oiMovement.oiChangeStartToEndPct?.toFixed(3) ?? "",
+      r.oiAtEnd?.offsetMs ?? "",
+      r.oiPhaseChangeUsd.oiStartToEndUsd?.toFixed(0) ?? "",
+      r.oiPhaseChangeUsd.oiStartToEndPct?.toFixed(3) ?? "",
+      r.oiPhaseChangeQuantity.oiQuantityStartToEndPct?.toFixed(3) ?? "",
+      r.oiLiquidationRatios.oiNetChangeToLiqRatio?.toFixed(4) ?? "",
+      r.oiLiquidationRatios.oiClearingRatio?.toFixed(4) ?? "",
+      r.oiPhaseChangeUsd.oiStartToExtremeUsd?.toFixed(0) ?? "",
+      r.oiPhaseChangeUsd.oiExtremeToEndUsd?.toFixed(0) ?? "",
       r.clearingTransitionAtEnd.clearingThenStabilizationPattern ?? "",
       r.outcomes[5]?.mfePct?.toFixed(3) ?? "",
       r.outcomes[5]?.maePct?.toFixed(3) ?? "",
@@ -506,6 +611,53 @@ async function main(): Promise<void> {
         ),
       ]),
     ),
+    oiLiquidationRatioDistribution: (["LONG", "SHORT"] as const).reduce(
+      (acc, direction) => {
+        const values = allRecords
+          .filter(
+            (r) =>
+              r.direction === direction &&
+              r.oiLiquidationRatios.oiNetChangeToLiqRatio !== null,
+          )
+          .map((r) => r.oiLiquidationRatios.oiNetChangeToLiqRatio!);
+        acc[direction] = {
+          n: values.length,
+          median: median(values),
+          ...iqr(values),
+        };
+        return acc;
+      },
+      {} as Record<
+        string,
+        {
+          n: number;
+          median: number | null;
+          p25: number | null;
+          p75: number | null;
+        }
+      >,
+    ),
+    startToExtremeVsExtremeToEndPhaseCounts: {
+      contractionThenStabilize: allRecords.filter(
+        (r) =>
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd !== null &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd !== null &&
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd < 0 &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd >= 0,
+      ).length,
+      contractionThenContinuedContraction: allRecords.filter(
+        (r) =>
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd !== null &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd !== null &&
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd < 0 &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd < 0,
+      ).length,
+      measurableBothPhases: allRecords.filter(
+        (r) =>
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd !== null &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd !== null,
+      ).length,
+    },
   };
   fs.writeFileSync(
     path.join(outDir, `episode-research-summary-${tag}.json`),
