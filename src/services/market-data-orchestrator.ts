@@ -7,6 +7,8 @@ import {
 } from "../strategy/v5/v5-wave.service";
 import { OiTrackerService } from "../domain/liquidation/oi-tracker.service";
 import { OiSecondObservationRepository } from "../infrastructure/mongo/oi-second-observation.repository";
+import { LiquidationOiRuntimeOrchestrator } from "./liquidation-oi-runtime-orchestrator";
+import { buildPercentileContext } from "../domain/liquidation-oi-strategy/percentile-rank-approximation";
 import { FundingStatsService } from "../domain/liquidation/funding-stats.service";
 import { FundingRateService } from "../domain/liquidation/funding-rate.service";
 import { LiquidationStore } from "../domain/liquidation/liquidation.store";
@@ -301,6 +303,35 @@ export class MarketDataOrchestrator {
       sendMessage: (text: string) => Promise<unknown>;
     } | null = null,
     private readonly productionSignalsEnabled: boolean = true,
+    /** Sep 16 2026 (Karo), operator-approved architecture --
+     *  Liquidation+OI Exhaustion strategy. Both null by default,
+     *  meaning the strategy is completely inert unless main.ts
+     *  explicitly constructs and passes both. When
+     *  liquidationOiOrchestrator is provided, its OWN internal
+     *  observationEnabled/executionEnabled flags (constructed
+     *  separately, executionEnabled defaulting false) govern whether
+     *  it does anything and whether it can ever reach Binance -- this
+     *  orchestrator never checks or overrides those flags itself, it
+     *  only forwards real events/ticks when the reference is non-null. */
+    private readonly liquidationOiOrchestrator: LiquidationOiRuntimeOrchestrator | null = null,
+    private readonly episodePercentileServiceForLox: {
+      getThresholds(
+        symbol: string,
+      ): {
+        long: {
+          p90: number | null;
+          p95: number | null;
+          p99: number | null;
+          sampleCount: number;
+        };
+        short: {
+          p90: number | null;
+          p95: number | null;
+          p99: number | null;
+          sampleCount: number;
+        };
+      } | null;
+    } | null = null,
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
@@ -670,6 +701,29 @@ export class MarketDataOrchestrator {
         ...(marketSnapshot !== undefined ? { marketSnapshot } : {}),
       });
       const victimForShadow: Side = l.side === "SELL" ? "LONG" : "SHORT";
+      // Sep 16 2026 (Karo), operator-approved architecture --
+      // Liquidation+OI Exhaustion strategy. Fed regardless of
+      // mainSymbolLocks (same convention as candlePhysics.onLiquidation
+      // above) -- this strategy's OWN symbol ownership
+      // (SymbolOwnershipRegistry, inside LiquidationOiWatchManager) is
+      // completely independent of mainSymbolLocks. No-op entirely when
+      // liquidationOiOrchestrator is null (default) or its own
+      // observationEnabled is false.
+      if (this.liquidationOiOrchestrator !== null) {
+        const oiSnap = this.oiTracker.getCachedOI(l.symbol);
+        this.liquidationOiOrchestrator.onLiquidationEvent(
+          {
+            symbol: l.symbol,
+            victim: victimForShadow,
+            timestamp: l.timestamp,
+            price: l.price,
+            quoteQty: l.quoteQty,
+          },
+          oiSnap !== null
+            ? { quantity: oiSnap.contracts, timestamp: oiSnap.ts }
+            : null,
+        );
+      }
       // Sep 11 2026 (Karo), operator-requested -- THE production wave
       // engine. Replaces the OLD feedCascade() call entirely (removed
       // below, left commented per the operator's own "do not delete"
@@ -812,6 +866,60 @@ export class MarketDataOrchestrator {
       for (const close of closes) void this.handleMainTradeClose(close);
       void this.reconciliation.onTick(b.symbol, mid, b.timestamp);
       this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
+      // Sep 16 2026 (Karo), operator-approved architecture --
+      // Liquidation+OI Exhaustion strategy. Only bothers gathering
+      // percentile/ATR/OI-history context for a symbol that ALREADY
+      // has a tracked lifecycle (cheap peek first) -- avoids wasted
+      // work on every symbol on every single bookTicker tick. Reuses
+      // the EXISTING oiTracker.getOiHistory() RAM ring (no second
+      // polling loop) and the EXISTING atrTracker (already
+      // bootstrapped at startup, unchanged). No-op entirely when
+      // liquidationOiOrchestrator is null (default) or its own
+      // observationEnabled is false.
+      if (
+        this.liquidationOiOrchestrator !== null &&
+        this.liquidationOiOrchestrator
+          .getWatchManager()
+          .getLifecycle(b.symbol) !== null
+      ) {
+        const lastClosed3m = this.candleStore.lastClosed(b.symbol, "3m");
+        const atr3m = this.atrTracker.getWilderATRAtOrBefore(
+          b.symbol,
+          "3m",
+          14,
+          b.timestamp,
+        );
+        const atr3mAgeMs =
+          lastClosed3m !== null ? b.timestamp - lastClosed3m.closeTime : null;
+        const oiHistory = this.oiTracker
+          .getOiHistory(b.symbol)
+          .map((s) => ({ contracts: s.contracts, fetchedAt: s.fetchedAt }));
+        const lifecycle = this.liquidationOiOrchestrator
+          .getWatchManager()
+          .getLifecycle(b.symbol)!;
+        const thresholds =
+          this.episodePercentileServiceForLox?.getThresholds(b.symbol) ?? null;
+        const dir =
+          lifecycle.episode.victim === "LONG"
+            ? thresholds?.long
+            : thresholds?.short;
+        const percentileContext = buildPercentileContext(
+          dir?.sampleCount ?? null,
+          dir?.p90 ?? null,
+          dir?.p95 ?? null,
+          dir?.p99 ?? null,
+          lifecycle.episode.sameDirectionLiqUsd,
+        );
+        void this.liquidationOiOrchestrator.onTick(
+          b.symbol,
+          percentileContext,
+          oiHistory,
+          mid,
+          atr3m,
+          atr3mAgeMs,
+          b.timestamp,
+        );
+      }
       // Sep 10 2026 (Karo), operator-requested: DISCONNECTED, same
       // rationale as feedUnitResearchShadowAfter() above -- this call
       // fed live bookTicker ticks into the old research state machine

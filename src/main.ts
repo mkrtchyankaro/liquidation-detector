@@ -22,6 +22,11 @@ import { GlobalSignalRepository } from "./infrastructure/mongo/global-signal.rep
 import { UserSignalRepository } from "./infrastructure/mongo/user-signal.repository";
 import { bootstrapAtrFromRest, pairsFor } from "./domain/market/atr-bootstrap";
 import { bootstrapCandleAndDirectionalAtrFromRest } from "./domain/market/candle-directional-atr-bootstrap";
+import { LiquidationOiRuntimeOrchestrator } from "./services/liquidation-oi-runtime-orchestrator";
+import { LiquidationOiGlobalSignalRepository } from "./infrastructure/mongo/liquidation-oi-global-signal.repository";
+import { StrategyOrderRepository } from "./infrastructure/mongo/strategy-order.repository";
+import { DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG } from "./domain/liquidation-oi-strategy/config";
+import { DEFAULT_CAPACITY_MODEL_COEFFICIENTS } from "./domain/liquidation-oi-strategy/initial-capacity-model";
 import { loadPersistenceConfig } from "./infrastructure/config/persistence.config";
 import { loadWallPersistenceConfig } from "./infrastructure/config/wall-persistence.config";
 import { LiqAggregateRepository } from "./infrastructure/mongo/liq-aggregate.repository";
@@ -196,6 +201,35 @@ async function main(): Promise<void> {
   // actual warmup is triggered later, fire-and-forget, AFTER
   // orchestrator.start() -- see that call site's own comment.
   const episodePercentileService = new EpisodePercentileService(symbols);
+  // Sep 16 2026 (Karo), operator-approved architecture -- Liquidation+OI
+  // Exhaustion strategy runtime wiring. observationEnabled=true so the
+  // full data path (real liquidation events, real bookTicker price,
+  // existing OI/ATR state) is genuinely live and inspectable.
+  // executionEnabled is explicitly false here -- this is the ONE place
+  // that would need to change (to `true`) to allow real Binance orders
+  // for this new strategy. No environment variable; this exact line is
+  // the single source of truth.
+  const liquidationOiGlobalSignalRepo = new LiquidationOiGlobalSignalRepository(
+    mongo,
+  );
+  const liquidationOiStrategyOrderRepo = new StrategyOrderRepository(mongo);
+  const liquidationOiOrchestrator = new LiquidationOiRuntimeOrchestrator(
+    DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+    DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+    liquidationOiGlobalSignalRepo,
+    liquidationOiStrategyOrderRepo,
+    () =>
+      userRuntimes
+        .filter((r) => r.config.enabled)
+        .map((r) => ({
+          userId: r.config.userId,
+          riskUsd: r.config.risk.riskUsd,
+          binanceRest: r.binanceRest,
+          telegram: r.telegram,
+        })),
+    true, // observationEnabled
+    false, // executionEnabled -- MUST be explicitly changed to true here to allow real orders
+  );
   const reconciliation = new ReconciliationManager(
     mongo,
     userRuntimes,
@@ -257,6 +291,8 @@ async function main(): Promise<void> {
     // to "true" in the environment to re-enable production signals
     // again later without any code change.
     process.env.V5_PRODUCTION_SIGNALS_ENABLED === "true",
+    liquidationOiOrchestrator,
+    episodePercentileService,
   );
   orchestratorPlaceholder.instance = orchestrator;
 
