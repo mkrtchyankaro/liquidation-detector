@@ -316,31 +316,77 @@ function atr5mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
  *  segmentation comparison. confirm5mAtrMultiple===null means ATR5m
  *  is recorded as context on every RECOVERY_CONFIRMED/INVALIDATED
  *  transition but does NOT gate the decision (FAST/BALANCED); STRICT
- *  hard-gates on it. */
+ *  hard-gates on it.
+ *
+ *  Sep 16 2026 (Karo), operator-requested DISPLACEMENT-AWARE
+ *  extension. recoveryFractionMinimum===null means the variant is
+ *  displacement-UNAWARE (the three BASELINE variants, unchanged
+ *  behavior). When set, an additional condition applies at 3m
+ *  confirmation: recovery must also be a large enough FRACTION of the
+ *  episode's own total displacement (startReferencePrice -> latest
+ *  extreme), not just large relative to current ATR -- a fixed ATR
+ *  bar can be trivially easy for a large cascade and structurally
+ *  meaningful for a small one. See MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE's
+ *  own doc comment for the ATR-normalized safeguard against tiny-
+ *  displacement instability. */
 interface Variant {
-  name: "FAST" | "BALANCED" | "STRICT";
+  name: string;
   candidate1mAtrMultiple: number;
   confirm3mAtrMultiple: number;
   confirm5mAtrMultiple: number | null;
+  recoveryFractionMinimum: number | null;
 }
+/** ATR-normalized safeguard (never a raw dollar minimum, per operator
+ *  instruction): the displacement-fraction condition only APPLIES once
+ *  the episode's own displacement reaches at least this many ATR3m
+ *  units. Below that, a displacement-aware variant behaves exactly
+ *  like its ATR-only baseline (the fraction condition is bypassed,
+ *  not failed) -- fraction reasoning about "how much of the move has
+ *  been recovered" is not yet meaningful for a move that barely
+ *  exceeds normal volatility in the first place. */
+const MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE = 1.0;
 const VARIANTS: Variant[] = [
   {
     name: "FAST",
     candidate1mAtrMultiple: 0.5,
     confirm3mAtrMultiple: 1.0,
     confirm5mAtrMultiple: null,
+    recoveryFractionMinimum: null,
   },
   {
     name: "BALANCED",
     candidate1mAtrMultiple: 0.75,
     confirm3mAtrMultiple: 1.0,
     confirm5mAtrMultiple: null,
+    recoveryFractionMinimum: null,
   },
   {
     name: "STRICT",
     candidate1mAtrMultiple: 1.0,
     confirm3mAtrMultiple: 1.0,
     confirm5mAtrMultiple: 0.5,
+    recoveryFractionMinimum: null,
+  },
+  {
+    name: "DISPLACEMENT_FAST",
+    candidate1mAtrMultiple: 0.5,
+    confirm3mAtrMultiple: 1.0,
+    confirm5mAtrMultiple: null,
+    recoveryFractionMinimum: 0.2,
+  },
+  {
+    name: "DISPLACEMENT_BALANCED",
+    candidate1mAtrMultiple: 0.75,
+    confirm3mAtrMultiple: 1.0,
+    confirm5mAtrMultiple: null,
+    recoveryFractionMinimum: 0.3,
+  },
+  {
+    name: "DISPLACEMENT_STRICT",
+    candidate1mAtrMultiple: 1.0,
+    confirm3mAtrMultiple: 1.0,
+    confirm5mAtrMultiple: 0.5,
+    recoveryFractionMinimum: 0.4,
   },
 ];
 
@@ -359,6 +405,14 @@ interface Transition {
   atr3m?: number | null;
   atr5m?: number | null;
   reason?: string;
+  // Sep 16 2026 (Karo), operator-requested debug transparency -- only
+  // populated on RECOVERY_CANDIDATE/RECOVERY_CONFIRMED/RECOVERY_INVALIDATED.
+  startReferencePrice?: number;
+  episodeDisplacement?: number;
+  episodeDisplacementAtr3m?: number | null;
+  recoveryFraction?: number | null;
+  atrConditionPass?: boolean;
+  displacementConditionPass?: boolean;
 }
 
 interface Episode {
@@ -398,11 +452,17 @@ export function isMoreAdverse(
  *  Confirmation checks the FIRST 3m candle to close after the
  *  candidate -- exactly one confirmation attempt per candidate; if it
  *  fails, the state machine returns to watching for a fresh 1m
- *  candidate from the (possibly now-deeper) extreme. */
+ *  candidate from the (possibly now-deeper) extreme.
+ *
+ *  `startReferencePrice` is fixed for the whole episode (the first
+ *  liquidation event's own price -- see this turn's own written
+ *  justification) and is DELIBERATELY tracked separately from
+ *  `extreme`, which moves every time a deeper adverse point appears --
+ *  episodeDisplacement is the causal distance between these two. */
 export function runStateMachine(
   direction: Side,
   startTime: number,
-  startPrice: number,
+  startReferencePrice: number,
   atrs: Atrs,
   variant: Variant,
 ): {
@@ -412,9 +472,9 @@ export function runStateMachine(
   transitions: Transition[];
 } {
   const transitions: Transition[] = [
-    { type: "START", time: startTime, price: startPrice },
+    { type: "START", time: startTime, price: startReferencePrice },
   ];
-  let extreme = startPrice,
+  let extreme = startReferencePrice,
     extremeTime = startTime;
   let candidate: { time: number } | null = null;
   let c3mIdx = 0;
@@ -451,6 +511,11 @@ export function runStateMachine(
           price: c.close,
           recovery,
           atr1m: atr1,
+          startReferencePrice,
+          episodeDisplacement:
+            direction === "LONG"
+              ? startReferencePrice - extreme
+              : extreme - startReferencePrice,
         });
       }
     }
@@ -472,7 +537,35 @@ export function runStateMachine(
       const passes5m =
         variant.confirm5mAtrMultiple === null ||
         (atr5 !== null && recovery3m >= variant.confirm5mAtrMultiple * atr5);
-      if (passes3m && passes5m) {
+
+      const episodeDisplacement =
+        direction === "LONG"
+          ? startReferencePrice - extreme
+          : extreme - startReferencePrice;
+      const episodeDisplacementAtr3m =
+        atr3 !== null && atr3 > 0 ? episodeDisplacement / atr3 : null;
+      const recoveryFraction =
+        episodeDisplacement > 0 ? recovery3m / episodeDisplacement : null;
+      let passesDisplacement = true; // default: bypassed (BASELINE variants, or displacement too small for fraction reasoning -- see MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE)
+      if (
+        variant.recoveryFractionMinimum !== null &&
+        episodeDisplacementAtr3m !== null &&
+        episodeDisplacementAtr3m >= MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE
+      ) {
+        passesDisplacement =
+          recoveryFraction !== null &&
+          recoveryFraction >= variant.recoveryFractionMinimum;
+      }
+
+      const debugFields = {
+        startReferencePrice,
+        episodeDisplacement,
+        episodeDisplacementAtr3m,
+        recoveryFraction,
+        atrConditionPass: passes3m && passes5m,
+        displacementConditionPass: passesDisplacement,
+      };
+      if (passes3m && passes5m && passesDisplacement) {
         transitions.push({
           type: "RECOVERY_CONFIRMED",
           time: c3.closeTime,
@@ -480,17 +573,27 @@ export function runStateMachine(
           recovery: recovery3m,
           atr3m: atr3,
           atr5m: atr5,
+          ...debugFields,
         });
         endTime = c3.closeTime;
         transitions.push({ type: "END", time: c3.closeTime });
       } else {
+        const reasons: string[] = [];
+        if (!passes3m) reasons.push("ATR3m recovery insufficient");
+        if (!passes5m) reasons.push("ATR5m recovery insufficient");
+        if (!passesDisplacement)
+          reasons.push(
+            `recovery fraction insufficient (${recoveryFraction !== null ? (recoveryFraction * 100).toFixed(1) : "?"}% < ${(variant.recoveryFractionMinimum! * 100).toFixed(0)}% required)`,
+          );
         transitions.push({
           type: "RECOVERY_INVALIDATED",
           time: c3.closeTime,
-          reason: "3m close did not sustain required recovery",
+          reason:
+            reasons.join("; ") || "3m close did not sustain required recovery",
           recovery: recovery3m,
           atr3m: atr3,
           atr5m: atr5,
+          ...debugFields,
         });
       }
       candidate = null;
@@ -569,7 +672,7 @@ async function main(): Promise<void> {
     `Window: ${new Date(args.fromMs).toISOString()} -> ${new Date(args.toMs).toISOString()}`,
   );
   console.log(
-    `Variants: ${VARIANTS.map((v) => `${v.name}(1m>=${v.candidate1mAtrMultiple}xATR1m, 3m>=${v.confirm3mAtrMultiple}xATR3m${v.confirm5mAtrMultiple !== null ? `, 5m>=${v.confirm5mAtrMultiple}xATR5m` : ""})`).join(" | ")}`,
+    `Variants: ${VARIANTS.map((v) => `${v.name}(1m>=${v.candidate1mAtrMultiple}xATR1m, 3m>=${v.confirm3mAtrMultiple}xATR3m${v.confirm5mAtrMultiple !== null ? `, 5m>=${v.confirm5mAtrMultiple}xATR5m` : ""}${v.recoveryFractionMinimum !== null ? `, fraction>=${(v.recoveryFractionMinimum * 100).toFixed(0)}% (gated once displacement>=${MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE}xATR3m)` : ""})`).join(" | ")}`,
   );
 
   console.log("Fetching Binance historical klines...");
@@ -736,12 +839,39 @@ async function main(): Promise<void> {
           parts.push(`ATR3m=${t.atr3m.toFixed(2)}`);
         if (t.atr5m !== undefined && t.atr5m !== null)
           parts.push(`ATR5m=${t.atr5m.toFixed(2)}`);
+        if (t.episodeDisplacement !== undefined)
+          parts.push(`episodeDisplacement=${t.episodeDisplacement.toFixed(2)}`);
+        if (
+          t.episodeDisplacementAtr3m !== undefined &&
+          t.episodeDisplacementAtr3m !== null
+        )
+          parts.push(
+            `episodeDisplacementATR3m=${t.episodeDisplacementAtr3m.toFixed(2)}`,
+          );
+        if (t.recoveryFraction !== undefined && t.recoveryFraction !== null)
+          parts.push(
+            `recoveryFraction=${(t.recoveryFraction * 100).toFixed(1)}%`,
+          );
+        if (t.atrConditionPass !== undefined)
+          parts.push(`ATRcondition=${t.atrConditionPass ? "PASS" : "FAIL"}`);
+        if (t.displacementConditionPass !== undefined)
+          parts.push(
+            `displacementCondition=${t.displacementConditionPass ? "PASS" : "FAIL"}`,
+          );
         if (t.reason) parts.push(`reason="${t.reason}"`);
         console.log(parts.join(" "));
       }
       console.log(
         `  END: ${e.endTime !== null ? new Date(e.endTime).toISOString() : "STILL OPEN at window end"}`,
       );
+      const finalTransition = [...e.transitions]
+        .reverse()
+        .find((t) => t.type === "RECOVERY_CONFIRMED");
+      if (finalTransition) {
+        console.log(
+          `  Episode displacement: ${finalTransition.episodeDisplacement?.toFixed(2)} (${finalTransition.episodeDisplacementAtr3m?.toFixed(2)}x ATR3m)  Recovery fraction at END: ${finalTransition.recoveryFraction !== null && finalTransition.recoveryFraction !== undefined ? (finalTransition.recoveryFraction * 100).toFixed(1) + "%" : "n/a"}`,
+        );
+      }
       console.log(
         `  Same-direction USD: $${episodeUsd(e).toFixed(0)} (${e.sameDirectionEvents.length} events)  Opposite-side: ${e.oppositeSideEvents.length} events`,
       );
@@ -836,6 +966,49 @@ async function main(): Promise<void> {
 
   console.log(`\nJSON: ${jsonPath}`);
   console.log(`HTML: ${htmlPath}`);
+
+  // ---- BTC debug-window comparison (operator-requested diagnostic
+  // print only -- gated on the symbol being BTCUSDT because these are
+  // the operator's own named debugging windows, NOT because the
+  // segmentation algorithm itself contains any BTC-specific logic;
+  // the algorithm above never references this symbol or these times. ----
+  if (args.symbol === "BTCUSDT") {
+    const dayStart = new Date(args.fromMs);
+    dayStart.setUTCHours(0, 0, 0, 0);
+    const debugWindows: { label: string; fromMs: number; toMs: number }[] = [
+      {
+        label: "~14:00-15:00 UTC",
+        fromMs: dayStart.getTime() + 14 * 3_600_000,
+        toMs: dayStart.getTime() + 15 * 3_600_000,
+      },
+      {
+        label: "~18:30-19:00 UTC",
+        fromMs: dayStart.getTime() + 18.5 * 3_600_000,
+        toMs: dayStart.getTime() + 19 * 3_600_000,
+      },
+    ];
+    console.log(
+      `\n########## BTC DEBUG WINDOW COMPARISON (validation examples only -- not tuned for these) ##########`,
+    );
+    for (const w of debugWindows) {
+      console.log(`\n== ${w.label} ==`);
+      for (const variant of VARIANTS) {
+        const episodes = variantResults[variant.name]!.episodes.filter(
+          (e) => e.startTime < w.toMs && (e.endTime ?? args.toMs) > w.fromMs,
+        );
+        for (const e of episodes) {
+          const finalTransition = [...e.transitions]
+            .reverse()
+            .find((t) => t.type === "RECOVERY_CONFIRMED");
+          console.log(
+            `  [${variant.name}] ${e.direction} START=${new Date(e.startTime).toISOString().slice(11, 19)} END=${e.endTime !== null ? new Date(e.endTime).toISOString().slice(11, 19) : "OPEN"} usd=$${episodeUsd(e).toFixed(0)} displacement=${finalTransition?.episodeDisplacement?.toFixed(2) ?? "n/a"} recoveryATR3m=${finalTransition?.atr3m !== undefined && finalTransition?.atr3m !== null && finalTransition.recovery !== undefined ? (finalTransition.recovery / finalTransition.atr3m).toFixed(2) : "n/a"} recoveryFraction=${finalTransition?.recoveryFraction !== null && finalTransition?.recoveryFraction !== undefined ? (finalTransition.recoveryFraction * 100).toFixed(1) + "%" : "n/a"}`,
+          );
+        }
+        if (episodes.length === 0)
+          console.log(`  [${variant.name}] (no episode overlaps this window)`);
+      }
+    }
+  }
 }
 
 function buildHtmlReport(
@@ -895,17 +1068,39 @@ function buildHtmlReport(
       })
       .join("\n");
     const table = episodes
-      .map(
-        (e, idx) =>
-          `<tr><td>${idx}</td><td>${e.direction}</td><td>${new Date(e.startTime).toISOString()}</td><td>${e.endTime !== null ? new Date(e.endTime).toISOString() : "STILL OPEN"}</td><td>$${episodeUsd(e).toFixed(0)}</td><td>${e.sameDirectionEvents.length}</td><td>${e.oppositeSideEvents.length}</td></tr>`,
-      )
+      .map((e, idx) => {
+        const finalTransition = [...e.transitions]
+          .reverse()
+          .find((t) => t.type === "RECOVERY_CONFIRMED");
+        const displacement =
+          finalTransition?.episodeDisplacement !== undefined
+            ? finalTransition.episodeDisplacement.toFixed(2)
+            : "-";
+        const displacementAtr3m =
+          finalTransition?.episodeDisplacementAtr3m !== undefined &&
+          finalTransition?.episodeDisplacementAtr3m !== null
+            ? finalTransition.episodeDisplacementAtr3m.toFixed(2)
+            : "-";
+        const recoveryAtr3m =
+          finalTransition?.atr3m !== undefined &&
+          finalTransition?.atr3m !== null &&
+          finalTransition.recovery !== undefined
+            ? (finalTransition.recovery / finalTransition.atr3m).toFixed(2)
+            : "-";
+        const recoveryFraction =
+          finalTransition?.recoveryFraction !== undefined &&
+          finalTransition?.recoveryFraction !== null
+            ? (finalTransition.recoveryFraction * 100).toFixed(1) + "%"
+            : "-";
+        return `<tr><td>${idx}</td><td>${e.direction}</td><td>${new Date(e.startTime).toISOString()}</td><td>${e.endTime !== null ? new Date(e.endTime).toISOString() : "STILL OPEN"}</td><td>$${episodeUsd(e).toFixed(0)}</td><td>${e.sameDirectionEvents.length}</td><td>${e.oppositeSideEvents.length}</td><td>${displacement}</td><td>${displacementAtr3m}</td><td>${recoveryAtr3m}</td><td>${recoveryFraction}</td></tr>`;
+      })
       .join("\n");
     return `<h2>${variant.name} (1m&gt;=${variant.candidate1mAtrMultiple}xATR1m, 3m&gt;=${variant.confirm3mAtrMultiple}xATR3m${variant.confirm5mAtrMultiple !== null ? `, 5m&gt;=${variant.confirm5mAtrMultiple}xATR5m` : ""}) -- ${episodes.length} episodes</h2>
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 ${candleSvg}
 ${episodeSvg}
 </svg>
-<table><tr><th>#</th><th>Dir</th><th>Start</th><th>End</th><th>Same-dir USD</th><th>Same-dir events</th><th>Opposite events</th></tr>
+<table><tr><th>#</th><th>Dir</th><th>Start</th><th>End</th><th>Same-dir USD</th><th>Same-dir events</th><th>Opposite events</th><th>Displacement</th><th>Displacement (ATR3m)</th><th>Recovery (ATR3m)</th><th>Recovery Fraction</th></tr>
 ${table}
 </table>`;
   }).join("\n<hr/>\n");
