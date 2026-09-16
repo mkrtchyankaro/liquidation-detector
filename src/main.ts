@@ -21,6 +21,7 @@ import { MarketDataOrchestrator } from "./services/market-data-orchestrator";
 import { GlobalSignalRepository } from "./infrastructure/mongo/global-signal.repository";
 import { UserSignalRepository } from "./infrastructure/mongo/user-signal.repository";
 import { bootstrapAtrFromRest, pairsFor } from "./domain/market/atr-bootstrap";
+import { bootstrapCandleAndDirectionalAtrFromRest } from "./domain/market/candle-directional-atr-bootstrap";
 import { loadPersistenceConfig } from "./infrastructure/config/persistence.config";
 import { loadWallPersistenceConfig } from "./infrastructure/config/wall-persistence.config";
 import { LiqAggregateRepository } from "./infrastructure/mongo/liq-aggregate.repository";
@@ -322,6 +323,25 @@ async function main(): Promise<void> {
     new BinanceRestClient(binanceConfig),
     orchestrator.atrTracker,
     [...bootstrapPairs, ...research1mBootstrapPairs],
+  );
+  // Sep 16 2026 (Karo), operator-approved -- restart/redeploy candle +
+  // directional-ATR warmup. Standard ATR bootstrap above is UNCHANGED.
+  // This closes the narrower gap it left: candleStore and
+  // directionalAtr{,3m,5m} had no REST bootstrap at all before this.
+  // Awaited HERE, before orchestrator.start() below -- the same call
+  // that opens the WS connection carrying both klines and forceOrder
+  // (liquidation) events -- so no liquidation event can possibly
+  // arrive before this completes. See candle-directional-atr-
+  // bootstrap.ts's own header for the full sequencing rationale.
+  await bootstrapCandleAndDirectionalAtrFromRest(
+    new BinanceRestClient(binanceConfig),
+    {
+      candleStore: orchestrator.candleStore,
+      directionalAtr1m: orchestrator.directionalAtr,
+      directionalAtr3m: orchestrator.directionalAtr3m,
+      directionalAtr5m: orchestrator.directionalAtr5m,
+    },
+    symbols,
   );
 
   // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own

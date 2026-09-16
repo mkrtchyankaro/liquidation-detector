@@ -260,8 +260,13 @@ export class MarketDataOrchestrator {
    *  to serve V5 ROTATION unchanged) -- fed at the existing 3m/5m
    *  kline-close sites already present in this.ws.on("kline", ...)
    *  for the standard (non-directional) ATR; no new subscription. */
-  private readonly directionalAtr3m = new DirectionalAtrTracker();
-  private readonly directionalAtr5m = new DirectionalAtrTracker();
+  /** Sep 16 2026 (Karo), operator-approved -- made readonly (public),
+   *  matching directionalAtr's own visibility above, so the restart/
+   *  redeploy candle bootstrap can seed these from REST at startup the
+   *  same way it already reaches candleStore/atrTracker/directionalAtr.
+   *  No behavior change to either tracker -- visibility only. */
+  readonly directionalAtr3m = new DirectionalAtrTracker();
+  readonly directionalAtr5m = new DirectionalAtrTracker();
   private readonly cascadeCandidate3m = new CascadeCandidateService();
   private readonly cascadeCandidate5m = new CascadeCandidateService();
   private readonly cascadeRegistry = new CascadeRegistry(
