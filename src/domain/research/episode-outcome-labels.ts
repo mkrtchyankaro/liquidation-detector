@@ -1,15 +1,24 @@
-import type { Side } from "../../shared/common.types";
-import { fetchKlines } from "./displacement-balanced-core";
+import type { Side, Candle } from "../../shared/common.types";
 
 /**
  * Sep 16 2026 (Karo), operator-approved. FUTURE DATA LIVES HERE ONLY.
- * This module is the ONE place in the whole research pipeline allowed
- * to read candles after an episode's own END -- deliberately isolated
+ * This module is the ONE place in the whole research pipeline that
+ * reads candles after an episode's own END -- deliberately isolated
  * from every causal-feature module (displacement-balanced-core.ts,
  * episode-historical-percentile.ts, episode-oi-trajectory.ts), none
  * of which import from or call into this file. The causality test in
  * tests/episode-research-causality.test.ts asserts exactly this
  * separation holds in practice, not just by convention.
+ *
+ * Sep 16 2026 (Karo), operator-requested (429 fix). This function no
+ * longer fetches its own candles -- it used to call fetchKlines once
+ * PER EPISODE, which meant 162 separate REST calls across just 3
+ * symbols in the first real run, with heavily overlapping windows
+ * (episodes ending close together in time re-fetch nearly the same
+ * 60-minute stretch), and no retry on 429. The caller now fetches 1m
+ * candles ONCE per symbol (covering the whole research window plus
+ * the outcome buffer) and passes that array in here to be filtered
+ * per episode -- zero additional network calls per episode.
  */
 
 export interface HorizonOutcome {
@@ -29,15 +38,17 @@ export interface EpisodeOutcomeLabels {
   madeAdverseNewExtremeAfterEnd: boolean | null;
 }
 
-/** Fetches closed 1m candles for [endTime, endTime + maxHorizonMin]
- *  and computes MFE/MAE/close-return per horizon, normalized in both
- *  percent and ATR units. `atr3mAtEnd` must be the CAUSAL ATR3m
- *  already captured on the episode's own RECOVERY_CONFIRMED
- *  transition -- never re-fetched or re-derived here. `direction`
- *  determines which side is favorable (LONG -> UP, SHORT -> DOWN).
- *  Returns null for any horizon where insufficient future data
- *  exists -- never fabricates an outcome. */
-export async function computeEpisodeOutcomeLabels(
+/** Computes MFE/MAE/close-return per horizon from an ALREADY-FETCHED
+ *  1m candle pool (`postEndCandlePool` -- must cover at least
+ *  [endTime, endTime + 60min] for full-horizon coverage; a shorter
+ *  pool simply yields null for horizons it doesn't reach, never a
+ *  fabricated value), normalized in both percent and ATR units.
+ *  `atr3mAtEnd` must be the CAUSAL ATR3m already captured on the
+ *  episode's own RECOVERY_CONFIRMED transition -- never re-derived
+ *  here. `direction` determines which side is favorable (LONG -> UP,
+ *  SHORT -> DOWN). Returns null for any horizon where insufficient
+ *  future data exists in the pool -- never fabricates an outcome. */
+export function computeEpisodeOutcomeLabels(
   symbol: string,
   direction: Side,
   endTime: number,
@@ -45,15 +56,10 @@ export async function computeEpisodeOutcomeLabels(
   extremePrice: number,
   atr3mAtEnd: number | null,
   researchWindowToMs: number,
-): Promise<EpisodeOutcomeLabels> {
-  const maxHorizonMs = Math.max(...OUTCOME_HORIZONS_MIN) * 60_000;
-  const fetchToMs = Math.min(endTime + maxHorizonMs, researchWindowToMs);
-  const candles =
-    fetchToMs > endTime
-      ? await fetchKlines(symbol, 60_000, endTime, fetchToMs)
-      : [];
-  const afterEnd = candles
-    .filter((c) => c.closeTime > endTime)
+  postEndCandlePool: readonly Candle[],
+): EpisodeOutcomeLabels {
+  const afterEnd = postEndCandlePool
+    .filter((c) => c.symbol === symbol && c.closeTime > endTime)
     .sort((a, b) => a.openTime - b.openTime);
 
   const outcomes: Record<number, HorizonOutcome | null> = {};

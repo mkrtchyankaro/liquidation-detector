@@ -227,6 +227,56 @@ function main(): void {
     },
   );
 
+  scenario(
+    "8. REGRESSION: a single same-direction event AT the phase's own start boundary must NOT be excluded (the exact bug found auditing the first real run)",
+    () => {
+      // this event's own timestamp IS the start waypoint's timestamp -- it must still count
+      const events = [mkEvent("e1", 0, "LONG", 1, 20)];
+      const start = mkWaypoint(0, 1000);
+      const end = mkWaypoint(1000, 1000);
+      const result = computeQuantityPhaseAccounting(events, start, end, 1000);
+      assert.strictEqual(
+        result.liquidatedQuantity,
+        20,
+        "the single event defining this phase's own start must count toward its liquidated quantity -- excluding it artificially zeroes the denominator and inflates every downstream ratio",
+      );
+    },
+  );
+
+  scenario(
+    "9. adjacent-phase decomposition never double-counts the shared extreme boundary event",
+    () => {
+      // one event exactly AT the extreme waypoint's own timestamp
+      const events = [mkEvent("atExtreme", 500, "LONG", 1, 50)];
+      const start = mkWaypoint(0, 1000);
+      const extreme = mkWaypoint(500, 950);
+      const end = mkWaypoint(1000, 900);
+      const startToExtreme = computeQuantityPhaseAccounting(
+        events,
+        start,
+        extreme,
+        500,
+      );
+      const extremeToEnd = computeQuantityPhaseAccounting(
+        events,
+        extreme,
+        end,
+        1000,
+        true,
+      );
+      assert.strictEqual(
+        startToExtreme.liquidatedQuantity,
+        50,
+        "startToExtreme (inclusive end) must count the event at the extreme boundary",
+      );
+      assert.strictEqual(
+        extremeToEnd.liquidatedQuantity,
+        0,
+        "extremeToEnd (exclusive start) must NOT count the same event again",
+      );
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 }

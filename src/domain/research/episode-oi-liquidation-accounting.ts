@@ -70,20 +70,26 @@ function pctChange(from: number | null, to: number | null): number | null {
 
 /** quantity = quoteQty / price -- exact algebraic inversion of how
  *  quoteQty was originally computed, see this module's own header.
- *  Strictly same-direction events only; strictly within
- *  (fromTsExclusive, toTsInclusive]. */
+ *  Strictly same-direction events only. INCLUSIVE on both boundaries
+ *  by default -- a single liquidation event that itself defines the
+ *  phase's own start (a very common case for smaller episodes) must
+ *  still count toward that phase's liquidated quantity, or the
+ *  denominator would be artificially zeroed out. Pass
+ *  `fromExclusive: true` only when decomposing adjacent phases that
+ *  share a boundary waypoint, so that shared boundary event is never
+ *  counted in both phases. */
 function sumLiquidatedQuantity(
   sameDirectionEvents: readonly RawEvent[],
-  fromTsExclusive: number,
+  fromTs: number,
   toTsInclusive: number,
+  fromExclusive = false,
 ): number {
   let sum = 0;
   for (const ev of sameDirectionEvents) {
-    if (
-      ev.timestamp > fromTsExclusive &&
-      ev.timestamp <= toTsInclusive &&
-      ev.price > 0
-    )
+    const afterStart = fromExclusive
+      ? ev.timestamp > fromTs
+      : ev.timestamp >= fromTs;
+    if (afterStart && ev.timestamp <= toTsInclusive && ev.price > 0)
       sum += ev.quoteQty / ev.price;
   }
   return sum;
@@ -94,6 +100,7 @@ export function computeQuantityPhaseAccounting(
   startWp: OiWaypoint | null,
   endWp: OiWaypoint | null,
   structuralPhaseEndTimestamp: number | null,
+  fromExclusive = false,
 ): QuantityPhaseAccounting {
   if (
     startWp === null ||
@@ -120,6 +127,7 @@ export function computeQuantityPhaseAccounting(
     sameDirectionEvents,
     startWp.timestamp,
     endWp.timestamp,
+    fromExclusive,
   );
   const observedOiQuantityChange = endWp.openInterest - startWp.openInterest;
   const observedOiQuantityChangePct = pctChange(
@@ -187,11 +195,16 @@ export function computeEpisodeQuantityAccounting(
       extremeWp,
       extremeTime,
     ),
+    // fromExclusive=true here: the extreme waypoint's own boundary
+    // event was already counted (inclusive) as the END of
+    // startToExtreme above -- excluding it here prevents double-
+    // counting it again as the START of this phase.
     extremeToEnd: computeQuantityPhaseAccounting(
       sameDirectionEvents,
       extremeWp,
       endWp,
       endTime,
+      true,
     ),
     startToEnd: computeQuantityPhaseAccounting(
       sameDirectionEvents,

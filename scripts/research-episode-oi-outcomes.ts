@@ -2,7 +2,6 @@ import "dotenv/config";
 import * as fs from "fs";
 import * as path from "path";
 import {
-  fetchKlines,
   loadRawEvents,
   computeAtrSeries,
   reconstructEpisodesForVariant,
@@ -10,6 +9,11 @@ import {
   type Atrs,
   type Episode,
 } from "../src/domain/research/displacement-balanced-core";
+import {
+  fetchKlinesWithRetry,
+  getFetchStats,
+  resetFetchStats,
+} from "../src/domain/research/research-fetch-retry";
 import {
   extractOiTrajectory,
   closestWaypoint,
@@ -37,8 +41,10 @@ import {
 } from "../src/domain/research/episode-historical-percentile";
 import {
   computeEpisodeOutcomeLabels,
+  OUTCOME_HORIZONS_MIN,
   type EpisodeOutcomeLabels,
 } from "../src/domain/research/episode-outcome-labels";
+import type { Candle } from "../src/shared/common.types";
 
 /**
  * Sep 16 2026 (Karo), operator-approved. STEP 3 research pipeline:
@@ -173,9 +179,31 @@ async function buildRecordsForSymbol(
   args: CliArgs,
 ): Promise<{ records: EpisodeResearchRecord[]; episodeCount: number }> {
   const paddedFrom = args.fromMs - args.paddingMs;
-  const c1m = await fetchKlines(symbol, 60_000, paddedFrom, args.toMs);
-  const c3m = await fetchKlines(symbol, 180_000, paddedFrom, args.toMs);
-  const c5m = await fetchKlines(symbol, 300_000, paddedFrom, args.toMs);
+  const maxOutcomeHorizonMs = Math.max(...OUTCOME_HORIZONS_MIN) * 60_000;
+  // Sep 16 2026 (Karo), operator-requested (429 fix). The 1m fetch
+  // now extends past args.toMs by the full outcome-horizon buffer, in
+  // ONE call, so computeEpisodeOutcomeLabels below never needs its
+  // own network call per episode -- this was the actual root cause of
+  // the 429s (162 redundant, heavily-overlapping per-episode fetches
+  // across just 3 symbols in the first real run).
+  const c1m = await fetchKlinesWithRetry(
+    symbol,
+    60_000,
+    paddedFrom,
+    args.toMs + maxOutcomeHorizonMs,
+  );
+  const c3m = await fetchKlinesWithRetry(
+    symbol,
+    180_000,
+    paddedFrom,
+    args.toMs,
+  );
+  const c5m = await fetchKlinesWithRetry(
+    symbol,
+    300_000,
+    paddedFrom,
+    args.toMs,
+  );
   const atrs: Atrs = {
     c1m,
     c3m,
@@ -227,14 +255,18 @@ async function buildRecordsForSymbol(
       },
       refs,
     );
-    const outcomeLabels = await computeEpisodeOutcomeLabels(
+    // no longer async -- computeEpisodeOutcomeLabels reads from the
+    // already-fetched c1m pool (which already covers the outcome
+    // horizon), zero additional network calls here.
+    const outcomeLabels = computeEpisodeOutcomeLabels(
       symbol,
       e.direction,
       e.endTime!,
       confirmed?.price ?? e.extremePrice,
       e.extremePrice,
       confirmed?.atr3m ?? null,
-      args.toMs,
+      args.toMs + maxOutcomeHorizonMs,
+      c1m,
     );
 
     const inspectFrom = new Date(e.startTime - 15 * 60_000).toISOString();
@@ -370,6 +402,7 @@ function groupStats(
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
+  resetFetchStats();
   console.log(`Symbols: ${args.symbols.join(", ")}`);
   console.log(
     `Window: ${new Date(args.fromMs).toISOString()} -> ${new Date(args.toMs).toISOString()}`,
@@ -399,6 +432,16 @@ async function main(): Promise<void> {
   console.log(`By symbol: ${JSON.stringify(perSymbolCounts)}`);
   console.log(
     `By direction: LONG=${allRecords.filter((r) => r.direction === "LONG").length} SHORT=${allRecords.filter((r) => r.direction === "SHORT").length}`,
+  );
+
+  const fetchStats = getFetchStats();
+  console.log(`\n=== FETCH STATS (429 fix verification) ===`);
+  console.log(
+    `Total REST request attempts: ${fetchStats.totalRequestAttempts}`,
+  );
+  console.log(`Total retries triggered by 429/418: ${fetchStats.totalRetries}`);
+  console.log(
+    `(Per-episode outcome fetching eliminated -- outcome labels now read from the same per-symbol candle pool used for episode reconstruction)`,
   );
 
   console.log(`\n=== OI WAYPOINT QUALITY DISTRIBUTION (at END) ===`);
@@ -500,21 +543,83 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `\n=== START->EXTREME vs EXTREME->END OI phase behavior (n=${allRecords.length}) ===`,
+    `\n=== START->EXTREME vs EXTREME->END OI phase behavior, split by direction and quality (n=${allRecords.length}) ===`,
   );
+  const phaseHorizons = [3, 5, 10, 15, 30] as const;
+  function printPhasePattern(
+    label: string,
+    records: readonly EpisodeResearchRecord[],
+  ): void {
+    console.log(`  ${label}: n=${records.length}`);
+    if (records.length === 0) return;
+    const ranks = records
+      .map((r) => r.historical.percentileRank)
+      .filter((v): v is number => v !== null);
+    console.log(
+      `    median historical percentile rank: ${median(ranks)?.toFixed(1) ?? "n/a"} (n=${ranks.length} with history)`,
+    );
+    console.log(
+      `    median liquidation USD: ${median(records.map((r) => r.sameDirectionLiqUsd))?.toFixed(0)}`,
+    );
+    for (const h of phaseHorizons) {
+      const mfe = records
+        .map((r) => r.outcomes[h]?.mfePct)
+        .filter((v): v is number => v !== null && v !== undefined);
+      const mae = records
+        .map((r) => r.outcomes[h]?.maePct)
+        .filter((v): v is number => v !== null && v !== undefined);
+      console.log(
+        `    ${h}m: medianMFE=${median(mfe)?.toFixed(3) ?? "n/a"}% (n=${mfe.length}) medianMAE=${median(mae)?.toFixed(3) ?? "n/a"}% (n=${mae.length})`,
+      );
+    }
+  }
+  for (const direction of ["LONG", "SHORT"] as const) {
+    const dirAll = allRecords.filter(
+      (r) =>
+        r.direction === direction &&
+        r.oiPhaseChangeUsd.oiStartToExtremeUsd !== null &&
+        r.oiPhaseChangeUsd.oiExtremeToEndUsd !== null,
+    );
+    const dirHighQ = dirAll.filter(
+      (r) => r.oiAtEnd !== null && Math.abs(r.oiAtEnd.offsetMs) <= 30_000,
+    );
+    printPhasePattern(
+      `${direction} contraction->stabilize/rebuild (ALL quality)`,
+      dirAll.filter(
+        (r) =>
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd! >= 0,
+      ),
+    );
+    printPhasePattern(
+      `${direction} contraction->continued contraction (ALL quality)`,
+      dirAll.filter(
+        (r) =>
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd! < 0,
+      ),
+    );
+    printPhasePattern(
+      `${direction} contraction->stabilize/rebuild (HIGH quality, offset<=30s)`,
+      dirHighQ.filter(
+        (r) =>
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd! >= 0,
+      ),
+    );
+    printPhasePattern(
+      `${direction} contraction->continued contraction (HIGH quality, offset<=30s)`,
+      dirHighQ.filter(
+        (r) =>
+          r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 &&
+          r.oiPhaseChangeUsd.oiExtremeToEndUsd! < 0,
+      ),
+    );
+  }
   const phaseAvailable = allRecords.filter(
     (r) =>
       r.oiPhaseChangeUsd.oiStartToExtremeUsd !== null &&
       r.oiPhaseChangeUsd.oiExtremeToEndUsd !== null,
-  );
-  console.log(
-    `  Episodes with both phases measurable: n=${phaseAvailable.length}`,
-  );
-  console.log(
-    `  Contraction start->extreme THEN stabilize/rebuild extreme->end: n=${phaseAvailable.filter((r) => r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 && r.oiPhaseChangeUsd.oiExtremeToEndUsd! >= 0).length}`,
-  );
-  console.log(
-    `  Contraction start->extreme, continued contraction extreme->end: n=${phaseAvailable.filter((r) => r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 && r.oiPhaseChangeUsd.oiExtremeToEndUsd! < 0).length}`,
   );
 
   console.log(
@@ -545,6 +650,61 @@ async function main(): Promise<void> {
         `    implied replacement ratio: median=${median(ratios)?.toFixed(2)}x n=${ratios.length}`,
       );
     }
+  }
+
+  console.log(
+    `\n=== DENOMINATOR / SMALL-EPISODE AUDIT: ratio distribution stratified by liquidation size ===`,
+  );
+  const withRatio = allRecords.filter(
+    (r) => r.oiLiquidationRatios.oiNetChangeToLiqRatio !== null,
+  );
+  console.log(
+    `  median liquidation USD (all with a ratio): ${median(withRatio.map((r) => r.sameDirectionLiqUsd))?.toFixed(0)}`,
+  );
+  console.log(
+    `  median liquidation quantity, START->END (all with a ratio): ${median(withRatio.map((r) => r.quantityAccounting.startToEnd.liquidatedQuantity ?? NaN).filter((v) => !Number.isNaN(v)))?.toFixed(6)}`,
+  );
+  const sortedByAbsRatio = [...withRatio].sort(
+    (a, b) =>
+      Math.abs(b.oiLiquidationRatios.oiNetChangeToLiqRatio!) -
+      Math.abs(a.oiLiquidationRatios.oiNetChangeToLiqRatio!),
+  );
+  console.log(`  Top 5 most extreme |ratio| episodes -- raw components:`);
+  for (const r of sortedByAbsRatio.slice(0, 5)) {
+    console.log(
+      `  --- ${r.symbol} ${r.direction} end=${new Date(r.endTs).toISOString()} ---`,
+    );
+    console.log(
+      `      sameDirectionLiqUsd=${r.sameDirectionLiqUsd.toFixed(0)} sameDirectionEventCount=${r.sameDirectionEventCount}`,
+    );
+    console.log(
+      `      oiStartUsd=${r.oiPhaseChangeUsd.oiStartUsd?.toFixed(0)} oiNearEndUsd=${r.oiPhaseChangeUsd.oiNearEndUsd?.toFixed(0)} oiStartToEndUsd=${r.oiPhaseChangeUsd.oiStartToEndUsd?.toFixed(0)}`,
+    );
+    console.log(
+      `      oiAtEnd offsetMs=${r.oiAtEnd?.offsetMs} quality=${r.oiAtEnd?.quality}`,
+    );
+    console.log(
+      `      quantityAccounting.startToEnd: liquidatedQuantity=${r.quantityAccounting.startToEnd.liquidatedQuantity?.toFixed(6)} observedOiQuantityChange=${r.quantityAccounting.startToEnd.observedOiQuantityChange?.toFixed(6)}`,
+    );
+    console.log(
+      `      oiNetChangeToLiqRatio=${r.oiLiquidationRatios.oiNetChangeToLiqRatio?.toFixed(3)} impliedReplacementQuantity=${r.quantityAccounting.startToEnd.impliedReplacementQuantity?.toFixed(6) ?? "n/a"}`,
+    );
+    console.log(`      ${r.inspectWindow.suggestedCommand}`);
+  }
+
+  console.log(
+    `\n=== PERCENTILE BAND AUDIT: episodes with historicalSampleCount > 0, near the P90/P95 boundary ===`,
+  );
+  const withHistory = allRecords
+    .filter((r) => r.historical.historicalSampleCount > 0)
+    .sort(
+      (a, b) =>
+        (a.historical.percentileRank ?? 0) - (b.historical.percentileRank ?? 0),
+    );
+  for (const r of withHistory.slice(-10)) {
+    console.log(
+      `  ${r.symbol} ${r.direction} liqUsd=${r.sameDirectionLiqUsd.toFixed(0)} n=${r.historical.historicalSampleCount} P90=${r.historical.historicalP90?.toFixed(0)} P95=${r.historical.historicalP95?.toFixed(0)} rank=${r.historical.percentileRank?.toFixed(1)} band=${r.atOrAboveP95 ? ">=P95" : r.betweenP90P95 ? "P90-P95" : "below P90"}`,
+    );
   }
 
   const outDir = path.join(process.cwd(), "research-output");
