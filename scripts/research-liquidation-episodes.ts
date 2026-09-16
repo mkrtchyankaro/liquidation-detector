@@ -665,6 +665,51 @@ export function percentile(
   return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (idx - lo);
 }
 
+/** Sep 16 2026 (Karo), operator-requested -- explicit, top-level
+ *  summary fields for easy inspection (previously only inside the
+ *  transitions array). Generic across every variant -- populated the
+ *  same way regardless of whether the variant actually GATES on
+ *  displacement/fraction, so BASELINE episodes also get these values
+ *  reported (just never used to decide their own END). */
+export function episodeSummary(e: Episode): {
+  startReferencePrice: number;
+  finalExtremePrice: number;
+  finalExtremeTime: number;
+  durationMs: number | null;
+  episodeDisplacement: number | null;
+  episodeDisplacementAtr3m: number | null;
+  recoveryAtEnd: number | null;
+  recoveryAtr3m: number | null;
+  recoveryAtr5m: number | null;
+  recoveryFraction: number | null;
+} {
+  const confirmed = [...e.transitions]
+    .reverse()
+    .find((t) => t.type === "RECOVERY_CONFIRMED");
+  return {
+    startReferencePrice: confirmed?.startReferencePrice ?? e.firstPrice,
+    finalExtremePrice: e.extremePrice,
+    finalExtremeTime: e.extremeTime,
+    durationMs: e.endTime !== null ? e.endTime - e.startTime : null,
+    episodeDisplacement: confirmed?.episodeDisplacement ?? null,
+    episodeDisplacementAtr3m: confirmed?.episodeDisplacementAtr3m ?? null,
+    recoveryAtEnd: confirmed?.recovery ?? null,
+    recoveryAtr3m:
+      confirmed?.atr3m !== undefined &&
+      confirmed?.atr3m !== null &&
+      confirmed?.recovery !== undefined
+        ? confirmed.recovery / confirmed.atr3m
+        : null,
+    recoveryAtr5m:
+      confirmed?.atr5m !== undefined &&
+      confirmed?.atr5m !== null &&
+      confirmed?.recovery !== undefined
+        ? confirmed.recovery / confirmed.atr5m
+        : null,
+    recoveryFraction: confirmed?.recoveryFraction ?? null,
+  };
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   console.log(`Symbol: ${args.symbol}`);
@@ -933,6 +978,7 @@ async function main(): Promise<void> {
                 e.endTime !== null
                   ? "confirmed via causal 1m->3m state machine -- reproducible live"
                   : "still open as of the end of the requested data window",
+              ...episodeSummary(e),
               transitions: e.transitions,
               sameDirectionUsd: episodeUsd(e),
               sameDirectionEventCount: e.sameDirectionEvents.length,
@@ -1041,8 +1087,19 @@ function buildHtmlReport(
     })
     .join("\n");
 
-  const variantPanels = VARIANTS.map((variant) => {
-    const episodes = variantResults[variant.name]!.episodes;
+  // Sep 16 2026 (Karo), operator-requested -- DISPLACEMENT_BALANCED is
+  // now the accepted PRIMARY research variant for cross-symbol
+  // validation. Rendered first, full-size, with prominent on-chart
+  // "Recovery: X% / ATR3m: Y" text at every confirmed END so manual
+  // validation doesn't require reading the table. Every other variant
+  // (including baseline BALANCED, kept for direct comparison) is
+  // still fully available but collapsed by default via a native
+  // <details> element -- no JS framework, works in any browser.
+  const renderVariantPanel = (
+    variant: Variant,
+    episodes: Episode[],
+    prominent: boolean,
+  ): string => {
     const episodeSvg = episodes
       .map((e, idx) => {
         const startX = x(e.startTime),
@@ -1052,8 +1109,18 @@ function buildHtmlReport(
         const color = e.direction === "LONG" ? "#2962ff" : "#ff6d00";
         let s = `<circle cx="${startX}" cy="${y(e.firstPrice)}" r="4" fill="${color}" stroke="black"/>`;
         s += `<circle cx="${extremeX}" cy="${extremeY}" r="5" fill="yellow" stroke="${color}" stroke-width="2"/>`;
-        if (endX !== null)
+        if (endX !== null) {
           s += `<line x1="${endX}" y1="0" x2="${endX}" y2="${H}" stroke="lime" stroke-width="1.5" stroke-dasharray="4,2"/>`;
+          if (prominent) {
+            const sum = episodeSummary(e);
+            const label =
+              sum.recoveryFraction !== null
+                ? `Recovery: ${(sum.recoveryFraction * 100).toFixed(1)}% / ATR3m: ${sum.recoveryAtr3m !== null ? sum.recoveryAtr3m.toFixed(2) + "x" : "n/a"}`
+                : "";
+            if (label)
+              s += `<text x="${endX + 4}" y="${20 + (idx % 5) * 12}" font-size="10" fill="lime">${label}</text>`;
+          }
+        }
         for (const tr of e.transitions) {
           if (tr.type === "RECOVERY_CANDIDATE")
             s += `<circle cx="${x(tr.time)}" cy="${tr.price !== undefined ? y(tr.price) : 0}" r="3" fill="none" stroke="cyan" stroke-width="1"/>`;
@@ -1069,48 +1136,48 @@ function buildHtmlReport(
       .join("\n");
     const table = episodes
       .map((e, idx) => {
-        const finalTransition = [...e.transitions]
-          .reverse()
-          .find((t) => t.type === "RECOVERY_CONFIRMED");
-        const displacement =
-          finalTransition?.episodeDisplacement !== undefined
-            ? finalTransition.episodeDisplacement.toFixed(2)
-            : "-";
-        const displacementAtr3m =
-          finalTransition?.episodeDisplacementAtr3m !== undefined &&
-          finalTransition?.episodeDisplacementAtr3m !== null
-            ? finalTransition.episodeDisplacementAtr3m.toFixed(2)
-            : "-";
-        const recoveryAtr3m =
-          finalTransition?.atr3m !== undefined &&
-          finalTransition?.atr3m !== null &&
-          finalTransition.recovery !== undefined
-            ? (finalTransition.recovery / finalTransition.atr3m).toFixed(2)
-            : "-";
-        const recoveryFraction =
-          finalTransition?.recoveryFraction !== undefined &&
-          finalTransition?.recoveryFraction !== null
-            ? (finalTransition.recoveryFraction * 100).toFixed(1) + "%"
-            : "-";
-        return `<tr><td>${idx}</td><td>${e.direction}</td><td>${new Date(e.startTime).toISOString()}</td><td>${e.endTime !== null ? new Date(e.endTime).toISOString() : "STILL OPEN"}</td><td>$${episodeUsd(e).toFixed(0)}</td><td>${e.sameDirectionEvents.length}</td><td>${e.oppositeSideEvents.length}</td><td>${displacement}</td><td>${displacementAtr3m}</td><td>${recoveryAtr3m}</td><td>${recoveryFraction}</td></tr>`;
+        const sum = episodeSummary(e);
+        const durationMin =
+          sum.durationMs !== null ? (sum.durationMs / 60_000).toFixed(1) : "-";
+        const fmt = (v: number | null, digits = 2): string =>
+          v !== null ? v.toFixed(digits) : "-";
+        return `<tr><td>${idx}</td><td>${e.direction}</td><td>${new Date(e.startTime).toISOString()}</td><td>${e.endTime !== null ? new Date(e.endTime).toISOString() : "STILL OPEN"}</td><td>${durationMin}</td><td>$${episodeUsd(e).toFixed(0)}</td><td>${e.sameDirectionEvents.length}</td><td>${e.oppositeSideEvents.length}</td><td>${fmt(sum.episodeDisplacement)}</td><td>${fmt(sum.episodeDisplacementAtr3m)}</td><td>${fmt(sum.recoveryAtr3m)}</td><td>${fmt(sum.recoveryAtr5m)}</td><td>${sum.recoveryFraction !== null ? (sum.recoveryFraction * 100).toFixed(1) + "%" : "-"}</td></tr>`;
       })
       .join("\n");
-    return `<h2>${variant.name} (1m&gt;=${variant.candidate1mAtrMultiple}xATR1m, 3m&gt;=${variant.confirm3mAtrMultiple}xATR3m${variant.confirm5mAtrMultiple !== null ? `, 5m&gt;=${variant.confirm5mAtrMultiple}xATR5m` : ""}) -- ${episodes.length} episodes</h2>
+    const heading = `${variant.name} (1m&gt;=${variant.candidate1mAtrMultiple}xATR1m, 3m&gt;=${variant.confirm3mAtrMultiple}xATR3m${variant.confirm5mAtrMultiple !== null ? `, 5m&gt;=${variant.confirm5mAtrMultiple}xATR5m` : ""}${variant.recoveryFractionMinimum !== null ? `, fraction&gt;=${(variant.recoveryFractionMinimum * 100).toFixed(0)}%` : ""}) -- ${episodes.length} episodes`;
+    return `<h2>${heading}</h2>
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 ${candleSvg}
 ${episodeSvg}
 </svg>
-<table><tr><th>#</th><th>Dir</th><th>Start</th><th>End</th><th>Same-dir USD</th><th>Same-dir events</th><th>Opposite events</th><th>Displacement</th><th>Displacement (ATR3m)</th><th>Recovery (ATR3m)</th><th>Recovery Fraction</th></tr>
+<table><tr><th>#</th><th>Dir</th><th>Start</th><th>End</th><th>Duration (min)</th><th>Same-dir USD</th><th>Same-dir events</th><th>Opposite events</th><th>Displacement</th><th>Displacement (ATR3m)</th><th>Recovery (ATR3m)</th><th>Recovery (ATR5m)</th><th>Recovery Fraction</th></tr>
 ${table}
 </table>`;
-  }).join("\n<hr/>\n");
+  };
+
+  const primaryVariant = VARIANTS.find(
+    (v) => v.name === "DISPLACEMENT_BALANCED",
+  )!;
+  const primaryPanel = renderVariantPanel(
+    primaryVariant,
+    variantResults[primaryVariant.name]!.episodes,
+    true,
+  );
+  const otherPanels = VARIANTS.filter((v) => v.name !== "DISPLACEMENT_BALANCED")
+    .map((v) => renderVariantPanel(v, variantResults[v.name]!.episodes, false))
+    .join("\n<hr/>\n");
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${symbol} liquidation episodes</title>
-<style>body{font-family:monospace;background:#111;color:#eee} table{border-collapse:collapse;margin-bottom:20px} td,th{border:1px solid #444;padding:4px 8px} svg{background:#1a1a1a}</style>
+<style>body{font-family:monospace;background:#111;color:#eee} table{border-collapse:collapse;margin-bottom:20px} td,th{border:1px solid #444;padding:4px 8px} svg{background:#1a1a1a} summary{cursor:pointer;font-size:1.2em;margin:16px 0;color:#8ab4f8}</style>
 </head><body>
-<h1>${symbol} -- causal 1m recovery candidate -> 3m confirmation state machine, by variant</h1>
-<p>Blue dot=LONG episode start, Orange dot=SHORT episode start, Yellow ring=final extreme, Lime dashed=confirmed END, Cyan ring=recovery candidate, Red dashed ring=invalidated candidate, gray dot=opposite-side event.</p>
-${variantPanels}
+<h1>${symbol} -- causal 1m recovery candidate -> 3m confirmation state machine</h1>
+<p>PRIMARY variant: <b>DISPLACEMENT_BALANCED</b> (ATR recovery + recovery-as-fraction-of-episode-displacement, accepted for cross-symbol validation).</p>
+<p>Blue dot=LONG episode start, Orange dot=SHORT episode start, Yellow ring=final extreme, Lime dashed=confirmed END (with recovery%/ATR3m label), Cyan ring=recovery candidate, Red dashed ring=invalidated candidate, gray dot=opposite-side event.</p>
+${primaryPanel}
+<details>
+<summary>Other variants (comparison only -- click to expand)</summary>
+${otherPanels}
+</details>
 </body></html>`;
 }
 
