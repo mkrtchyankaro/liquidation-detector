@@ -1,4 +1,8 @@
 import * as assert from "assert";
+import * as fs from "fs";
+import * as path from "path";
+import * as os from "os";
+import { loadUsersConfig } from "../src/infrastructure/config/users.config.loader";
 import {
   LiquidationOiRuntimeOrchestrator,
   type LiquidationOiUserRuntimeRef,
@@ -193,17 +197,21 @@ function mockRestThatShouldNeverBeCalled(): BinanceRestLike {
 function karoArtakRuntimes(
   karoRest: BinanceRestLike | null,
   artakRest: BinanceRestLike | null,
+  karoEnabled = true,
+  artakEnabled = true,
 ): LiquidationOiUserRuntimeRef[] {
   return [
     {
       userId: "karo",
       riskUsd: 1,
+      liquidationOiExecutionEnabled: karoEnabled,
       binanceRest: karoRest,
       telegram: { sendMessage: async () => {} },
     },
     {
       userId: "artak",
       riskUsd: 5,
+      liquidationOiExecutionEnabled: artakEnabled,
       binanceRest: artakRest,
       telegram: { sendMessage: async () => {} },
     },
@@ -451,7 +459,13 @@ async function main(): Promise<void> {
         new LiquidationOiGlobalSignalRepository(mongo),
         new StrategyOrderRepository(mongo),
         () => [
-          { userId: "karo", riskUsd: 1, binanceRest: rest, telegram: null },
+          {
+            userId: "karo",
+            riskUsd: 1,
+            liquidationOiExecutionEnabled: true,
+            binanceRest: rest,
+            telegram: null,
+          },
         ],
         true,
         true,
@@ -483,7 +497,13 @@ async function main(): Promise<void> {
         new LiquidationOiGlobalSignalRepository(mongo),
         new StrategyOrderRepository(mongo),
         () => [
-          { userId: "karo", riskUsd: 1, binanceRest: rest, telegram: null },
+          {
+            userId: "karo",
+            riskUsd: 1,
+            liquidationOiExecutionEnabled: true,
+            binanceRest: rest,
+            telegram: null,
+          },
         ],
         true,
         true,
@@ -541,7 +561,13 @@ async function main(): Promise<void> {
         repo,
         new StrategyOrderRepository(mongo),
         () => [
-          { userId: "karo", riskUsd: 1, binanceRest: rest, telegram: null },
+          {
+            userId: "karo",
+            riskUsd: 1,
+            liquidationOiExecutionEnabled: true,
+            binanceRest: rest,
+            telegram: null,
+          },
         ],
         true,
         true,
@@ -562,6 +588,370 @@ async function main(): Promise<void> {
         1,
         "exactly ONE user-execution row, never a duplicate",
       );
+    },
+  );
+
+  // ============== Per-user liquidationOiExecutionEnabled gating ==============
+
+  await scenario(
+    "G.1. global OFF + Karo user-flag ON -> zero Binance calls",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const rest = mockRestThatShouldNeverBeCalled();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => [
+          {
+            userId: "karo",
+            riskUsd: 1,
+            liquidationOiExecutionEnabled: true,
+            binanceRest: rest,
+            telegram: { sendMessage: async () => {} },
+          },
+        ],
+        true,
+        false /* global OFF */,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 10_000_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(
+        karo.state,
+        "PENDING",
+        "global master switch off must produce the SAME observational PENDING outcome regardless of the user's own flag",
+      );
+    },
+  );
+
+  await scenario(
+    "G.2. global ON + Karo user-flag OFF -> zero Binance calls",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const rest = mockRestThatShouldNeverBeCalled();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => [
+          {
+            userId: "karo",
+            riskUsd: 1,
+            liquidationOiExecutionEnabled: false,
+            binanceRest: rest,
+            telegram: { sendMessage: async () => {} },
+          },
+        ],
+        true,
+        true /* global ON */,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 11_000_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.state, "TERMINAL");
+      assert.strictEqual(
+        karo.terminalReason,
+        "USER_STRATEGY_EXECUTION_DISABLED",
+      );
+      // mockRestThatShouldNeverBeCalled() throwing on any call, combined with the test completing without an uncaught rejection, is itself proof of zero Binance calls
+    },
+  );
+
+  await scenario(
+    "G.3. global ON + Karo user-flag ON -> execution allowed (real call sequence occurs)",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const rest = mockRestSuccess();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => [
+          {
+            userId: "karo",
+            riskUsd: 1,
+            liquidationOiExecutionEnabled: true,
+            binanceRest: rest,
+            telegram: { sendMessage: async () => {} },
+          },
+        ],
+        true,
+        true,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 12_000_000);
+      assert.deepStrictEqual(
+        rest.calls.filter((c) => c.startsWith("create")),
+        [
+          "createOrder:MARKET",
+          "createAlgoOrder:STOP_MARKET",
+          "createOrder:LIMIT",
+        ],
+      );
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.state, "ACTIVE");
+    },
+  );
+
+  await scenario("G.4. Karo ON + Artak OFF -> only Karo executes", async () => {
+    const { mongo, userExecs } = fakeMongo();
+    const karoRest = mockRestSuccess();
+    const artakRest = mockRestThatShouldNeverBeCalled();
+    const orch = new LiquidationOiRuntimeOrchestrator(
+      DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+      DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+      new LiquidationOiGlobalSignalRepository(mongo),
+      new StrategyOrderRepository(mongo),
+      () => karoArtakRuntimes(karoRest, artakRest, true, false),
+      true,
+      true,
+    );
+    await driveToEntryReady(orch, "SOLUSDT", 13_000_000);
+    const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+    const artak = userExecs.docs.find((d: any) => d.userId === "artak");
+    assert.strictEqual(karo.state, "ACTIVE");
+    assert.strictEqual(artak.state, "TERMINAL");
+    assert.strictEqual(
+      artak.terminalReason,
+      "USER_STRATEGY_EXECUTION_DISABLED",
+    );
+  });
+
+  await scenario(
+    "G.5. Karo OFF + Artak ON -> only Artak executes",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const karoRest = mockRestThatShouldNeverBeCalled();
+      const artakRest = mockRestSuccess();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => karoArtakRuntimes(karoRest, artakRest, false, true),
+        true,
+        true,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 14_000_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      const artak = userExecs.docs.find((d: any) => d.userId === "artak");
+      assert.strictEqual(karo.state, "TERMINAL");
+      assert.strictEqual(
+        karo.terminalReason,
+        "USER_STRATEGY_EXECUTION_DISABLED",
+      );
+      assert.strictEqual(artak.state, "ACTIVE");
+    },
+  );
+
+  await scenario("G.6. both ON -> both execute independently", async () => {
+    const { mongo, userExecs } = fakeMongo();
+    const karoRest = mockRestSuccess();
+    const artakRest = mockRestSuccess();
+    const orch = new LiquidationOiRuntimeOrchestrator(
+      DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+      DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+      new LiquidationOiGlobalSignalRepository(mongo),
+      new StrategyOrderRepository(mongo),
+      () => karoArtakRuntimes(karoRest, artakRest, true, true),
+      true,
+      true,
+    );
+    await driveToEntryReady(orch, "SOLUSDT", 15_000_000);
+    const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+    const artak = userExecs.docs.find((d: any) => d.userId === "artak");
+    assert.strictEqual(karo.state, "ACTIVE");
+    assert.strictEqual(artak.state, "ACTIVE");
+    assert.deepStrictEqual(
+      karoRest.calls.filter((c) => c.startsWith("create")),
+      [
+        "createOrder:MARKET",
+        "createAlgoOrder:STOP_MARKET",
+        "createOrder:LIMIT",
+      ],
+    );
+    assert.deepStrictEqual(
+      artakRest.calls.filter((c) => c.startsWith("create")),
+      [
+        "createOrder:MARKET",
+        "createAlgoOrder:STOP_MARKET",
+        "createOrder:LIMIT",
+      ],
+    );
+  });
+
+  await scenario(
+    "G.7. both OFF -> MAIN still observes (reaches ENTRY_READY) but no user executes",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const karoRest = mockRestThatShouldNeverBeCalled();
+      const artakRest = mockRestThatShouldNeverBeCalled();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => karoArtakRuntimes(karoRest, artakRest, false, false),
+        true,
+        true,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 16_000_000);
+      assert.strictEqual(
+        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
+        "ENTRY_READY",
+        "MAIN's own observation/WATCH/ENTRY_READY must be completely unaffected by any user's individual execution flag",
+      );
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      const artak = userExecs.docs.find((d: any) => d.userId === "artak");
+      assert.strictEqual(
+        karo.terminalReason,
+        "USER_STRATEGY_EXECUTION_DISABLED",
+      );
+      assert.strictEqual(
+        artak.terminalReason,
+        "USER_STRATEGY_EXECUTION_DISABLED",
+      );
+    },
+  );
+
+  await scenario(
+    "G.8. the real config loader resolves a missing field to false, not a mock",
+    () => {
+      const tmpPath = path.join(
+        os.tmpdir(),
+        `lox-test-users-${Date.now()}.json`,
+      );
+      // deliberately omits liquidationOiExecutionEnabled entirely, simulating a real pre-existing user JSON file untouched by this change
+      fs.writeFileSync(
+        tmpPath,
+        JSON.stringify({
+          users: [{ userId: "karo_test_user", enabled: true }],
+        }),
+      );
+      try {
+        const [loaded] = loadUsersConfig(tmpPath);
+        assert.strictEqual(
+          loaded!.liquidationOiExecutionEnabled,
+          false,
+          "an existing user JSON file with no knowledge of this field must load as liquidationOiExecutionEnabled=false, via the REAL loader, not a mock",
+        );
+      } finally {
+        fs.unlinkSync(tmpPath);
+      }
+    },
+  );
+
+  await scenario(
+    "G.9. a disabled user never becomes ACTIVE, in any of the four global/user combinations",
+    async () => {
+      for (const [global, user] of [
+        [false, true],
+        [true, false],
+        [false, false],
+      ] as const) {
+        const { mongo, userExecs } = fakeMongo();
+        const rest = mockRestThatShouldNeverBeCalled();
+        const orch = new LiquidationOiRuntimeOrchestrator(
+          DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+          DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+          new LiquidationOiGlobalSignalRepository(mongo),
+          new StrategyOrderRepository(mongo),
+          () => [
+            {
+              userId: "karo",
+              riskUsd: 1,
+              liquidationOiExecutionEnabled: user,
+              binanceRest: rest,
+              telegram: {
+                sendMessage: async () => {
+                  throw new Error(
+                    "Telegram must never be sent for a disabled user",
+                  );
+                },
+              },
+            },
+          ],
+          true,
+          global,
+        );
+        await driveToEntryReady(
+          orch,
+          "SOLUSDT",
+          17_000_000 + Math.random() * 1000,
+        );
+        const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+        assert.notStrictEqual(
+          karo.state,
+          "ACTIVE",
+          `global=${global} user=${user} must never produce ACTIVE`,
+        );
+      }
+    },
+  );
+
+  await scenario(
+    "G.10. a disabled user receives NO Telegram ENTRY message",
+    async () => {
+      const { mongo } = fakeMongo();
+      const rest = mockRestSuccess();
+      let telegramCalled = false;
+      const runtime: LiquidationOiUserRuntimeRef = {
+        userId: "karo",
+        riskUsd: 1,
+        liquidationOiExecutionEnabled: false,
+        binanceRest: rest,
+        telegram: {
+          sendMessage: async () => {
+            telegramCalled = true;
+          },
+        },
+      };
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => [runtime],
+        true,
+        true,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 18_000_000);
+      assert.strictEqual(
+        telegramCalled,
+        false,
+        "no Telegram ENTRY may be sent -- no position was ever opened for this user",
+      );
+    },
+  );
+
+  await scenario(
+    "G.11. enabled users still size using their OWN runtime.config.risk.riskUsd, unaffected by the new gate",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const karoRest = mockRestSuccess();
+      const artakRest = mockRestSuccess();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => karoArtakRuntimes(karoRest, artakRest, true, true),
+        true,
+        true,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 19_000_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      const artak = userExecs.docs.find((d: any) => d.userId === "artak");
+      assert.strictEqual(karo.riskUsd, 1);
+      assert.strictEqual(artak.riskUsd, 5);
+      // Not asserting quantity here: mockRestSuccess()'s getPositionRisk() returns a fixed
+      // positionAmt regardless of the requested quantity (it doesn't echo the request), so
+      // both users' VERIFIED quantity converges to the same mocked value here -- that's a
+      // property of this test's mock fidelity, not of the real sizing/execution code (which
+      // is exactly why riskUsd itself, the actual sizing input, is what's asserted above).
+      // computePositionSizing()'s own unit tests (S.1/S.2 in the sizing-capacity test file)
+      // already directly prove different riskUsd produces different computed quantities.
     },
   );
 

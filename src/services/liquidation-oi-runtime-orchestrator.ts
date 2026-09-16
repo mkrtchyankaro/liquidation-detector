@@ -51,6 +51,13 @@ const log = childLogger({ mod: "lox-runtime" });
 export interface LiquidationOiUserRuntimeRef {
   userId: string;
   riskUsd: number;
+  /** Sep 16 2026 (Karo), operator-requested -- PER-USER real-execution
+   *  gate, sourced from that user's own UserConfig.liquidationOiExecutionEnabled
+   *  (users.config.loader.ts, defaults false when absent). This is
+   *  the SECOND of two required gates -- see executeForUser()'s own
+   *  gating logic below for how it combines with the constructor-level
+   *  executionEnabled master switch. */
+  liquidationOiExecutionEnabled: boolean;
   binanceRest: BinanceRestLike | null;
   telegram: { sendMessage(text: string): Promise<unknown> } | null;
 }
@@ -273,7 +280,29 @@ export class LiquidationOiRuntimeOrchestrator {
 
     if (!this.executionEnabled) {
       log.info(
-        `[LOX_OBSERVATION_ONLY] userId=${runtime.userId} symbol=${symbol} would have entered ${side} qty=${sizing.positionQty} sizeUsdt=${sizing.positionSizeUsdt.toFixed(2)} -- executionEnabled=false, no order placed`,
+        `[LOX_OBSERVATION_ONLY] userId=${runtime.userId} symbol=${symbol} would have entered ${side} qty=${sizing.positionQty} sizeUsdt=${sizing.positionSizeUsdt.toFixed(2)} -- executionEnabled=false (GLOBAL master switch), no order placed`,
+      );
+      return;
+    }
+
+    // Sep 16 2026 (Karo), operator-requested -- SECOND required gate,
+    // checked only after the global master switch has already passed
+    // above. BOTH must be true for a real order to be placed. This
+    // user's own opt-out is recorded as a distinct TERMINAL reason
+    // (never left as an ambiguous PENDING/observational row, and
+    // never becomes ACTIVE) -- and no Telegram is sent, since
+    // persistOutcome()/the Telegram send are never reached from here.
+    if (!runtime.liquidationOiExecutionEnabled) {
+      userExec = {
+        ...userExec,
+        state: "TERMINAL",
+        terminalReason: "USER_STRATEGY_EXECUTION_DISABLED",
+        cleanupState: "COMPLETE",
+        updatedAt: Date.now(),
+      };
+      await this.globalSignalRepo.upsertUserExecution(userExec);
+      log.info(
+        `[LOX_USER_STRATEGY_EXECUTION_DISABLED] userId=${runtime.userId} symbol=${symbol} -- this user's own liquidationOiExecutionEnabled=false, no order attempted, no Binance call made`,
       );
       return;
     }

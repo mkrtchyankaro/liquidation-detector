@@ -12,6 +12,18 @@ interface RawUsersConfigFile {
     btcBlockEnabled?: boolean;
     longEnabled?: boolean;
     shortEnabled?: boolean;
+    /** Sep 16 2026 (Karo), operator-requested -- Liquidation+OI
+     *  Exhaustion strategy, PER-USER real-execution gate. Defaults to
+     *  false when absent (see normalization below) -- an existing
+     *  user JSON file with no knowledge of this field must behave
+     *  identically to one that explicitly sets it false, per the
+     *  operator's own explicit backward-compatibility requirement.
+     *  This is ONE of two required gates -- the other is the global
+     *  master safety switch passed to LiquidationOiRuntimeOrchestrator's
+     *  own constructor (executionEnabled) in main.ts; BOTH must be
+     *  true for this user to receive a real order (see
+     *  liquidation-oi-runtime-orchestrator.ts's own gating logic). */
+    liquidationOiExecutionEnabled?: boolean;
     telegram?: {
       enabled: boolean;
       botToken: string;
@@ -143,6 +155,12 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
       // NOT enforced) if omitted, matching liqwatch-bot's own
       // V5_BTC_BLOCK default.
       btcBlockEnabled: u.btcBlockEnabled ?? false,
+      // Sep 16 2026 (Karo), operator-requested -- defaults to false if
+      // omitted, per explicit operator instruction: an existing user
+      // JSON file that predates this field must behave exactly as
+      // liquidationOiExecutionEnabled=false, never opt a user in
+      // silently.
+      liquidationOiExecutionEnabled: u.liquidationOiExecutionEnabled ?? false,
       // Sep 8 2026 (Karo) -- default true (nothing disabled) if
       // omitted, matching the safe/permissive default.
       longEnabled: u.longEnabled ?? true,

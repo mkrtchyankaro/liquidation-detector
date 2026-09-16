@@ -64,6 +64,24 @@ export interface UserConfig {
    *  flag at all. This flag ONLY controls whether the block is
    *  actually ENFORCED for this user's own delivery/execution. */
   btcBlockEnabled: boolean;
+  /** Sep 16 2026 (Karo), operator-requested -- Liquidation+OI
+   *  Exhaustion strategy, PER-USER real-execution gate. Defaults to
+   *  false when absent from the user's own JSON config (see
+   *  users.config.loader.ts's own normalization) -- an operator must
+   *  explicitly set this true to allow real Binance orders for that
+   *  user under this strategy. This is one of TWO required gates:
+   *  LiquidationOiRuntimeOrchestrator also requires its own
+   *  constructor-level executionEnabled master switch (set in
+   *  main.ts, defaults false) to be true -- BOTH must hold, per
+   *  operator instruction, for any real order to be placed. Does NOT
+   *  affect MAIN's own global observation/WATCH/ENTRY_READY
+   *  processing for this strategy, which remains unconditional and
+   *  shared across all users (mirrors how btcBlockEnabled above
+   *  governs enforcement for a user without touching the shared
+   *  underlying signal engine). Entirely independent of
+   *  binance.orderExecutionEnabled (the V3/V5 execution gate) --
+   *  never read or written by this strategy. */
+  liquidationOiExecutionEnabled: boolean;
   /** Sep 8 2026 (Karo) -- per-user directional kill-switch. Both
    *  default to true (nothing disabled) if omitted. Deliberately
    *  implemented at the SIGNAL-DISTRIBUTION level (services/

@@ -224,6 +224,7 @@ async function main(): Promise<void> {
         .map((r) => ({
           userId: r.config.userId,
           riskUsd: r.config.risk.riskUsd,
+          liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled,
           binanceRest: r.binanceRest,
           telegram: r.telegram,
         })),

@@ -68,7 +68,8 @@ export type UserTerminalReason =
   | "MANUAL_CLOSE"
   | "EMERGENCY_STOP"
   | "EXECUTION_FAILED"
-  | "PROTECTION_FAILED";
+  | "PROTECTION_FAILED"
+  | "USER_STRATEGY_EXECUTION_DISABLED"; // Sep 16 2026 (Karo), operator-requested -- this user's own liquidationOiExecutionEnabled=false, MAIN still observing globally, no order ever attempted for this user
 
 export type CleanupState = "PENDING" | "FAILED_RETRYING" | "COMPLETE";
 
