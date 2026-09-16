@@ -67,6 +67,18 @@ interface SymbolLifecycle {
    *  All null until the relevant state is actually entered. */
   enteredExhaustionCandidateAt: number | null;
   lastTickAt: number | null;
+  /** Sep 16 2026 (Karo), operator-requested SECOND fix -- "meaningful
+   *  progress" checkpoint, distinct from episode.latestLiqTs/extremeTs
+   *  (which refresh on ANY event, size-agnostic). Snapshots the
+   *  episode's own quantities at the last point genuine material
+   *  progress was detected; onTick() compares the CURRENT episode
+   *  against this checkpoint, not against genesis, so a long-lived
+   *  genuinely active episode is judged by its RECENT trajectory, not
+   *  just whether it grew at all since it started. */
+  lastMeaningfulProgressAt: number;
+  liqUsdAtLastMeaningfulProgress: number;
+  extremeAtLastMeaningfulProgress: number;
+  minOiAtLastMeaningfulProgress: number | null;
 }
 
 export interface NoSignalEvent {
@@ -145,14 +157,19 @@ export class LiquidationOiWatchManager {
     const existing = this.symbols.get(event.symbol);
 
     if (existing === undefined) {
+      const episode = startEpisode(event, oiAtEvent);
       this.symbols.set(event.symbol, {
         ownershipId: "",
         globalState: "EPISODE_TRACKING",
-        episode: startEpisode(event, oiAtEvent),
+        episode,
         watchResult: null,
         entryResult: null,
         enteredExhaustionCandidateAt: null,
         lastTickAt: null,
+        lastMeaningfulProgressAt: event.timestamp,
+        liqUsdAtLastMeaningfulProgress: episode.sameDirectionLiqUsd,
+        extremeAtLastMeaningfulProgress: episode.extremePrice,
+        minOiAtLastMeaningfulProgress: episode.minOiQuantity,
       });
       return;
     }
@@ -193,7 +210,7 @@ export class LiquidationOiWatchManager {
     atr3mAgeMs: number | null,
     nowMs: number,
   ): void {
-    const lifecycle = this.symbols.get(symbol);
+    let lifecycle = this.symbols.get(symbol);
     if (lifecycle === undefined) return;
     if (
       lifecycle.globalState === "ACTIVE" ||
@@ -233,23 +250,29 @@ export class LiquidationOiWatchManager {
     }
 
     if (lifecycle.globalState === "EPISODE_TRACKING") {
-      // EPISODE_NO_PROGRESS / LIQUIDATION_FLOW_DIED: causal, not a
-      // bare timer -- dies only when BOTH the liquidation flow AND
-      // the adverse-extreme progression have gone quiet.
-      const sinceLastLiq = nowMs - lifecycle.episode.latestLiqTs;
-      const sinceLastExtreme = nowMs - lifecycle.episode.extremeTs;
-      if (
-        sinceLastLiq > this.config.noProgressTimeoutMs &&
-        sinceLastExtreme > this.config.noProgressTimeoutMs
-      ) {
+      // Sep 16 2026 (Karo), operator-requested SECOND fix, proven by
+      // the real BTC replay: recompute whether MEANINGFUL progress
+      // (not just any event) has happened since the last checkpoint,
+      // and only then check staleness against that checkpoint -- a
+      // tiny liquidation print or a marginal new extreme no longer
+      // resets the clock on its own.
+      const checkpoint = this.recomputeMeaningfulProgressCheckpoint(
+        lifecycle,
+        atr3m,
+        nowMs,
+      );
+      const sinceLastMeaningfulProgress =
+        nowMs - checkpoint.lastMeaningfulProgressAt;
+      if (sinceLastMeaningfulProgress > this.config.noProgressTimeoutMs) {
         this.cancel(
           symbol,
           "EPISODE_NO_PROGRESS",
-          `no same-direction liquidation for ${sinceLastLiq}ms and no new adverse extreme for ${sinceLastExtreme}ms, both exceed noProgressTimeoutMs=${this.config.noProgressTimeoutMs}ms`,
+          `no MEANINGFUL liquidation/extreme/OI progress for ${sinceLastMeaningfulProgress}ms, exceeds noProgressTimeoutMs=${this.config.noProgressTimeoutMs}ms (raw activity may have continued -- see minMeaningfulLiqProgressFraction/minMeaningfulExtremeProgressAtr/minMeaningfulOiProgressFraction)`,
           nowMs,
         );
         return;
       }
+      lifecycle = { ...lifecycle, ...checkpoint };
 
       const result = qualifyWatch(
         lifecycle.episode,
@@ -293,6 +316,12 @@ export class LiquidationOiWatchManager {
         entryResult: null,
         enteredExhaustionCandidateAt: nowMs,
         lastTickAt: nowMs,
+        lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+        liqUsdAtLastMeaningfulProgress:
+          lifecycle.liqUsdAtLastMeaningfulProgress,
+        extremeAtLastMeaningfulProgress:
+          lifecycle.extremeAtLastMeaningfulProgress,
+        minOiAtLastMeaningfulProgress: lifecycle.minOiAtLastMeaningfulProgress,
       });
       return;
     }
@@ -425,6 +454,83 @@ export class LiquidationOiWatchManager {
     });
     if (this.ownership.isOwned(symbol)) this.ownership.release(symbol);
     this.symbols.delete(symbol);
+  }
+
+  /** Sep 16 2026 (Karo), operator-requested SECOND fix. Compares the
+   *  CURRENT episode snapshot against the last "meaningful progress"
+   *  checkpoint (not genesis) across three independent, relative,
+   *  self-scaling dimensions -- reusing the episode's own accumulated
+   *  USD, ATR (an existing strategy statistic), and OI, per the
+   *  operator's own explicit instruction against inventing fresh
+   *  absolute thresholds. ANY ONE dimension showing meaningful
+   *  progress refreshes the checkpoint (an episode that is genuinely
+   *  still developing via liquidation flow OR price extension OR OI
+   *  destruction is still alive) -- meaningful progress is NOT
+   *  required on all three simultaneously. Pure; does not mutate the
+   *  lifecycle passed in. */
+  private recomputeMeaningfulProgressCheckpoint(
+    lifecycle: SymbolLifecycle,
+    atr3m: number | null,
+    nowMs: number,
+  ): Pick<
+    SymbolLifecycle,
+    | "lastMeaningfulProgressAt"
+    | "liqUsdAtLastMeaningfulProgress"
+    | "extremeAtLastMeaningfulProgress"
+    | "minOiAtLastMeaningfulProgress"
+  > {
+    let progressed = false;
+
+    const liqBase = lifecycle.liqUsdAtLastMeaningfulProgress;
+    const liqProgressFraction =
+      liqBase > 0
+        ? (lifecycle.episode.sameDirectionLiqUsd - liqBase) / liqBase
+        : 0;
+    if (liqProgressFraction >= this.config.minMeaningfulLiqProgressFraction)
+      progressed = true;
+
+    if (atr3m !== null && atr3m > 0) {
+      const extremeProgressAtr =
+        Math.abs(
+          lifecycle.episode.extremePrice -
+            lifecycle.extremeAtLastMeaningfulProgress,
+        ) / atr3m;
+      if (extremeProgressAtr >= this.config.minMeaningfulExtremeProgressAtr)
+        progressed = true;
+    }
+
+    const startOi = lifecycle.episode.startOiQuantity;
+    const currentMinOi = lifecycle.episode.minOiQuantity;
+    if (
+      startOi !== null &&
+      startOi > 0 &&
+      currentMinOi !== null &&
+      lifecycle.minOiAtLastMeaningfulProgress !== null
+    ) {
+      const additionalDestructionFraction =
+        (lifecycle.minOiAtLastMeaningfulProgress - currentMinOi) / startOi;
+      if (
+        additionalDestructionFraction >=
+        this.config.minMeaningfulOiProgressFraction
+      )
+        progressed = true;
+    }
+
+    if (!progressed)
+      return {
+        lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+        liqUsdAtLastMeaningfulProgress:
+          lifecycle.liqUsdAtLastMeaningfulProgress,
+        extremeAtLastMeaningfulProgress:
+          lifecycle.extremeAtLastMeaningfulProgress,
+        minOiAtLastMeaningfulProgress: lifecycle.minOiAtLastMeaningfulProgress,
+      };
+    return {
+      lastMeaningfulProgressAt: nowMs,
+      liqUsdAtLastMeaningfulProgress: lifecycle.episode.sameDirectionLiqUsd,
+      extremeAtLastMeaningfulProgress: lifecycle.episode.extremePrice,
+      minOiAtLastMeaningfulProgress: lifecycle.episode.minOiQuantity,
+    };
   }
 
   private assertTransition(

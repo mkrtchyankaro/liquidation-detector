@@ -30,6 +30,25 @@ export interface LiquidationOiStrategyConfig {
   entryWindowTimeoutMs: number;
   thesisInvalidationAtrMultiple: number;
   marketDataStaleTimeoutMs: number;
+  /** Sep 16 2026 (Karo), operator-requested SECOND fix, proven by the
+   *  real BTC replay: "any event happened recently" is not the same
+   *  as "the episode is making MEANINGFUL progress". A tiny same-
+   *  direction liquidation or a marginal new extreme (even $0.01)
+   *  used to refresh latestLiqTs/extremeTs unconditionally, which
+   *  meant the noProgressTimeoutMs check above almost never fired on
+   *  an actively-trading symbol like BTC (something tiny refreshes
+   *  one of the two clocks every few minutes). These three
+   *  thresholds define "meaningful progress" instead -- all
+   *  RELATIVE/self-scaling, reusing the episode's own accumulated
+   *  quantities and ATR (an existing strategy statistic) rather than
+   *  a fresh arbitrary absolute figure, per the operator's own
+   *  explicit instruction not to invent thresholds from intuition.
+   *  All UNTUNED. Only relevant to EPISODE_TRACKING (pre-WATCH) --
+   *  once EXHAUSTION_CANDIDATE is reached, entryWindowTimeoutMs is
+   *  the separate, already-causal guard for that phase. */
+  minMeaningfulLiqProgressFraction: number;
+  minMeaningfulExtremeProgressAtr: number;
+  minMeaningfulOiProgressFraction: number;
   /** FAILSAFE ONLY -- a final safety net so a programming/data edge
    *  case can never lock a symbol indefinitely. NOT the primary
    *  episode-death mechanism (noProgressTimeoutMs/entryWindowTimeoutMs/
@@ -120,4 +139,23 @@ export const DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG: LiquidationOiStrategyConfig
     // preEntryFailsafeMaxLifetimeMs (default 4h): FAILSAFE ONLY -- see
     // the field's own doc comment above.
     preEntryFailsafeMaxLifetimeMs: 4 * 3_600_000,
+
+    // "Meaningful progress" thresholds -- all UNTUNED, all RELATIVE/
+    // self-scaling (see the field's own doc comment above for why).
+    // minMeaningfulLiqProgressFraction (default 0.05 = 5%): an
+    // additional same-direction liquidation event counts as progress
+    // only if it grows the episode's own accumulated USD by at least
+    // this fraction versus the last progress checkpoint -- a $76 print
+    // on a $500,000 episode does not reset the clock.
+    minMeaningfulLiqProgressFraction: 0.05,
+    // minMeaningfulExtremeProgressAtr (default 0.05 ATR3m): a new
+    // adverse extreme counts as progress only if it extends beyond the
+    // last progress checkpoint's extreme by at least this many ATR --
+    // a $0.01 marginal new high does not reset the clock.
+    minMeaningfulExtremeProgressAtr: 0.05,
+    // minMeaningfulOiProgressFraction (default 0.02 = 2% of starting
+    // OI): continuing OI destruction counts as progress only if the
+    // episode's own minimum OI drops by at least this much (as a
+    // fraction of its own starting OI) versus the last checkpoint.
+    minMeaningfulOiProgressFraction: 0.02,
   };
