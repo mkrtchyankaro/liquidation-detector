@@ -104,7 +104,7 @@ function parseArgs(argv: string[]): CliArgs {
   return { symbol, fromMs, toMs };
 }
 
-async function fetchKlines(
+export async function fetchKlines(
   symbol: string,
   intervalMs: number,
   fromMs: number,
@@ -236,7 +236,7 @@ export function atrAtOrBefore(
   return bestIdx >= 0 ? (series[bestIdx] ?? null) : null;
 }
 
-interface RawEvent {
+export interface RawEvent {
   _id: string;
   timestamp: number;
   victim: Side;
@@ -245,7 +245,7 @@ interface RawEvent {
   marketSnapshot: Record<string, any> | null;
 }
 
-async function loadRawEvents(
+export async function loadRawEvents(
   symbol: string,
   fromMs: number,
   toMs: number,
@@ -289,7 +289,7 @@ function get(obj: unknown, path_: string): unknown {
     );
 }
 
-interface Atrs {
+export interface Atrs {
   series1m: (number | null)[];
   series3m: (number | null)[];
   series5m: (number | null)[];
@@ -329,7 +329,7 @@ function atr5mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
  *  meaningful for a small one. See MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE's
  *  own doc comment for the ATR-normalized safeguard against tiny-
  *  displacement instability. */
-interface Variant {
+export interface Variant {
   name: string;
   candidate1mAtrMultiple: number;
   confirm3mAtrMultiple: number;
@@ -344,7 +344,7 @@ interface Variant {
  *  not failed) -- fraction reasoning about "how much of the move has
  *  been recovered" is not yet meaningful for a move that barely
  *  exceeds normal volatility in the first place. */
-const MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE = 1.0;
+export const MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE = 1.0;
 /** Sep 16 2026 (Karo), operator-requested FREEZE. All other variants
  *  (FAST/BALANCED/STRICT/DISPLACEMENT_FAST/DISPLACEMENT_STRICT) are
  *  removed from this research script entirely -- not just hidden from
@@ -357,7 +357,7 @@ const MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE = 1.0;
  *  large multi-variant JSON. With exactly one variant, every exported
  *  episode is unambiguously DISPLACEMENT_BALANCED. Config values
  *  UNCHANGED from before -- this is a freeze, not a retune. */
-const PRIMARY_VARIANT: Variant = {
+export const PRIMARY_VARIANT: Variant = {
   name: "DISPLACEMENT_BALANCED",
   candidate1mAtrMultiple: 0.75,
   confirm3mAtrMultiple: 1.0,
@@ -393,7 +393,7 @@ interface Transition {
   displacementConditionPass?: boolean;
 }
 
-interface Episode {
+export interface Episode {
   variant: string;
   direction: Side;
   startTime: number;
