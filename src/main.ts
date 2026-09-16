@@ -27,6 +27,7 @@ import { LiqAggregateRepository } from "./infrastructure/mongo/liq-aggregate.rep
 import { LiqAggregateOrchestrator } from "./infrastructure/mongo/liq-aggregate-persistence.orchestrator";
 import { WallAggregateRepository } from "./infrastructure/mongo/wall-aggregate.repository";
 import { WallAggregateOrchestrator } from "./infrastructure/mongo/wall-aggregate-persistence.orchestrator";
+import { EpisodePercentileService } from "./domain/research/episode-percentile.service";
 
 const log = childLogger({ mod: "main" });
 
@@ -188,7 +189,17 @@ async function main(): Promise<void> {
   );
 
   const distributor = new SignalDistributor(mongo, userRuntimes);
-  const reconciliation = new ReconciliationManager(mongo, userRuntimes);
+  // Sep 16 2026 (Karo), operator-approved -- constructed here (no I/O
+  // in its own constructor) so it can be threaded into
+  // ReconciliationManager for the signal-CLOSE refresh hook. Its
+  // actual warmup is triggered later, fire-and-forget, AFTER
+  // orchestrator.start() -- see that call site's own comment.
+  const episodePercentileService = new EpisodePercentileService(symbols);
+  const reconciliation = new ReconciliationManager(
+    mongo,
+    userRuntimes,
+    episodePercentileService,
+  );
 
   const ws = new BinanceWsClient(binanceConfig);
   // Sep 8 2026 (Karo) -- CRITICAL FIX: broadcasts system-wide alerts
@@ -390,6 +401,28 @@ async function main(): Promise<void> {
 
   await reconciliation.start();
   orchestrator.start();
+  // Sep 16 2026 (Karo), operator-approved -- historical
+  // DISPLACEMENT_BALANCED episode-size percentile cache warmup.
+  // Deliberately NOT awaited: a full 10-symbol, 3-day, 3-timeframe
+  // warmup can take real wall-clock time (verified Binance weight
+  // cost: ~50 weight/symbol, ~500 total -- safe against the 2400/min
+  // budget, but still real time across controlled concurrency), and
+  // live liquidation detection must never wait on it. Each symbol's
+  // cache entry starts NOT_READY (getThresholds() returns null) and
+  // becomes READY as its own warmup completes -- no signal-
+  // qualification code reads from this yet (that integration is a
+  // separate, future step). Failures are logged inside the service
+  // itself; they never throw here. The service instance itself was
+  // already constructed earlier (see its own comment there) so
+  // ReconciliationManager could be wired to it for the signal-CLOSE
+  // refresh hook.
+  void episodePercentileService
+    .warmupAll()
+    .catch((err) =>
+      log.error(
+        `[PERCENTILES] warmupAll failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
+      ),
+    );
   // Sep 8 2026 (Karo) -- starts the 60s flush timer, AFTER ws.start()
   // (matching old app.ts's own ordering exactly -- "runs after WS so
   // live data flow is never blocked by Mongo index creation").

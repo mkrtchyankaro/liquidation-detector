@@ -44,6 +44,13 @@ export async function reconcileUserPosition(
    *  reconcileUserPositionImpl's own doc comment on this same
    *  parameter for the full rationale. */
   lastKnownPrice: number | undefined,
+  /** Sep 16 2026 (Karo), operator-approved -- optional. On a
+   *  CONFIRMED close (TP/SL/MANUAL), triggers an async, fire-and-
+   *  forget percentile refresh for THIS symbol only -- never awaited,
+   *  never blocks close processing, never used for any qualification
+   *  decision here. See this function's own call site below for the
+   *  exact hook point. */
+  episodePercentileService?: { scheduleRefresh(symbol: string): void },
 ): Promise<{ closed: boolean }> {
   const result = await runtime.reconcileInFlight.run(
     userSignal.signalId,
@@ -56,6 +63,7 @@ export async function reconcileUserPosition(
         now,
         onConfirmedClosed,
         lastKnownPrice,
+        episodePercentileService,
       );
     },
   );
@@ -88,6 +96,9 @@ async function reconcileUserPositionImpl(
    *  silently prefers entry over a real known price.
    */
   lastKnownPrice: number | undefined,
+  /** Sep 16 2026 (Karo), operator-approved -- see reconcileUserPosition's
+   *  own doc comment on this same parameter. */
+  episodePercentileService?: { scheduleRefresh(symbol: string): void },
 ): Promise<{ closed: boolean }> {
   const userId = runtime.config.userId;
   const reconcileStartTs = Date.now();
@@ -270,6 +281,14 @@ async function reconcileUserPositionImpl(
     },
     "[USER_LIVE_RECONCILE_DB_CLOSED]",
   );
+
+  // Sep 16 2026 (Karo), operator-approved -- fire-and-forget, this
+  // symbol only, BOTH directions refreshed regardless of this trade's
+  // own side (the rolling 3-day market history may have changed for
+  // either). NEVER awaited -- close processing must not wait for it.
+  // Deduplicated inside the service itself if a refresh for this
+  // symbol is already in flight from another user's close.
+  episodePercentileService?.scheduleRefresh(userSignal.symbol);
 
   const message = formatV5CloseMessage(
     userSignal.symbol,

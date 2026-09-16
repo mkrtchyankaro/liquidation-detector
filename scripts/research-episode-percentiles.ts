@@ -17,7 +17,7 @@ import {
   type Atrs,
   type Episode,
   type Variant,
-} from "./research-liquidation-episodes";
+} from "../src/domain/research/displacement-balanced-core";
 
 /**
  * Sep 16 2026 (Karo), operator-requested. STAGE 1 ONLY: historical

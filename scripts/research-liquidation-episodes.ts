@@ -1,11 +1,26 @@
 import "dotenv/config";
 import * as fs from "fs";
 import * as path from "path";
-import {
-  MongoClientWrapper,
-  type MongoDetectorConfig,
-} from "../src/infrastructure/mongo/mongo.client";
 import type { Candle, Side } from "../src/shared/common.types";
+import {
+  fetchKlines,
+  computeAtrSeries,
+  atrAtOrBefore,
+  loadRawEvents,
+  getCollectionCoverage,
+  type Atrs,
+  type RawEvent,
+  type Variant,
+  type Episode,
+  type Transition,
+  MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE,
+  PRIMARY_VARIANT,
+  isMoreAdverse,
+  runStateMachine,
+  reconstructEpisodesForVariant,
+  percentile,
+  episodeSummary,
+} from "../src/domain/research/displacement-balanced-core";
 
 /**
  * Sep 16 2026 (Karo), operator-requested. READ-ONLY research: no
@@ -52,10 +67,6 @@ import type { Candle, Side } from "../src/shared/common.types";
  *   already-completed earlier episode, which is exactly what the
  *   prior "silence gap" design allowed to happen.
  */
-
-const BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines";
-const ATR_PERIOD = 14;
-const MAX_KLINES_PER_REQUEST = 1500;
 
 interface CliArgs {
   symbol: string;
@@ -104,179 +115,22 @@ function parseArgs(argv: string[]): CliArgs {
   return { symbol, fromMs, toMs };
 }
 
-export async function fetchKlines(
-  symbol: string,
-  intervalMs: number,
-  fromMs: number,
-  toMs: number,
-): Promise<Candle[]> {
-  const interval =
-    intervalMs === 60_000 ? "1m" : intervalMs === 180_000 ? "3m" : "5m";
-  const out: Candle[] = [];
-  let cursor = fromMs;
-  const seedPadMs = ATR_PERIOD * 3 * intervalMs;
-  cursor -= seedPadMs;
-  while (cursor < toMs) {
-    const url = `${BINANCE_KLINES_URL}?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${toMs}&limit=${MAX_KLINES_PER_REQUEST}`;
-    const res = await fetch(url);
-    if (!res.ok)
-      throw new Error(
-        `Binance klines HTTP ${res.status} for ${symbol} ${interval}`,
-      );
-    const rows = (await res.json()) as unknown[][];
-    if (rows.length === 0) break;
-    for (const r of rows) {
-      out.push({
-        symbol,
-        interval: interval as Candle["interval"],
-        openTime: r[0] as number,
-        closeTime: r[6] as number,
-        open: Number(r[1]),
-        high: Number(r[2]),
-        low: Number(r[3]),
-        close: Number(r[4]),
-        volume: Number(r[5]),
-        quoteVolume: Number(r[7]),
-        trades: r[8] as number,
-        takerBuyVolume: Number(r[9]),
-        takerBuyQuoteVolume: Number(r[10]),
-        isClosed: true,
-      });
-    }
-    const lastOpenTime = rows[rows.length - 1]![0] as number;
-    if (lastOpenTime <= cursor) break;
-    cursor = lastOpenTime + intervalMs;
-    if (rows.length < MAX_KLINES_PER_REQUEST) break;
-  }
-  return out;
+// Sep 16 2026 (Karo), operator-requested EXTRACTION. The state
+// machine, ATR series builder, kline/event loaders, Variant/Episode
+// types, PRIMARY_VARIANT, and percentile/episodeSummary helpers are
+// now imported from src/domain/research/displacement-balanced-core.ts
+// -- the single shared core production also imports from. Only the
+// thin local wrappers below (needed by the PHYSICS section further
+// down, which stays research-only) and the OI-context path getter
+// remain defined here.
+function atr1mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
+  return atrAtOrBefore(atrs.c1m, atrs.series1m, atOrBeforeMs);
 }
-
-export function deriveCandles(
-  oneMin: readonly Candle[],
-  intervalMinutes: number,
-): Candle[] {
-  const intervalMs = intervalMinutes * 60_000;
-  const out: Candle[] = [];
-  let bucket: Candle[] = [];
-  let bucketStart: number | null = null;
-  for (const c of oneMin) {
-    const alignedStart = Math.floor(c.openTime / intervalMs) * intervalMs;
-    if (bucketStart === null) bucketStart = alignedStart;
-    if (alignedStart !== bucketStart) {
-      out.push(mergeCandles(bucket, bucketStart, intervalMs));
-      bucket = [];
-      bucketStart = alignedStart;
-    }
-    bucket.push(c);
-  }
-  if (bucket.length > 0 && bucketStart !== null)
-    out.push(mergeCandles(bucket, bucketStart, intervalMs));
-  return out;
+function atr3mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
+  return atrAtOrBefore(atrs.c3m, atrs.series3m, atOrBeforeMs);
 }
-function mergeCandles(
-  bucket: Candle[],
-  openTime: number,
-  intervalMs: number,
-): Candle {
-  return {
-    symbol: bucket[0]!.symbol,
-    interval: (intervalMs === 180_000 ? "3m" : "5m") as Candle["interval"],
-    openTime,
-    closeTime: openTime + intervalMs - 1,
-    open: bucket[0]!.open,
-    close: bucket[bucket.length - 1]!.close,
-    high: Math.max(...bucket.map((c) => c.high)),
-    low: Math.min(...bucket.map((c) => c.low)),
-    volume: bucket.reduce((s, c) => s + c.volume, 0),
-    quoteVolume: bucket.reduce((s, c) => s + c.quoteVolume, 0),
-    takerBuyVolume: bucket.reduce((s, c) => s + c.takerBuyVolume, 0),
-    takerBuyQuoteVolume: bucket.reduce((s, c) => s + c.takerBuyQuoteVolume, 0),
-    trades: bucket.reduce((s, c) => s + c.trades, 0),
-    isClosed: true,
-  };
-}
-
-export function computeAtrSeries(
-  candles: readonly Candle[],
-  period = ATR_PERIOD,
-): (number | null)[] {
-  const out: (number | null)[] = new Array(candles.length).fill(null);
-  if (candles.length < period + 1) return out;
-  const trs: number[] = [];
-  for (let i = 1; i < candles.length; i++) {
-    const c = candles[i]!,
-      prev = candles[i - 1]!;
-    trs.push(
-      Math.max(
-        c.high - c.low,
-        Math.abs(c.high - prev.close),
-        Math.abs(c.low - prev.close),
-      ),
-    );
-  }
-  let sum = 0;
-  for (let i = 0; i < period; i++) sum += trs[i]!;
-  let atrVal = sum / period;
-  out[period] = atrVal;
-  for (let i = period; i < trs.length; i++) {
-    atrVal = (atrVal * (period - 1) + trs[i]!) / period;
-    out[i + 1] = atrVal;
-  }
-  return out;
-}
-export function atrAtOrBefore(
-  candles: readonly Candle[],
-  series: readonly (number | null)[],
-  atOrBeforeMs: number,
-): number | null {
-  let bestIdx = -1;
-  for (let i = 0; i < candles.length; i++)
-    if (candles[i]!.closeTime <= atOrBeforeMs) bestIdx = i;
-    else break;
-  return bestIdx >= 0 ? (series[bestIdx] ?? null) : null;
-}
-
-export interface RawEvent {
-  _id: string;
-  timestamp: number;
-  victim: Side;
-  price: number;
-  quoteQty: number;
-  marketSnapshot: Record<string, any> | null;
-}
-
-export async function loadRawEvents(
-  symbol: string,
-  fromMs: number,
-  toMs: number,
-): Promise<RawEvent[]> {
-  const mongoCfg: MongoDetectorConfig = {
-    enabled: (process.env.MONGO_URI ?? "").length > 0,
-    uri: process.env.MONGO_URI ?? "",
-    sharedMarketDataDb: process.env.MONGO_SHARED_DB ?? "liqwatch_bot",
-    ownDb: process.env.MONGO_OWN_DB ?? "liquidation_detector",
-  };
-  if (!mongoCfg.enabled)
-    throw new Error(
-      "MONGO_URI not set -- this script reuses the project's own env loading (dotenv/config), same as inspect-liquidation-period.ts",
-    );
-  const mongo = new MongoClientWrapper(mongoCfg);
-  const coll = await mongo.rawLiquidationEvents();
-  if (!coll)
-    throw new Error("Could not obtain the liq_raw_events collection handle");
-  const docs = await coll
-    .find({ symbol, timestamp: { $gte: fromMs, $lte: toMs } })
-    .sort({ timestamp: 1 })
-    .toArray();
-  await mongo.close();
-  return docs.map((d: any) => ({
-    _id: d._id.toString(),
-    timestamp: d.timestamp,
-    victim: d.victim,
-    price: d.price,
-    quoteQty: d.quoteQty,
-    marketSnapshot: d.marketSnapshot ?? null,
-  }));
+function atr5mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
+  return atrAtOrBefore(atrs.c5m, atrs.series5m, atOrBeforeMs);
 }
 
 function get(obj: unknown, path_: string): unknown {
@@ -289,381 +143,7 @@ function get(obj: unknown, path_: string): unknown {
     );
 }
 
-export interface Atrs {
-  series1m: (number | null)[];
-  series3m: (number | null)[];
-  series5m: (number | null)[];
-  c1m: Candle[];
-  c3m: Candle[];
-  c5m: Candle[];
-}
-
-function atr1mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
-  return atrAtOrBefore(atrs.c1m, atrs.series1m, atOrBeforeMs);
-}
-function atr3mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
-  return atrAtOrBefore(atrs.c3m, atrs.series3m, atOrBeforeMs);
-}
-function atr5mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
-  return atrAtOrBefore(atrs.c5m, atrs.series5m, atOrBeforeMs);
-}
-
-/** Sep 16 2026 (Karo), operator-requested REDESIGN. Replaces the prior
- *  fixed-lookahead-window mechanism entirely (that design is what
- *  caused the earlier over-merging bug AND was explicitly rejected as
- *  "not reproducible live"). Named, research-comparable threshold
- *  sets -- not tuned for profitability, purely for episode
- *  segmentation comparison. confirm5mAtrMultiple===null means ATR5m
- *  is recorded as context on every RECOVERY_CONFIRMED/INVALIDATED
- *  transition but does NOT gate the decision (FAST/BALANCED); STRICT
- *  hard-gates on it.
- *
- *  Sep 16 2026 (Karo), operator-requested DISPLACEMENT-AWARE
- *  extension. recoveryFractionMinimum===null means the variant is
- *  displacement-UNAWARE (the three BASELINE variants, unchanged
- *  behavior). When set, an additional condition applies at 3m
- *  confirmation: recovery must also be a large enough FRACTION of the
- *  episode's own total displacement (startReferencePrice -> latest
- *  extreme), not just large relative to current ATR -- a fixed ATR
- *  bar can be trivially easy for a large cascade and structurally
- *  meaningful for a small one. See MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE's
- *  own doc comment for the ATR-normalized safeguard against tiny-
- *  displacement instability. */
-export interface Variant {
-  name: string;
-  candidate1mAtrMultiple: number;
-  confirm3mAtrMultiple: number;
-  confirm5mAtrMultiple: number | null;
-  recoveryFractionMinimum: number | null;
-}
-/** ATR-normalized safeguard (never a raw dollar minimum, per operator
- *  instruction): the displacement-fraction condition only APPLIES once
- *  the episode's own displacement reaches at least this many ATR3m
- *  units. Below that, a displacement-aware variant behaves exactly
- *  like its ATR-only baseline (the fraction condition is bypassed,
- *  not failed) -- fraction reasoning about "how much of the move has
- *  been recovered" is not yet meaningful for a move that barely
- *  exceeds normal volatility in the first place. */
-export const MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE = 1.0;
-/** Sep 16 2026 (Karo), operator-requested FREEZE. All other variants
- *  (FAST/BALANCED/STRICT/DISPLACEMENT_FAST/DISPLACEMENT_STRICT) are
- *  removed from this research script entirely -- not just hidden from
- *  output. This directly addresses the confusion that led to the
- *  XRP 27.61% investigation: those baseline variants still reported
- *  episodeDisplacement/episodeDisplacementAtr3m/recoveryFraction on
- *  every episode for cross-variant comparison, even though they never
- *  gated on those values -- making a baseline episode visually
- *  indistinguishable from a genuine DISPLACEMENT_BALANCED one in a
- *  large multi-variant JSON. With exactly one variant, every exported
- *  episode is unambiguously DISPLACEMENT_BALANCED. Config values
- *  UNCHANGED from before -- this is a freeze, not a retune. */
-export const PRIMARY_VARIANT: Variant = {
-  name: "DISPLACEMENT_BALANCED",
-  candidate1mAtrMultiple: 0.75,
-  confirm3mAtrMultiple: 1.0,
-  confirm5mAtrMultiple: null,
-  recoveryFractionMinimum: 0.3,
-};
 const VARIANTS: Variant[] = [PRIMARY_VARIANT];
-
-interface Transition {
-  type:
-    | "START"
-    | "EXTREME_UPDATED"
-    | "RECOVERY_CANDIDATE"
-    | "RECOVERY_INVALIDATED"
-    | "RECOVERY_CONFIRMED"
-    | "END";
-  time: number;
-  price?: number;
-  recovery?: number;
-  atr1m?: number | null;
-  atr3m?: number | null;
-  atr5m?: number | null;
-  reason?: string;
-  // Sep 16 2026 (Karo), operator-requested debug transparency -- only
-  // populated on RECOVERY_CANDIDATE/RECOVERY_CONFIRMED/RECOVERY_INVALIDATED.
-  startReferencePrice?: number;
-  episodeDisplacement?: number;
-  episodeDisplacementAtr3m?: number | null;
-  recoveryFraction?: number | null;
-  requiredRecoveryFraction?: number | null;
-  fractionGateActive?: boolean;
-  atrConditionPass?: boolean;
-  displacementConditionPass?: boolean;
-}
-
-export interface Episode {
-  variant: string;
-  direction: Side;
-  startTime: number;
-  firstPrice: number;
-  extremePrice: number;
-  extremeTime: number;
-  endTime: number | null; // null = still open as of the end of the requested data window -- NOT "unresolved forever", just not yet confirmed within available data
-  transitions: Transition[];
-  sameDirectionEvents: RawEvent[];
-  oppositeSideEvents: RawEvent[];
-}
-
-export function isMoreAdverse(
-  direction: Side,
-  candidatePrice: number,
-  currentExtreme: number,
-): boolean {
-  return direction === "LONG"
-    ? candidatePrice < currentExtreme
-    : candidatePrice > currentExtreme;
-}
-
-/** Sep 16 2026 (Karo), operator-requested state machine. Pure causal
- *  replay: at every closed 1m candle, in chronological order, using
- *  only information available by that candle's own closeTime (and,
- *  for confirmation, the next 3m candle's own closeTime) -- NO fixed
- *  future lookahead window anywhere. This is deliberately designed so
- *  the SAME decision could be made live, one candle close at a time --
- *  see this file's own header for the operator's own framing of that
- *  requirement.
- *
- *  Recovery candidates are invalidated the instant a new adverse
- *  extreme appears (extreme always wins over a pending candidate).
- *  Confirmation checks the FIRST 3m candle to close after the
- *  candidate -- exactly one confirmation attempt per candidate; if it
- *  fails, the state machine returns to watching for a fresh 1m
- *  candidate from the (possibly now-deeper) extreme.
- *
- *  `startReferencePrice` is fixed for the whole episode (the first
- *  liquidation event's own price -- see this turn's own written
- *  justification) and is DELIBERATELY tracked separately from
- *  `extreme`, which moves every time a deeper adverse point appears --
- *  episodeDisplacement is the causal distance between these two. */
-export function runStateMachine(
-  direction: Side,
-  startTime: number,
-  startReferencePrice: number,
-  atrs: Atrs,
-  variant: Variant,
-): {
-  endTime: number | null;
-  extremePrice: number;
-  extremeTime: number;
-  transitions: Transition[];
-} {
-  const transitions: Transition[] = [
-    { type: "START", time: startTime, price: startReferencePrice },
-  ];
-  let extreme = startReferencePrice,
-    extremeTime = startTime;
-  let candidate: { time: number } | null = null;
-  let c3mIdx = 0;
-  let endTime: number | null = null;
-
-  const c1mAfter = atrs.c1m.filter((c) => c.closeTime > startTime);
-  for (const c of c1mAfter) {
-    const adverseCandidate = direction === "LONG" ? c.low : c.high;
-    if (isMoreAdverse(direction, adverseCandidate, extreme)) {
-      extreme = adverseCandidate;
-      extremeTime = c.closeTime;
-      transitions.push({
-        type: "EXTREME_UPDATED",
-        time: c.closeTime,
-        price: extreme,
-      });
-      if (candidate) {
-        transitions.push({
-          type: "RECOVERY_INVALIDATED",
-          time: c.closeTime,
-          reason: "new adverse extreme before 3m confirmation",
-        });
-        candidate = null;
-      }
-    } else if (!candidate) {
-      const recovery =
-        direction === "LONG" ? c.close - extreme : extreme - c.close;
-      const atr1 = atr1mAt(atrs, c.closeTime);
-      if (atr1 !== null && recovery >= variant.candidate1mAtrMultiple * atr1) {
-        candidate = { time: c.closeTime };
-        transitions.push({
-          type: "RECOVERY_CANDIDATE",
-          time: c.closeTime,
-          price: c.close,
-          recovery,
-          atr1m: atr1,
-          startReferencePrice,
-          episodeDisplacement:
-            direction === "LONG"
-              ? startReferencePrice - extreme
-              : extreme - startReferencePrice,
-        });
-      }
-    }
-
-    while (
-      candidate &&
-      c3mIdx < atrs.c3m.length &&
-      atrs.c3m[c3mIdx]!.closeTime <= c.closeTime
-    ) {
-      const c3 = atrs.c3m[c3mIdx]!;
-      c3mIdx++;
-      if (c3.closeTime <= candidate.time) continue; // closed before the candidate existed -- not the relevant one
-      const atr3 = atr3mAt(atrs, c3.closeTime);
-      const atr5 = atr5mAt(atrs, c3.closeTime);
-      const recovery3m =
-        direction === "LONG" ? c3.close - extreme : extreme - c3.close;
-      const passes3m =
-        atr3 !== null && recovery3m >= variant.confirm3mAtrMultiple * atr3;
-      const passes5m =
-        variant.confirm5mAtrMultiple === null ||
-        (atr5 !== null && recovery3m >= variant.confirm5mAtrMultiple * atr5);
-
-      const episodeDisplacement =
-        direction === "LONG"
-          ? startReferencePrice - extreme
-          : extreme - startReferencePrice;
-      const episodeDisplacementAtr3m =
-        atr3 !== null && atr3 > 0 ? episodeDisplacement / atr3 : null;
-      const recoveryFraction =
-        episodeDisplacement > 0 ? recovery3m / episodeDisplacement : null;
-      // Sep 16 2026 (Karo), operator-requested explicit debug field --
-      // whether the fraction gate was even APPLICABLE at this instant
-      // (variant configured for it AND displacement >= the ATR-
-      // normalized minimum), tracked SEPARATELY from whether it PASSED.
-      const fractionGateActive =
-        variant.recoveryFractionMinimum !== null &&
-        episodeDisplacementAtr3m !== null &&
-        episodeDisplacementAtr3m >= MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE;
-      let passesDisplacement = true; // default: bypassed (gate not active)
-      if (fractionGateActive) {
-        passesDisplacement =
-          recoveryFraction !== null &&
-          recoveryFraction >= variant.recoveryFractionMinimum!;
-      }
-
-      const debugFields = {
-        startReferencePrice,
-        episodeDisplacement,
-        episodeDisplacementAtr3m,
-        recoveryFraction,
-        requiredRecoveryFraction: variant.recoveryFractionMinimum,
-        fractionGateActive,
-        atrConditionPass: passes3m && passes5m,
-        displacementConditionPass: passesDisplacement,
-      };
-      if (passes3m && passes5m && passesDisplacement) {
-        // Sep 16 2026 (Karo), operator-requested INVARIANT ASSERTION --
-        // triggered by the XRP 27.61% investigation. If this ever
-        // throws, that is a REAL bug in the gating logic above, not a
-        // display/export issue -- fail loudly rather than silently
-        // exporting a confirmation that violates the variant's own
-        // configured threshold.
-        if (
-          fractionGateActive &&
-          recoveryFraction !== null &&
-          recoveryFraction < variant.recoveryFractionMinimum!
-        ) {
-          throw new Error(
-            `INVARIANT VIOLATED: RECOVERY_CONFIRMED for variant ${variant.name} with fractionGateActive=true and recoveryFraction=${recoveryFraction} < requiredRecoveryFraction=${variant.recoveryFractionMinimum} at ${new Date(c3.closeTime).toISOString()}`,
-          );
-        }
-        const reasons: string[] = [];
-        if (fractionGateActive)
-          reasons.push(
-            `PASS: recovery fraction ${(recoveryFraction! * 100).toFixed(1)}% >= ${(variant.recoveryFractionMinimum! * 100).toFixed(0)}% required (gate active, displacement=${episodeDisplacementAtr3m!.toFixed(2)}xATR3m)`,
-          );
-        else
-          reasons.push(
-            `PASS: fraction gate not active (${episodeDisplacementAtr3m !== null ? `displacement=${episodeDisplacementAtr3m.toFixed(2)}xATR3m < ${MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE}x minimum` : "ATR3m unavailable"})`,
-          );
-        transitions.push({
-          type: "RECOVERY_CONFIRMED",
-          time: c3.closeTime,
-          price: c3.close,
-          recovery: recovery3m,
-          atr3m: atr3,
-          atr5m: atr5,
-          reason: reasons.join("; "),
-          ...debugFields,
-        });
-        endTime = c3.closeTime;
-        transitions.push({ type: "END", time: c3.closeTime });
-      } else {
-        const reasons: string[] = [];
-        if (!passes3m)
-          reasons.push(
-            `FAIL: ATR3m recovery insufficient (recovery=${recovery3m.toFixed(6)} < ${variant.confirm3mAtrMultiple}x ATR3m=${atr3 !== null ? (variant.confirm3mAtrMultiple * atr3).toFixed(6) : "n/a"})`,
-          );
-        if (!passes5m) reasons.push("FAIL: ATR5m recovery insufficient");
-        if (fractionGateActive && !passesDisplacement)
-          reasons.push(
-            `FAIL: recovery fraction insufficient (${recoveryFraction !== null ? (recoveryFraction * 100).toFixed(1) : "?"}% < ${(variant.recoveryFractionMinimum! * 100).toFixed(0)}% required, gate active at displacement=${episodeDisplacementAtr3m!.toFixed(2)}xATR3m)`,
-          );
-        transitions.push({
-          type: "RECOVERY_INVALIDATED",
-          time: c3.closeTime,
-          reason:
-            reasons.join("; ") || "3m close did not sustain required recovery",
-          recovery: recovery3m,
-          atr3m: atr3,
-          atr5m: atr5,
-          ...debugFields,
-        });
-      }
-      candidate = null;
-      break;
-    }
-    if (endTime !== null) break;
-  }
-  return { endTime, extremePrice: extreme, extremeTime, transitions };
-}
-
-export function reconstructEpisodesForVariant(
-  events: RawEvent[],
-  atrs: Atrs,
-  variant: Variant,
-  windowEndMs: number,
-): Episode[] {
-  const episodes: Episode[] = [];
-  let i = 0;
-  while (i < events.length) {
-    const startEvent = events[i]!;
-    const direction = startEvent.victim;
-    const { endTime, extremePrice, extremeTime, transitions } = runStateMachine(
-      direction,
-      startEvent.timestamp,
-      startEvent.price,
-      atrs,
-      variant,
-    );
-    // No fixed lookahead window means: if still open (endTime===null),
-    // it genuinely IS still open as of the end of available data -- ALL
-    // remaining events belong to it, up to the requested window's end.
-    const assignBoundary = endTime ?? windowEndMs;
-
-    const sameDirectionEvents: RawEvent[] = [startEvent];
-    const oppositeSideEvents: RawEvent[] = [];
-    let j = i + 1;
-    while (j < events.length && events[j]!.timestamp <= assignBoundary) {
-      const ev = events[j]!;
-      if (ev.victim === direction) sameDirectionEvents.push(ev);
-      else oppositeSideEvents.push(ev);
-      j++;
-    }
-    episodes.push({
-      variant: variant.name,
-      direction,
-      startTime: startEvent.timestamp,
-      firstPrice: startEvent.price,
-      extremePrice,
-      extremeTime,
-      endTime,
-      transitions,
-      sameDirectionEvents,
-      oppositeSideEvents,
-    });
-    i = j;
-  }
-  return episodes;
-}
 
 // ============================================================
 // Sep 16 2026 (Karo), operator-requested PHYSICS-based END model
@@ -1027,18 +507,6 @@ export function reconstructPhysicsEpisodes(
   return episodes;
 }
 
-export function percentile(
-  sorted: readonly number[],
-  q: number,
-): number | null {
-  if (sorted.length === 0) return null;
-  const idx = q * (sorted.length - 1);
-  const lo = Math.floor(idx),
-    hi = Math.ceil(idx);
-  if (lo === hi) return sorted[lo]!;
-  return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (idx - lo);
-}
-
 /** Sep 16 2026 (Karo), operator-requested -- adverse price velocity,
  *  derived from the EXTREME_UPDATED transitions already collected by
  *  runPhysicsStateMachine (no new live-loop complexity: this is a
@@ -1071,51 +539,6 @@ export function physicsVelocitySummary(
     current = v;
   }
   return { peakVelocityAtrPerMin: peak, currentVelocityAtrPerMin: current };
-}
-
-/** Sep 16 2026 (Karo), operator-requested -- explicit, top-level
- *  summary fields for easy inspection (previously only inside the
- *  transitions array). Generic across every variant -- populated the
- *  same way regardless of whether the variant actually GATES on
- *  displacement/fraction, so BASELINE episodes also get these values
- *  reported (just never used to decide their own END). */
-export function episodeSummary(e: Episode): {
-  startReferencePrice: number;
-  finalExtremePrice: number;
-  finalExtremeTime: number;
-  durationMs: number | null;
-  episodeDisplacement: number | null;
-  episodeDisplacementAtr3m: number | null;
-  recoveryAtEnd: number | null;
-  recoveryAtr3m: number | null;
-  recoveryAtr5m: number | null;
-  recoveryFraction: number | null;
-} {
-  const confirmed = [...e.transitions]
-    .reverse()
-    .find((t) => t.type === "RECOVERY_CONFIRMED");
-  return {
-    startReferencePrice: confirmed?.startReferencePrice ?? e.firstPrice,
-    finalExtremePrice: e.extremePrice,
-    finalExtremeTime: e.extremeTime,
-    durationMs: e.endTime !== null ? e.endTime - e.startTime : null,
-    episodeDisplacement: confirmed?.episodeDisplacement ?? null,
-    episodeDisplacementAtr3m: confirmed?.episodeDisplacementAtr3m ?? null,
-    recoveryAtEnd: confirmed?.recovery ?? null,
-    recoveryAtr3m:
-      confirmed?.atr3m !== undefined &&
-      confirmed?.atr3m !== null &&
-      confirmed?.recovery !== undefined
-        ? confirmed.recovery / confirmed.atr3m
-        : null,
-    recoveryAtr5m:
-      confirmed?.atr5m !== undefined &&
-      confirmed?.atr5m !== null &&
-      confirmed?.recovery !== undefined
-        ? confirmed.recovery / confirmed.atr5m
-        : null,
-    recoveryFraction: confirmed?.recoveryFraction ?? null,
-  };
 }
 
 async function main(): Promise<void> {

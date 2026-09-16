@@ -81,6 +81,17 @@ export class ReconciliationManager {
   constructor(
     private readonly mongo: MongoClientWrapper,
     private readonly userRuntimes: UserRuntime[],
+    /** Sep 16 2026 (Karo), operator-approved -- optional so existing
+     *  call sites/tests are unaffected. When provided, a confirmed
+     *  signal CLOSE triggers an async, fire-and-forget percentile
+     *  refresh for that symbol only (see reconcile-user-position.
+     *  usecase.ts's own doc comment on the exact hook point). This
+     *  service is NOT used for any qualification decision here --
+     *  it is only ever told "this symbol's data changed, refresh it
+     *  in the background." */
+    private readonly episodePercentileService?: {
+      scheduleRefresh(symbol: string): void;
+    },
   ) {}
 
   /** Call once at startup (after Mongo is connected). Does an
@@ -275,6 +286,7 @@ export class ReconciliationManager {
         now,
         pruneFromCache,
         lastKnownPrice,
+        this.episodePercentileService,
       );
       if (closed) {
         // Sep 9 2026 (Karo) -- defensive safety-net only; the real
