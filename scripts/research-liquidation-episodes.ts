@@ -1,7 +1,10 @@
 import "dotenv/config";
 import * as fs from "fs";
 import * as path from "path";
-import { MongoClientWrapper, type MongoDetectorConfig } from "../src/infrastructure/mongo/mongo.client";
+import {
+  MongoClientWrapper,
+  type MongoDetectorConfig,
+} from "../src/infrastructure/mongo/mongo.client";
 import type { Candle, Side } from "../src/shared/common.types";
 
 /**
@@ -54,7 +57,11 @@ const BINANCE_KLINES_URL = "https://fapi.binance.com/fapi/v1/klines";
 const ATR_PERIOD = 14;
 const MAX_KLINES_PER_REQUEST = 1500;
 
-interface CliArgs { symbol: string; fromMs: number; toMs: number; recoveryAtrMultiple: number; confirmationLookaheadMinutes: number }
+interface CliArgs {
+  symbol: string;
+  fromMs: number;
+  toMs: number;
+}
 
 function parseUtcDatetime(input: string): number {
   if (input.trim().toLowerCase() === "now") return Date.now();
@@ -69,32 +76,42 @@ function parseUtcDatetime(input: string): number {
 
 function parseArgs(argv: string[]): CliArgs {
   const symbol = argv[2]?.toUpperCase();
-  if (!symbol) { console.error('Usage: research-liquidation-episodes.ts <SYMBOL> --hours 24 | --from "..." --to "..."'); process.exit(1); }
-  const get = (flag: string): string | undefined => { const idx = argv.indexOf(flag); return idx >= 0 ? argv[idx + 1] : undefined; };
+  if (!symbol) {
+    console.error(
+      'Usage: research-liquidation-episodes.ts <SYMBOL> --hours 24 | --from "..." --to "..."',
+    );
+    process.exit(1);
+  }
+  const get = (flag: string): string | undefined => {
+    const idx = argv.indexOf(flag);
+    return idx >= 0 ? argv[idx + 1] : undefined;
+  };
   let fromMs: number, toMs: number;
   const hoursArg = get("--hours");
-  if (hoursArg) { toMs = Date.now(); fromMs = toMs - Number(hoursArg) * 3_600_000; }
-  else {
-    const fromArg = get("--from"), toArg = get("--to");
-    if (!fromArg) { console.error("Must provide --hours or --from/--to"); process.exit(1); }
+  if (hoursArg) {
+    toMs = Date.now();
+    fromMs = toMs - Number(hoursArg) * 3_600_000;
+  } else {
+    const fromArg = get("--from"),
+      toArg = get("--to");
+    if (!fromArg) {
+      console.error("Must provide --hours or --from/--to");
+      process.exit(1);
+    }
     fromMs = parseUtcDatetime(fromArg);
     toMs = toArg ? parseUtcDatetime(toArg) : Date.now();
   }
-  return {
-    symbol, fromMs, toMs,
-    recoveryAtrMultiple: Number(get("--recoveryAtrMultiple") ?? 1.0),
-    // Sep 16 2026 (Karo), operator-reported -- reduced from 60 to 20.
-    // A genuine dead-cat bounce typically re-violates within single-
-    // digit-to-~15 minutes; a SEPARATE, later liquidation move (in the
-    // reported BTC case, ~40 minutes after the first recovery) should
-    // count as its own independent episode, not retroactively
-    // invalidate an already-genuine recovery. Still fully configurable.
-    confirmationLookaheadMinutes: Number(get("--confirmationLookaheadMinutes") ?? 20),
-  };
+  return { symbol, fromMs, toMs };
 }
 
-async function fetchKlines(symbol: string, intervalMs: number, fromMs: number, toMs: number): Promise<Candle[]> {
-  const interval = intervalMs === 60_000 ? "1m" : intervalMs === 180_000 ? "3m" : "5m";
+async function fetchKlines(
+  symbol: string,
+  intervalMs: number,
+  fromMs: number,
+  toMs: number,
+): Promise<Candle[]> {
+  const interval =
+    intervalMs === 60_000 ? "1m" : intervalMs === 180_000 ? "3m" : "5m";
   const out: Candle[] = [];
   let cursor = fromMs;
   const seedPadMs = ATR_PERIOD * 3 * intervalMs;
@@ -102,16 +119,27 @@ async function fetchKlines(symbol: string, intervalMs: number, fromMs: number, t
   while (cursor < toMs) {
     const url = `${BINANCE_KLINES_URL}?symbol=${symbol}&interval=${interval}&startTime=${cursor}&endTime=${toMs}&limit=${MAX_KLINES_PER_REQUEST}`;
     const res = await fetch(url);
-    if (!res.ok) throw new Error(`Binance klines HTTP ${res.status} for ${symbol} ${interval}`);
+    if (!res.ok)
+      throw new Error(
+        `Binance klines HTTP ${res.status} for ${symbol} ${interval}`,
+      );
     const rows = (await res.json()) as unknown[][];
     if (rows.length === 0) break;
     for (const r of rows) {
       out.push({
-        symbol, interval: interval as Candle["interval"],
-        openTime: r[0] as number, closeTime: r[6] as number,
-        open: Number(r[1]), high: Number(r[2]), low: Number(r[3]), close: Number(r[4]),
-        volume: Number(r[5]), quoteVolume: Number(r[7]), trades: r[8] as number,
-        takerBuyVolume: Number(r[9]), takerBuyQuoteVolume: Number(r[10]),
+        symbol,
+        interval: interval as Candle["interval"],
+        openTime: r[0] as number,
+        closeTime: r[6] as number,
+        open: Number(r[1]),
+        high: Number(r[2]),
+        low: Number(r[3]),
+        close: Number(r[4]),
+        volume: Number(r[5]),
+        quoteVolume: Number(r[7]),
+        trades: r[8] as number,
+        takerBuyVolume: Number(r[9]),
+        takerBuyQuoteVolume: Number(r[10]),
         isClosed: true,
       });
     }
@@ -123,7 +151,10 @@ async function fetchKlines(symbol: string, intervalMs: number, fromMs: number, t
   return out;
 }
 
-export function deriveCandles(oneMin: readonly Candle[], intervalMinutes: number): Candle[] {
+export function deriveCandles(
+  oneMin: readonly Candle[],
+  intervalMinutes: number,
+): Candle[] {
   const intervalMs = intervalMinutes * 60_000;
   const out: Candle[] = [];
   let bucket: Candle[] = [];
@@ -133,32 +164,55 @@ export function deriveCandles(oneMin: readonly Candle[], intervalMinutes: number
     if (bucketStart === null) bucketStart = alignedStart;
     if (alignedStart !== bucketStart) {
       out.push(mergeCandles(bucket, bucketStart, intervalMs));
-      bucket = []; bucketStart = alignedStart;
+      bucket = [];
+      bucketStart = alignedStart;
     }
     bucket.push(c);
   }
-  if (bucket.length > 0 && bucketStart !== null) out.push(mergeCandles(bucket, bucketStart, intervalMs));
+  if (bucket.length > 0 && bucketStart !== null)
+    out.push(mergeCandles(bucket, bucketStart, intervalMs));
   return out;
 }
-function mergeCandles(bucket: Candle[], openTime: number, intervalMs: number): Candle {
+function mergeCandles(
+  bucket: Candle[],
+  openTime: number,
+  intervalMs: number,
+): Candle {
   return {
-    symbol: bucket[0]!.symbol, interval: (intervalMs === 180_000 ? "3m" : "5m") as Candle["interval"],
-    openTime, closeTime: openTime + intervalMs - 1,
-    open: bucket[0]!.open, close: bucket[bucket.length - 1]!.close,
-    high: Math.max(...bucket.map((c) => c.high)), low: Math.min(...bucket.map((c) => c.low)),
-    volume: bucket.reduce((s, c) => s + c.volume, 0), quoteVolume: bucket.reduce((s, c) => s + c.quoteVolume, 0),
-    takerBuyVolume: bucket.reduce((s, c) => s + c.takerBuyVolume, 0), takerBuyQuoteVolume: bucket.reduce((s, c) => s + c.takerBuyQuoteVolume, 0),
-    trades: bucket.reduce((s, c) => s + c.trades, 0), isClosed: true,
+    symbol: bucket[0]!.symbol,
+    interval: (intervalMs === 180_000 ? "3m" : "5m") as Candle["interval"],
+    openTime,
+    closeTime: openTime + intervalMs - 1,
+    open: bucket[0]!.open,
+    close: bucket[bucket.length - 1]!.close,
+    high: Math.max(...bucket.map((c) => c.high)),
+    low: Math.min(...bucket.map((c) => c.low)),
+    volume: bucket.reduce((s, c) => s + c.volume, 0),
+    quoteVolume: bucket.reduce((s, c) => s + c.quoteVolume, 0),
+    takerBuyVolume: bucket.reduce((s, c) => s + c.takerBuyVolume, 0),
+    takerBuyQuoteVolume: bucket.reduce((s, c) => s + c.takerBuyQuoteVolume, 0),
+    trades: bucket.reduce((s, c) => s + c.trades, 0),
+    isClosed: true,
   };
 }
 
-export function computeAtrSeries(candles: readonly Candle[], period = ATR_PERIOD): (number | null)[] {
+export function computeAtrSeries(
+  candles: readonly Candle[],
+  period = ATR_PERIOD,
+): (number | null)[] {
   const out: (number | null)[] = new Array(candles.length).fill(null);
   if (candles.length < period + 1) return out;
   const trs: number[] = [];
   for (let i = 1; i < candles.length; i++) {
-    const c = candles[i]!, prev = candles[i - 1]!;
-    trs.push(Math.max(c.high - c.low, Math.abs(c.high - prev.close), Math.abs(c.low - prev.close)));
+    const c = candles[i]!,
+      prev = candles[i - 1]!;
+    trs.push(
+      Math.max(
+        c.high - c.low,
+        Math.abs(c.high - prev.close),
+        Math.abs(c.low - prev.close),
+      ),
+    );
   }
   let sum = 0;
   for (let i = 0; i < period; i++) sum += trs[i]!;
@@ -170,175 +224,340 @@ export function computeAtrSeries(candles: readonly Candle[], period = ATR_PERIOD
   }
   return out;
 }
-export function atrAtOrBefore(candles: readonly Candle[], series: readonly (number | null)[], atOrBeforeMs: number): number | null {
+export function atrAtOrBefore(
+  candles: readonly Candle[],
+  series: readonly (number | null)[],
+  atOrBeforeMs: number,
+): number | null {
   let bestIdx = -1;
-  for (let i = 0; i < candles.length; i++) if (candles[i]!.closeTime <= atOrBeforeMs) bestIdx = i; else break;
-  return bestIdx >= 0 ? series[bestIdx] ?? null : null;
+  for (let i = 0; i < candles.length; i++)
+    if (candles[i]!.closeTime <= atOrBeforeMs) bestIdx = i;
+    else break;
+  return bestIdx >= 0 ? (series[bestIdx] ?? null) : null;
 }
 
-interface RawEvent { _id: string; timestamp: number; victim: Side; price: number; quoteQty: number; marketSnapshot: Record<string, any> | null }
+interface RawEvent {
+  _id: string;
+  timestamp: number;
+  victim: Side;
+  price: number;
+  quoteQty: number;
+  marketSnapshot: Record<string, any> | null;
+}
 
-async function loadRawEvents(symbol: string, fromMs: number, toMs: number): Promise<RawEvent[]> {
+async function loadRawEvents(
+  symbol: string,
+  fromMs: number,
+  toMs: number,
+): Promise<RawEvent[]> {
   const mongoCfg: MongoDetectorConfig = {
     enabled: (process.env.MONGO_URI ?? "").length > 0,
     uri: process.env.MONGO_URI ?? "",
     sharedMarketDataDb: process.env.MONGO_SHARED_DB ?? "liqwatch_bot",
     ownDb: process.env.MONGO_OWN_DB ?? "liquidation_detector",
   };
-  if (!mongoCfg.enabled) throw new Error("MONGO_URI not set -- this script reuses the project's own env loading (dotenv/config), same as inspect-liquidation-period.ts");
+  if (!mongoCfg.enabled)
+    throw new Error(
+      "MONGO_URI not set -- this script reuses the project's own env loading (dotenv/config), same as inspect-liquidation-period.ts",
+    );
   const mongo = new MongoClientWrapper(mongoCfg);
   const coll = await mongo.rawLiquidationEvents();
-  if (!coll) throw new Error("Could not obtain the liq_raw_events collection handle");
-  const docs = await coll.find({ symbol, timestamp: { $gte: fromMs, $lte: toMs } }).sort({ timestamp: 1 }).toArray();
+  if (!coll)
+    throw new Error("Could not obtain the liq_raw_events collection handle");
+  const docs = await coll
+    .find({ symbol, timestamp: { $gte: fromMs, $lte: toMs } })
+    .sort({ timestamp: 1 })
+    .toArray();
   await mongo.close();
-  return docs.map((d: any) => ({ _id: d._id.toString(), timestamp: d.timestamp, victim: d.victim, price: d.price, quoteQty: d.quoteQty, marketSnapshot: d.marketSnapshot ?? null }));
+  return docs.map((d: any) => ({
+    _id: d._id.toString(),
+    timestamp: d.timestamp,
+    victim: d.victim,
+    price: d.price,
+    quoteQty: d.quoteQty,
+    marketSnapshot: d.marketSnapshot ?? null,
+  }));
 }
 
 function get(obj: unknown, path_: string): unknown {
-  return path_.split(".").reduce((acc: any, key) => (acc === null || acc === undefined ? undefined : acc[key]), obj);
+  return path_
+    .split(".")
+    .reduce(
+      (acc: any, key) =>
+        acc === null || acc === undefined ? undefined : acc[key],
+      obj,
+    );
 }
 
-interface Atrs { series1m: (number | null)[]; series3m: (number | null)[]; series5m: (number | null)[]; c1m: Candle[]; c3m: Candle[]; c5m: Candle[] }
+interface Atrs {
+  series1m: (number | null)[];
+  series3m: (number | null)[];
+  series5m: (number | null)[];
+  c1m: Candle[];
+  c3m: Candle[];
+  c5m: Candle[];
+}
 
-function atr3mAt(atrs: Atrs, atOrBeforeMs: number): number | null { return atrAtOrBefore(atrs.c3m, atrs.series3m, atOrBeforeMs); }
-function atr5mAt(atrs: Atrs, atOrBeforeMs: number): number | null { return atrAtOrBefore(atrs.c5m, atrs.series5m, atOrBeforeMs); }
+function atr1mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
+  return atrAtOrBefore(atrs.c1m, atrs.series1m, atOrBeforeMs);
+}
+function atr3mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
+  return atrAtOrBefore(atrs.c3m, atrs.series3m, atOrBeforeMs);
+}
+function atr5mAt(atrs: Atrs, atOrBeforeMs: number): number | null {
+  return atrAtOrBefore(atrs.c5m, atrs.series5m, atOrBeforeMs);
+}
+
+/** Sep 16 2026 (Karo), operator-requested REDESIGN. Replaces the prior
+ *  fixed-lookahead-window mechanism entirely (that design is what
+ *  caused the earlier over-merging bug AND was explicitly rejected as
+ *  "not reproducible live"). Named, research-comparable threshold
+ *  sets -- not tuned for profitability, purely for episode
+ *  segmentation comparison. confirm5mAtrMultiple===null means ATR5m
+ *  is recorded as context on every RECOVERY_CONFIRMED/INVALIDATED
+ *  transition but does NOT gate the decision (FAST/BALANCED); STRICT
+ *  hard-gates on it. */
+interface Variant {
+  name: "FAST" | "BALANCED" | "STRICT";
+  candidate1mAtrMultiple: number;
+  confirm3mAtrMultiple: number;
+  confirm5mAtrMultiple: number | null;
+}
+const VARIANTS: Variant[] = [
+  {
+    name: "FAST",
+    candidate1mAtrMultiple: 0.5,
+    confirm3mAtrMultiple: 1.0,
+    confirm5mAtrMultiple: null,
+  },
+  {
+    name: "BALANCED",
+    candidate1mAtrMultiple: 0.75,
+    confirm3mAtrMultiple: 1.0,
+    confirm5mAtrMultiple: null,
+  },
+  {
+    name: "STRICT",
+    candidate1mAtrMultiple: 1.0,
+    confirm3mAtrMultiple: 1.0,
+    confirm5mAtrMultiple: 0.5,
+  },
+];
+
+interface Transition {
+  type:
+    | "START"
+    | "EXTREME_UPDATED"
+    | "RECOVERY_CANDIDATE"
+    | "RECOVERY_INVALIDATED"
+    | "RECOVERY_CONFIRMED"
+    | "END";
+  time: number;
+  price?: number;
+  recovery?: number;
+  atr1m?: number | null;
+  atr3m?: number | null;
+  atr5m?: number | null;
+  reason?: string;
+}
 
 interface Episode {
-  direction: Side; startTime: number; firstPrice: number;
-  extremePrice: number; extremeTime: number;
-  retrospectiveTrueEnd: number | null;
-  sameDirectionEvents: RawEvent[]; oppositeSideEvents: RawEvent[];
-  causalDetectedEnd: { A: number | null; B: number | null; C: number | null };
+  variant: string;
+  direction: Side;
+  startTime: number;
+  firstPrice: number;
+  extremePrice: number;
+  extremeTime: number;
+  endTime: number | null; // null = still open as of the end of the requested data window -- NOT "unresolved forever", just not yet confirmed within available data
+  transitions: Transition[];
+  sameDirectionEvents: RawEvent[];
+  oppositeSideEvents: RawEvent[];
 }
 
-export function reconstructRetrospectiveEpisodes(events: RawEvent[], atrs: Atrs, args: CliArgs): Episode[] {
+export function isMoreAdverse(
+  direction: Side,
+  candidatePrice: number,
+  currentExtreme: number,
+): boolean {
+  return direction === "LONG"
+    ? candidatePrice < currentExtreme
+    : candidatePrice > currentExtreme;
+}
+
+/** Sep 16 2026 (Karo), operator-requested state machine. Pure causal
+ *  replay: at every closed 1m candle, in chronological order, using
+ *  only information available by that candle's own closeTime (and,
+ *  for confirmation, the next 3m candle's own closeTime) -- NO fixed
+ *  future lookahead window anywhere. This is deliberately designed so
+ *  the SAME decision could be made live, one candle close at a time --
+ *  see this file's own header for the operator's own framing of that
+ *  requirement.
+ *
+ *  Recovery candidates are invalidated the instant a new adverse
+ *  extreme appears (extreme always wins over a pending candidate).
+ *  Confirmation checks the FIRST 3m candle to close after the
+ *  candidate -- exactly one confirmation attempt per candidate; if it
+ *  fails, the state machine returns to watching for a fresh 1m
+ *  candidate from the (possibly now-deeper) extreme. */
+export function runStateMachine(
+  direction: Side,
+  startTime: number,
+  startPrice: number,
+  atrs: Atrs,
+  variant: Variant,
+): {
+  endTime: number | null;
+  extremePrice: number;
+  extremeTime: number;
+  transitions: Transition[];
+} {
+  const transitions: Transition[] = [
+    { type: "START", time: startTime, price: startPrice },
+  ];
+  let extreme = startPrice,
+    extremeTime = startTime;
+  let candidate: { time: number } | null = null;
+  let c3mIdx = 0;
+  let endTime: number | null = null;
+
+  const c1mAfter = atrs.c1m.filter((c) => c.closeTime > startTime);
+  for (const c of c1mAfter) {
+    const adverseCandidate = direction === "LONG" ? c.low : c.high;
+    if (isMoreAdverse(direction, adverseCandidate, extreme)) {
+      extreme = adverseCandidate;
+      extremeTime = c.closeTime;
+      transitions.push({
+        type: "EXTREME_UPDATED",
+        time: c.closeTime,
+        price: extreme,
+      });
+      if (candidate) {
+        transitions.push({
+          type: "RECOVERY_INVALIDATED",
+          time: c.closeTime,
+          reason: "new adverse extreme before 3m confirmation",
+        });
+        candidate = null;
+      }
+    } else if (!candidate) {
+      const recovery =
+        direction === "LONG" ? c.close - extreme : extreme - c.close;
+      const atr1 = atr1mAt(atrs, c.closeTime);
+      if (atr1 !== null && recovery >= variant.candidate1mAtrMultiple * atr1) {
+        candidate = { time: c.closeTime };
+        transitions.push({
+          type: "RECOVERY_CANDIDATE",
+          time: c.closeTime,
+          price: c.close,
+          recovery,
+          atr1m: atr1,
+        });
+      }
+    }
+
+    while (
+      candidate &&
+      c3mIdx < atrs.c3m.length &&
+      atrs.c3m[c3mIdx]!.closeTime <= c.closeTime
+    ) {
+      const c3 = atrs.c3m[c3mIdx]!;
+      c3mIdx++;
+      if (c3.closeTime <= candidate.time) continue; // closed before the candidate existed -- not the relevant one
+      const atr3 = atr3mAt(atrs, c3.closeTime);
+      const atr5 = atr5mAt(atrs, c3.closeTime);
+      const recovery3m =
+        direction === "LONG" ? c3.close - extreme : extreme - c3.close;
+      const passes3m =
+        atr3 !== null && recovery3m >= variant.confirm3mAtrMultiple * atr3;
+      const passes5m =
+        variant.confirm5mAtrMultiple === null ||
+        (atr5 !== null && recovery3m >= variant.confirm5mAtrMultiple * atr5);
+      if (passes3m && passes5m) {
+        transitions.push({
+          type: "RECOVERY_CONFIRMED",
+          time: c3.closeTime,
+          price: c3.close,
+          recovery: recovery3m,
+          atr3m: atr3,
+          atr5m: atr5,
+        });
+        endTime = c3.closeTime;
+        transitions.push({ type: "END", time: c3.closeTime });
+      } else {
+        transitions.push({
+          type: "RECOVERY_INVALIDATED",
+          time: c3.closeTime,
+          reason: "3m close did not sustain required recovery",
+          recovery: recovery3m,
+          atr3m: atr3,
+          atr5m: atr5,
+        });
+      }
+      candidate = null;
+      break;
+    }
+    if (endTime !== null) break;
+  }
+  return { endTime, extremePrice: extreme, extremeTime, transitions };
+}
+
+export function reconstructEpisodesForVariant(
+  events: RawEvent[],
+  atrs: Atrs,
+  variant: Variant,
+  windowEndMs: number,
+): Episode[] {
   const episodes: Episode[] = [];
   let i = 0;
   while (i < events.length) {
     const startEvent = events[i]!;
     const direction = startEvent.victim;
-
-    // Sep 16 2026 (Karo), operator-reported FIX. The prior version had
-    // a standalone, UNBOUNDED "silence-gap" extreme-tracking loop that
-    // ran BEFORE ever attempting a recovery check -- any incidental
-    // new low within the confirmation window of the last extreme, even one
-    // completely unrelated to liquidation activity, e.g. a broader
-    // downtrend drifting to new lows every <25min) reset the clock and
-    // kept "extending" the episode indefinitely, silently absorbing a
-    // LATER, independent liquidation move. Root cause confirmed on a
-    // real BTC episode: 13:32-14:54 was actually two separate moves
-    // (true local low ~13:50-13:52, genuine recovery there, then an
-    // unrelated later selloff ~14:30-14:52) merged into one.
-    //
-    // Fix: findConfirmedRecovery() now OWNS extreme-tracking AND
-    // recovery-confirmation as one interleaved process -- it extends
-    // the extreme only as far as needed to find a confirmed, non-
-    // retraced recovery, then STOPS and RETURNS. There is no separate
-    // pass that can walk past an already-confirmed recovery.
-    const { endTime, finalExtremePrice, finalExtremeTime } = findConfirmedRecovery(atrs, direction, startEvent.price, startEvent.timestamp, args);
-
-    // Events belong to this (now permanently closed, if endTime is
-    // non-null) episode only up to the boundary the search actually
-    // used. Once resolved, LATER events -- same direction or not --
-    // start a brand new episode, per the operator's explicit lifecycle
-    // (LIQUIDATION START -> ... -> EPISODE END -> RESET -> WAIT_FOR_NEW_LIQUIDATION).
-    const assignBoundary = endTime !== null ? endTime : finalExtremeTime + args.confirmationLookaheadMinutes * 60_000;
+    const { endTime, extremePrice, extremeTime, transitions } = runStateMachine(
+      direction,
+      startEvent.timestamp,
+      startEvent.price,
+      atrs,
+      variant,
+    );
+    // No fixed lookahead window means: if still open (endTime===null),
+    // it genuinely IS still open as of the end of available data -- ALL
+    // remaining events belong to it, up to the requested window's end.
+    const assignBoundary = endTime ?? windowEndMs;
 
     const sameDirectionEvents: RawEvent[] = [startEvent];
     const oppositeSideEvents: RawEvent[] = [];
     let j = i + 1;
     while (j < events.length && events[j]!.timestamp <= assignBoundary) {
       const ev = events[j]!;
-      if (ev.victim === direction) sameDirectionEvents.push(ev); else oppositeSideEvents.push(ev);
+      if (ev.victim === direction) sameDirectionEvents.push(ev);
+      else oppositeSideEvents.push(ev);
       j++;
     }
-
-    const causalDetectedEnd = computeCausalDetectedEnds(atrs, direction, startEvent.timestamp, sameDirectionEvents, events, i, j);
-    episodes.push({ direction, startTime: startEvent.timestamp, firstPrice: startEvent.price, extremePrice: finalExtremePrice, extremeTime: finalExtremeTime, retrospectiveTrueEnd: endTime, sameDirectionEvents, oppositeSideEvents, causalDetectedEnd });
+    episodes.push({
+      variant: variant.name,
+      direction,
+      startTime: startEvent.timestamp,
+      firstPrice: startEvent.price,
+      extremePrice,
+      extremeTime,
+      endTime,
+      transitions,
+      sameDirectionEvents,
+      oppositeSideEvents,
+    });
     i = j;
   }
   return episodes;
 }
 
-export function isMoreAdverse(direction: Side, candidatePrice: number, currentExtreme: number): boolean {
-  return direction === "LONG" ? candidatePrice < currentExtreme : candidatePrice > currentExtreme;
-}
-
-
-/** Sep 16 2026 (Karo), operator-reported FIX. Extreme-tracking and
- *  recovery-confirmation are now ONE interleaved process, not two
- *  sequential phases -- see reconstructRetrospectiveEpisodes's own
- *  comment for the full root-cause explanation. The confirmation
- *  window RE-ANCHORS to the current extreme every time it deepens
- *  (rather than staying fixed relative to the very first extreme),
- *  so a genuinely evolving cascade lasting longer than
- *  confirmationLookaheadMinutes isn't prematurely marked unresolved
- *  just because the window was anchored too early. Bounded overall by
- *  an absolute safety cap (6h) so this can never scan forever.
- *  Returns the final extreme reached even when unresolved (endTime
- *  null), so the caller can report/bound the episode consistently. */
-export function findConfirmedRecovery(atrs: Atrs, direction: Side, initialExtremePrice: number, initialExtremeTime: number, args: CliArgs): { endTime: number | null; finalExtremePrice: number; finalExtremeTime: number } {
-  let currentExtreme = initialExtremePrice;
-  let currentExtremeTime = initialExtremeTime;
-  const ABSOLUTE_SCAN_CAP_MS = 6 * 60 * 60_000;
-  const absoluteScanEnd = initialExtremeTime + ABSOLUTE_SCAN_CAP_MS;
-
-  while (currentExtremeTime < absoluteScanEnd) {
-    const atr3 = atr3mAt(atrs, currentExtremeTime);
-    if (atr3 === null) return { endTime: null, finalExtremePrice: currentExtreme, finalExtremeTime: currentExtremeTime };
-    const threshold = args.recoveryAtrMultiple * atr3;
-    const lookaheadEnd = Math.min(currentExtremeTime + args.confirmationLookaheadMinutes * 60_000, absoluteScanEnd);
-    const candlesAfter = atrs.c1m.filter((c) => c.closeTime > currentExtremeTime && c.closeTime <= lookaheadEnd);
-    if (candlesAfter.length === 0) return { endTime: null, finalExtremePrice: currentExtreme, finalExtremeTime: currentExtremeTime };
-
-    let deepened = false;
-    for (let k = 0; k < candlesAfter.length; k++) {
-      const c = candlesAfter[k]!;
-      const adverseCandidate = direction === "LONG" ? c.low : c.high;
-      if (isMoreAdverse(direction, adverseCandidate, currentExtreme)) {
-        currentExtreme = adverseCandidate; currentExtremeTime = c.closeTime;
-        deepened = true;
-        break; // restart with a RE-ANCHORED lookahead window from this new, deeper extreme
-      }
-      const recovery = direction === "LONG" ? c.close - currentExtreme : currentExtreme - c.close;
-      if (recovery >= threshold) {
-        const violated = candlesAfter.slice(k + 1).some((future) => isMoreAdverse(direction, direction === "LONG" ? future.low : future.high, currentExtreme));
-        if (!violated) return { endTime: c.closeTime, finalExtremePrice: currentExtreme, finalExtremeTime: currentExtremeTime };
-        // if violated, the violating candle will itself be reached later in this same scan and trigger the "deepened" branch above
-      }
-    }
-    if (!deepened) return { endTime: null, finalExtremePrice: currentExtreme, finalExtremeTime: currentExtremeTime }; // scanned the whole re-anchored window: no deepening, no confirmed recovery -- truly unresolved
-  }
-  return { endTime: null, finalExtremePrice: currentExtreme, finalExtremeTime: currentExtremeTime };
-}
-
-export function computeCausalDetectedEnds(atrs: Atrs, direction: Side, episodeStart: number, sameDirectionEvents: RawEvent[], allEvents: RawEvent[], startIdx: number, endIdx: number): { A: number | null; B: number | null; C: number | null } {
-  let causalExtreme = sameDirectionEvents[0]!.price;
-  let causalExtremeTime = sameDirectionEvents[0]!.timestamp;
-  const result: { A: number | null; B: number | null; C: number | null } = { A: null, B: null, C: null };
-  const episodeEventWindow = allEvents.slice(startIdx, endIdx);
-  const lastRelevantTs = episodeEventWindow.length > 0 ? episodeEventWindow[episodeEventWindow.length - 1]!.timestamp : episodeStart;
-  const searchEnd = lastRelevantTs + 60 * 60_000;
-  for (const c of atrs.c1m) {
-    if (c.closeTime <= episodeStart) continue;
-    if (c.closeTime > searchEnd) break;
-    const adverseCandidate = direction === "LONG" ? c.low : c.high;
-    if (isMoreAdverse(direction, adverseCandidate, causalExtreme)) { causalExtreme = adverseCandidate; causalExtremeTime = c.closeTime; }
-    const recovery = direction === "LONG" ? c.close - causalExtreme : causalExtreme - c.close;
-    const atr3 = atr3mAt(atrs, c.closeTime), atr5 = atr5mAt(atrs, c.closeTime);
-    if (result.A === null && atr3 !== null && recovery >= 1.0 * atr3) result.A = c.closeTime;
-    if (result.B === null && atr3 !== null && atr5 !== null && recovery >= 1.0 * atr3 && recovery >= 0.5 * atr5) result.B = c.closeTime;
-    if (result.C === null && atr3 !== null && atr5 !== null && recovery >= 1.0 * atr3 && recovery >= 0.7 * atr5) result.C = c.closeTime;
-    if (result.A !== null && result.B !== null && result.C !== null) break;
-  }
-  void causalExtremeTime;
-  return result;
-}
-
-export function percentile(sorted: readonly number[], q: number): number | null {
+export function percentile(
+  sorted: readonly number[],
+  q: number,
+): number | null {
   if (sorted.length === 0) return null;
   const idx = q * (sorted.length - 1);
-  const lo = Math.floor(idx), hi = Math.ceil(idx);
+  const lo = Math.floor(idx),
+    hi = Math.ceil(idx);
   if (lo === hi) return sorted[lo]!;
   return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (idx - lo);
 }
@@ -346,94 +565,202 @@ export function percentile(sorted: readonly number[], q: number): number | null 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv);
   console.log(`Symbol: ${args.symbol}`);
-  console.log(`Window: ${new Date(args.fromMs).toISOString()} -> ${new Date(args.toMs).toISOString()}`);
-  console.log(`Retrospective params: recoveryAtrMultiple=${args.recoveryAtrMultiple} confirmationLookaheadMinutes=${args.confirmationLookaheadMinutes}`);
+  console.log(
+    `Window: ${new Date(args.fromMs).toISOString()} -> ${new Date(args.toMs).toISOString()}`,
+  );
+  console.log(
+    `Variants: ${VARIANTS.map((v) => `${v.name}(1m>=${v.candidate1mAtrMultiple}xATR1m, 3m>=${v.confirm3mAtrMultiple}xATR3m${v.confirm5mAtrMultiple !== null ? `, 5m>=${v.confirm5mAtrMultiple}xATR5m` : ""})`).join(" | ")}`,
+  );
 
-  console.log("Fetching Binance historical klines (retrospective reconstruction only)...");
+  console.log("Fetching Binance historical klines...");
   const c1m = await fetchKlines(args.symbol, 60_000, args.fromMs, args.toMs);
   const c3m = await fetchKlines(args.symbol, 180_000, args.fromMs, args.toMs);
   const c5m = await fetchKlines(args.symbol, 300_000, args.fromMs, args.toMs);
   console.log(`Klines: 1m=${c1m.length} 3m=${c3m.length} 5m=${c5m.length}`);
-  const atrs: Atrs = { c1m, c3m, c5m, series1m: computeAtrSeries(c1m), series3m: computeAtrSeries(c3m), series5m: computeAtrSeries(c5m) };
+  const atrs: Atrs = {
+    c1m,
+    c3m,
+    c5m,
+    series1m: computeAtrSeries(c1m),
+    series3m: computeAtrSeries(c3m),
+    series5m: computeAtrSeries(c5m),
+  };
 
-  console.log("Loading raw liquidation events from liq_raw_events (READ ONLY)...");
+  console.log(
+    "Loading raw liquidation events from liq_raw_events (READ ONLY)...",
+  );
   const events = await loadRawEvents(args.symbol, args.fromMs, args.toMs);
   console.log(`Raw events: ${events.length}`);
 
-  const episodes = reconstructRetrospectiveEpisodes(events, atrs, args);
-
-  const longEpisodes = episodes.filter((e) => e.direction === "LONG");
-  const shortEpisodes = episodes.filter((e) => e.direction === "SHORT");
-  const sameDirEventCount = episodes.reduce((s, e) => s + e.sameDirectionEvents.length, 0);
-  const oppositeEventCount = episodes.reduce((s, e) => s + e.oppositeSideEvents.length, 0);
-  const unresolvedCount = episodes.filter((e) => e.retrospectiveTrueEnd === null).length;
-
-  const episodeUsd = (e: Episode): number => e.sameDirectionEvents.reduce((s, ev) => s + ev.quoteQty, 0);
-  const usdSorted = episodes.map(episodeUsd).sort((a, b) => a - b);
-  const pctTable = { p50: percentile(usdSorted, 0.5), p70: percentile(usdSorted, 0.7), p75: percentile(usdSorted, 0.75), p80: percentile(usdSorted, 0.8), p90: percentile(usdSorted, 0.9), p95: percentile(usdSorted, 0.95), p975: percentile(usdSorted, 0.975), p99: percentile(usdSorted, 0.99) };
-
-  console.log(`\n=== COUNTS ===`);
-  console.log(`Total raw events: ${events.length}`);
-  console.log(`Total retrospective episodes: ${episodes.length} (LONG=${longEpisodes.length} SHORT=${shortEpisodes.length})`);
-  console.log(`Same-direction events: ${sameDirEventCount}  Opposite-side embedded events: ${oppositeEventCount}`);
-  console.log(`Unresolved episodes (no confirmed retrospective end within window/lookahead): ${unresolvedCount}`);
-  console.log(`\n=== EPISODE USD PERCENTILES (same-direction only) ===`);
-  console.log(JSON.stringify(pctTable));
-
-  console.log(`\n=== CAUSAL DETECTOR COMPARISON ===`);
-  const problemCases: { episodeIdx: number; rule: string; kind: string; detail: string }[] = [];
-  for (const [idx, e] of episodes.entries()) {
-    for (const rule of ["A", "B", "C"] as const) {
-      const causal = e.causalDetectedEnd[rule];
-      if (e.retrospectiveTrueEnd === null) {
-        if (causal !== null) problemCases.push({ episodeIdx: idx, rule, kind: "CAUSAL_DETECTED_BUT_RETROSPECTIVE_UNRESOLVED", detail: `causal=${new Date(causal).toISOString()}` });
-        continue;
-      }
-      if (causal === null) { problemCases.push({ episodeIdx: idx, rule, kind: "NEVER_DETECTED", detail: `retrospectiveTrueEnd=${new Date(e.retrospectiveTrueEnd).toISOString()}` }); continue; }
-      const lagSeconds = (causal - e.retrospectiveTrueEnd) / 1000;
-      if (causal < e.startTime) problemCases.push({ episodeIdx: idx, rule, kind: "IMPOSSIBLE_BEFORE_START", detail: "causal end before episode start" });
-      else if (lagSeconds < -300) problemCases.push({ episodeIdx: idx, rule, kind: "DETECTED_TOO_EARLY", detail: `lag=${lagSeconds}s` });
-      else if (lagSeconds > 1800) problemCases.push({ episodeIdx: idx, rule, kind: "DETECTED_LATE", detail: `lag=${lagSeconds}s` });
-    }
-  }
-  console.log(`Problem cases found: ${problemCases.length}`);
-  const byKind = new Map<string, number>();
-  for (const p of problemCases) byKind.set(p.kind, (byKind.get(p.kind) ?? 0) + 1);
-  console.log(JSON.stringify(Object.fromEntries(byKind)));
-
-  const violations: string[] = [];
-  const allAssignedIds = new Set<string>();
-  for (const e of episodes) for (const ev of [...e.sameDirectionEvents, ...e.oppositeSideEvents]) {
-    if (allAssignedIds.has(ev._id)) violations.push(`event ${ev._id} assigned to two episodes`);
-    allAssignedIds.add(ev._id);
-  }
-  if (allAssignedIds.size !== events.length) violations.push(`assigned event count (${allAssignedIds.size}) != raw event count (${events.length})`);
-  console.log(`\n=== VALIDATION: ${violations.length === 0 ? "PASS" : "FAIL"} ===`);
-  violations.forEach((v) => console.error(`  ${v}`));
-
-  console.log(`\n=== EPISODE TABLE ===`);
-  for (const [idx, e] of episodes.entries()) {
-    console.log(`[${idx}] ${e.direction} start=${new Date(e.startTime).toISOString()} extreme=${e.extremePrice}@${new Date(e.extremeTime).toISOString()} trueEnd=${e.retrospectiveTrueEnd ? new Date(e.retrospectiveTrueEnd).toISOString() : "UNRESOLVED"} usd=${episodeUsd(e).toFixed(0)} sameEv=${e.sameDirectionEvents.length} oppEv=${e.oppositeSideEvents.length} causalA=${e.causalDetectedEnd.A ? new Date(e.causalDetectedEnd.A).toISOString() : "-"} causalB=${e.causalDetectedEnd.B ? new Date(e.causalDetectedEnd.B).toISOString() : "-"} causalC=${e.causalDetectedEnd.C ? new Date(e.causalDetectedEnd.C).toISOString() : "-"}`);
-  }
-
-  const oiContext = episodes.map((e) => {
+  const episodeUsd = (e: Episode): number =>
+    e.sameDirectionEvents.reduce((s, ev) => s + ev.quoteQty, 0);
+  const oiContextFor = (e: Episode): Record<string, unknown> => {
     const startSnap = e.sameDirectionEvents[0]?.marketSnapshot;
-    const extremeEventNearby = [...e.sameDirectionEvents].reverse().find((ev) => Math.abs(ev.timestamp - e.extremeTime) < 5 * 60_000);
-    const lastSameDirEvent = e.sameDirectionEvents[e.sameDirectionEvents.length - 1];
+    const extremeEventNearby = [...e.sameDirectionEvents]
+      .reverse()
+      .find((ev) => Math.abs(ev.timestamp - e.extremeTime) < 5 * 60_000);
+    const lastSameDirEvent =
+      e.sameDirectionEvents[e.sameDirectionEvents.length - 1];
     return {
       oiAtStartUsd: get(startSnap, "openInterest.openInterestUsd") ?? null,
-      oiNearExtremeUsd: extremeEventNearby ? get(extremeEventNearby.marketSnapshot, "openInterest.openInterestUsd") ?? null : null,
-      oiAtLastSameDirEventUsd: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.openInterestUsd") ?? null : null,
-      oiDelta5s: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta5sPct") ?? null : null,
-      oiDelta10s: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta10sPct") ?? null : null,
-      oiDelta15s: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta15sPct") ?? null : null,
-      oiDelta30s: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta30sPct") ?? null : null,
-      oiDelta1m: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta1mPct") ?? null : null,
-      oiDelta2m: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta2mPct") ?? null : null,
-      oiDelta3m: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta3mPct") ?? null : null,
-      oiDelta5m: lastSameDirEvent ? get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta5mPct") ?? null : null,
+      oiNearExtremeUsd: extremeEventNearby
+        ? (get(
+            extremeEventNearby.marketSnapshot,
+            "openInterest.openInterestUsd",
+          ) ?? null)
+        : null,
+      oiAtLastSameDirEventUsd: lastSameDirEvent
+        ? (get(
+            lastSameDirEvent.marketSnapshot,
+            "openInterest.openInterestUsd",
+          ) ?? null)
+        : null,
+      oiDelta5s: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta5sPct") ??
+          null)
+        : null,
+      oiDelta10s: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta10sPct") ??
+          null)
+        : null,
+      oiDelta15s: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta15sPct") ??
+          null)
+        : null,
+      oiDelta30s: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta30sPct") ??
+          null)
+        : null,
+      oiDelta1m: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta1mPct") ??
+          null)
+        : null,
+      oiDelta2m: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta2mPct") ??
+          null)
+        : null,
+      oiDelta3m: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta3mPct") ??
+          null)
+        : null,
+      oiDelta5m: lastSameDirEvent
+        ? (get(lastSameDirEvent.marketSnapshot, "openInterest.oiDelta5mPct") ??
+          null)
+        : null,
     };
-  });
+  };
+
+  const variantResults: Record<
+    string,
+    {
+      episodes: Episode[];
+      counts: Record<string, unknown>;
+      percentiles: Record<string, number | null>;
+      violations: string[];
+    }
+  > = {};
+
+  for (const variant of VARIANTS) {
+    console.log(`\n########## VARIANT: ${variant.name} ##########`);
+    const episodes = reconstructEpisodesForVariant(
+      events,
+      atrs,
+      variant,
+      args.toMs,
+    );
+    const longEpisodes = episodes.filter((e) => e.direction === "LONG");
+    const shortEpisodes = episodes.filter((e) => e.direction === "SHORT");
+    const sameDirEventCount = episodes.reduce(
+      (s, e) => s + e.sameDirectionEvents.length,
+      0,
+    );
+    const oppositeEventCount = episodes.reduce(
+      (s, e) => s + e.oppositeSideEvents.length,
+      0,
+    );
+    const stillOpenCount = episodes.filter((e) => e.endTime === null).length;
+
+    const usdSorted = episodes.map(episodeUsd).sort((a, b) => a - b);
+    const pctTable = {
+      p50: percentile(usdSorted, 0.5),
+      p70: percentile(usdSorted, 0.7),
+      p75: percentile(usdSorted, 0.75),
+      p80: percentile(usdSorted, 0.8),
+      p90: percentile(usdSorted, 0.9),
+      p95: percentile(usdSorted, 0.95),
+      p975: percentile(usdSorted, 0.975),
+      p99: percentile(usdSorted, 0.99),
+    };
+
+    console.log(
+      `Episodes: ${episodes.length} (LONG=${longEpisodes.length} SHORT=${shortEpisodes.length})`,
+    );
+    console.log(
+      `Same-direction events: ${sameDirEventCount}  Opposite-side embedded: ${oppositeEventCount}  Still open at window end: ${stillOpenCount}`,
+    );
+    console.log(`USD percentiles: ${JSON.stringify(pctTable)}`);
+
+    const violations: string[] = [];
+    const allAssignedIds = new Set<string>();
+    for (const e of episodes)
+      for (const ev of [...e.sameDirectionEvents, ...e.oppositeSideEvents]) {
+        if (allAssignedIds.has(ev._id))
+          violations.push(`event ${ev._id} assigned to two episodes`);
+        allAssignedIds.add(ev._id);
+      }
+    if (allAssignedIds.size !== events.length)
+      violations.push(
+        `assigned event count (${allAssignedIds.size}) != raw event count (${events.length})`,
+      );
+    console.log(`Validation: ${violations.length === 0 ? "PASS" : "FAIL"}`);
+    violations.forEach((v) => console.error(`  ${v}`));
+
+    console.log(`\n-- Episode details (${variant.name}) --`);
+    for (const [idx, e] of episodes.entries()) {
+      console.log(`\nEpisode #${idx} ${e.direction}`);
+      console.log(
+        `  START: ${new Date(e.startTime).toISOString()} price=${e.firstPrice}`,
+      );
+      console.log(
+        `  FINAL EXTREME: ${new Date(e.extremeTime).toISOString()} / price ${e.extremePrice}`,
+      );
+      for (const t of e.transitions) {
+        if (t.type === "START") continue;
+        const parts = [`  ${t.type}: ${new Date(t.time).toISOString()}`];
+        if (t.price !== undefined) parts.push(`price=${t.price}`);
+        if (t.recovery !== undefined)
+          parts.push(`recovery=${t.recovery.toFixed(2)}`);
+        if (t.atr1m !== undefined && t.atr1m !== null)
+          parts.push(`ATR1m=${t.atr1m.toFixed(2)}`);
+        if (t.atr3m !== undefined && t.atr3m !== null)
+          parts.push(`ATR3m=${t.atr3m.toFixed(2)}`);
+        if (t.atr5m !== undefined && t.atr5m !== null)
+          parts.push(`ATR5m=${t.atr5m.toFixed(2)}`);
+        if (t.reason) parts.push(`reason="${t.reason}"`);
+        console.log(parts.join(" "));
+      }
+      console.log(
+        `  END: ${e.endTime !== null ? new Date(e.endTime).toISOString() : "STILL OPEN at window end"}`,
+      );
+      console.log(
+        `  Same-direction USD: $${episodeUsd(e).toFixed(0)} (${e.sameDirectionEvents.length} events)  Opposite-side: ${e.oppositeSideEvents.length} events`,
+      );
+    }
+
+    variantResults[variant.name] = {
+      episodes,
+      counts: {
+        totalEpisodes: episodes.length,
+        longEpisodes: longEpisodes.length,
+        shortEpisodes: shortEpisodes.length,
+        sameDirectionEvents: sameDirEventCount,
+        oppositeSideEvents: oppositeEventCount,
+        stillOpenAtWindowEnd: stillOpenCount,
+      },
+      percentiles: pctTable,
+      violations,
+    };
+  }
 
   const outDir = path.join(process.cwd(), "research-output");
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
@@ -442,82 +769,159 @@ async function main(): Promise<void> {
   const htmlPath = path.join(outDir, `episodes-${tag}.html`);
 
   const exportPayload = {
-    metadata: { symbol: args.symbol, fromMs: args.fromMs, toMs: args.toMs, params: args, generatedAt: new Date().toISOString(), atrFormula: "Wilder ATR(14), identical to src/shared/indicators.ts's atr()" },
-    counts: { totalRawEvents: events.length, totalEpisodes: episodes.length, longEpisodes: longEpisodes.length, shortEpisodes: shortEpisodes.length, sameDirectionEvents: sameDirEventCount, oppositeSideEvents: oppositeEventCount, unresolvedEpisodes: unresolvedCount },
-    percentiles: pctTable,
-    problemCases,
-    validation: { violations, pass: violations.length === 0 },
-    episodes: episodes.map((e, idx) => ({
-      index: idx, direction: e.direction, startTime: e.startTime, firstPrice: e.firstPrice,
-      extremePrice: e.extremePrice, extremeTime: e.extremeTime,
-      retrospectiveTrueEnd: e.retrospectiveTrueEnd, retrospectiveNote: "MAY use future candles -- historical reconstruction only, never a live-safe timestamp",
-      causalDetectedEnd: e.causalDetectedEnd, causalNote: "NEVER uses information after the candle's own closeTime",
-      sameDirectionUsd: episodeUsd(e), sameDirectionEventCount: e.sameDirectionEvents.length, oppositeSideEventCount: e.oppositeSideEvents.length,
-      largestSameDirectionEventUsd: Math.max(...e.sameDirectionEvents.map((ev) => ev.quoteQty)),
-      priceDisplacement: Math.abs(e.extremePrice - e.firstPrice),
-      sameDirectionEvents: e.sameDirectionEvents.map((ev) => ({ timestamp: ev.timestamp, price: ev.price, quoteQty: ev.quoteQty })),
-      oppositeSideEvents: e.oppositeSideEvents.map((ev) => ({ timestamp: ev.timestamp, price: ev.price, quoteQty: ev.quoteQty })),
-      oi: oiContext[idx],
-    })),
+    metadata: {
+      symbol: args.symbol,
+      fromMs: args.fromMs,
+      toMs: args.toMs,
+      generatedAt: new Date().toISOString(),
+      atrFormula:
+        "Wilder ATR(14), identical to src/shared/indicators.ts's atr()",
+      variants: VARIANTS,
+      totalRawEvents: events.length,
+    },
+    variants: Object.fromEntries(
+      VARIANTS.map((v) => {
+        const r = variantResults[v.name]!;
+        return [
+          v.name,
+          {
+            counts: r.counts,
+            percentiles: r.percentiles,
+            validation: {
+              violations: r.violations,
+              pass: r.violations.length === 0,
+            },
+            episodes: r.episodes.map((e, idx) => ({
+              index: idx,
+              direction: e.direction,
+              startTime: e.startTime,
+              firstPrice: e.firstPrice,
+              extremePrice: e.extremePrice,
+              extremeTime: e.extremeTime,
+              endTime: e.endTime,
+              endNote:
+                e.endTime !== null
+                  ? "confirmed via causal 1m->3m state machine -- reproducible live"
+                  : "still open as of the end of the requested data window",
+              transitions: e.transitions,
+              sameDirectionUsd: episodeUsd(e),
+              sameDirectionEventCount: e.sameDirectionEvents.length,
+              oppositeSideEventCount: e.oppositeSideEvents.length,
+              largestSameDirectionEventUsd: Math.max(
+                ...e.sameDirectionEvents.map((ev) => ev.quoteQty),
+              ),
+              priceDisplacement: Math.abs(e.extremePrice - e.firstPrice),
+              sameDirectionEvents: e.sameDirectionEvents.map((ev) => ({
+                timestamp: ev.timestamp,
+                price: ev.price,
+                quoteQty: ev.quoteQty,
+              })),
+              oppositeSideEvents: e.oppositeSideEvents.map((ev) => ({
+                timestamp: ev.timestamp,
+                price: ev.price,
+                quoteQty: ev.quoteQty,
+              })),
+              oi: oiContextFor(e),
+            })),
+          },
+        ];
+      }),
+    ),
   };
   fs.writeFileSync(jsonPath, JSON.stringify(exportPayload, null, 2));
-  fs.writeFileSync(htmlPath, buildHtmlReport(args.symbol, atrs, episodes, episodeUsd));
+  fs.writeFileSync(
+    htmlPath,
+    buildHtmlReport(args.symbol, atrs, variantResults, episodeUsd),
+  );
 
   console.log(`\nJSON: ${jsonPath}`);
   console.log(`HTML: ${htmlPath}`);
 }
 
-function buildHtmlReport(symbol: string, atrs: Atrs, episodes: Episode[], episodeUsd: (e: Episode) => number): string {
+function buildHtmlReport(
+  symbol: string,
+  atrs: Atrs,
+  variantResults: Record<string, { episodes: Episode[] }>,
+  episodeUsd: (e: Episode) => number,
+): string {
   const candles = atrs.c1m;
-  if (candles.length === 0) return `<html><body><h1>${symbol}</h1><p>No candle data.</p></body></html>`;
+  if (candles.length === 0)
+    return `<html><body><h1>${symbol}</h1><p>No candle data.</p></body></html>`;
   const minPrice = Math.min(...candles.map((c) => c.low));
   const maxPrice = Math.max(...candles.map((c) => c.high));
-  const t0 = candles[0]!.openTime, t1 = candles[candles.length - 1]!.closeTime;
-  const W = 1600, H = 700, PAD = 50;
+  const t0 = candles[0]!.openTime,
+    t1 = candles[candles.length - 1]!.closeTime;
+  const W = 1600,
+    H = 500,
+    PAD = 50;
   const x = (t: number): number => PAD + ((t - t0) / (t1 - t0)) * (W - 2 * PAD);
-  const y = (p: number): number => H - PAD - ((p - minPrice) / (maxPrice - minPrice)) * (H - 2 * PAD);
+  const y = (p: number): number =>
+    H - PAD - ((p - minPrice) / (maxPrice - minPrice)) * (H - 2 * PAD);
 
-  const candleSvg = candles.map((c) => {
-    const cx = x((c.openTime + c.closeTime) / 2);
-    const color = c.close >= c.open ? "#26a69a" : "#ef5350";
-    const bodyTop = y(Math.max(c.open, c.close)), bodyBot = y(Math.min(c.open, c.close));
-    return `<line x1="${cx}" y1="${y(c.high)}" x2="${cx}" y2="${y(c.low)}" stroke="${color}" stroke-width="1"/><rect x="${cx - 2}" y="${bodyTop}" width="4" height="${Math.max(1, bodyBot - bodyTop)}" fill="${color}"/>`;
-  }).join("\n");
+  const candleSvg = candles
+    .map((c) => {
+      const cx = x((c.openTime + c.closeTime) / 2);
+      const color = c.close >= c.open ? "#26a69a" : "#ef5350";
+      const bodyTop = y(Math.max(c.open, c.close)),
+        bodyBot = y(Math.min(c.open, c.close));
+      return `<line x1="${cx}" y1="${y(c.high)}" x2="${cx}" y2="${y(c.low)}" stroke="${color}" stroke-width="1"/><rect x="${cx - 2}" y="${bodyTop}" width="4" height="${Math.max(1, bodyBot - bodyTop)}" fill="${color}"/>`;
+    })
+    .join("\n");
 
-  const episodeSvg = episodes.map((e, idx) => {
-    const startX = x(e.startTime), extremeX = x(e.extremeTime), extremeY = y(e.extremePrice);
-    const trueEndX = e.retrospectiveTrueEnd !== null ? x(e.retrospectiveTrueEnd) : null;
-    const color = e.direction === "LONG" ? "#2962ff" : "#ff6d00";
-    let s = `<circle cx="${startX}" cy="${y(e.firstPrice)}" r="4" fill="${color}" stroke="black"/>`;
-    s += `<circle cx="${extremeX}" cy="${extremeY}" r="5" fill="yellow" stroke="${color}" stroke-width="2"/>`;
-    if (trueEndX !== null) s += `<line x1="${trueEndX}" y1="0" x2="${trueEndX}" y2="${H}" stroke="green" stroke-width="1" stroke-dasharray="4,2"/>`;
-    for (const rule of ["A", "B", "C"] as const) {
-      const t = e.causalDetectedEnd[rule];
-      if (t !== null) { const cx = x(t); s += `<line x1="${cx}" y1="0" x2="${cx}" y2="${H}" stroke="purple" stroke-width="0.5" stroke-dasharray="2,4"/><text x="${cx}" y="${12 + ["A", "B", "C"].indexOf(rule) * 10}" font-size="8" fill="purple">${rule}</text>`; }
-    }
-    for (const ev of e.sameDirectionEvents) s += `<circle cx="${x(ev.timestamp)}" cy="${y(ev.price)}" r="2" fill="${color}"/>`;
-    for (const ev of e.oppositeSideEvents) s += `<circle cx="${x(ev.timestamp)}" cy="${y(ev.price)}" r="2" fill="gray" stroke="black" stroke-width="0.3"/>`;
-    return `<g data-episode="${idx}">${s}</g>`;
-  }).join("\n");
-
-  const table = episodes.map((e, idx) => `<tr><td>${idx}</td><td>${e.direction}</td><td>${new Date(e.startTime).toISOString()}</td><td>${e.retrospectiveTrueEnd ? new Date(e.retrospectiveTrueEnd).toISOString() : "UNRESOLVED"}</td><td>$${episodeUsd(e).toFixed(0)}</td><td>${e.sameDirectionEvents.length}</td><td>${e.oppositeSideEvents.length}</td></tr>`).join("\n");
-
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${symbol} liquidation episodes</title>
-<style>body{font-family:monospace;background:#111;color:#eee} table{border-collapse:collapse} td,th{border:1px solid #444;padding:4px 8px} svg{background:#1a1a1a}</style>
-</head><body>
-<h1>${symbol} -- retrospective vs causal liquidation episodes</h1>
-<p>Blue dot=LONG episode start, Orange dot=SHORT episode start, Yellow ring=extreme, Green dashed=retrospectiveTrueEnd (future-informed), Purple dotted=causal A/B/C detected end, gray dot=opposite-side event.</p>
+  const variantPanels = VARIANTS.map((variant) => {
+    const episodes = variantResults[variant.name]!.episodes;
+    const episodeSvg = episodes
+      .map((e, idx) => {
+        const startX = x(e.startTime),
+          extremeX = x(e.extremeTime),
+          extremeY = y(e.extremePrice);
+        const endX = e.endTime !== null ? x(e.endTime) : null;
+        const color = e.direction === "LONG" ? "#2962ff" : "#ff6d00";
+        let s = `<circle cx="${startX}" cy="${y(e.firstPrice)}" r="4" fill="${color}" stroke="black"/>`;
+        s += `<circle cx="${extremeX}" cy="${extremeY}" r="5" fill="yellow" stroke="${color}" stroke-width="2"/>`;
+        if (endX !== null)
+          s += `<line x1="${endX}" y1="0" x2="${endX}" y2="${H}" stroke="lime" stroke-width="1.5" stroke-dasharray="4,2"/>`;
+        for (const tr of e.transitions) {
+          if (tr.type === "RECOVERY_CANDIDATE")
+            s += `<circle cx="${x(tr.time)}" cy="${tr.price !== undefined ? y(tr.price) : 0}" r="3" fill="none" stroke="cyan" stroke-width="1"/>`;
+          if (tr.type === "RECOVERY_INVALIDATED")
+            s += `<circle cx="${x(tr.time)}" cy="${tr.price !== undefined ? y(tr.price) : 0}" r="3" fill="none" stroke="red" stroke-width="1" stroke-dasharray="1,1"/>`;
+        }
+        for (const ev of e.sameDirectionEvents)
+          s += `<circle cx="${x(ev.timestamp)}" cy="${y(ev.price)}" r="2" fill="${color}"/>`;
+        for (const ev of e.oppositeSideEvents)
+          s += `<circle cx="${x(ev.timestamp)}" cy="${y(ev.price)}" r="2" fill="gray" stroke="black" stroke-width="0.3"/>`;
+        return `<g data-episode="${idx}">${s}</g>`;
+      })
+      .join("\n");
+    const table = episodes
+      .map(
+        (e, idx) =>
+          `<tr><td>${idx}</td><td>${e.direction}</td><td>${new Date(e.startTime).toISOString()}</td><td>${e.endTime !== null ? new Date(e.endTime).toISOString() : "STILL OPEN"}</td><td>$${episodeUsd(e).toFixed(0)}</td><td>${e.sameDirectionEvents.length}</td><td>${e.oppositeSideEvents.length}</td></tr>`,
+      )
+      .join("\n");
+    return `<h2>${variant.name} (1m&gt;=${variant.candidate1mAtrMultiple}xATR1m, 3m&gt;=${variant.confirm3mAtrMultiple}xATR3m${variant.confirm5mAtrMultiple !== null ? `, 5m&gt;=${variant.confirm5mAtrMultiple}xATR5m` : ""}) -- ${episodes.length} episodes</h2>
 <svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
 ${candleSvg}
 ${episodeSvg}
 </svg>
-<h2>Episode table</h2>
-<table><tr><th>#</th><th>Dir</th><th>Start</th><th>Retrospective True End</th><th>Same-dir USD</th><th>Same-dir events</th><th>Opposite events</th></tr>
+<table><tr><th>#</th><th>Dir</th><th>Start</th><th>End</th><th>Same-dir USD</th><th>Same-dir events</th><th>Opposite events</th></tr>
 ${table}
-</table>
+</table>`;
+  }).join("\n<hr/>\n");
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>${symbol} liquidation episodes</title>
+<style>body{font-family:monospace;background:#111;color:#eee} table{border-collapse:collapse;margin-bottom:20px} td,th{border:1px solid #444;padding:4px 8px} svg{background:#1a1a1a}</style>
+</head><body>
+<h1>${symbol} -- causal 1m recovery candidate -> 3m confirmation state machine, by variant</h1>
+<p>Blue dot=LONG episode start, Orange dot=SHORT episode start, Yellow ring=final extreme, Lime dashed=confirmed END, Cyan ring=recovery candidate, Red dashed ring=invalidated candidate, gray dot=opposite-side event.</p>
+${variantPanels}
 </body></html>`;
 }
 
 if (require.main === module) {
-  main().catch((err) => { console.error(err); process.exit(1); });
+  main().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
 }
