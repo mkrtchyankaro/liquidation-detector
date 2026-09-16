@@ -27,6 +27,10 @@ import {
   type OiLiquidationRatios,
 } from "../src/domain/research/episode-oi-liquidation-ratios";
 import {
+  computeEpisodeQuantityAccounting,
+  type EpisodeQuantityAccounting,
+} from "../src/domain/research/episode-oi-liquidation-accounting";
+import {
   computeCausalHistoricalPercentile,
   type CompletedEpisodeRef,
   type HistoricalPercentileContext,
@@ -153,6 +157,7 @@ interface EpisodeResearchRecord {
   oiPhaseChangeUsd: OiPhaseChangeUsd;
   oiPhaseChangeQuantity: OiPhaseChangeQuantity;
   oiLiquidationRatios: OiLiquidationRatios;
+  quantityAccounting: EpisodeQuantityAccounting;
   clearingTransitionAtEnd: ReturnType<typeof clearingTransitionFeatures>;
   outcomes: EpisodeOutcomeLabels["outcomes"];
   madeAdverseNewExtremeAfterEnd: boolean | null;
@@ -296,6 +301,14 @@ async function buildRecordsForSymbol(
           nearExtreme?.waypoint ?? null,
           atEnd?.waypoint ?? null,
         ).oiStartToEndUsd,
+      ),
+      quantityAccounting: computeEpisodeQuantityAccounting(
+        e.sameDirectionEvents,
+        startWp,
+        nearExtreme?.waypoint ?? null,
+        atEnd?.waypoint ?? null,
+        e.extremeTime,
+        e.endTime,
       ),
       clearingTransitionAtEnd: clearingTransitionFeatures(
         atEnd?.waypoint ?? null,
@@ -504,6 +517,36 @@ async function main(): Promise<void> {
     `  Contraction start->extreme, continued contraction extreme->end: n=${phaseAvailable.filter((r) => r.oiPhaseChangeUsd.oiStartToExtremeUsd! < 0 && r.oiPhaseChangeUsd.oiExtremeToEndUsd! < 0).length}`,
   );
 
+  console.log(
+    `\n=== IMPLIED REPLACEMENT / RESIDUAL ACCOUNTING (START->END, quantity-based, high-quality only offset<=60s) ===`,
+  );
+  for (const direction of ["LONG", "SHORT"] as const) {
+    const dirRecords = ratioHighQuality.filter(
+      (r) => r.direction === direction,
+    );
+    const withReplacement = dirRecords.filter(
+      (r) =>
+        r.quantityAccounting.startToEnd.impliedReplacementQuantity !== null,
+    );
+    const withResidual = dirRecords.filter(
+      (r) =>
+        r.quantityAccounting.startToEnd.residualContractionBeyondLiquidation !==
+        null,
+    );
+    console.log(
+      `  ${direction}: n_withImpliedReplacement=${withReplacement.length} n_withResidualContraction=${withResidual.length}`,
+    );
+    if (withReplacement.length > 0) {
+      const ratios = withReplacement.map(
+        (r) =>
+          r.quantityAccounting.startToEnd.impliedReplacementToLiquidationRatio!,
+      );
+      console.log(
+        `    implied replacement ratio: median=${median(ratios)?.toFixed(2)}x n=${ratios.length}`,
+      );
+    }
+  }
+
   const outDir = path.join(process.cwd(), "research-output");
   if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
   const tag = `${new Date(args.fromMs).toISOString().slice(0, 10)}_to_${new Date(args.toMs).toISOString().slice(0, 10)}`;
@@ -546,6 +589,11 @@ async function main(): Promise<void> {
     "oiClearingRatio",
     "oiStartToExtremeUsd",
     "oiExtremeToEndUsd",
+    "liquidatedQuantityStartToEnd",
+    "observedOiQuantityChangeStartToEnd",
+    "impliedReplacementQuantityStartToEnd",
+    "impliedReplacementRatioStartToEnd",
+    "residualContractionStartToEnd",
     "clearingThenStabilization",
     "mfe5mPct",
     "mae5mPct",
@@ -575,6 +623,17 @@ async function main(): Promise<void> {
       r.oiLiquidationRatios.oiClearingRatio?.toFixed(4) ?? "",
       r.oiPhaseChangeUsd.oiStartToExtremeUsd?.toFixed(0) ?? "",
       r.oiPhaseChangeUsd.oiExtremeToEndUsd?.toFixed(0) ?? "",
+      r.quantityAccounting.startToEnd.liquidatedQuantity?.toFixed(6) ?? "",
+      r.quantityAccounting.startToEnd.observedOiQuantityChange?.toFixed(6) ??
+        "",
+      r.quantityAccounting.startToEnd.impliedReplacementQuantity?.toFixed(6) ??
+        "",
+      r.quantityAccounting.startToEnd.impliedReplacementToLiquidationRatio?.toFixed(
+        3,
+      ) ?? "",
+      r.quantityAccounting.startToEnd.residualContractionBeyondLiquidation?.toFixed(
+        6,
+      ) ?? "",
       r.clearingTransitionAtEnd.clearingThenStabilizationPattern ?? "",
       r.outcomes[5]?.mfePct?.toFixed(3) ?? "",
       r.outcomes[5]?.maePct?.toFixed(3) ?? "",
