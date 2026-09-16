@@ -9,6 +9,7 @@ import type { RawLiquidationEventDoc } from "./raw-liquidation-event.repository"
 import type { UserSignalDoc } from "../../domain/signal/user-signal.model";
 import type { RotationEpisodeHistoryDoc } from "../../domain/signal/rotation-episode-history.model";
 import type { OiSecondObservationDoc } from "./oi-second-observation.repository";
+import type { StrategyOrderDoc } from "./strategy-order.repository";
 import type { ExecutionRecordDoc } from "./execution-record.model";
 import type { ExecutionClaimDoc } from "./execution-claim.model";
 
@@ -195,6 +196,13 @@ export class MongoClientWrapper {
     return dbs
       ? dbs.own.collection<OiSecondObservationDoc>("oi_second_observations")
       : null;
+  }
+
+  /** Sep 16 2026 (Karo), operator-approved architecture -- see
+   *  strategy-order.repository.ts's own module doc comment. */
+  async strategyOrders(): Promise<Collection<StrategyOrderDoc> | null> {
+    const dbs = await this.ensure();
+    return dbs ? dbs.own.collection<StrategyOrderDoc>("strategy_orders") : null;
   }
 
   /** Sep 14 2026 (Karo), operator-requested -- historical ROTATION
