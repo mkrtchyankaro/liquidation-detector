@@ -62,6 +62,18 @@ export interface LiquidationOiUserRuntimeRef {
   telegram: { sendMessage(text: string): Promise<unknown> } | null;
 }
 
+/** Sep 16 2026 (Karo), operator-requested. What one user's fan-out
+ *  attempt resolved to -- used ONLY to decide, after the whole
+ *  fan-out completes, whether the GLOBAL lifecycle resolves to ACTIVE
+ *  (>=1 real position) or a specific no-position CANCELLED reason. */
+type UserFanOutOutcome =
+  | "ACTIVE"
+  | "ALREADY_ACTIVE"
+  | "ALREADY_TERMINAL"
+  | "GLOBAL_DISABLED"
+  | "USER_DISABLED"
+  | "FAILED";
+
 const STRUCTURAL_INVALIDATION_BUFFER_ATR = 0.1; // UNTUNED -- small noise/execution buffer beyond the episode's own extreme
 
 export class LiquidationOiRuntimeOrchestrator {
@@ -179,12 +191,19 @@ export class LiquidationOiRuntimeOrchestrator {
       `[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} invalidation=${structuralInvalidationPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} components=${JSON.stringify(capacity.components)}`,
     );
 
+    // Sep 16 2026 (Karo), operator-requested lifecycle fix: the
+    // persisted signal starts at ENTRY_READY, NOT ACTIVE -- ACTIVE is
+    // earned only once the fan-out below confirms a real position,
+    // mirroring exactly what confirmActivePosition()/cancel() do to
+    // the in-memory LiquidationOiWatchManager. ENTRY_READY must never
+    // by itself imply ACTIVE, for either the in-memory lifecycle or
+    // its persisted record.
     await this.globalSignalRepo.upsertSignal({
       globalSignalId,
       symbol,
       victim: episode.victim,
       candidateSide,
-      state: "ACTIVE",
+      state: "ENTRY_READY",
       ownershipId,
       episodePercentileRank: watchResult.episodePercentileRank,
       sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
@@ -196,19 +215,23 @@ export class LiquidationOiRuntimeOrchestrator {
       tpRevision: 0,
     });
 
+    const outcomes: UserFanOutOutcome[] = [];
     for (const runtime of this.getUserRuntimes()) {
       try {
-        await this.executeForUser(
-          runtime,
-          symbol,
-          globalSignalId,
-          candidateSide,
-          entryPrice,
-          structuralInvalidationPrice,
-          tpPrice,
-          nowMs,
+        outcomes.push(
+          await this.executeForUser(
+            runtime,
+            symbol,
+            globalSignalId,
+            candidateSide,
+            entryPrice,
+            structuralInvalidationPrice,
+            tpPrice,
+            nowMs,
+          ),
         );
       } catch (err) {
+        outcomes.push("FAILED");
         log.error(
           {
             userId: runtime.userId,
@@ -220,6 +243,100 @@ export class LiquidationOiRuntimeOrchestrator {
         );
       }
     }
+
+    // Sep 16 2026 (Karo), operator-requested CRITICAL FIX: ENTRY_READY
+    // is now ALWAYS resolved, synchronously, in this same call --
+    // never left waiting across ticks. This is what makes ENTRY_READY
+    // a genuinely transient state rather than a permanent lock, and
+    // is what lets observation-only mode (executionEnabled=false)
+    // produce an unbounded sequence of independent setups for the
+    // same symbol within one process lifetime, with no restart ever
+    // required to "see the next setup".
+    const hasRealPosition = outcomes.some(
+      (o) => o === "ACTIVE" || o === "ALREADY_ACTIVE",
+    );
+    if (hasRealPosition) {
+      this.watchManager.confirmActivePosition(symbol, nowMs);
+      await this.globalSignalRepo.upsertSignal({
+        globalSignalId,
+        symbol,
+        victim: episode.victim,
+        candidateSide,
+        state: "ACTIVE",
+        ownershipId,
+        episodePercentileRank: watchResult.episodePercentileRank,
+        sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
+        extremePrice: episode.extremePrice,
+        entryPrice,
+        strategyInvalidationPrice: structuralInvalidationPrice,
+        initialCapacityAtr: capacity.initialCapacityAtr,
+        initialTpPrice: tpPrice,
+        tpRevision: 0,
+      });
+      log.info(
+        `[LOX_GLOBAL_ACTIVE] ${symbol} globalSignalId=${globalSignalId} -- at least one real user position confirmed, symbol ownership retained`,
+      );
+      return;
+    }
+
+    const { code, detail } = this.resolveNoPositionReason(outcomes);
+    this.watchManager.cancel(symbol, code, detail, nowMs);
+    await this.globalSignalRepo.upsertSignal({
+      globalSignalId,
+      symbol,
+      victim: episode.victim,
+      candidateSide,
+      state: "CANCELLED",
+      ownershipId,
+      episodePercentileRank: watchResult.episodePercentileRank,
+      sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
+      extremePrice: episode.extremePrice,
+      entryPrice,
+      strategyInvalidationPrice: structuralInvalidationPrice,
+      initialCapacityAtr: capacity.initialCapacityAtr,
+      initialTpPrice: tpPrice,
+      tpRevision: 0,
+    });
+    log.info(
+      `[LOX_GLOBAL_CANCELLED] ${symbol} globalSignalId=${globalSignalId} reason=${code} -- no real position resulted, symbol released for the next independent episode`,
+    );
+  }
+
+  /** Sep 16 2026 (Karo), operator-requested. Picks the specific
+   *  no-position reason code from the fan-out outcomes:
+   *  - executionEnabled was false for the whole batch -> observational
+   *  - no users configured at all -> no eligible users
+   *  - every user had their own liquidationOiExecutionEnabled=false ->
+   *    all-users-disabled
+   *  - otherwise, execution was genuinely attempted for at least one
+   *    user but produced no real position -> all-executions-failed */
+  private resolveNoPositionReason(outcomes: readonly UserFanOutOutcome[]): {
+    code: string;
+    detail: string;
+  } {
+    if (!this.executionEnabled)
+      return {
+        code: "ENTRY_READY_OBSERVATIONAL_ONLY",
+        detail:
+          "global executionEnabled=false -- observational signal recorded and consumed, no Binance call was ever attempted for any user",
+      };
+    if (outcomes.length === 0)
+      return {
+        code: "ENTRY_READY_NO_ELIGIBLE_USERS",
+        detail: "no users were configured for fan-out",
+      };
+    const anyUserEnabled = outcomes.some((o) => o !== "USER_DISABLED");
+    if (!anyUserEnabled)
+      return {
+        code: "ENTRY_READY_ALL_USERS_EXECUTION_DISABLED",
+        detail:
+          "every configured user's own liquidationOiExecutionEnabled=false",
+      };
+    return {
+      code: "ENTRY_READY_ALL_EXECUTIONS_FAILED",
+      detail:
+        "execution was attempted for at least one user but no real position resulted",
+    };
   }
 
   private async executeForUser(
@@ -231,7 +348,7 @@ export class LiquidationOiRuntimeOrchestrator {
     structuralInvalidationPrice: number,
     tpPrice: number,
     nowMs: number,
-  ): Promise<void> {
+  ): Promise<UserFanOutOutcome> {
     const existing = await this.globalSignalRepo.findUserExecution(
       runtime.userId,
       globalSignalId,
@@ -240,7 +357,9 @@ export class LiquidationOiRuntimeOrchestrator {
       log.info(
         `[LOX_USER_EXECUTION_ALREADY_EXISTS] userId=${runtime.userId} globalSignalId=${globalSignalId} state=${existing.state} -- skipping, idempotent`,
       );
-      return;
+      return existing.state === "ACTIVE"
+        ? "ALREADY_ACTIVE"
+        : "ALREADY_TERMINAL";
     }
 
     const sizing = computePositionSizing({
@@ -268,7 +387,7 @@ export class LiquidationOiRuntimeOrchestrator {
       log.warn(
         `[LOX_SIZING_FAILED] userId=${runtime.userId} symbol=${symbol} reason=${sizing.reason}`,
       );
-      return;
+      return "FAILED";
     }
     userExec = {
       ...userExec,
@@ -282,7 +401,7 @@ export class LiquidationOiRuntimeOrchestrator {
       log.info(
         `[LOX_OBSERVATION_ONLY] userId=${runtime.userId} symbol=${symbol} would have entered ${side} qty=${sizing.positionQty} sizeUsdt=${sizing.positionSizeUsdt.toFixed(2)} -- executionEnabled=false (GLOBAL master switch), no order placed`,
       );
-      return;
+      return "GLOBAL_DISABLED";
     }
 
     // Sep 16 2026 (Karo), operator-requested -- SECOND required gate,
@@ -304,7 +423,7 @@ export class LiquidationOiRuntimeOrchestrator {
       log.info(
         `[LOX_USER_STRATEGY_EXECUTION_DISABLED] userId=${runtime.userId} symbol=${symbol} -- this user's own liquidationOiExecutionEnabled=false, no order attempted, no Binance call made`,
       );
-      return;
+      return "USER_DISABLED";
     }
 
     if (runtime.binanceRest === null) {
@@ -319,7 +438,7 @@ export class LiquidationOiRuntimeOrchestrator {
       log.warn(
         `[LOX_NO_BINANCE_CLIENT] userId=${runtime.userId} symbol=${symbol} -- user has no configured Binance client`,
       );
-      return;
+      return "FAILED";
     }
 
     const outcome = await runEntrySequence(runtime.binanceRest, {
@@ -333,7 +452,7 @@ export class LiquidationOiRuntimeOrchestrator {
       initialTpPrice: tpPrice,
     });
 
-    await this.persistOutcome(
+    return await this.persistOutcome(
       userExec,
       outcome,
       symbol,
@@ -352,7 +471,7 @@ export class LiquidationOiRuntimeOrchestrator {
     structuralInvalidationPrice: number,
     tpPrice: number,
     runtime: LiquidationOiUserRuntimeRef,
-  ): Promise<void> {
+  ): Promise<UserFanOutOutcome> {
     const now = Date.now();
     if (outcome.outcome === "ENTRY_FAILED") {
       await this.globalSignalRepo.upsertUserExecution({
@@ -365,7 +484,7 @@ export class LiquidationOiRuntimeOrchestrator {
       log.warn(
         `[LOX_ENTRY_FAILED] userId=${userExec.userId} symbol=${symbol} reason=${outcome.reason}`,
       );
-      return;
+      return "FAILED";
     }
     if (outcome.outcome === "PROTECTION_FAILED_CLOSED") {
       await this.strategyOrderRepo.upsert({
@@ -393,7 +512,7 @@ export class LiquidationOiRuntimeOrchestrator {
       log.error(
         `[LOX_PROTECTION_FAILED_CLOSED] userId=${userExec.userId} symbol=${symbol} -- position was opened and immediately fail-safe closed, reason=${outcome.reason}`,
       );
-      return;
+      return "FAILED";
     }
 
     await this.strategyOrderRepo.upsert({
@@ -480,5 +599,6 @@ export class LiquidationOiRuntimeOrchestrator {
         );
       }
     }
+    return "ACTIVE";
   }
 }

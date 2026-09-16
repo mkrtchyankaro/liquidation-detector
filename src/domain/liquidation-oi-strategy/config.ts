@@ -20,6 +20,24 @@ export interface LiquidationOiStrategyConfig {
   maxDistanceFromExtremeAtrForEntry: number;
   maxOiSampleAgeMsForEntry: number;
   maxAtrAgeMsForEntry: number;
+
+  /** Sep 16 2026 (Karo), operator-requested lifecycle-death parameters
+   *  -- a SEPARATE concern from the market-signal thresholds above
+   *  (these govern how long a symbol's tracking slot may be occupied
+   *  by a setup that never resolves, not what qualifies a setup).
+   *  All UNTUNED, same as everything else in this file. */
+  noProgressTimeoutMs: number;
+  entryWindowTimeoutMs: number;
+  thesisInvalidationAtrMultiple: number;
+  marketDataStaleTimeoutMs: number;
+  /** FAILSAFE ONLY -- a final safety net so a programming/data edge
+   *  case can never lock a symbol indefinitely. NOT the primary
+   *  episode-death mechanism (noProgressTimeoutMs/entryWindowTimeoutMs/
+   *  thesisInvalidationAtrMultiple/marketDataStaleTimeoutMs are).
+   *  Applies across the ENTIRE pre-ACTIVE lifetime (EPISODE_TRACKING
+   *  through ENTRY_READY-awaiting-resolution), measured from the
+   *  episode's own first liquidation event. */
+  preEntryFailsafeMaxLifetimeMs: number;
 }
 
 /**
@@ -80,4 +98,26 @@ export const DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG: LiquidationOiStrategyConfig
     maxDistanceFromExtremeAtrForEntry: 1.0,
     maxOiSampleAgeMsForEntry: 5_000,
     maxAtrAgeMsForEntry: 240_000,
+
+    // Lifecycle-death parameters -- all UNTUNED starting points.
+    // noProgressTimeoutMs (default 30min): in EPISODE_TRACKING, if
+    // neither a new same-direction liquidation nor a new adverse
+    // extreme has occurred for this long, the flow is considered dead.
+    noProgressTimeoutMs: 30 * 60_000,
+    // entryWindowTimeoutMs (default 20min): in EXHAUSTION_CANDIDATE
+    // (clearing being awaited), if ENTRY_READY has not been reached
+    // within this long of entering the state, the window is missed.
+    entryWindowTimeoutMs: 20 * 60_000,
+    // thesisInvalidationAtrMultiple (default 0.5 ATR3m): in
+    // EXHAUSTION_CANDIDATE, if price moves back past the episode's own
+    // startPrice by more than this many ATR in the adverse direction,
+    // the "capitulation" premise itself has failed.
+    thesisInvalidationAtrMultiple: 0.5,
+    // marketDataStaleTimeoutMs (default 10min): if the gap between two
+    // consecutive onTick calls for a symbol exceeds this, the market
+    // data feed itself is considered to have gone stale.
+    marketDataStaleTimeoutMs: 10 * 60_000,
+    // preEntryFailsafeMaxLifetimeMs (default 4h): FAILSAFE ONLY -- see
+    // the field's own doc comment above.
+    preEntryFailsafeMaxLifetimeMs: 4 * 3_600_000,
   };

@@ -19,6 +19,7 @@ import {
 import type { OiHistorySample } from "./oi-clearing-detector";
 import {
   isValidGlobalTransition,
+  candidateTradeSideForVictim,
   type GlobalLifecycleState,
 } from "./lifecycle.types";
 import type { LiquidationOiStrategyConfig } from "./config";
@@ -34,9 +35,26 @@ import { DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG } from "./config";
  * lifecycle state and pure decisions, fully unit-testable without any
  * live dependency.
  *
- * NOT wired into main.ts/market-data-orchestrator.ts in this pass --
- * available for Phase 5 to construct and drive with real events, but
- * not yet receiving any from the live system.
+ * Sep 16 2026 (Karo), operator-requested CRITICAL FIX, confirmed by a
+ * real production BTC replay: a symbol's internal tracking slot
+ * previously had NO automatic release mechanism at all. An episode
+ * that started tracking and simply never resolved (never qualified,
+ * or qualified but never reached ENTRY_READY, or reached ENTRY_READY
+ * but observation was never "consumed") occupied the slot
+ * INDEFINITELY -- for the remainder of the process's uptime -- and,
+ * combined with direction-sticky ownership, silently discarded every
+ * later liquidation event in the OPPOSITE direction, including a real
+ * $2.53M cascade. This file now implements explicit, causal lifecycle
+ * death for every pre-ACTIVE state, and an explicit ENTRY_READY
+ * resolution path (see confirmActivePosition/cancel), so ENTRY_READY
+ * can never again behave as a permanent, unresolved state. See
+ * lifecycle-death-fix.md-equivalent doc in the delivery report for
+ * the full design.
+ *
+ * INVARIANT (structural, not just documented): once a symbol reaches
+ * ACTIVE, none of the pre-entry staleness/no-progress checks in
+ * onTick() are ever evaluated for it again -- see the early return at
+ * the top of onTick() for ACTIVE/CLOSING states.
  */
 
 interface SymbolLifecycle {
@@ -45,6 +63,10 @@ interface SymbolLifecycle {
   episode: LiquidationOiEpisodeState;
   watchResult: WatchQualificationResult | null;
   entryResult: EntryGateResult | null;
+  /** Sep 16 2026 (Karo), operator-requested lifecycle-death tracking.
+   *  All null until the relevant state is actually entered. */
+  enteredExhaustionCandidateAt: number | null;
+  lastTickAt: number | null;
 }
 
 export interface NoSignalEvent {
@@ -105,7 +127,17 @@ export class LiquidationOiWatchManager {
    *  EPISODE_TRACKING through ENTRY_READY -- is now always ignored:
    *  it never replaces, never resets, never creates a competing
    *  episode. It is recorded in oppositeEventIgnoredLog for strategy
-   *  telemetry instead. */
+   *  telemetry instead.
+   *
+   *  This remains correct under the Sep 16 lifecycle-death fix: an
+   *  opposite event only reaches this "ignore" branch while a
+   *  lifecycle genuinely still exists for the symbol. Once that
+   *  lifecycle legitimately terminates (via the new death checks in
+   *  onTick(), or via cancel()/confirmActivePosition() from the
+   *  orchestrator), the map entry is gone -- so the VERY NEXT
+   *  liquidation event, same or opposite direction, falls into the
+   *  `existing === undefined` branch below and starts a genuinely
+   *  fresh episode. Nothing here replays previously-ignored events. */
   onLiquidationEvent(
     event: LiquidationOiEventInput,
     oiAtEvent: { quantity: number; timestamp: number } | null,
@@ -119,16 +151,13 @@ export class LiquidationOiWatchManager {
         episode: startEpisode(event, oiAtEvent),
         watchResult: null,
         entryResult: null,
+        enteredExhaustionCandidateAt: null,
+        lastTickAt: null,
       });
       return;
     }
 
     if (existing.episode.victim !== event.victim) {
-      // Direction-sticky: the currently-tracking episode's own
-      // victimDirection is fixed from its first event, regardless of
-      // whether GLOBAL_TRADE/WATCH ownership has been claimed yet.
-      // Always ignored -- never replaces, never resets, never starts
-      // a competing episode.
       this.oppositeEventIgnoredLog.push({
         symbol: event.symbol,
         trackedVictim: existing.episode.victim,
@@ -147,10 +176,14 @@ export class LiquidationOiWatchManager {
     this.symbols.set(event.symbol, { ...existing, episode: withOi });
   }
 
-  /** Periodic tick -- advances EPISODE_TRACKING -> WATCH_QUALIFIED
-   *  (claiming ownership) and EXHAUSTION_CANDIDATE -> ENTRY_READY.
-   *  Failing a gate is logged as NO_SIGNAL but does not itself
-   *  transition to CANCELLED (see cancel() for explicit cancellation). */
+  /** Periodic tick -- advances EPISODE_TRACKING -> EXHAUSTION_CANDIDATE
+   *  and EXHAUSTION_CANDIDATE -> ENTRY_READY, AND (Sep 16 2026 fix)
+   *  applies explicit, causal lifecycle-death checks so no pre-ACTIVE
+   *  state can occupy a symbol's slot indefinitely.
+   *
+   *  INVARIANT: once ACTIVE (or CLOSING), none of this applies --
+   *  returns immediately. A real managed position is NEVER touched by
+   *  pre-entry staleness/no-progress logic. */
   onTick(
     symbol: string,
     percentile: EpisodePercentileContext,
@@ -162,8 +195,62 @@ export class LiquidationOiWatchManager {
   ): void {
     const lifecycle = this.symbols.get(symbol);
     if (lifecycle === undefined) return;
+    if (
+      lifecycle.globalState === "ACTIVE" ||
+      lifecycle.globalState === "CLOSING" ||
+      lifecycle.globalState === "CLOSED"
+    )
+      return;
+
+    // MARKET_DATA_STALE_TIMEOUT: the gap since the LAST tick this
+    // symbol actually received (not since episode start) -- detects
+    // the feed itself having gone quiet, independent of episode age.
+    if (lifecycle.lastTickAt !== null) {
+      const gapMs = nowMs - lifecycle.lastTickAt;
+      if (gapMs > this.config.marketDataStaleTimeoutMs) {
+        this.cancel(
+          symbol,
+          "MARKET_DATA_STALE_TIMEOUT",
+          `gap of ${gapMs}ms since the last tick exceeds marketDataStaleTimeoutMs=${this.config.marketDataStaleTimeoutMs}ms`,
+          nowMs,
+        );
+        return;
+      }
+    }
+
+    // FAILSAFE (final safety net, not the primary boundary): absolute
+    // max lifetime measured from the episode's own first liquidation
+    // event, across the entire pre-ACTIVE lifetime.
+    const totalLifetimeMs = nowMs - lifecycle.episode.firstLiqTs;
+    if (totalLifetimeMs > this.config.preEntryFailsafeMaxLifetimeMs) {
+      this.cancel(
+        symbol,
+        "PRE_ENTRY_FAILSAFE_MAX_LIFETIME",
+        `FAILSAFE: total pre-ACTIVE lifetime ${totalLifetimeMs}ms exceeds preEntryFailsafeMaxLifetimeMs=${this.config.preEntryFailsafeMaxLifetimeMs}ms -- this indicates the primary death checks failed to fire and is a safety net, not the intended normal path`,
+        nowMs,
+      );
+      return;
+    }
 
     if (lifecycle.globalState === "EPISODE_TRACKING") {
+      // EPISODE_NO_PROGRESS / LIQUIDATION_FLOW_DIED: causal, not a
+      // bare timer -- dies only when BOTH the liquidation flow AND
+      // the adverse-extreme progression have gone quiet.
+      const sinceLastLiq = nowMs - lifecycle.episode.latestLiqTs;
+      const sinceLastExtreme = nowMs - lifecycle.episode.extremeTs;
+      if (
+        sinceLastLiq > this.config.noProgressTimeoutMs &&
+        sinceLastExtreme > this.config.noProgressTimeoutMs
+      ) {
+        this.cancel(
+          symbol,
+          "EPISODE_NO_PROGRESS",
+          `no same-direction liquidation for ${sinceLastLiq}ms and no new adverse extreme for ${sinceLastExtreme}ms, both exceed noProgressTimeoutMs=${this.config.noProgressTimeoutMs}ms`,
+          nowMs,
+        );
+        return;
+      }
+
       const result = qualifyWatch(
         lifecycle.episode,
         percentile,
@@ -179,7 +266,11 @@ export class LiquidationOiWatchManager {
           detail: result.detail,
           timestamp: nowMs,
         });
-        this.symbols.set(symbol, { ...lifecycle, watchResult: result });
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          watchResult: result,
+          lastTickAt: nowMs,
+        });
         return;
       }
       const resolution = this.ownership.resolve(
@@ -200,11 +291,56 @@ export class LiquidationOiWatchManager {
         episode: lifecycle.episode,
         watchResult: result,
         entryResult: null,
+        enteredExhaustionCandidateAt: nowMs,
+        lastTickAt: nowMs,
       });
       return;
     }
 
     if (lifecycle.globalState === "EXHAUSTION_CANDIDATE") {
+      // ENTRY_WINDOW_MISSED: too long awaiting entry since clearing
+      // was first expected, regardless of gate-by-gate outcome.
+      const sinceEnteredExhaustion =
+        lifecycle.enteredExhaustionCandidateAt !== null
+          ? nowMs - lifecycle.enteredExhaustionCandidateAt
+          : 0;
+      if (sinceEnteredExhaustion > this.config.entryWindowTimeoutMs) {
+        this.cancel(
+          symbol,
+          "ENTRY_WINDOW_MISSED",
+          `${sinceEnteredExhaustion}ms in EXHAUSTION_CANDIDATE without reaching ENTRY_READY, exceeds entryWindowTimeoutMs=${this.config.entryWindowTimeoutMs}ms`,
+          nowMs,
+        );
+        return;
+      }
+      // PRE_ENTRY_THESIS_INVALIDATED: price has already fully
+      // reverted PAST the episode's own starting reference price, in
+      // the FAVORABLE direction for the candidate trade, before entry
+      // ever triggered -- the edge this setup was waiting for has
+      // already played out without us, so waiting further no longer
+      // makes sense. (Not the adverse direction: continued adverse
+      // movement is already captured by the episode's own extreme
+      // continuing to update on each new same-direction liquidation.)
+      if (atr3m !== null) {
+        const candidateSide = candidateTradeSideForVictim(
+          lifecycle.episode.victim,
+        );
+        const buffer = atr3m * this.config.thesisInvalidationAtrMultiple;
+        const invalidated =
+          candidateSide === "LONG"
+            ? currentPrice > lifecycle.episode.startPrice + buffer
+            : currentPrice < lifecycle.episode.startPrice - buffer;
+        if (invalidated) {
+          this.cancel(
+            symbol,
+            "PRE_ENTRY_THESIS_INVALIDATED",
+            `price ${currentPrice} already fully reverted past the episode's own startPrice ${lifecycle.episode.startPrice} (favorable direction) by more than thesisInvalidationAtrMultiple=${this.config.thesisInvalidationAtrMultiple} ATR (${buffer}) before entry ever triggered -- the move already played out`,
+            nowMs,
+          );
+          return;
+        }
+      }
+
       const result = evaluateEntryGates({
         episode: lifecycle.episode,
         oiHistory,
@@ -223,7 +359,11 @@ export class LiquidationOiWatchManager {
           detail: result.detail,
           timestamp: nowMs,
         });
-        this.symbols.set(symbol, { ...lifecycle, entryResult: result });
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          entryResult: result,
+          lastTickAt: nowMs,
+        });
         return;
       }
       this.assertTransition("EXHAUSTION_CANDIDATE", "ENTRY_READY", symbol);
@@ -231,14 +371,40 @@ export class LiquidationOiWatchManager {
         ...lifecycle,
         globalState: "ENTRY_READY",
         entryResult: result,
+        lastTickAt: nowMs,
       });
       return;
     }
   }
 
+  /** Sep 16 2026 (Karo), operator-requested. The ONLY path to ACTIVE.
+   *  Called by the orchestrator once at least one user's execution has
+   *  produced a genuinely confirmed, protected real position --
+   *  ENTRY_READY alone must never imply ACTIVE. Retains ownership
+   *  permanently (per the approved architecture, symbol release from
+   *  here on is governed solely by isGlobalCloseEligible(), Phase 8+
+   *  scope) -- none of onTick()'s pre-entry death checks apply to this
+   *  symbol again (see the early return at the top of onTick()). */
+  confirmActivePosition(symbol: string, nowMs: number): void {
+    const lifecycle = this.symbols.get(symbol);
+    if (lifecycle === undefined) return;
+    this.assertTransition(lifecycle.globalState, "ACTIVE", symbol);
+    this.symbols.set(symbol, {
+      ...lifecycle,
+      globalState: "ACTIVE",
+      lastTickAt: nowMs,
+    });
+  }
+
   /** Explicit CANCEL, callable from EPISODE_TRACKING through
    *  ENTRY_READY. Releases ownership if held; safe even if ownership
-   *  was never claimed. */
+   *  was never claimed. This is also the resolution path for
+   *  ENTRY_READY-with-no-real-position (observational-only, all users
+   *  disabled, all executions failed) -- the orchestrator calls this
+   *  with the appropriate reason code once it has determined no real
+   *  position resulted from the fan-out, per the operator's own
+   *  explicit requirement that ENTRY_READY never remain a permanent
+   *  state. */
   cancel(
     symbol: string,
     reasonCode: string,

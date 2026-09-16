@@ -348,7 +348,7 @@ async function main(): Promise<void> {
   await scenario(
     "I.3. OI history is consumed from the caller-supplied array -- same data source, no second poll",
     async () => {
-      const { mongo } = fakeMongo();
+      const { mongo, signals } = fakeMongo();
       const orch = new LiquidationOiRuntimeOrchestrator(
         DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
         DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
@@ -359,9 +359,17 @@ async function main(): Promise<void> {
         false,
       );
       await driveToEntryReady(orch, "SOLUSDT", 1_000_000);
+      // ENTRY_READY was genuinely reached (proving the supplied oiHistory array drove clearing detection) and then
+      // immediately resolved per the Sep 16 2026 lifecycle fix -- persisted record ends CANCELLED, in-memory lifecycle released.
+      assert.ok(
+        signals.docs.length > 0,
+        "a signal record must have been persisted",
+      );
+      assert.strictEqual(signals.docs[0].state, "CANCELLED");
       assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
-        "ENTRY_READY",
+        orch.getWatchManager().getLifecycle("SOLUSDT"),
+        null,
+        "post-fix: ENTRY_READY must resolve and release immediately, never persist as the final observed state",
       );
     },
   );
@@ -420,9 +428,9 @@ async function main(): Promise<void> {
   );
 
   await scenario(
-    "I.5. disabled execution places ZERO Binance calls -- ENTRY_READY remains observational only",
+    "I.5. disabled execution places ZERO Binance calls -- ENTRY_READY resolves observationally and releases",
     async () => {
-      const { mongo, userExecs } = fakeMongo();
+      const { mongo, userExecs, signals } = fakeMongo();
       const rest = mockRestThatShouldNeverBeCalled();
       const orch = new LiquidationOiRuntimeOrchestrator(
         DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
@@ -435,9 +443,14 @@ async function main(): Promise<void> {
       );
       await driveToEntryReady(orch, "SOLUSDT", 1_000_000);
       assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
-        "ENTRY_READY",
+        orch.getWatchManager().getLifecycle("SOLUSDT"),
+        null,
+        "post-fix: must release, never remain locked in ENTRY_READY while execution is disabled",
       );
+      const finalSignal = signals.docs.find(
+        (d: any) => d.state === "CANCELLED",
+      );
+      assert.ok(finalSignal, "the persisted signal must resolve to CANCELLED");
       assert.strictEqual(userExecs.docs.length, 2);
       for (const doc of userExecs.docs)
         assert.strictEqual(
@@ -798,9 +811,9 @@ async function main(): Promise<void> {
       );
       await driveToEntryReady(orch, "SOLUSDT", 16_000_000);
       assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
-        "ENTRY_READY",
-        "MAIN's own observation/WATCH/ENTRY_READY must be completely unaffected by any user's individual execution flag",
+        orch.getWatchManager().getLifecycle("SOLUSDT"),
+        null,
+        "MAIN reaches ENTRY_READY (proven by both users receiving a real fan-out attempt below) then resolves/releases since no real position exists -- symbol free for the next independent episode",
       );
       const karo = userExecs.docs.find((d: any) => d.userId === "karo");
       const artak = userExecs.docs.find((d: any) => d.userId === "artak");
