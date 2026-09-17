@@ -12,6 +12,8 @@ import type { LiquidationOiWatchManager } from "../domain/liquidation-oi-strateg
 import type { LiquidationOiUserRuntimeRef } from "./liquidation-oi-runtime-orchestrator";
 import type { BinanceRestLike } from "../infrastructure/binance/liquidation-oi-user-execution.service";
 import type { ForensicEvent } from "../domain/liquidation-oi-strategy/forensic-events";
+import { computePaperPnl } from "../domain/liquidation-oi-strategy/pnl-calculator";
+import { formatCloseMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
 import { childLogger } from "../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "lox-position-lifecycle" });
@@ -201,6 +203,63 @@ export class LiquidationOiPositionLifecycleService {
     nowMs: number,
   ): Promise<void> {
     const runtime = this.findRuntime(userExec.userId);
+
+    // Sep 17 2026 (Karo), operator-requested Sections 2/10 -- PAPER
+    // cleanup is immediate and trivial: there is no Binance order to
+    // cancel or verify, ever, for a paper row, REGARDLESS of whether
+    // this user happens to have a real binanceRest client configured
+    // (mode is the single source of truth, never inferred from client
+    // presence -- see the same fix applied in
+    // liquidation-oi-active-main-runtime.service.ts's own
+    // applyTpRevision/requestUserMarketExit).
+    if (userExec.mode === "PAPER") {
+      const finalized: LiquidationOiUserExecutionState = {
+        ...userExec,
+        cleanupState: "COMPLETE",
+        updatedAt: nowMs,
+      };
+      await this.globalSignalRepo.upsertUserExecution(finalized);
+      this.emit(userExec, nowMs, {
+        type: "CLEANUP_COMPLETE",
+        userId: userExec.userId,
+      });
+      log.info(
+        `[LOX_PAPER_CLEANUP_COMPLETE] userId=${userExec.userId} symbol=${userExec.symbol} globalSignalId=${userExec.globalSignalId} -- no Binance calls, paper row`,
+      );
+      if (
+        runtime !== null &&
+        runtime.telegram !== null &&
+        userExec.entryPrice !== null
+      ) {
+        try {
+          const candidateSide = userExec.side; // candidate side equals victim-derived side already stored per-user
+          const text = formatCloseMessage({
+            symbol: userExec.symbol,
+            candidateSide,
+            terminalReason:
+              userExec.terminalReason ?? "POSITION_CLOSED_EXTERNALLY",
+            entryPrice: userExec.entryPrice,
+            exitPrice: userExec.exitPrice,
+            tpAtClose: userExec.tpPrice,
+            durationMs: nowMs - userExec.createdAt,
+            mode: "PAPER",
+            paperGrossPnlUsd: userExec.grossPnlUsd,
+          });
+          await runtime.telegram.sendMessage(text);
+        } catch (err) {
+          log.error(
+            {
+              userId: userExec.userId,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            "[LOX_TELEGRAM_CLOSE_SEND_FAILED] -- isolated, cleanup already persisted",
+          );
+        }
+      }
+      await this.maybeCloseGlobal(userExec.globalSignalId, nowMs);
+      return;
+    }
+
     if (runtime === null || runtime.binanceRest === null) {
       await this.markCleanupFailed(
         userExec,
@@ -251,11 +310,22 @@ export class LiquidationOiPositionLifecycleService {
       log.info(
         `[LOX_CLEANUP_COMPLETE] userId=${userExec.userId} symbol=${userExec.symbol} globalSignalId=${userExec.globalSignalId}`,
       );
-      if (runtime.telegram !== null) {
+      if (runtime.telegram !== null && userExec.entryPrice !== null) {
         try {
-          await runtime.telegram.sendMessage(
-            `${userExec.symbol} ${userExec.side} CLOSE\nReason: ${userExec.terminalReason}\nEntry: ${userExec.entryPrice}\nExit: ${userExec.exitPrice ?? "N/A"}\nPnL: ${userExec.realizedPnlUsd !== null ? userExec.realizedPnlUsd.toFixed(2) : "N/A (" + (userExec.pnlSource ?? "unknown") + ")"}\nCleanup: COMPLETE`,
-          );
+          const text = formatCloseMessage({
+            symbol: userExec.symbol,
+            candidateSide: userExec.side,
+            terminalReason:
+              userExec.terminalReason ?? "POSITION_CLOSED_EXTERNALLY",
+            entryPrice: userExec.entryPrice,
+            exitPrice: userExec.exitPrice,
+            tpAtClose: userExec.tpPrice,
+            durationMs: nowMs - userExec.createdAt,
+            mode: "REAL",
+            realActualPnlUsd: userExec.realizedPnlUsd,
+            cleanupState: "COMPLETE",
+          });
+          await runtime.telegram.sendMessage(text);
         } catch (err) {
           log.error(
             {
@@ -433,13 +503,14 @@ export class LiquidationOiPositionLifecycleService {
   async requestGlobalMarketExit(
     globalSignalId: string,
     reason: LiquidationOiUserExecutionState["terminalReason"],
+    currentPrice: number,
     nowMs: number,
   ): Promise<void> {
     const allUserExecs =
       await this.globalSignalRepo.findUserExecutionsForSignal(globalSignalId);
     for (const userExec of allUserExecs.filter((u) => u.state === "ACTIVE")) {
       try {
-        await this.requestUserMarketExit(userExec, reason, nowMs);
+        await this.requestUserMarketExit(userExec, reason, currentPrice, nowMs);
       } catch (err) {
         log.error(
           {
@@ -456,8 +527,46 @@ export class LiquidationOiPositionLifecycleService {
   private async requestUserMarketExit(
     userExec: LiquidationOiUserExecutionState,
     reason: LiquidationOiUserExecutionState["terminalReason"],
+    currentPrice: number,
     nowMs: number,
   ): Promise<void> {
+    // Sep 17 2026 (Karo), operator-requested CRITICAL SAFETY FIX --
+    // mode is the ONLY thing that decides whether a real Binance
+    // reduce-only MARKET order is placed. A PAPER user (paper due to
+    // their own flag or the global safety fallback) closes VIRTUALLY
+    // at the causal reference price (the SAME live price MAIN itself
+    // used to decide the exit -- no future information, no separate
+    // price source), even if they happen to have a real binanceRest
+    // client configured -- checking client presence alone would have
+    // placed a real order for a paper user.
+    if (userExec.mode === "PAPER") {
+      if (userExec.entryPrice === null || userExec.quantity === null) return;
+      const pnl = computePaperPnl({
+        side: userExec.side,
+        entryPrice: userExec.entryPrice,
+        exitPrice: currentPrice,
+        quantity: userExec.quantity,
+      });
+      const updated: LiquidationOiUserExecutionState = {
+        ...userExec,
+        state: "TERMINAL",
+        terminalReason: reason,
+        exitPrice: currentPrice,
+        grossPnlUsd: pnl.grossPnlUsd,
+        priceMovePct: pnl.priceMovePct,
+        updatedAt: nowMs,
+      };
+      await this.globalSignalRepo.upsertUserExecution(updated);
+      this.emit(userExec, nowMs, {
+        type: "USER_MARKET_EXIT_CONFIRMED",
+        userId: userExec.userId,
+      });
+      log.info(
+        `[LOX_PAPER_MARKET_EXIT_CONFIRMED] userId=${userExec.userId} symbol=${userExec.symbol} reason=${reason} exit=${currentPrice} grossPnlUsd=${pnl.grossPnlUsd.toFixed(2)}`,
+      );
+      await this.runCleanup(updated, nowMs);
+      return;
+    }
     const runtime = this.findRuntime(userExec.userId);
     if (
       runtime === null ||
@@ -490,6 +599,7 @@ export class LiquidationOiPositionLifecycleService {
         ...userExec,
         state: "TERMINAL",
         terminalReason: reason,
+        exitPrice: currentPrice,
         updatedAt: nowMs,
       };
       await this.globalSignalRepo.upsertUserExecution(updated);

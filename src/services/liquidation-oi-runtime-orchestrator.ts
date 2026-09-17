@@ -35,9 +35,10 @@ import {
 } from "../domain/liquidation-oi-strategy/active-lifecycle-config";
 import {
   formatWatchMessage,
-  formatEntryReadyMessage,
   formatRealEntryMessage,
+  formatPaperEntryMessage,
 } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { resolveUserExecutionMode } from "../domain/liquidation-oi-strategy/user-execution-mode";
 import type { LiquidationOiActiveMainRuntime } from "./liquidation-oi-active-main-runtime.service";
 import { childLogger } from "../infrastructure/logging/logger";
 
@@ -80,12 +81,16 @@ export interface LiquidationOiUserRuntimeRef {
 /** Sep 16 2026 (Karo), operator-requested. What one user's fan-out
  *  attempt resolved to -- used ONLY to decide, after the whole
  *  fan-out completes, whether the GLOBAL lifecycle resolves to ACTIVE
- *  (>=1 real position) or a specific no-position CANCELLED reason. */
+ *  (>=1 manageable user, PAPER or REAL) or a specific no-position
+ *  CANCELLED reason. Sep 17 2026 (Karo), operator-requested CRITICAL
+ *  FIX: PAPER_ACTIVE added and counted as manageable -- a market
+ *  signal must not become CANCELLED merely because real execution was
+ *  off; PAPER is a complete virtual lifecycle, not "nothing". */
 type UserFanOutOutcome =
   | "ACTIVE"
+  | "PAPER_ACTIVE"
   | "ALREADY_ACTIVE"
   | "ALREADY_TERMINAL"
-  | "GLOBAL_DISABLED"
   | "USER_DISABLED"
   | "FAILED";
 
@@ -218,12 +223,30 @@ export class LiquidationOiRuntimeOrchestrator {
       after.globalState === "EXHAUSTION_CANDIDATE" &&
       after.watchResult?.qualifies
     ) {
+      // Sep 17 2026 (Karo), operator-requested Section 14 -- WATCH-time
+      // order-book capture, previously missing (ENTRY_READY only).
+      const watchOrderBook =
+        atr3m !== null
+          ? captureOrderBookObservation(
+              symbol,
+              currentPrice,
+              after.episode.extremePrice,
+              atr3m,
+              bestBid,
+              bestAsk,
+              wallLookup,
+              this.activeLifecycleConfig,
+              nowMs,
+            )
+          : null;
       await this.sendWatchTelegram(
         symbol,
         after.episode.victim,
         after.episode.sameDirectionLiqUsd,
         after.watchResult.episodePercentileRank,
         after.watchResult.displacementAtr,
+        after.watchResult.oiDestructionFractionAtQualification,
+        watchOrderBook,
       );
     }
 
@@ -267,6 +290,8 @@ export class LiquidationOiRuntimeOrchestrator {
     sameDirectionLiqUsd: number,
     percentileRank: number,
     displacementAtr: number,
+    oiDestructionFraction: number | null,
+    orderBook: OrderBookObservation | null,
   ): Promise<void> {
     const text = formatWatchMessage(
       symbol,
@@ -274,6 +299,8 @@ export class LiquidationOiRuntimeOrchestrator {
       sameDirectionLiqUsd,
       percentileRank,
       displacementAtr,
+      oiDestructionFraction,
+      orderBook,
     );
     for (const runtime of this.getUserRuntimes()) {
       if (runtime.telegram === null) continue;
@@ -375,40 +402,15 @@ export class LiquidationOiRuntimeOrchestrator {
       orderBookAtEntryReady: orderBook,
     });
 
-    // Sections F/Q: ENTRY_READY Telegram -- sent regardless of
-    // executionEnabled, per the operator's own explicit "we need to
-    // see signals before real execution" requirement. Isolated,
-    // never blocks the fan-out below.
-    const entryReadyText = formatEntryReadyMessage(
-      symbol,
-      candidateSide,
-      episode.sameDirectionLiqUsd,
-      watchResult.episodePercentileRank,
-      episode.extremePrice,
-      entryPrice,
-      watchResult.oiDestructionFractionAtQualification,
-      counterMoveAtr,
-      distanceFromExtremeAtr,
-      strategyInvalidationPrice,
-      tpPrice,
-      orderBook,
-      !this.executionEnabled,
-    );
-    for (const runtime of this.getUserRuntimes()) {
-      if (runtime.telegram === null) continue;
-      try {
-        await runtime.telegram.sendMessage(entryReadyText);
-      } catch (err) {
-        log.error(
-          {
-            userId: runtime.userId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "[LOX_TELEGRAM_ENTRY_READY_SEND_FAILED] -- isolated, trading lifecycle unaffected",
-        );
-      }
-    }
-
+    // Sep 17 2026 (Karo), operator-requested REMOVAL of the old
+    // pre-fan-out "ENTRY_READY" broadcast: each user now receives their
+    // own PAPER or REAL "ENTRY" Telegram (formatPaperEntryMessage /
+    // formatRealEntryMessage), sent from executeForUser() below, AFTER
+    // their mode has actually resolved -- per the operator's own
+    // explicit instruction not to call it ENTRY_READY in user-facing
+    // Telegram once a position (paper or real) has actually been
+    // created. The WATCH message (sendWatchTelegram, above) remains
+    // the pre-entry observational broadcast.
     const outcomes: UserFanOutOutcome[] = [];
     for (const runtime of this.getUserRuntimes()) {
       try {
@@ -422,6 +424,10 @@ export class LiquidationOiRuntimeOrchestrator {
             strategyInvalidationPrice,
             emergencyHardStopPrice,
             tpPrice,
+            watchResult.episodePercentileRank,
+            episode.sameDirectionLiqUsd,
+            counterMoveAtr,
+            orderBook,
             nowMs,
           ),
         );
@@ -439,23 +445,18 @@ export class LiquidationOiRuntimeOrchestrator {
       }
     }
 
-    // Sep 16 2026 (Karo), operator-requested CRITICAL FIX: ENTRY_READY
-    // is now ALWAYS resolved, synchronously, in this same call --
-    // never left waiting across ticks. This is what makes ENTRY_READY
-    // a genuinely transient state rather than a permanent lock, and
-    // is what lets observation-only mode (executionEnabled=false)
-    // produce an unbounded sequence of independent setups for the
-    // same symbol within one process lifetime, with no restart ever
-    // required to "see the next setup".
-    const hasRealPosition = outcomes.some(
-      (o) => o === "ACTIVE" || o === "ALREADY_ACTIVE",
+    // Sep 17 2026 (Karo), operator-requested CRITICAL FIX: a manageable
+    // user is now ACTIVE (real Binance position) OR PAPER_ACTIVE (a
+    // complete virtual lifecycle) -- the global signal must NOT become
+    // CANCELLED merely because real execution was off for every user.
+    // MARKET SIGNAL and USER EXECUTION MODE are different concepts.
+    const hasManageableUser = outcomes.some(
+      (o) => o === "ACTIVE" || o === "ALREADY_ACTIVE" || o === "PAPER_ACTIVE",
     );
     const episodeIdForForensics =
       this.watchManager.getLifecycle(symbol)?.episodeId ?? "unknown";
-    const enabledUsers = this.getUserRuntimes().filter(
-      (r) => r.liquidationOiExecutionEnabled,
-    ).length;
-    if (hasRealPosition) {
+    const enabledUsers = this.getUserRuntimes().length;
+    if (hasManageableUser) {
       this.watchManager.confirmActivePosition(symbol, nowMs);
       await this.globalSignalRepo.upsertSignal({
         globalSignalId,
@@ -488,18 +489,17 @@ export class LiquidationOiRuntimeOrchestrator {
         globalExecutionEnabled: this.executionEnabled,
         eligibleUsers: outcomes.length,
         enabledUsers,
-        attemptedUsers: outcomes.filter(
-          (o) => o !== "GLOBAL_DISABLED" && o !== "USER_DISABLED",
-        ).length,
+        attemptedUsers: outcomes.filter((o) => o !== "USER_DISABLED").length,
         activeUsers: outcomes.filter(
-          (o) => o === "ACTIVE" || o === "ALREADY_ACTIVE",
+          (o) =>
+            o === "ACTIVE" || o === "ALREADY_ACTIVE" || o === "PAPER_ACTIVE",
         ).length,
         failedUsers: outcomes.filter((o) => o === "FAILED").length,
         resolution: "ACTIVE",
         terminalReason: null,
       });
       log.info(
-        `[LOX_GLOBAL_ACTIVE] ${symbol} globalSignalId=${globalSignalId} -- at least one real user position confirmed, symbol ownership retained`,
+        `[LOX_GLOBAL_ACTIVE] ${symbol} globalSignalId=${globalSignalId} -- at least one manageable user (real or paper) confirmed, symbol ownership retained`,
       );
       return;
     }
@@ -537,53 +537,41 @@ export class LiquidationOiRuntimeOrchestrator {
       globalExecutionEnabled: this.executionEnabled,
       eligibleUsers: outcomes.length,
       enabledUsers,
-      attemptedUsers: outcomes.filter(
-        (o) => o !== "GLOBAL_DISABLED" && o !== "USER_DISABLED",
-      ).length,
+      attemptedUsers: outcomes.filter((o) => o !== "USER_DISABLED").length,
       activeUsers: 0,
       failedUsers: outcomes.filter((o) => o === "FAILED").length,
       resolution: "CANCELLED",
       terminalReason: code,
     });
     log.info(
-      `[LOX_GLOBAL_CANCELLED] ${symbol} globalSignalId=${globalSignalId} reason=${code} -- no real position resulted, symbol released for the next independent episode`,
+      `[LOX_GLOBAL_CANCELLED] ${symbol} globalSignalId=${globalSignalId} reason=${code} -- no manageable user resulted, symbol released for the next independent episode`,
     );
   }
 
-  /** Sep 16 2026 (Karo), operator-requested. Picks the specific
-   *  no-position reason code from the fan-out outcomes:
-   *  - executionEnabled was false for the whole batch -> observational
-   *  - no users configured at all -> no eligible users
-   *  - every user had their own liquidationOiExecutionEnabled=false ->
-   *    all-users-disabled
-   *  - otherwise, execution was genuinely attempted for at least one
-   *    user but produced no real position -> all-executions-failed */
+  /** Sep 17 2026 (Karo), operator-requested REWRITE for the PAPER/REAL
+   *  architecture -- this now ONLY fires when truly NO manageable user
+   *  exists (no users configured at all, or every configured user has
+   *  their OWN enabled=false). It is no longer reachable merely
+   *  because real execution was off, since that case now resolves to
+   *  PAPER_ACTIVE instead. */
   private resolveNoPositionReason(outcomes: readonly UserFanOutOutcome[]): {
     code: string;
     detail: string;
   } {
-    if (!this.executionEnabled)
-      return {
-        code: "ENTRY_READY_OBSERVATIONAL_ONLY",
-        detail:
-          "global executionEnabled=false -- observational signal recorded and consumed, no Binance call was ever attempted for any user",
-      };
     if (outcomes.length === 0)
       return {
         code: "ENTRY_READY_NO_ELIGIBLE_USERS",
         detail: "no users were configured for fan-out",
       };
-    const anyUserEnabled = outcomes.some((o) => o !== "USER_DISABLED");
-    if (!anyUserEnabled)
+    const anyManageable = outcomes.some((o) => o !== "USER_DISABLED");
+    if (!anyManageable)
       return {
-        code: "ENTRY_READY_ALL_USERS_EXECUTION_DISABLED",
-        detail:
-          "every configured user's own liquidationOiExecutionEnabled=false",
+        code: "ENTRY_READY_ALL_USERS_DISABLED",
+        detail: "every configured user's own enabled=false",
       };
     return {
       code: "ENTRY_READY_ALL_EXECUTIONS_FAILED",
-      detail:
-        "execution was attempted for at least one user but no real position resulted",
+      detail: "at least one user was manageable but every attempt failed",
     };
   }
 
@@ -596,6 +584,10 @@ export class LiquidationOiRuntimeOrchestrator {
     strategyInvalidationPrice: number,
     emergencyHardStopPrice: number,
     tpPrice: number,
+    percentileRank: number,
+    sameDirectionLiqUsd: number,
+    counterMoveAtr: number,
+    orderBook: OrderBookObservation | null,
     nowMs: number,
   ): Promise<UserFanOutOutcome> {
     const existing = await this.globalSignalRepo.findUserExecution(
@@ -606,16 +598,34 @@ export class LiquidationOiRuntimeOrchestrator {
       log.info(
         `[LOX_USER_EXECUTION_ALREADY_EXISTS] userId=${runtime.userId} globalSignalId=${globalSignalId} state=${existing.state} -- skipping, idempotent`,
       );
-      return existing.state === "ACTIVE"
-        ? "ALREADY_ACTIVE"
-        : "ALREADY_TERMINAL";
+      if (existing.state === "ACTIVE")
+        return existing.mode === "PAPER" ? "PAPER_ACTIVE" : "ALREADY_ACTIVE";
+      return "ALREADY_TERMINAL";
     }
 
-    // Sep 17 2026 (Karo), operator-requested -- SIZING STILL USES
-    // strategyInvalidationPrice, unchanged (Section H: preserve the
-    // exact risk principle). The wider emergencyHardStopPrice never
-    // feeds sizing -- it is purely the physical catastrophe-protection
-    // order's own placement price.
+    // Sep 17 2026 (Karo), operator-requested CRITICAL architecture fix
+    // -- see user-execution-mode.ts for the exact 4-row matrix. By the
+    // time a runtime reaches this method it has already passed the
+    // caller's own userConfig.enabled filter (see getUserRuntimes()
+    // call sites in main.ts), so userConfigEnabled=true here always;
+    // the two remaining gates (this user's own liquidationOiExecutionEnabled
+    // and the GLOBAL executionEnabled master switch) decide PAPER vs REAL.
+    const mode = resolveUserExecutionMode(
+      true,
+      runtime.liquidationOiExecutionEnabled,
+      this.executionEnabled,
+    );
+    if (mode === "NONE") {
+      // Structurally unreachable: getUserRuntimes() call sites already
+      // filter to userConfig.enabled=true before this method is ever
+      // called (see main.ts). Defensive only.
+      log.error(
+        `[LOX_UNEXPECTED_NONE_MODE] userId=${runtime.userId} symbol=${symbol} -- resolveUserExecutionMode returned NONE despite a runtime already being in the fan-out list; skipping defensively`,
+      );
+      return "USER_DISABLED";
+    }
+
+    // Sizing STILL uses strategyInvalidationPrice, unchanged (Section H).
     const sizing = computePositionSizing({
       entry: entryPrice,
       structuralInvalidationPrice: strategyInvalidationPrice,
@@ -628,6 +638,7 @@ export class LiquidationOiRuntimeOrchestrator {
       side,
       runtime.riskUsd,
       nowMs,
+      mode,
     );
     if (!sizing.valid) {
       userExec = {
@@ -644,110 +655,132 @@ export class LiquidationOiRuntimeOrchestrator {
       return "FAILED";
     }
 
-    // Sep 17 2026 (Karo), operator-requested safety constraint --
-    // "If emergency protection would violate an explicit risk/safety
-    // constraint, skip execution rather than silently taking larger
-    // risk." The emergency hard stop's OWN implied worst-case loss
-    // (at the wider, catastrophe-only price) must not exceed
-    // maxEmergencyLossMultipleOfRiskUsd times this user's own riskUsd.
-    const estimatedEmergencyMaxLossUsd =
-      Math.abs(entryPrice - emergencyHardStopPrice) * sizing.positionQty;
-    const emergencyLossMultiple =
-      estimatedEmergencyMaxLossUsd / runtime.riskUsd;
-    if (
-      emergencyLossMultiple >
-      this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd
-    ) {
+    if (mode === "REAL") {
+      // Sep 17 2026 (Karo), operator-requested safety constraint --
+      // "If emergency protection would violate an explicit risk/safety
+      // constraint, skip execution rather than silently taking larger
+      // risk." Only meaningful for REAL mode, since PAPER never places
+      // a real emergency stop and carries zero real capital risk.
+      const estimatedEmergencyMaxLossUsd =
+        Math.abs(entryPrice - emergencyHardStopPrice) * sizing.positionQty;
+      const emergencyLossMultiple =
+        estimatedEmergencyMaxLossUsd / runtime.riskUsd;
+      if (
+        emergencyLossMultiple >
+        this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd
+      ) {
+        userExec = {
+          ...userExec,
+          state: "TERMINAL",
+          terminalReason: "EXECUTION_FAILED",
+          cleanupState: "COMPLETE",
+          updatedAt: nowMs,
+        };
+        await this.globalSignalRepo.upsertUserExecution(userExec);
+        log.warn(
+          `[LOX_EMERGENCY_RISK_CONSTRAINT_VIOLATED] userId=${runtime.userId} symbol=${symbol} estimatedEmergencyMaxLossUsd=${estimatedEmergencyMaxLossUsd.toFixed(2)} riskUsd=${runtime.riskUsd} multiple=${emergencyLossMultiple.toFixed(2)}x exceeds maxEmergencyLossMultipleOfRiskUsd=${this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd}x -- skipping rather than silently accepting larger risk`,
+        );
+        return "FAILED";
+      }
       userExec = {
         ...userExec,
-        state: "TERMINAL",
-        terminalReason: "EXECUTION_FAILED",
-        cleanupState: "COMPLETE",
-        updatedAt: nowMs,
+        quantity: sizing.positionQty,
+        positionSizeUsdt: sizing.positionSizeUsdt,
+        estimatedStrategyLossUsd: runtime.riskUsd,
+        estimatedEmergencyMaxLossUsd,
       };
       await this.globalSignalRepo.upsertUserExecution(userExec);
-      log.warn(
-        `[LOX_EMERGENCY_RISK_CONSTRAINT_VIOLATED] userId=${runtime.userId} symbol=${symbol} estimatedEmergencyMaxLossUsd=${estimatedEmergencyMaxLossUsd.toFixed(2)} riskUsd=${runtime.riskUsd} multiple=${emergencyLossMultiple.toFixed(2)}x exceeds maxEmergencyLossMultipleOfRiskUsd=${this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd}x -- skipping rather than silently accepting larger risk`,
+
+      if (runtime.binanceRest === null) {
+        userExec = {
+          ...userExec,
+          state: "TERMINAL",
+          terminalReason: "EXECUTION_FAILED",
+          cleanupState: "COMPLETE",
+          updatedAt: Date.now(),
+        };
+        await this.globalSignalRepo.upsertUserExecution(userExec);
+        log.warn(
+          `[LOX_NO_BINANCE_CLIENT] userId=${runtime.userId} symbol=${symbol} -- user has no configured Binance client`,
+        );
+        return "FAILED";
+      }
+
+      // Sep 17 2026 (Karo) -- the PHYSICAL Binance order is placed at
+      // emergencyHardStopPrice (the wider, catastrophe-only level),
+      // never at strategyInvalidationPrice.
+      const outcome = await runEntrySequence(runtime.binanceRest, {
+        userId: runtime.userId,
+        globalSignalId,
+        symbol,
+        side,
+        quantity: sizing.positionQty,
+        entryPriceEstimate: entryPrice,
+        emergencyStopPrice: emergencyHardStopPrice,
+        initialTpPrice: tpPrice,
+      });
+      return await this.persistOutcome(
+        userExec,
+        outcome,
+        symbol,
+        side,
+        strategyInvalidationPrice,
+        emergencyHardStopPrice,
+        tpPrice,
+        percentileRank,
+        sameDirectionLiqUsd,
+        runtime,
       );
-      return "FAILED";
     }
 
+    // Sep 17 2026 (Karo), operator-requested Section 2/3 -- PAPER mode.
+    // A COMPLETE virtual lifecycle: entry, risk, TP, strategy SL, ACTIVE
+    // state, MAIN monitoring (via LiquidationOiActiveMainRuntime, same
+    // as REAL), causal virtual TP/SL detection, PnL, terminal reason,
+    // Telegram, Mongo. The ONLY thing that never happens is a Binance
+    // call -- confirmed structurally: this branch never references
+    // runtime.binanceRest at all.
     userExec = {
       ...userExec,
+      state: "ACTIVE",
       quantity: sizing.positionQty,
       positionSizeUsdt: sizing.positionSizeUsdt,
       estimatedStrategyLossUsd: runtime.riskUsd,
-      estimatedEmergencyMaxLossUsd,
+      entryPrice,
+      tpPrice,
+      appliedTpRevision: 0,
+      updatedAt: nowMs,
     };
     await this.globalSignalRepo.upsertUserExecution(userExec);
-
-    if (!this.executionEnabled) {
-      log.info(
-        `[LOX_OBSERVATION_ONLY] userId=${runtime.userId} symbol=${symbol} would have entered ${side} qty=${sizing.positionQty} sizeUsdt=${sizing.positionSizeUsdt.toFixed(2)} -- executionEnabled=false (GLOBAL master switch), no order placed`,
-      );
-      return "GLOBAL_DISABLED";
-    }
-
-    // Sep 16 2026 (Karo), operator-requested -- SECOND required gate,
-    // checked only after the global master switch has already passed
-    // above. BOTH must be true for a real order to be placed. This
-    // user's own opt-out is recorded as a distinct TERMINAL reason
-    // (never left as an ambiguous PENDING/observational row, and
-    // never becomes ACTIVE) -- and no Telegram is sent, since
-    // persistOutcome()/the Telegram send are never reached from here.
-    if (!runtime.liquidationOiExecutionEnabled) {
-      userExec = {
-        ...userExec,
-        state: "TERMINAL",
-        terminalReason: "USER_STRATEGY_EXECUTION_DISABLED",
-        cleanupState: "COMPLETE",
-        updatedAt: Date.now(),
-      };
-      await this.globalSignalRepo.upsertUserExecution(userExec);
-      log.info(
-        `[LOX_USER_STRATEGY_EXECUTION_DISABLED] userId=${runtime.userId} symbol=${symbol} -- this user's own liquidationOiExecutionEnabled=false, no order attempted, no Binance call made`,
-      );
-      return "USER_DISABLED";
-    }
-
-    if (runtime.binanceRest === null) {
-      userExec = {
-        ...userExec,
-        state: "TERMINAL",
-        terminalReason: "EXECUTION_FAILED",
-        cleanupState: "COMPLETE",
-        updatedAt: Date.now(),
-      };
-      await this.globalSignalRepo.upsertUserExecution(userExec);
-      log.warn(
-        `[LOX_NO_BINANCE_CLIENT] userId=${runtime.userId} symbol=${symbol} -- user has no configured Binance client`,
-      );
-      return "FAILED";
-    }
-
-    // Sep 17 2026 (Karo), operator-requested -- the PHYSICAL Binance
-    // order is placed at emergencyHardStopPrice (the wider,
-    // catastrophe-only level), never at strategyInvalidationPrice.
-    const outcome = await runEntrySequence(runtime.binanceRest, {
-      userId: runtime.userId,
-      globalSignalId,
-      symbol,
-      side,
-      quantity: sizing.positionQty,
-      entryPriceEstimate: entryPrice,
-      emergencyStopPrice: emergencyHardStopPrice,
-      initialTpPrice: tpPrice,
-    });
-
-    return await this.persistOutcome(
-      userExec,
-      outcome,
-      symbol,
-      side,
-      emergencyHardStopPrice,
-      tpPrice,
-      runtime,
+    log.info(
+      `[LOX_PAPER_ENTRY] userId=${runtime.userId} symbol=${symbol} ${side} entry=${entryPrice} qty=${sizing.positionQty} tp=${tpPrice} sl=${strategyInvalidationPrice} -- PAPER, zero Binance calls`,
     );
+    if (runtime.telegram !== null) {
+      try {
+        const text = formatPaperEntryMessage(
+          symbol,
+          side,
+          entryPrice,
+          tpPrice,
+          strategyInvalidationPrice,
+          sameDirectionLiqUsd,
+          percentileRank,
+          counterMoveAtr,
+          runtime.riskUsd,
+          orderBook,
+        );
+        await runtime.telegram.sendMessage(text);
+      } catch (err) {
+        log.error(
+          {
+            userId: runtime.userId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "[LOX_TELEGRAM_PAPER_ENTRY_SEND_FAILED] -- isolated, paper position already persisted",
+        );
+      }
+    }
+    return "PAPER_ACTIVE";
   }
 
   private async persistOutcome(
@@ -755,8 +788,11 @@ export class LiquidationOiRuntimeOrchestrator {
     outcome: Awaited<ReturnType<typeof runEntrySequence>>,
     symbol: string,
     side: Side,
+    strategyInvalidationPrice: number,
     emergencyHardStopPrice: number,
     tpPrice: number,
+    percentileRank: number,
+    sameDirectionLiqUsd: number,
     runtime: LiquidationOiUserRuntimeRef,
   ): Promise<UserFanOutOutcome> {
     const now = Date.now();
@@ -872,14 +908,15 @@ export class LiquidationOiRuntimeOrchestrator {
         const text = formatRealEntryMessage(
           symbol,
           side,
-          userExec.riskUsd,
           outcome.entryPrice,
           outcome.quantity,
-          updated.emergencyStopPrice ?? emergencyHardStopPrice,
-          emergencyHardStopPrice,
-          updated.estimatedStrategyLossUsd ?? userExec.riskUsd,
-          updated.estimatedEmergencyMaxLossUsd ?? 0,
+          userExec.riskUsd,
           tpPrice,
+          strategyInvalidationPrice,
+          emergencyHardStopPrice,
+          sameDirectionLiqUsd,
+          percentileRank,
+          outcome.outcome === "ENTRY_ACTIVE_WITH_TP",
         );
         await runtime.telegram.sendMessage(text);
       } catch (err) {

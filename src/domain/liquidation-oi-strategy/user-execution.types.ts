@@ -19,6 +19,11 @@ export interface LiquidationOiUserExecutionState {
   state: UserExecutionState;
   terminalReason: UserTerminalReason | null;
   cleanupState: CleanupState;
+  /** Sep 17 2026 (Karo), operator-requested PAPER/REAL architecture --
+   *  see user-execution-mode.ts for the exact resolution matrix.
+   *  Determined ONCE at entry and never changes for this row's
+   *  lifetime. */
+  mode: "PAPER" | "REAL";
 
   riskUsd: number;
   entryPrice: number | null;
@@ -44,6 +49,12 @@ export interface LiquidationOiUserExecutionState {
   exitPrice: number | null;
   lastCleanupAttemptAt: number | null;
   cleanupFailureReason: string | null;
+  /** Sep 17 2026 (Karo), operator-requested Section 9 -- PAPER only,
+   *  null for REAL rows (which use realizedPnlUsd/pnlSource instead). */
+  grossPnlUsd: number | null;
+  priceMovePct: number | null;
+  simulatedFeesUsd: number | null;
+  paperNetPnlUsd: number | null;
 
   createdAt: number;
   updatedAt: number;
@@ -56,6 +67,7 @@ export function newPendingUserExecution(
   side: Side,
   riskUsd: number,
   now: number,
+  mode: "PAPER" | "REAL" = "REAL",
 ): LiquidationOiUserExecutionState {
   return {
     userId,
@@ -65,6 +77,7 @@ export function newPendingUserExecution(
     state: "PENDING",
     terminalReason: null,
     cleanupState: "PENDING",
+    mode,
     riskUsd,
     entryPrice: null,
     quantity: null,
@@ -86,6 +99,10 @@ export function newPendingUserExecution(
     exitPrice: null,
     lastCleanupAttemptAt: null,
     cleanupFailureReason: null,
+    grossPnlUsd: null,
+    priceMovePct: null,
+    simulatedFeesUsd: null,
+    paperNetPnlUsd: null,
     createdAt: now,
     updatedAt: now,
   };

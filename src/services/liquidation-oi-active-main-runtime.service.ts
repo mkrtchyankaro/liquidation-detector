@@ -16,6 +16,12 @@ import {
   type DynamicExitControllerState,
 } from "../domain/liquidation-oi-strategy/dynamic-exit-controller";
 import { strategyClientOrderId } from "../domain/liquidation-oi-strategy/strategy-order-identity";
+import { computePaperPnl } from "../domain/liquidation-oi-strategy/pnl-calculator";
+import {
+  formatCloseMessage,
+  formatTpUpdateMessage,
+  formatMarketExitMessage,
+} from "../domain/liquidation-oi-strategy/telegram-formatter";
 import type { ForensicEvent } from "../domain/liquidation-oi-strategy/forensic-events";
 import type { BinanceRestLike } from "../infrastructure/binance/liquidation-oi-user-execution.service";
 import { childLogger } from "../infrastructure/logging/logger";
@@ -111,9 +117,18 @@ export class LiquidationOiActiveMainRuntime {
         log.warn(
           `[LOX_STRATEGY_INVALIDATION] ${symbol} globalSignalId=${globalSignalId} currentPrice=${currentPrice} strategyInvalidationPrice=${signal.strategyInvalidationPrice}`,
         );
+        await this.broadcastMarketExit(
+          symbol,
+          globalSignalId,
+          candidateSide,
+          "STRATEGY_INVALIDATION",
+          signal.entryPrice,
+          currentPrice,
+        );
         await this.positionLifecycle.requestGlobalMarketExit(
           globalSignalId,
           "STRATEGY_INVALIDATION",
+          currentPrice,
           nowMs,
         );
         this.evict(globalSignalId);
@@ -153,14 +168,40 @@ export class LiquidationOiActiveMainRuntime {
         log.warn(
           `[LOX_ADVERSE_OI_PRICE_EFFICIENCY_FLIP] ${symbol} globalSignalId=${globalSignalId} consecutiveAdverseCount=${oiResult.state.consecutiveAdverseCount}`,
         );
+        await this.broadcastMarketExit(
+          symbol,
+          globalSignalId,
+          candidateSide,
+          "ADVERSE_OI_PRICE_EFFICIENCY_FLIP",
+          signal.entryPrice,
+          currentPrice,
+        );
         await this.positionLifecycle.requestGlobalMarketExit(
           globalSignalId,
           "ADVERSE_OI_PRICE_EFFICIENCY_FLIP",
+          currentPrice,
           nowMs,
         );
         this.evict(globalSignalId);
         return;
       }
+
+      // Sections 2/3/8: PAPER TP hit detection. Causal, same bookTicker
+      // mid-price stream as every other MAIN decision (Section 15) --
+      // no separate price source invented for paper. Strategy-invalidation
+      // (paper SL) is ALREADY handled generically above via
+      // requestGlobalMarketExit(), which fans out to every ACTIVE user
+      // (paper and real alike) -- this block only needs to add the
+      // per-user TP check, since TP is a per-user field even though it
+      // normally tracks the SAME MAIN target for everyone.
+      await this.checkPaperTpHits(
+        globalSignalId,
+        symbol,
+        episodeId,
+        candidateSide,
+        currentPrice,
+        nowMs,
+      );
 
       // Section K: dynamic TP. UNTUNED, deliberately simple, exploratory
       // rule -- NOT a claim of optimization. FAVORABLE momentum re-projects
@@ -239,6 +280,145 @@ export class LiquidationOiActiveMainRuntime {
     this.dynamicExitStates.delete(globalSignalId);
   }
 
+  /** Section 7 "MARKET THESIS EXIT" broadcast -- one MAIN-level
+   *  notification per exit event, sent to every user with Telegram
+   *  configured, BEFORE the per-user fan-out resolves. Isolated. */
+  private async broadcastMarketExit(
+    symbol: string,
+    globalSignalId: string,
+    candidateSide: Side,
+    reason: string,
+    entryPrice: number,
+    exitRefPrice: number,
+  ): Promise<void> {
+    const text = formatMarketExitMessage(
+      symbol,
+      candidateSide,
+      reason,
+      entryPrice,
+      exitRefPrice,
+    );
+    for (const runtime of this.getUserRuntimes()) {
+      if (runtime.telegram === null) continue;
+      try {
+        await runtime.telegram.sendMessage(text);
+      } catch (err) {
+        log.error(
+          {
+            userId: runtime.userId,
+            globalSignalId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "[LOX_TELEGRAM_MARKET_EXIT_SEND_FAILED] -- isolated, trading lifecycle unaffected",
+        );
+      }
+    }
+  }
+
+  /** Sections 2/3/8: causal, per-user PAPER TP hit detection, driven
+   *  from the SAME live tick as every other MAIN decision. Isolated
+   *  per user -- one user's TP hit never affects another's, and never
+   *  touches a REAL row (REAL TP fills are detected by
+   *  LiquidationOiPositionLifecycleService's own Binance-order-status
+   *  polling, unchanged). */
+  private async checkPaperTpHits(
+    globalSignalId: string,
+    symbol: string,
+    episodeId: string,
+    candidateSide: Side,
+    currentPrice: number,
+    nowMs: number,
+  ): Promise<void> {
+    const userExecs =
+      await this.globalSignalRepo.findUserExecutionsForSignal(globalSignalId);
+    const paperActive = userExecs.filter(
+      (u) =>
+        u.mode === "PAPER" &&
+        u.state === "ACTIVE" &&
+        u.entryPrice !== null &&
+        u.tpPrice !== null &&
+        u.quantity !== null,
+    );
+    for (const userExec of paperActive) {
+      const tpPrice = userExec.tpPrice!;
+      const hit =
+        candidateSide === "LONG"
+          ? currentPrice >= tpPrice
+          : currentPrice <= tpPrice;
+      if (!hit) continue;
+      try {
+        const pnl = computePaperPnl({
+          side: candidateSide,
+          entryPrice: userExec.entryPrice!,
+          exitPrice: currentPrice,
+          quantity: userExec.quantity!,
+        });
+        const updated = {
+          ...userExec,
+          state: "TERMINAL" as const,
+          terminalReason: "TP_FILLED" as const,
+          cleanupState: "COMPLETE" as const,
+          exitPrice: currentPrice,
+          grossPnlUsd: pnl.grossPnlUsd,
+          priceMovePct: pnl.priceMovePct,
+          updatedAt: nowMs,
+        };
+        await this.globalSignalRepo.upsertUserExecution(updated);
+        this.forensic({
+          ts: nowMs,
+          symbol,
+          episodeId,
+          victim: userExec.side,
+          state: "TERMINAL",
+          episodeAgeSec: 0,
+          type: "POSITION_TERMINAL_DETECTED",
+          userId: userExec.userId,
+          reason: "TP_FILLED",
+        } as unknown as ForensicEvent);
+        log.info(
+          `[LOX_PAPER_TP_HIT] userId=${userExec.userId} symbol=${symbol} entry=${userExec.entryPrice} exit=${currentPrice} tp=${tpPrice} grossPnlUsd=${pnl.grossPnlUsd.toFixed(2)}`,
+        );
+        const runtime = this.getUserRuntimes().find(
+          (r) => r.userId === userExec.userId,
+        );
+        if (runtime !== undefined && runtime.telegram !== null) {
+          try {
+            const text = formatCloseMessage({
+              symbol,
+              candidateSide,
+              terminalReason: "TP_FILLED",
+              entryPrice: userExec.entryPrice!,
+              exitPrice: currentPrice,
+              tpAtClose: tpPrice,
+              durationMs: nowMs - userExec.createdAt,
+              mode: "PAPER",
+              paperGrossPnlUsd: pnl.grossPnlUsd,
+            });
+            await runtime.telegram.sendMessage(text);
+          } catch (err) {
+            log.error(
+              {
+                userId: userExec.userId,
+                err: err instanceof Error ? err.message : String(err),
+              },
+              "[LOX_TELEGRAM_PAPER_CLOSE_SEND_FAILED] -- isolated, terminal state already persisted",
+            );
+          }
+        }
+        await this.positionLifecycle.maybeCloseGlobal(globalSignalId, nowMs);
+      } catch (err) {
+        log.error(
+          {
+            userId: userExec.userId,
+            symbol,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "[LOX_PAPER_TP_HIT_UNEXPECTED_ERROR] -- isolated, other users unaffected",
+        );
+      }
+    }
+  }
+
   private async applyTpRevision(
     symbol: string,
     globalSignalId: string,
@@ -251,9 +431,75 @@ export class LiquidationOiActiveMainRuntime {
       await this.globalSignalRepo.findUserExecutionsForSignal(globalSignalId);
     const results: TpRevisionApplyResult[] = [];
     for (const userExec of userExecs.filter((u) => u.state === "ACTIVE")) {
+      const oldTp = userExec.tpPrice ?? newTargetPrice;
       const runtime = this.getUserRuntimes().find(
         (r) => r.userId === userExec.userId,
       );
+
+      // Sep 17 2026 (Karo), operator-requested CRITICAL SAFETY FIX --
+      // mode is checked EXPLICITLY here, never inferred from whether a
+      // Binance client happens to be configured. A PAPER user (paper
+      // because of THEIR OWN flag, or the GLOBAL safety fallback) may
+      // still have a real, working binanceRest client on their runtime
+      // -- checking only `binanceRest === null` would have silently
+      // placed a REAL Binance TP order for a user who should never see
+      // one. mode is the single source of truth.
+      if (userExec.mode === "PAPER") {
+        const updated = {
+          ...userExec,
+          tpPrice: newTargetPrice,
+          appliedTpRevision: revision,
+          updatedAt: nowMs,
+        };
+        await this.globalSignalRepo.upsertUserExecution(updated);
+        this.forensic({
+          ts: nowMs,
+          symbol,
+          episodeId: globalSignalId,
+          victim: userExec.side,
+          state: "ACTIVE",
+          episodeAgeSec: 0,
+          type: "TP_REVISION_APPLIED",
+          userId: userExec.userId,
+          revision,
+          newTargetPrice,
+        });
+        if (
+          runtime !== undefined &&
+          runtime.telegram !== null &&
+          userExec.entryPrice !== null
+        ) {
+          try {
+            const text = formatTpUpdateMessage(
+              symbol,
+              candidateSide,
+              userExec.entryPrice,
+              oldTp,
+              newTargetPrice,
+              revision,
+              "OI/price capacity strengthened",
+              "PAPER",
+              null,
+            );
+            await runtime.telegram.sendMessage(text);
+          } catch (err) {
+            log.error(
+              {
+                userId: userExec.userId,
+                err: err instanceof Error ? err.message : String(err),
+              },
+              "[LOX_TELEGRAM_TP_UPDATE_SEND_FAILED] -- isolated, paper TP already updated",
+            );
+          }
+        }
+        results.push({
+          userId: userExec.userId,
+          success: true,
+          detail: "paper TP updated, no Binance call",
+        });
+        continue;
+      }
+
       if (
         runtime === undefined ||
         runtime.binanceRest === null ||
@@ -308,6 +554,25 @@ export class LiquidationOiActiveMainRuntime {
             success: false,
             detail: `TP verification returned status=${verify.status}`,
           });
+          if (runtime.telegram !== null && userExec.entryPrice !== null) {
+            try {
+              await runtime.telegram.sendMessage(
+                formatTpUpdateMessage(
+                  symbol,
+                  candidateSide,
+                  userExec.entryPrice,
+                  oldTp,
+                  newTargetPrice,
+                  revision,
+                  "OI/price capacity strengthened",
+                  "REAL",
+                  false,
+                ),
+              );
+            } catch {
+              /* isolated */
+            }
+          }
           continue;
         }
         await this.strategyOrderRepo.upsert({
@@ -347,6 +612,31 @@ export class LiquidationOiActiveMainRuntime {
           success: true,
           detail: "applied",
         });
+        if (runtime.telegram !== null && userExec.entryPrice !== null) {
+          try {
+            await runtime.telegram.sendMessage(
+              formatTpUpdateMessage(
+                symbol,
+                candidateSide,
+                userExec.entryPrice,
+                oldTp,
+                newTargetPrice,
+                revision,
+                "OI/price capacity strengthened",
+                "REAL",
+                true,
+              ),
+            );
+          } catch (err) {
+            log.error(
+              {
+                userId: userExec.userId,
+                err: err instanceof Error ? err.message : String(err),
+              },
+              "[LOX_TELEGRAM_TP_UPDATE_SEND_FAILED] -- isolated",
+            );
+          }
+        }
       } catch (err) {
         log.error(
           {

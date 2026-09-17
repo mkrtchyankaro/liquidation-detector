@@ -273,7 +273,7 @@ async function main(): Promise<void> {
   );
 
   await scenario(
-    "B. ENTRY_READY + execution globally disabled -> observation consumed -> lifecycle releases -> later LONG starts a NEW episode",
+    "B. ENTRY_READY + execution globally disabled -> resolves to PAPER (safety fallback) -> global signal ACTIVE -> symbol remains legitimately owned, NOT released",
     async () => {
       const { mongo } = fakeMongo();
       const rest = mockRestNeverCalled();
@@ -288,10 +288,16 @@ async function main(): Promise<void> {
       );
       await driveToEntryReady(orch, "SOLUSDT", 1_000_000);
       assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT"),
-        null,
-        "must release immediately, same tick",
+        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
+        "ACTIVE",
+        "PAPER users are manageable -- the global signal must remain ACTIVE, not release",
       );
+      assert.strictEqual(
+        orch.getWatchManager().isSymbolOwned("SOLUSDT"),
+        true,
+        "ownership must be retained while paper positions are ACTIVE",
+      );
+      // An opposite-direction liquidation while a PAPER-backed episode is ACTIVE must be ignored, exactly like a real ACTIVE position -- never steal the symbol.
       orch.onLiquidationEvent(
         {
           symbol: "SOLUSDT",
@@ -304,16 +310,15 @@ async function main(): Promise<void> {
       );
       const lc = orch.getWatchManager().getLifecycle("SOLUSDT")!;
       assert.strictEqual(
-        lc.episode.victim,
-        "LONG",
-        "the opposite direction must be free to start a fresh episode with no process restart",
+        lc.globalState,
+        "ACTIVE",
+        "the ACTIVE (paper-backed) lifecycle must be completely unaffected by the opposite event",
       );
-      assert.strictEqual(lc.episode.eventCount, 1);
     },
   );
 
   await scenario(
-    "C. ENTRY_READY + all per-user execution disabled -> no position -> release -> later LONG starts normally",
+    "C. ENTRY_READY + all per-user execution disabled -> resolves to PAPER for every user -> global signal ACTIVE, symbol owned, not released",
     async () => {
       const { mongo } = fakeMongo();
       const rest = mockRestNeverCalled();
@@ -327,19 +332,11 @@ async function main(): Promise<void> {
         true,
       );
       await driveToEntryReady(orch, "SOLUSDT", 2_000_000);
-      assert.strictEqual(orch.getWatchManager().getLifecycle("SOLUSDT"), null);
-      orch.onLiquidationEvent(
-        {
-          symbol: "SOLUSDT",
-          victim: "LONG",
-          timestamp: 6_000_000,
-          price: 90,
-          quoteQty: 60000,
-        },
-        null,
+      assert.strictEqual(
+        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
+        "ACTIVE",
       );
-      const lc = orch.getWatchManager().getLifecycle("SOLUSDT")!;
-      assert.strictEqual(lc.episode.victim, "LONG");
+      assert.strictEqual(orch.getWatchManager().isSymbolOwned("SOLUSDT"), true);
     },
   );
 

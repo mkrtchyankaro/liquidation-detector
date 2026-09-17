@@ -358,9 +358,9 @@ async function main(): Promise<void> {
   );
 
   await scenario(
-    "I.3. OI history is consumed from the caller-supplied array -- same data source, no second poll",
+    "I.3. global execution OFF -> users resolve to PAPER, global signal remains ACTIVE (not CANCELLED) -- OI history still drove real clearing detection",
     async () => {
-      const { mongo, signals } = fakeMongo();
+      const { mongo, signals, userExecs } = fakeMongo();
       const orch = new LiquidationOiRuntimeOrchestrator(
         DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
         DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
@@ -371,17 +371,28 @@ async function main(): Promise<void> {
         false,
       );
       await driveToEntryReady(orch, "SOLUSDT", 1_000_000);
-      // ENTRY_READY was genuinely reached (proving the supplied oiHistory array drove clearing detection) and then
-      // immediately resolved per the Sep 16 2026 lifecycle fix -- persisted record ends CANCELLED, in-memory lifecycle released.
+      // Sep 17 2026 (Karo), production-completion pass, PAPER/REAL architecture:
+      // global executionEnabled=false is the SAFETY FALLBACK to PAPER, not a
+      // reason to cancel a genuine market signal -- MARKET SIGNAL and USER
+      // EXECUTION MODE are different concepts.
       assert.ok(
         signals.docs.length > 0,
         "a signal record must have been persisted",
       );
-      assert.strictEqual(signals.docs[0].state, "CANCELLED");
       assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT"),
-        null,
-        "post-fix: ENTRY_READY must resolve and release immediately, never persist as the final observed state",
+        signals.docs.find((d: any) => d.state === "ACTIVE")?.state,
+        "ACTIVE",
+        "the global signal must remain ACTIVE with paper users manageable, not CANCELLED",
+      );
+      assert.strictEqual(
+        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
+        "ACTIVE",
+      );
+      assert.ok(
+        userExecs.docs.every(
+          (d: any) => d.mode === "PAPER" && d.state === "ACTIVE",
+        ),
+        "both users must resolve to PAPER and be ACTIVE",
       );
     },
   );
@@ -440,7 +451,7 @@ async function main(): Promise<void> {
   );
 
   await scenario(
-    "I.5. disabled execution places ZERO Binance calls -- ENTRY_READY resolves observationally and releases",
+    "I.5. global execution OFF -> ZERO Binance calls, both users become PAPER_ACTIVE (never CANCELLED, never left PENDING)",
     async () => {
       const { mongo, userExecs, signals } = fakeMongo();
       const rest = mockRestThatShouldNeverBeCalled();
@@ -455,21 +466,23 @@ async function main(): Promise<void> {
       );
       await driveToEntryReady(orch, "SOLUSDT", 1_000_000);
       assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT"),
-        null,
-        "post-fix: must release, never remain locked in ENTRY_READY while execution is disabled",
+        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
+        "ACTIVE",
+        "post-PAPER-architecture: manageable paper users keep the global signal ACTIVE",
       );
-      const finalSignal = signals.docs.find(
-        (d: any) => d.state === "CANCELLED",
-      );
-      assert.ok(finalSignal, "the persisted signal must resolve to CANCELLED");
+      const finalSignal = signals.docs.find((d: any) => d.state === "ACTIVE");
+      assert.ok(finalSignal, "the persisted signal must resolve to ACTIVE");
       assert.strictEqual(userExecs.docs.length, 2);
-      for (const doc of userExecs.docs)
+      for (const doc of userExecs.docs) {
+        assert.strictEqual(doc.mode, "PAPER");
         assert.strictEqual(
           doc.state,
-          "PENDING",
-          "no user execution may become ACTIVE while executionEnabled=false",
+          "ACTIVE",
+          "PAPER users become ACTIVE immediately -- a complete virtual lifecycle, not PENDING",
         );
+      }
+      // mockRestThatShouldNeverBeCalled() throws on ANY call -- reaching this
+      // line at all proves zero Binance calls were made, for either user.
     },
   );
 
@@ -619,7 +632,7 @@ async function main(): Promise<void> {
   // ============== Per-user liquidationOiExecutionEnabled gating ==============
 
   await scenario(
-    "G.1. global OFF + Karo user-flag ON -> zero Binance calls",
+    "G.1. global OFF + Karo user-flag ON -> PAPER (safety fallback), zero Binance calls",
     async () => {
       const { mongo, userExecs } = fakeMongo();
       const rest = mockRestThatShouldNeverBeCalled();
@@ -643,15 +656,20 @@ async function main(): Promise<void> {
       await driveToEntryReady(orch, "SOLUSDT", 10_000_000);
       const karo = userExecs.docs.find((d: any) => d.userId === "karo");
       assert.strictEqual(
+        karo.mode,
+        "PAPER",
+        "global master switch off is the SAFETY FALLBACK to PAPER, regardless of the user's own flag",
+      );
+      assert.strictEqual(
         karo.state,
-        "PENDING",
-        "global master switch off must produce the SAME observational PENDING outcome regardless of the user's own flag",
+        "ACTIVE",
+        "PAPER is a complete virtual ACTIVE lifecycle, not PENDING/observational",
       );
     },
   );
 
   await scenario(
-    "G.2. global ON + Karo user-flag OFF -> zero Binance calls",
+    "G.2. global ON + Karo user-flag OFF -> PAPER, zero Binance calls",
     async () => {
       const { mongo, userExecs } = fakeMongo();
       const rest = mockRestThatShouldNeverBeCalled();
@@ -674,11 +692,8 @@ async function main(): Promise<void> {
       );
       await driveToEntryReady(orch, "SOLUSDT", 11_000_000);
       const karo = userExecs.docs.find((d: any) => d.userId === "karo");
-      assert.strictEqual(karo.state, "TERMINAL");
-      assert.strictEqual(
-        karo.terminalReason,
-        "USER_STRATEGY_EXECUTION_DISABLED",
-      );
+      assert.strictEqual(karo.mode, "PAPER");
+      assert.strictEqual(karo.state, "ACTIVE");
       // mockRestThatShouldNeverBeCalled() throwing on any call, combined with the test completing without an uncaught rejection, is itself proof of zero Binance calls
     },
   );
@@ -715,36 +730,38 @@ async function main(): Promise<void> {
         ],
       );
       const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.mode, "REAL");
       assert.strictEqual(karo.state, "ACTIVE");
     },
   );
 
-  await scenario("G.4. Karo ON + Artak OFF -> only Karo executes", async () => {
-    const { mongo, userExecs } = fakeMongo();
-    const karoRest = mockRestSuccess();
-    const artakRest = mockRestThatShouldNeverBeCalled();
-    const orch = new LiquidationOiRuntimeOrchestrator(
-      DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-      DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
-      new LiquidationOiGlobalSignalRepository(mongo),
-      new StrategyOrderRepository(mongo),
-      () => karoArtakRuntimes(karoRest, artakRest, true, false),
-      true,
-      true,
-    );
-    await driveToEntryReady(orch, "SOLUSDT", 13_000_000);
-    const karo = userExecs.docs.find((d: any) => d.userId === "karo");
-    const artak = userExecs.docs.find((d: any) => d.userId === "artak");
-    assert.strictEqual(karo.state, "ACTIVE");
-    assert.strictEqual(artak.state, "TERMINAL");
-    assert.strictEqual(
-      artak.terminalReason,
-      "USER_STRATEGY_EXECUTION_DISABLED",
-    );
-  });
+  await scenario(
+    "G.4. Karo ON + Artak OFF (both global ON) -> Karo REAL, Artak PAPER",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const karoRest = mockRestSuccess();
+      const artakRest = mockRestThatShouldNeverBeCalled();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => karoArtakRuntimes(karoRest, artakRest, true, false),
+        true,
+        true,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 13_000_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      const artak = userExecs.docs.find((d: any) => d.userId === "artak");
+      assert.strictEqual(karo.mode, "REAL");
+      assert.strictEqual(karo.state, "ACTIVE");
+      assert.strictEqual(artak.mode, "PAPER");
+      assert.strictEqual(artak.state, "ACTIVE");
+    },
+  );
 
   await scenario(
-    "G.5. Karo OFF + Artak ON -> only Artak executes",
+    "G.5. Karo OFF + Artak ON (both global ON) -> Karo PAPER, Artak REAL",
     async () => {
       const { mongo, userExecs } = fakeMongo();
       const karoRest = mockRestThatShouldNeverBeCalled();
@@ -761,53 +778,54 @@ async function main(): Promise<void> {
       await driveToEntryReady(orch, "SOLUSDT", 14_000_000);
       const karo = userExecs.docs.find((d: any) => d.userId === "karo");
       const artak = userExecs.docs.find((d: any) => d.userId === "artak");
-      assert.strictEqual(karo.state, "TERMINAL");
-      assert.strictEqual(
-        karo.terminalReason,
-        "USER_STRATEGY_EXECUTION_DISABLED",
-      );
+      assert.strictEqual(karo.mode, "PAPER");
+      assert.strictEqual(karo.state, "ACTIVE");
+      assert.strictEqual(artak.mode, "REAL");
       assert.strictEqual(artak.state, "ACTIVE");
     },
   );
 
-  await scenario("G.6. both ON -> both execute independently", async () => {
-    const { mongo, userExecs } = fakeMongo();
-    const karoRest = mockRestSuccess();
-    const artakRest = mockRestSuccess();
-    const orch = new LiquidationOiRuntimeOrchestrator(
-      DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-      DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
-      new LiquidationOiGlobalSignalRepository(mongo),
-      new StrategyOrderRepository(mongo),
-      () => karoArtakRuntimes(karoRest, artakRest, true, true),
-      true,
-      true,
-    );
-    await driveToEntryReady(orch, "SOLUSDT", 15_000_000);
-    const karo = userExecs.docs.find((d: any) => d.userId === "karo");
-    const artak = userExecs.docs.find((d: any) => d.userId === "artak");
-    assert.strictEqual(karo.state, "ACTIVE");
-    assert.strictEqual(artak.state, "ACTIVE");
-    assert.deepStrictEqual(
-      karoRest.calls.filter((c) => c.startsWith("create")),
-      [
-        "createOrder:MARKET",
-        "createAlgoOrder:STOP_MARKET",
-        "createOrder:LIMIT",
-      ],
-    );
-    assert.deepStrictEqual(
-      artakRest.calls.filter((c) => c.startsWith("create")),
-      [
-        "createOrder:MARKET",
-        "createAlgoOrder:STOP_MARKET",
-        "createOrder:LIMIT",
-      ],
-    );
-  });
+  await scenario(
+    "G.6. both ON -> both execute independently, both REAL",
+    async () => {
+      const { mongo, userExecs } = fakeMongo();
+      const karoRest = mockRestSuccess();
+      const artakRest = mockRestSuccess();
+      const orch = new LiquidationOiRuntimeOrchestrator(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+        new LiquidationOiGlobalSignalRepository(mongo),
+        new StrategyOrderRepository(mongo),
+        () => karoArtakRuntimes(karoRest, artakRest, true, true),
+        true,
+        true,
+      );
+      await driveToEntryReady(orch, "SOLUSDT", 15_000_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      const artak = userExecs.docs.find((d: any) => d.userId === "artak");
+      assert.strictEqual(karo.state, "ACTIVE");
+      assert.strictEqual(artak.state, "ACTIVE");
+      assert.deepStrictEqual(
+        karoRest.calls.filter((c) => c.startsWith("create")),
+        [
+          "createOrder:MARKET",
+          "createAlgoOrder:STOP_MARKET",
+          "createOrder:LIMIT",
+        ],
+      );
+      assert.deepStrictEqual(
+        artakRest.calls.filter((c) => c.startsWith("create")),
+        [
+          "createOrder:MARKET",
+          "createAlgoOrder:STOP_MARKET",
+          "createOrder:LIMIT",
+        ],
+      );
+    },
+  );
 
   await scenario(
-    "G.7. both OFF -> MAIN still observes (reaches ENTRY_READY) but no user executes",
+    "G.7. both user-flags OFF (global ON) -> both PAPER, MAIN signal stays ACTIVE, no Binance calls",
     async () => {
       const { mongo, userExecs } = fakeMongo();
       const karoRest = mockRestThatShouldNeverBeCalled();
@@ -823,20 +841,16 @@ async function main(): Promise<void> {
       );
       await driveToEntryReady(orch, "SOLUSDT", 16_000_000);
       assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT"),
-        null,
-        "MAIN reaches ENTRY_READY (proven by both users receiving a real fan-out attempt below) then resolves/releases since no real position exists -- symbol free for the next independent episode",
+        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
+        "ACTIVE",
+        "both users resolve to manageable PAPER positions -- the global signal must remain ACTIVE, not release",
       );
       const karo = userExecs.docs.find((d: any) => d.userId === "karo");
       const artak = userExecs.docs.find((d: any) => d.userId === "artak");
-      assert.strictEqual(
-        karo.terminalReason,
-        "USER_STRATEGY_EXECUTION_DISABLED",
-      );
-      assert.strictEqual(
-        artak.terminalReason,
-        "USER_STRATEGY_EXECUTION_DISABLED",
-      );
+      assert.strictEqual(karo.mode, "PAPER");
+      assert.strictEqual(artak.mode, "PAPER");
+      assert.strictEqual(karo.state, "ACTIVE");
+      assert.strictEqual(artak.state, "ACTIVE");
     },
   );
 
@@ -868,7 +882,7 @@ async function main(): Promise<void> {
   );
 
   await scenario(
-    "G.9. a disabled user never becomes ACTIVE, in any of the four global/user combinations",
+    "G.9. mode is REAL only when BOTH the user's own flag AND the global switch are true -- every other combination resolves to PAPER, never a real Binance-backed position",
     async () => {
       for (const [global, user] of [
         [false, true],
@@ -888,13 +902,7 @@ async function main(): Promise<void> {
               riskUsd: 1,
               liquidationOiExecutionEnabled: user,
               binanceRest: rest,
-              telegram: {
-                sendMessage: async () => {
-                  throw new Error(
-                    "Telegram must never be sent for a disabled user",
-                  );
-                },
-              },
+              telegram: { sendMessage: async () => {} },
             },
           ],
           true,
@@ -907,10 +915,11 @@ async function main(): Promise<void> {
         );
         const karo = userExecs.docs.find((d: any) => d.userId === "karo");
         assert.notStrictEqual(
-          karo.state,
-          "ACTIVE",
-          `global=${global} user=${user} must never produce ACTIVE`,
+          karo.mode,
+          "REAL",
+          `global=${global} user=${user} must never produce mode=REAL`,
         );
+        // mockRestThatShouldNeverBeCalled() throwing on any call, combined with the test completing, proves zero Binance calls in every case.
       }
     },
   );
