@@ -618,6 +618,36 @@ async function main(): Promise<void> {
     },
   );
 
+  await scenario(
+    "P.8. REGRESSION (live production bug, Sep 17 2026) -- the periodic Binance reconciler must NEVER treat a PAPER user's real (always-flat) Binance position as POSITION_CLOSED_EXTERNALLY, even when that user has a real, working binanceRest client configured",
+    async () => {
+      const rest = mockRestSuccess();
+      (rest as any).getPositionRisk = async () => [
+        { symbol: "SOLUSDT", positionAmt: "0", entryPrice: "0" },
+      ]; // exactly the real-world case: a real client, but flat, because no real trade was ever placed for this PAPER user
+      const { orch, positionLifecycle, userExecs, signals } = buildStack(
+        runtimes([{ userId: "brother", riskUsd: 1, rest, enabled: false }]),
+        true,
+      );
+      await driveToActive(orch, "SOLUSDT", 8_000_000);
+      const before = userExecs.docs.find((d: any) => d.userId === "brother");
+      assert.strictEqual(before.mode, "PAPER");
+      assert.strictEqual(before.state, "ACTIVE");
+      // This is the exact call the 15s periodic timer makes in production -- previously this incorrectly
+      // terminated the paper user within one cycle, with terminalReason=POSITION_CLOSED_EXTERNALLY and no exit price.
+      await positionLifecycle.reconcileAll(8_015_000);
+      const after = userExecs.docs.find((d: any) => d.userId === "brother");
+      assert.strictEqual(
+        after.state,
+        "ACTIVE",
+        "a PAPER user must remain ACTIVE through Binance reconciliation -- it is monitored exclusively by the causal price-based paper checks, never by real-position polling",
+      );
+      assert.strictEqual(after.terminalReason, null);
+      const activeSignal = signals.docs.find((d: any) => d.state === "ACTIVE");
+      assert.ok(activeSignal, "the global signal must also remain ACTIVE");
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 }

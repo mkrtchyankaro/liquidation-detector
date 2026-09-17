@@ -67,6 +67,15 @@ export async function recoverLoxOnRestart(
         signal.globalSignalId,
       );
       for (const userExec of userExecs.filter((u) => u.state === "ACTIVE")) {
+        // Sep 17 2026 (Karo), operator-reported CRITICAL FIX (defense in
+        // depth, matching the same fix in reconcileOneUser) -- a PAPER
+        // user must NEVER be Binance-reconciled here either, even though
+        // it is transitively safe today (a paper user's real position is
+        // always flat, so the loop below would just `continue`) -- an
+        // explicit, unconditional skip is required so a future change to
+        // this loop can never silently start treating a paper user's
+        // always-flat position as something to act on.
+        if (userExec.mode === "PAPER") continue;
         const runtime = getUserRuntimes().find(
           (r) => r.userId === userExec.userId,
         );

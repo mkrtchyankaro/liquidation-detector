@@ -33,11 +33,11 @@ import {
   DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
   type LiquidationOiActiveLifecycleConfig,
 } from "../domain/liquidation-oi-strategy/active-lifecycle-config";
+import { formatEntryMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
 import {
-  formatWatchMessage,
-  formatRealEntryMessage,
-  formatPaperEntryMessage,
-} from "../domain/liquidation-oi-strategy/telegram-formatter";
+  displayNameFromUserId,
+  formatCompactUsd,
+} from "../domain/liquidation-oi-strategy/telegram-display-format";
 import { resolveUserExecutionMode } from "../domain/liquidation-oi-strategy/user-execution-mode";
 import type { LiquidationOiActiveMainRuntime } from "./liquidation-oi-active-main-runtime.service";
 import { childLogger } from "../infrastructure/logging/logger";
@@ -212,43 +212,12 @@ export class LiquidationOiRuntimeOrchestrator {
     );
     const after = this.watchManager.getLifecycle(symbol);
 
-    // Section F: WATCH Telegram, sent exactly once per episode, at the
-    // EPISODE_TRACKING -> EXHAUSTION_CANDIDATE transition (i.e. the moment
-    // WATCH_QUALIFIED fires) -- independent of executionEnabled, per the
-    // operator's own explicit "we need to see signals before real
-    // execution" requirement.
-    if (
-      before?.globalState === "EPISODE_TRACKING" &&
-      after !== null &&
-      after.globalState === "EXHAUSTION_CANDIDATE" &&
-      after.watchResult?.qualifies
-    ) {
-      // Sep 17 2026 (Karo), operator-requested Section 14 -- WATCH-time
-      // order-book capture, previously missing (ENTRY_READY only).
-      const watchOrderBook =
-        atr3m !== null
-          ? captureOrderBookObservation(
-              symbol,
-              currentPrice,
-              after.episode.extremePrice,
-              atr3m,
-              bestBid,
-              bestAsk,
-              wallLookup,
-              this.activeLifecycleConfig,
-              nowMs,
-            )
-          : null;
-      await this.sendWatchTelegram(
-        symbol,
-        after.episode.victim,
-        after.episode.sameDirectionLiqUsd,
-        after.watchResult.episodePercentileRank,
-        after.watchResult.displacementAtr,
-        after.watchResult.oiDestructionFractionAtQualification,
-        watchOrderBook,
-      );
-    }
+    // Sep 17 2026 (Karo), operator-requested Section B -- WATCH Telegram
+    // is REMOVED. WATCH state/qualification logic itself remains fully
+    // operational and persisted/logged (forensic WATCH_EVALUATION events,
+    // the state transition itself, everything downstream) -- only the
+    // user-facing notification is suppressed. The first user-facing LOX
+    // message is now ENTRY.
 
     if (
       before?.globalState !== "ENTRY_READY" &&
@@ -284,40 +253,6 @@ export class LiquidationOiRuntimeOrchestrator {
     }
   }
 
-  private async sendWatchTelegram(
-    symbol: string,
-    victim: Side,
-    sameDirectionLiqUsd: number,
-    percentileRank: number,
-    displacementAtr: number,
-    oiDestructionFraction: number | null,
-    orderBook: OrderBookObservation | null,
-  ): Promise<void> {
-    const text = formatWatchMessage(
-      symbol,
-      candidateTradeSideForVictim(victim),
-      sameDirectionLiqUsd,
-      percentileRank,
-      displacementAtr,
-      oiDestructionFraction,
-      orderBook,
-    );
-    for (const runtime of this.getUserRuntimes()) {
-      if (runtime.telegram === null) continue;
-      try {
-        await runtime.telegram.sendMessage(text);
-      } catch (err) {
-        log.error(
-          {
-            userId: runtime.userId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "[LOX_TELEGRAM_WATCH_SEND_FAILED] -- isolated, trading lifecycle unaffected",
-        );
-      }
-    }
-  }
-
   private async handleEntryReady(
     symbol: string,
     ownershipId: string,
@@ -325,6 +260,8 @@ export class LiquidationOiRuntimeOrchestrator {
       victim: Side;
       extremePrice: number;
       sameDirectionLiqUsd: number;
+      startOiQuantity: number | null;
+      minOiQuantity: number | null;
     },
     watchResult: WatchQualificationResult | null,
     entryPrice: number,
@@ -370,6 +307,30 @@ export class LiquidationOiRuntimeOrchestrator {
       candidateSide,
       capacity.initialCapacityAtr,
     );
+
+    // Sep 17 2026 (Karo), operator-requested Section I -- OI metric shown
+    // at ENTRY. CAUSALLY available at this exact moment from the
+    // episode's own state (startOiQuantity, minOiQuantity, both already
+    // tracked from the first liquidation event onward -- see
+    // episode-tracker.ts) -- nothing invented. USD figure is the
+    // destroyed-OI-in-contracts converted at the current entry price
+    // (the only price available at this instant; not a separate OI-price
+    // history, which this codebase does not track per-sample). Fraction
+    // reuses watchResult.oiDestructionFractionAtQualification, the SAME
+    // value already computed for WATCH qualification -- not recomputed
+    // differently here.
+    let oiMetricLine: string | null = null;
+    if (
+      episode.startOiQuantity !== null &&
+      episode.minOiQuantity !== null &&
+      watchResult.oiDestructionFractionAtQualification !== null
+    ) {
+      const destroyedUsd =
+        (episode.startOiQuantity - episode.minOiQuantity) * entryPrice;
+      if (destroyedUsd > 0) {
+        oiMetricLine = `\ud83d\udcca OI Clear  -${formatCompactUsd(destroyedUsd)}  (-${(watchResult.oiDestructionFractionAtQualification * 100).toFixed(2)}%)`;
+      }
+    }
 
     log.info(
       `[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} strategyInvalidation=${strategyInvalidationPrice} emergencyHardStop=${emergencyHardStopPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} components=${JSON.stringify(capacity.components)}`,
@@ -428,6 +389,7 @@ export class LiquidationOiRuntimeOrchestrator {
             episode.sameDirectionLiqUsd,
             counterMoveAtr,
             orderBook,
+            oiMetricLine,
             nowMs,
           ),
         );
@@ -588,6 +550,7 @@ export class LiquidationOiRuntimeOrchestrator {
     sameDirectionLiqUsd: number,
     counterMoveAtr: number,
     orderBook: OrderBookObservation | null,
+    oiMetricLine: string | null,
     nowMs: number,
   ): Promise<UserFanOutOutcome> {
     const existing = await this.globalSignalRepo.findUserExecution(
@@ -729,6 +692,9 @@ export class LiquidationOiRuntimeOrchestrator {
         tpPrice,
         percentileRank,
         sameDirectionLiqUsd,
+        counterMoveAtr,
+        orderBook,
+        oiMetricLine,
         runtime,
       );
     }
@@ -757,18 +723,26 @@ export class LiquidationOiRuntimeOrchestrator {
     );
     if (runtime.telegram !== null) {
       try {
-        const text = formatPaperEntryMessage(
+        const text = formatEntryMessage({
           symbol,
-          side,
+          candidateSide: side,
+          mode: "PAPER",
+          globalSignalId,
+          entryTimestamp: userExec.createdAt,
           entryPrice,
+          quantity: sizing.positionQty,
+          riskUsd: runtime.riskUsd,
           tpPrice,
           strategyInvalidationPrice,
+          emergencyHardStopPrice: null,
           sameDirectionLiqUsd,
           percentileRank,
+          oiMetricLine,
           counterMoveAtr,
-          runtime.riskUsd,
           orderBook,
-        );
+          protectionConfirmed: null,
+          displayName: displayNameFromUserId(runtime.userId),
+        });
         await runtime.telegram.sendMessage(text);
       } catch (err) {
         log.error(
@@ -793,6 +767,9 @@ export class LiquidationOiRuntimeOrchestrator {
     tpPrice: number,
     percentileRank: number,
     sameDirectionLiqUsd: number,
+    counterMoveAtr: number,
+    orderBook: OrderBookObservation | null,
+    oiMetricLine: string | null,
     runtime: LiquidationOiUserRuntimeRef,
   ): Promise<UserFanOutOutcome> {
     const now = Date.now();
@@ -905,19 +882,28 @@ export class LiquidationOiRuntimeOrchestrator {
     // failure must never undo the already-persisted execution state.
     if (runtime.telegram !== null) {
       try {
-        const text = formatRealEntryMessage(
+        const text = formatEntryMessage({
           symbol,
-          side,
-          outcome.entryPrice,
-          outcome.quantity,
-          userExec.riskUsd,
+          candidateSide: side,
+          mode: "REAL",
+          globalSignalId: userExec.globalSignalId,
+          entryTimestamp: updated.createdAt,
+          entryPrice: outcome.entryPrice,
+          quantity: outcome.quantity,
+          riskUsd: userExec.riskUsd,
           tpPrice,
           strategyInvalidationPrice,
           emergencyHardStopPrice,
           sameDirectionLiqUsd,
           percentileRank,
-          outcome.outcome === "ENTRY_ACTIVE_WITH_TP",
-        );
+          oiMetricLine,
+          counterMoveAtr,
+          orderBook,
+          protectionConfirmed:
+            outcome.outcome === "ENTRY_ACTIVE_WITH_TP" ||
+            outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP",
+          displayName: displayNameFromUserId(userExec.userId),
+        });
         await runtime.telegram.sendMessage(text);
       } catch (err) {
         log.error(

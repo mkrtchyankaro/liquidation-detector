@@ -20,8 +20,8 @@ import { computePaperPnl } from "../domain/liquidation-oi-strategy/pnl-calculato
 import {
   formatCloseMessage,
   formatTpUpdateMessage,
-  formatMarketExitMessage,
 } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { displayNameFromUserId } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import type { ForensicEvent } from "../domain/liquidation-oi-strategy/forensic-events";
 import type { BinanceRestLike } from "../infrastructure/binance/liquidation-oi-user-execution.service";
 import { childLogger } from "../infrastructure/logging/logger";
@@ -117,14 +117,6 @@ export class LiquidationOiActiveMainRuntime {
         log.warn(
           `[LOX_STRATEGY_INVALIDATION] ${symbol} globalSignalId=${globalSignalId} currentPrice=${currentPrice} strategyInvalidationPrice=${signal.strategyInvalidationPrice}`,
         );
-        await this.broadcastMarketExit(
-          symbol,
-          globalSignalId,
-          candidateSide,
-          "STRATEGY_INVALIDATION",
-          signal.entryPrice,
-          currentPrice,
-        );
         await this.positionLifecycle.requestGlobalMarketExit(
           globalSignalId,
           "STRATEGY_INVALIDATION",
@@ -167,14 +159,6 @@ export class LiquidationOiActiveMainRuntime {
         });
         log.warn(
           `[LOX_ADVERSE_OI_PRICE_EFFICIENCY_FLIP] ${symbol} globalSignalId=${globalSignalId} consecutiveAdverseCount=${oiResult.state.consecutiveAdverseCount}`,
-        );
-        await this.broadcastMarketExit(
-          symbol,
-          globalSignalId,
-          candidateSide,
-          "ADVERSE_OI_PRICE_EFFICIENCY_FLIP",
-          signal.entryPrice,
-          currentPrice,
         );
         await this.positionLifecycle.requestGlobalMarketExit(
           globalSignalId,
@@ -280,41 +264,6 @@ export class LiquidationOiActiveMainRuntime {
     this.dynamicExitStates.delete(globalSignalId);
   }
 
-  /** Section 7 "MARKET THESIS EXIT" broadcast -- one MAIN-level
-   *  notification per exit event, sent to every user with Telegram
-   *  configured, BEFORE the per-user fan-out resolves. Isolated. */
-  private async broadcastMarketExit(
-    symbol: string,
-    globalSignalId: string,
-    candidateSide: Side,
-    reason: string,
-    entryPrice: number,
-    exitRefPrice: number,
-  ): Promise<void> {
-    const text = formatMarketExitMessage(
-      symbol,
-      candidateSide,
-      reason,
-      entryPrice,
-      exitRefPrice,
-    );
-    for (const runtime of this.getUserRuntimes()) {
-      if (runtime.telegram === null) continue;
-      try {
-        await runtime.telegram.sendMessage(text);
-      } catch (err) {
-        log.error(
-          {
-            userId: runtime.userId,
-            globalSignalId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "[LOX_TELEGRAM_MARKET_EXIT_SEND_FAILED] -- isolated, trading lifecycle unaffected",
-        );
-      }
-    }
-  }
-
   /** Sections 2/3/8: causal, per-user PAPER TP hit detection, driven
    *  from the SAME live tick as every other MAIN decision. Isolated
    *  per user -- one user's TP hit never affects another's, and never
@@ -387,12 +336,16 @@ export class LiquidationOiActiveMainRuntime {
               symbol,
               candidateSide,
               terminalReason: "TP_FILLED",
+              globalSignalId,
+              terminalTimestamp: nowMs,
               entryPrice: userExec.entryPrice!,
               exitPrice: currentPrice,
-              tpAtClose: tpPrice,
+              quantity: userExec.quantity,
+              riskUsd: userExec.riskUsd,
               durationMs: nowMs - userExec.createdAt,
               mode: "PAPER",
               paperGrossPnlUsd: pnl.grossPnlUsd,
+              displayName: displayNameFromUserId(userExec.userId),
             });
             await runtime.telegram.sendMessage(text);
           } catch (err) {
@@ -470,17 +423,19 @@ export class LiquidationOiActiveMainRuntime {
           userExec.entryPrice !== null
         ) {
           try {
-            const text = formatTpUpdateMessage(
+            const text = formatTpUpdateMessage({
               symbol,
               candidateSide,
-              userExec.entryPrice,
+              globalSignalId,
+              entryPrice: userExec.entryPrice,
+              quantity: userExec.quantity ?? 0,
               oldTp,
-              newTargetPrice,
+              newTp: newTargetPrice,
               revision,
-              "OI/price capacity strengthened",
-              "PAPER",
-              null,
-            );
+              mode: "PAPER",
+              realReplaced: null,
+              displayName: displayNameFromUserId(userExec.userId),
+            });
             await runtime.telegram.sendMessage(text);
           } catch (err) {
             log.error(
@@ -557,17 +512,19 @@ export class LiquidationOiActiveMainRuntime {
           if (runtime.telegram !== null && userExec.entryPrice !== null) {
             try {
               await runtime.telegram.sendMessage(
-                formatTpUpdateMessage(
+                formatTpUpdateMessage({
                   symbol,
                   candidateSide,
-                  userExec.entryPrice,
+                  globalSignalId,
+                  entryPrice: userExec.entryPrice,
+                  quantity: userExec.quantity ?? 0,
                   oldTp,
-                  newTargetPrice,
+                  newTp: newTargetPrice,
                   revision,
-                  "OI/price capacity strengthened",
-                  "REAL",
-                  false,
-                ),
+                  mode: "REAL",
+                  realReplaced: false,
+                  displayName: displayNameFromUserId(userExec.userId),
+                }),
               );
             } catch {
               /* isolated */
@@ -615,17 +572,19 @@ export class LiquidationOiActiveMainRuntime {
         if (runtime.telegram !== null && userExec.entryPrice !== null) {
           try {
             await runtime.telegram.sendMessage(
-              formatTpUpdateMessage(
+              formatTpUpdateMessage({
                 symbol,
                 candidateSide,
-                userExec.entryPrice,
+                globalSignalId,
+                entryPrice: userExec.entryPrice,
+                quantity: userExec.quantity ?? 0,
                 oldTp,
-                newTargetPrice,
+                newTp: newTargetPrice,
                 revision,
-                "OI/price capacity strengthened",
-                "REAL",
-                true,
-              ),
+                mode: "REAL",
+                realReplaced: true,
+                displayName: displayNameFromUserId(userExec.userId),
+              }),
             );
           } catch (err) {
             log.error(

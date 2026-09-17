@@ -1,213 +1,156 @@
 import type { Side } from "../../shared/common.types";
 import type { OrderBookObservation } from "./order-book-observation";
-import { formatSignedPct } from "./pnl-calculator";
+import { pctMoveFromEntry } from "./pnl-calculator";
+import {
+  formatPrice,
+  formatSignedUsd,
+  formatCompactUsd,
+  formatPct,
+  formatUtcTime,
+  formatDuration,
+} from "./telegram-display-format";
 
 /**
- * Sep 17 2026 (Karo), operator-requested Section 7. Pure string
- * builders only -- no Telegram client, no Mongo, no Binance. Every
- * call site wraps the actual .sendMessage() in its own try/catch so a
- * Telegram failure here can never affect trading logic. This file is
- * the ONLY place LOX message text is constructed.
+ * Sep 17 2026 (Karo), operator-requested Telegram UX redesign pass.
+ * Pure string builders only -- no Telegram client, no Mongo, no
+ * Binance. Every call site wraps the actual .sendMessage() in its
+ * own try/catch so a Telegram failure here can never affect trading
+ * logic. This file is the ONLY place LOX message text is
+ * constructed. WATCH is deliberately no longer formatted here --
+ * WATCH state/logic remains fully operational internally, it simply
+ * produces no user-facing Telegram message (operator Section B).
  */
 
-function fmtNum(n: number | null | undefined, digits = 2): string {
-  return n === null || n === undefined ? "N/A" : n.toFixed(digits);
-}
-function fmtOrderBookSection(
+const SEP =
+  "\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501";
+
+function fmtOrderBookLine(
   ob: OrderBookObservation | null,
   candidateSide: Side,
-): string {
-  if (ob === null) return "";
-  const relevantWall =
+): string | null {
+  if (ob === null) return null;
+  const wall =
     candidateSide === "LONG"
       ? ob.strongestNearbyBidWall
       : ob.strongestNearbyAskWall;
-  const label = candidateSide === "LONG" ? "BUY wall" : "SELL wall";
-  if (relevantWall === null) return "";
-  const lines: string[] = ["", "Book:"];
-  lines.push(
-    `${label} $${(relevantWall.notionalUsd / 1000).toFixed(0)}k @ ${relevantWall.price}`,
+  if (wall === null) return null;
+  const label = candidateSide === "LONG" ? "BUY" : "SELL";
+  const distance =
+    wall.distanceFromPriceAtr !== null
+      ? ` (${wall.distanceFromPriceAtr.toFixed(2)} ATR)`
+      : "";
+  return `\ud83d\udcd6 Book      ${label} ${formatCompactUsd(wall.notionalUsd)} @ ${formatPrice(wall.price)}${distance}`;
+}
+
+export interface EntryMessageInput {
+  symbol: string;
+  candidateSide: Side;
+  mode: "PAPER" | "REAL";
+  globalSignalId: string;
+  entryTimestamp: number;
+  entryPrice: number;
+  quantity: number;
+  riskUsd: number;
+  tpPrice: number;
+  strategyInvalidationPrice: number;
+  emergencyHardStopPrice: number | null;
+  sameDirectionLiqUsd: number;
+  percentileRank: number;
+  oiMetricLine: string | null;
+  counterMoveAtr: number;
+  orderBook: OrderBookObservation | null;
+  protectionConfirmed: boolean | null;
+  displayName: string;
+}
+
+export function formatEntryMessage(input: EntryMessageInput): string {
+  const headerEmoji = input.mode === "PAPER" ? "\ud83d\udfe2" : "\ud83d\udd34";
+  const modeTag = input.mode === "PAPER" ? "PAPER" : "LIVE";
+  const positionNotional = input.entryPrice * input.quantity;
+  const tpPct = pctMoveFromEntry(
+    input.candidateSide,
+    input.entryPrice,
+    input.tpPrice,
   );
-  if (relevantWall.distanceFromPriceAtr !== null)
-    lines.push(`Distance: ${relevantWall.distanceFromPriceAtr.toFixed(2)} ATR`);
+  const slPct = pctMoveFromEntry(
+    input.candidateSide,
+    input.entryPrice,
+    input.strategyInvalidationPrice,
+  );
+  const tpUsd =
+    input.candidateSide === "LONG"
+      ? (input.tpPrice - input.entryPrice) * input.quantity
+      : (input.entryPrice - input.tpPrice) * input.quantity;
+  const slUsd =
+    input.candidateSide === "LONG"
+      ? (input.strategyInvalidationPrice - input.entryPrice) * input.quantity
+      : (input.entryPrice - input.strategyInvalidationPrice) * input.quantity;
+
+  const lines: string[] = [
+    `${headerEmoji} ${input.symbol} \u00b7 ${input.candidateSide} \u00b7 ${modeTag}`,
+    SEP,
+    `\ud83d\udccd ENTRY  \u00b7  ${formatUtcTime(input.entryTimestamp)}`,
+    `\ud83c\udd94 ${input.globalSignalId}`,
+    "",
+    `Entry     ${formatPrice(input.entryPrice)}`,
+    `TP        ${formatPrice(input.tpPrice)}  (${formatPct(tpPct)})  \u2502 ${formatSignedUsd(tpUsd)}`,
+    `SL        ${formatPrice(input.strategyInvalidationPrice)}  (${formatPct(slPct)})  \u2502 ${formatSignedUsd(slUsd)}`,
+  ];
+  if (input.mode === "REAL" && input.emergencyHardStopPrice !== null) {
+    lines.push(`Emergency ${formatPrice(input.emergencyHardStopPrice)}`);
+  }
+  lines.push(
+    "",
+    `Risk      $${input.riskUsd.toFixed(2)}`,
+    `Position  ${formatCompactUsd(positionNotional)}`,
+    "",
+    `\u26a1 Liq       ${formatCompactUsd(input.sameDirectionLiqUsd)}  \u00b7  P${input.percentileRank.toFixed(0)}`,
+  );
+  if (input.oiMetricLine !== null) lines.push(input.oiMetricLine);
+  lines.push(`\u2197 Recovery  ${input.counterMoveAtr.toFixed(2)} ATR`);
+  const bookLine = fmtOrderBookLine(input.orderBook, input.candidateSide);
+  if (bookLine !== null) lines.push(bookLine);
+  if (input.mode === "REAL")
+    lines.push(
+      `Protection ${input.protectionConfirmed ? "CONFIRMED \u2713" : "NOT CONFIRMED \u2717"}`,
+    );
+  lines.push(SEP, `${input.displayName} \u00b7 ${modeTag}`);
   return lines.join("\n");
 }
-function durationLabel(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const min = Math.floor(totalSec / 60);
-  const sec = totalSec % 60;
-  return `${min}m ${sec}s`;
-}
 
-export function formatWatchMessage(
-  symbol: string,
-  candidateSide: Side,
-  sameDirectionLiqUsd: number,
-  percentileRank: number,
-  displacementAtr: number,
-  oiDestructionFraction: number | null,
-  orderBook: OrderBookObservation | null,
-): string {
-  const lines = [
-    `${symbol} ${candidateSide} \u2014 WATCH`,
-    "",
-    `Liq: $${(sameDirectionLiqUsd / 1_000_000).toFixed(2)}M | Rank: ${percentileRank.toFixed(0)}`,
-    `Displacement: ${displacementAtr.toFixed(2)} ATR`,
-    `OI destruction: ${oiDestructionFraction !== null ? `${(oiDestructionFraction * 100).toFixed(1)}%` : "N/A"}`,
-    "OI: clearing not yet confirmed",
-    fmtOrderBookSection(orderBook, candidateSide),
-  ];
-  return lines.filter((l) => l !== "").join("\n");
-}
-
-export function formatPaperEntryMessage(
-  symbol: string,
-  candidateSide: Side,
-  entryPrice: number,
-  tpPrice: number,
-  strategyInvalidationPrice: number,
-  sameDirectionLiqUsd: number,
-  percentileRank: number,
-  counterMoveAtr: number,
-  riskUsd: number,
-  orderBook: OrderBookObservation | null,
-): string {
-  const tpPct = formatSignedPct(pctMove(candidateSide, entryPrice, tpPrice));
-  const slPct = formatSignedPct(
-    pctMove(candidateSide, entryPrice, strategyInvalidationPrice),
-  );
-  const lines = [
-    `${symbol} ${candidateSide} \u2014 ENTRY \ud83d\udcdd PAPER`,
-    "",
-    `Entry: ${entryPrice}`,
-    `TP: ${tpPrice} (${tpPct})`,
-    `SL: ${strategyInvalidationPrice} (${slPct})`,
-    "",
-    `Liq: $${(sameDirectionLiqUsd / 1_000_000).toFixed(2)}M | Rank: ${percentileRank.toFixed(0)}`,
-    "OI clearing: \u2713",
-    `Recovery: ${counterMoveAtr.toFixed(2)} ATR`,
-    fmtOrderBookSection(orderBook, candidateSide),
-    "",
-    `Risk model: $${fmtNum(riskUsd)}`,
-    "Mode: PAPER \u2014 NO BINANCE ORDER",
-  ];
-  return lines
-    .filter((l) => l !== "")
-    .join("\n")
-    .replace(/\n\n\n+/g, "\n\n");
-}
-
-export function formatRealEntryMessage(
-  symbol: string,
-  candidateSide: Side,
-  entryPrice: number,
-  quantity: number,
-  riskUsd: number,
-  tpPrice: number,
-  strategyInvalidationPrice: number,
-  emergencyHardStopPrice: number,
-  sameDirectionLiqUsd: number,
-  percentileRank: number,
-  protectionConfirmed: boolean,
-): string {
-  const tpPct = formatSignedPct(pctMove(candidateSide, entryPrice, tpPrice));
-  const slPct = formatSignedPct(
-    pctMove(candidateSide, entryPrice, strategyInvalidationPrice),
-  );
-  const emergPct = formatSignedPct(
-    pctMove(candidateSide, entryPrice, emergencyHardStopPrice),
-  );
-  return [
-    `${symbol} ${candidateSide} \u2014 ENTRY \ud83d\udd34 LIVE`,
-    "",
-    `Entry: ${entryPrice}`,
-    `Qty: ${quantity}`,
-    `Risk: $${fmtNum(riskUsd)}`,
-    "",
-    `TP: ${tpPrice} (${tpPct})`,
-    `Strategy SL: ${strategyInvalidationPrice} (${slPct})`,
-    `Emergency stop: ${emergencyHardStopPrice} (${emergPct})`,
-    "",
-    `Protection: ${protectionConfirmed ? "CONFIRMED" : "NOT CONFIRMED -- see cleanup/logs"}`,
-    "",
-    `Liq: $${(sameDirectionLiqUsd / 1_000_000).toFixed(2)}M | Rank: ${percentileRank.toFixed(0)}`,
-    "OI clearing: \u2713",
-  ].join("\n");
-}
-
-export function formatTpUpdateMessage(
-  symbol: string,
-  candidateSide: Side,
-  entryPrice: number,
-  oldTp: number,
-  newTp: number,
-  revision: number,
-  reason: string,
-  mode: "PAPER" | "REAL",
-  realReplaced: boolean | null,
-): string {
-  const oldPct = formatSignedPct(pctMove(candidateSide, entryPrice, oldTp));
-  const newPct = formatSignedPct(pctMove(candidateSide, entryPrice, newTp));
-  const modeLine =
-    mode === "PAPER"
-      ? "Mode: PAPER"
-      : `Mode: LIVE | Binance TP replaced ${realReplaced ? "\u2713" : "\u2717 FAILED -- previous TP retained"}`;
-  return [
-    `${symbol} ${candidateSide} \u2014 TP UPDATED`,
-    "",
-    `Old TP: ${oldTp} (${oldPct})`,
-    `New TP: ${newTp} (${newPct})`,
-    "",
-    `Reason: ${reason}`,
-    `Revision: ${revision}`,
-    "",
-    modeLine,
-  ].join("\n");
-}
-
-export function formatMarketExitMessage(
-  symbol: string,
-  candidateSide: Side,
-  reason: string,
-  entryPrice: number,
-  exitRefPrice: number,
-): string {
-  const movePct = formatSignedPct(
-    pctMove(candidateSide, entryPrice, exitRefPrice),
-  );
-  return [
-    `${symbol} ${candidateSide} \u2014 MARKET EXIT`,
-    "",
-    `Reason: ${reason}`,
-    "",
-    `Entry: ${entryPrice}`,
-    `Exit ref: ${exitRefPrice}`,
-    `Move: ${movePct}`,
-    "",
-    "MAIN thesis invalidated.",
-  ].join("\n");
-}
-
-const CLOSE_LABELS: Record<string, string> = {
-  TP_FILLED: "\u2705 TP",
-  STRATEGY_INVALIDATION: "\u274c SL",
-  ADVERSE_OI_PRICE_EFFICIENCY_FLIP: "\u26a0\ufe0f THESIS FLIP",
-  EMERGENCY_STOP: "\ud83d\udea8 EMERGENCY STOP",
-  POSITION_CLOSED_EXTERNALLY: "\u2753 EXTERNAL",
-  DYNAMIC_EXIT: "\u26a0\ufe0f DYNAMIC EXIT",
-  MANUAL_CLOSE: "\ud83d\udc64 MANUAL",
-  PROTECTION_FAILED: "\u26a0\ufe0f PROTECTION FAILED",
-  EXECUTION_FAILED: "\u26a0\ufe0f EXECUTION FAILED",
-  USER_STRATEGY_EXECUTION_DISABLED: "USER DISABLED",
+const CLOSE_HEADER: Record<string, { emoji: string; label: string }> = {
+  TP_FILLED: { emoji: "\u2705", label: "TAKE PROFIT" },
+  STRATEGY_INVALIDATION: { emoji: "\ud83d\udd34", label: "STOP LOSS" },
+  ADVERSE_OI_PRICE_EFFICIENCY_FLIP: {
+    emoji: "\u26a0\ufe0f",
+    label: "MARKET EXIT",
+  },
+  DYNAMIC_EXIT: { emoji: "\u26a0\ufe0f", label: "MARKET EXIT" },
+  EMERGENCY_STOP: { emoji: "\ud83d\udea8", label: "EMERGENCY STOP" },
+  POSITION_CLOSED_EXTERNALLY: { emoji: "\u2753", label: "EXTERNAL CLOSE" },
+  MANUAL_CLOSE: { emoji: "\ud83d\udc64", label: "MANUAL CLOSE" },
+  PROTECTION_FAILED: { emoji: "\u26a0\ufe0f", label: "PROTECTION FAILED" },
+  EXECUTION_FAILED: { emoji: "\u26a0\ufe0f", label: "EXECUTION FAILED" },
+  USER_STRATEGY_EXECUTION_DISABLED: {
+    emoji: "\u26a0\ufe0f",
+    label: "USER DISABLED",
+  },
+};
+const REASON_TEXT: Record<string, string> = {
+  ADVERSE_OI_PRICE_EFFICIENCY_FLIP: "OI / Price thesis invalidated",
+  DYNAMIC_EXIT: "MAIN thesis exit",
 };
 
 export interface CloseMessageInput {
   symbol: string;
   candidateSide: Side;
   terminalReason: string;
+  globalSignalId: string;
+  terminalTimestamp: number;
   entryPrice: number;
   exitPrice: number | null;
-  tpAtClose: number | null;
+  quantity: number | null;
+  riskUsd: number | null;
   durationMs: number | null;
   mode: "PAPER" | "REAL";
   paperGrossPnlUsd?: number | null;
@@ -215,74 +158,115 @@ export interface CloseMessageInput {
   realFeesUsd?: number | null;
   realNetPnlUsd?: number | null;
   cleanupState?: string;
+  displayName: string;
 }
 
-/** Never labels a loss "SL" unless the reason genuinely was
- *  STRATEGY_INVALIDATION -- every reason gets its own stable label,
- *  per the operator's own explicit instruction. */
 export function formatCloseMessage(input: CloseMessageInput): string {
-  const label = CLOSE_LABELS[input.terminalReason] ?? input.terminalReason;
-  const exitPriceLabel =
-    input.exitPrice !== null ? String(input.exitPrice) : "N/A";
-  const movePct =
-    input.exitPrice !== null
-      ? formatSignedPct(
-          pctMove(input.candidateSide, input.entryPrice, input.exitPrice),
-        )
-      : "N/A";
-  const lines = [
-    `${input.symbol} ${input.candidateSide} \u2014 CLOSED ${label}`,
+  const header = CLOSE_HEADER[input.terminalReason] ?? {
+    emoji: "\u2753",
+    label: input.terminalReason,
+  };
+  const modeTag = input.mode === "PAPER" ? "PAPER" : "LIVE";
+  const exitKnown = input.exitPrice !== null;
+  const movePct = exitKnown
+    ? pctMoveFromEntry(input.candidateSide, input.entryPrice, input.exitPrice!)
+    : null;
+  const moveUsd =
+    exitKnown && input.quantity !== null
+      ? (input.candidateSide === "LONG"
+          ? input.exitPrice! - input.entryPrice
+          : input.entryPrice - input.exitPrice!) * input.quantity
+      : null;
+
+  const lines: string[] = [
+    `${header.emoji} ${input.symbol} \u00b7 ${header.label}`,
+    SEP,
+    `\ud83c\udfc1 CLOSED  \u00b7  ${formatUtcTime(input.terminalTimestamp)}`,
+    `\ud83c\udd94 ${input.globalSignalId}`,
     "",
-    `Entry: ${input.entryPrice}`,
-    `Exit: ${exitPriceLabel}`,
-    `Move: ${movePct}`,
   ];
-  if (input.tpAtClose !== null)
-    lines.push(
-      `TP at close: ${input.tpAtClose} (${formatSignedPct(pctMove(input.candidateSide, input.entryPrice, input.tpAtClose))})`,
-    );
+  const reasonText = REASON_TEXT[input.terminalReason];
+  if (reasonText !== undefined) lines.push(`Reason    ${reasonText}`, "");
+  lines.push(
+    `Entry     ${formatPrice(input.entryPrice)}`,
+    `Exit      ${exitKnown ? formatPrice(input.exitPrice!) : "N/A"}`,
+    "",
+  );
+
+  const resultLine =
+    movePct !== null
+      ? `Result    ${formatPct(movePct)}  \u2502 ${moveUsd !== null ? formatSignedUsd(moveUsd) : "N/A"}`
+      : "Result    N/A";
+  lines.push(resultLine);
+  if (input.riskUsd !== null)
+    lines.push(`Risk      $${input.riskUsd.toFixed(2)}`);
   if (input.durationMs !== null)
-    lines.push(`Duration: ${durationLabel(input.durationMs)}`);
-  lines.push("");
-  if (input.mode === "PAPER") {
+    lines.push(`Duration  ${formatDuration(input.durationMs)}`);
+
+  if (input.mode === "REAL") {
+    lines.push("");
     lines.push(
-      `Paper PnL: ${input.paperGrossPnlUsd !== null && input.paperGrossPnlUsd !== undefined ? (input.paperGrossPnlUsd >= 0 ? "+" : "") + "$" + input.paperGrossPnlUsd.toFixed(2) : "N/A"}`,
-    );
-    lines.push("Mode: PAPER");
-  } else {
-    lines.push(
-      `Actual PnL: ${input.realActualPnlUsd !== null && input.realActualPnlUsd !== undefined ? "$" + input.realActualPnlUsd.toFixed(2) : "N/A (not yet provable)"}`,
+      `Actual PnL ${input.realActualPnlUsd !== null && input.realActualPnlUsd !== undefined ? formatSignedUsd(input.realActualPnlUsd) : "N/A (not yet provable)"}`,
     );
     if (input.realFeesUsd !== null && input.realFeesUsd !== undefined)
-      lines.push(`Fees: $${input.realFeesUsd.toFixed(2)}`);
+      lines.push(`Fees       $${input.realFeesUsd.toFixed(2)}`);
     if (input.realNetPnlUsd !== null && input.realNetPnlUsd !== undefined)
-      lines.push(`Net PnL: $${input.realNetPnlUsd.toFixed(2)}`);
-    lines.push(`Cleanup: ${input.cleanupState ?? "PENDING"}`);
+      lines.push(`Net PnL    ${formatSignedUsd(input.realNetPnlUsd)}`);
+    lines.push(`Cleanup    ${input.cleanupState ?? "PENDING"}`);
   }
+
+  lines.push(SEP, `${input.displayName} \u00b7 ${modeTag}`);
   return lines.join("\n");
 }
 
-export function formatCleanupFailureMessage(
-  symbol: string,
-  userId: string,
-  reason: string,
-): string {
-  return [
-    `${symbol} \u2014 CLEANUP FAILURE`,
-    "",
-    `User: ${userId}`,
-    `Reason: ${reason}`,
-    "",
-    "Will retry automatically. Manual review recommended if this persists.",
-  ].join("\n");
+export interface TpUpdateMessageInput {
+  symbol: string;
+  candidateSide: Side;
+  globalSignalId: string;
+  entryPrice: number;
+  quantity: number;
+  oldTp: number;
+  newTp: number;
+  revision: number;
+  mode: "PAPER" | "REAL";
+  realReplaced: boolean | null;
+  displayName: string;
 }
 
-function pctMove(
-  side: Side,
-  entryPrice: number,
-  referencePrice: number,
-): number {
-  return side === "LONG"
-    ? ((referencePrice - entryPrice) / entryPrice) * 100
-    : ((entryPrice - referencePrice) / entryPrice) * 100;
+export function formatTpUpdateMessage(input: TpUpdateMessageInput): string {
+  const oldPct = pctMoveFromEntry(
+    input.candidateSide,
+    input.entryPrice,
+    input.oldTp,
+  );
+  const newPct = pctMoveFromEntry(
+    input.candidateSide,
+    input.entryPrice,
+    input.newTp,
+  );
+  const oldUsd =
+    (input.candidateSide === "LONG"
+      ? input.oldTp - input.entryPrice
+      : input.entryPrice - input.oldTp) * input.quantity;
+  const newUsd =
+    (input.candidateSide === "LONG"
+      ? input.newTp - input.entryPrice
+      : input.entryPrice - input.newTp) * input.quantity;
+  const modeLine =
+    input.mode === "PAPER"
+      ? `${input.displayName} \u00b7 PAPER`
+      : `${input.displayName} \u00b7 LIVE${input.realReplaced === false ? " (replace FAILED -- previous TP retained)" : ""}`;
+
+  return [
+    `\ud83d\udd04 ${input.symbol} \u00b7 TP UPDATED`,
+    SEP,
+    `\ud83c\udd94 ${input.globalSignalId}`,
+    "",
+    `Old TP    ${formatPrice(input.oldTp)} (${formatPct(oldPct)}) \u2502 ${formatSignedUsd(oldUsd)}`,
+    `New TP    ${formatPrice(input.newTp)} (${formatPct(newPct)}) \u2502 ${formatSignedUsd(newUsd)}`,
+    "",
+    `Revision  ${input.revision}`,
+    SEP,
+    modeLine,
+  ].join("\n");
 }

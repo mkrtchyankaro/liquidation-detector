@@ -14,6 +14,7 @@ import type { BinanceRestLike } from "../infrastructure/binance/liquidation-oi-u
 import type { ForensicEvent } from "../domain/liquidation-oi-strategy/forensic-events";
 import { computePaperPnl } from "../domain/liquidation-oi-strategy/pnl-calculator";
 import { formatCloseMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { displayNameFromUserId } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import { childLogger } from "../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "lox-position-lifecycle" });
@@ -118,6 +119,23 @@ export class LiquidationOiPositionLifecycleService {
       return;
     }
     if (userExec.state !== "ACTIVE") return;
+
+    // Sep 17 2026 (Karo), operator-reported CRITICAL PRODUCTION BUG FIX.
+    // Live evidence: a PAPER user with a REAL binanceRest client
+    // configured (paper because of their OWN liquidationOiExecutionEnabled
+    // flag, or the global safety fallback -- NOT missing credentials) was
+    // being reconciled against their real, always-flat Binance position
+    // by this exact method, and incorrectly terminated as
+    // POSITION_CLOSED_EXTERNALLY within one ~15s poll cycle -- with no
+    // exit price, no PnL, defeating PAPER mode's own virtual monitoring
+    // entirely. This is the SAME class of bug already fixed in
+    // applyTpRevision() and requestUserMarketExit() (mode must be the
+    // exclusive gate, never client presence) -- this call site was
+    // missed in that pass. PAPER users are monitored EXCLUSIVELY by
+    // LiquidationOiActiveMainRuntime's own causal price-based checks
+    // (checkPaperTpHits, requestGlobalMarketExit's PAPER branch) --
+    // this Binance-reconciliation path must never touch them.
+    if (userExec.mode === "PAPER") return;
 
     const runtime = this.findRuntime(userExec.userId);
     if (runtime === null || runtime.binanceRest === null) return;
@@ -238,12 +256,16 @@ export class LiquidationOiPositionLifecycleService {
             candidateSide,
             terminalReason:
               userExec.terminalReason ?? "POSITION_CLOSED_EXTERNALLY",
+            globalSignalId: userExec.globalSignalId,
+            terminalTimestamp: nowMs,
             entryPrice: userExec.entryPrice,
             exitPrice: userExec.exitPrice,
-            tpAtClose: userExec.tpPrice,
+            quantity: userExec.quantity,
+            riskUsd: userExec.riskUsd,
             durationMs: nowMs - userExec.createdAt,
             mode: "PAPER",
             paperGrossPnlUsd: userExec.grossPnlUsd,
+            displayName: displayNameFromUserId(userExec.userId),
           });
           await runtime.telegram.sendMessage(text);
         } catch (err) {
@@ -317,13 +339,17 @@ export class LiquidationOiPositionLifecycleService {
             candidateSide: userExec.side,
             terminalReason:
               userExec.terminalReason ?? "POSITION_CLOSED_EXTERNALLY",
+            globalSignalId: userExec.globalSignalId,
+            terminalTimestamp: nowMs,
             entryPrice: userExec.entryPrice,
             exitPrice: userExec.exitPrice,
-            tpAtClose: userExec.tpPrice,
+            quantity: userExec.quantity,
+            riskUsd: userExec.riskUsd,
             durationMs: nowMs - userExec.createdAt,
             mode: "REAL",
             realActualPnlUsd: userExec.realizedPnlUsd,
             cleanupState: "COMPLETE",
+            displayName: displayNameFromUserId(userExec.userId),
           });
           await runtime.telegram.sendMessage(text);
         } catch (err) {
