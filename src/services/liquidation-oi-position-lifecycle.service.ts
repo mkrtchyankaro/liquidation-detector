@@ -14,6 +14,7 @@ import type { BinanceRestLike } from "../infrastructure/binance/liquidation-oi-u
 import type { ForensicEvent } from "../domain/liquidation-oi-strategy/forensic-events";
 import { computePaperPnl } from "../domain/liquidation-oi-strategy/pnl-calculator";
 import { formatCloseMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
 import { displayNameFromUserId } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import { childLogger } from "../infrastructure/logging/logger";
 
@@ -267,7 +268,11 @@ export class LiquidationOiPositionLifecycleService {
             paperGrossPnlUsd: userExec.grossPnlUsd,
             displayName: displayNameFromUserId(userExec.userId),
           });
-          await runtime.telegram.sendMessage(text);
+          await sendTelegramWithRetry(
+            runtime.telegram,
+            text,
+            `PAPER_CLOSE userId=${userExec.userId} symbol=${userExec.symbol}`,
+          );
         } catch (err) {
           log.error(
             {
@@ -351,7 +356,11 @@ export class LiquidationOiPositionLifecycleService {
             cleanupState: "COMPLETE",
             displayName: displayNameFromUserId(userExec.userId),
           });
-          await runtime.telegram.sendMessage(text);
+          await sendTelegramWithRetry(
+            runtime.telegram,
+            text,
+            `REAL_CLOSE userId=${userExec.userId} symbol=${userExec.symbol}`,
+          );
         } catch (err) {
           log.error(
             {
@@ -457,16 +466,11 @@ export class LiquidationOiPositionLifecycleService {
     );
     const runtime = this.findRuntime(userExec.userId);
     if (runtime !== null && runtime.telegram !== null) {
-      try {
-        await runtime.telegram.sendMessage(
-          `${userExec.symbol} ${userExec.side} CLEANUP FAILURE\nUser: ${userExec.userId}\nReason: ${reason}\nWill retry automatically. Manual review recommended if this persists.`,
-        );
-      } catch (err) {
-        log.error(
-          { err: err instanceof Error ? err.message : String(err) },
-          "[LOX_TELEGRAM_CLEANUP_FAILURE_SEND_FAILED] -- isolated",
-        );
-      }
+      await sendTelegramWithRetry(
+        runtime.telegram,
+        `${userExec.symbol} ${userExec.side} CLEANUP FAILURE\nUser: ${userExec.userId}\nReason: ${reason}\nWill retry automatically. Manual review recommended if this persists.`,
+        `CLEANUP_FAILURE userId=${userExec.userId} symbol=${userExec.symbol}`,
+      );
     }
   }
 
@@ -582,7 +586,20 @@ export class LiquidationOiPositionLifecycleService {
         priceMovePct: pnl.priceMovePct,
         updatedAt: nowMs,
       };
-      await this.globalSignalRepo.upsertUserExecution(updated);
+      // Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- ATOMIC
+      // compare-and-swap, not read-then-write. A plain findUserExecution()
+      // check followed by a separate upsertUserExecution() write left a
+      // race window: two overlapping onActiveTick calls (confirmed live,
+      // from bookTicker ticks arriving faster than one full tick cycle
+      // completes -- see market-data-orchestrator.ts's loxTickInFlight
+      // fix, the primary defense) could BOTH read "still ACTIVE" before
+      // EITHER writes. terminalizeIfActive()'s filter includes
+      // state==="ACTIVE" in the SAME atomic operation as the write, so
+      // MongoDB itself guarantees only one concurrent caller can ever
+      // win -- the loser's matchedCount is 0 and it cleanly skips all
+      // further processing below (no duplicate Telegram, no lost write).
+      const won = await this.globalSignalRepo.terminalizeIfActive(updated);
+      if (!won) return;
       this.emit(userExec, nowMs, {
         type: "USER_MARKET_EXIT_CONFIRMED",
         userId: userExec.userId,

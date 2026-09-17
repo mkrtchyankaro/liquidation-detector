@@ -142,6 +142,47 @@ export class LiquidationOiGlobalSignalRepository {
     }
   }
 
+  /** Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- ATOMIC
+   *  compare-and-swap terminal transition. A plain read-then-write
+   *  (findUserExecution() followed by upsertUserExecution()) is
+   *  racy: two concurrent callers can BOTH read state==="ACTIVE"
+   *  before EITHER writes, since the read and the write are two
+   *  separate round-trips with a window between them -- this is
+   *  exactly the mechanism proven live (a fast BTCUSDT move produced
+   *  overlapping ticks, and some users' close either duplicated or
+   *  silently lost a write). This method makes the transition
+   *  atomic at the database level: the update's FILTER itself
+   *  requires state==="ACTIVE", so MongoDB guarantees only ONE
+   *  concurrent caller's update can ever match and apply for a given
+   *  document -- the loser's matchedCount is 0, and callers use that
+   *  to skip all further processing (Telegram send, forensic events)
+   *  for their own race-losing attempt, cleanly, with no separate
+   *  read needed first. */
+  async terminalizeIfActive(
+    doc: LiquidationOiUserExecutionState,
+  ): Promise<boolean> {
+    try {
+      const col = await this.getUserExecCollection();
+      if (!col) return false;
+      const result = await col.updateOne(
+        {
+          userId: doc.userId,
+          globalSignalId: doc.globalSignalId,
+          state: "ACTIVE",
+        },
+        { $set: doc },
+      );
+      return result.matchedCount > 0;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      log.error(
+        { err: msg, userId: doc.userId, globalSignalId: doc.globalSignalId },
+        "[LOX_USER_EXECUTION_TERMINALIZE_IF_ACTIVE_FAILED]",
+      );
+      return false;
+    }
+  }
+
   async findUserExecution(
     userId: string,
     globalSignalId: string,

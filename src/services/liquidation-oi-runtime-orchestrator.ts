@@ -34,6 +34,7 @@ import {
   type LiquidationOiActiveLifecycleConfig,
 } from "../domain/liquidation-oi-strategy/active-lifecycle-config";
 import { formatEntryMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
 import {
   displayNameFromUserId,
   formatCompactUsd,
@@ -761,7 +762,11 @@ export class LiquidationOiRuntimeOrchestrator {
           protectionConfirmed: null,
           displayName: displayNameFromUserId(runtime.userId),
         });
-        await runtime.telegram.sendMessage(text);
+        await sendTelegramWithRetry(
+          runtime.telegram,
+          text,
+          `PAPER_ENTRY userId=${runtime.userId} symbol=${symbol}`,
+        );
       } catch (err) {
         log.error(
           {
@@ -922,7 +927,11 @@ export class LiquidationOiRuntimeOrchestrator {
             outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP",
           displayName: displayNameFromUserId(userExec.userId),
         });
-        await runtime.telegram.sendMessage(text);
+        await sendTelegramWithRetry(
+          runtime.telegram,
+          text,
+          `REAL_ENTRY userId=${userExec.userId} symbol=${symbol}`,
+        );
       } catch (err) {
         log.error(
           {

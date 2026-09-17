@@ -123,6 +123,27 @@ export class MarketDataOrchestrator {
   readonly liquidationStore = new LiquidationStore();
   readonly liquidationStats: LiquidationStatsService;
   readonly liqFeedWatchdog: LiqFeedWatchdogService;
+  /** Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- the
+   *  bookTicker handler below calls liquidationOiOrchestrator.onTick()
+   *  with `void` (fire-and-forget), and onTick()/onActiveTick() does
+   *  multiple sequential Mongo round-trips. During a fast price move,
+   *  bookTicker ticks for the SAME symbol can arrive faster than one
+   *  full onTick() cycle completes, so MULTIPLE overlapping calls for
+   *  the same symbol were racing each other -- confirmed as the
+   *  mechanism behind two live production symptoms: a strategy-
+   *  invalidation exit firing far past the actual crossing price (an
+   *  intermediate tick's result got overwritten by a
+   *  later-arriving-but-earlier-finishing call), and some users'
+   *  CLOSE Telegram silently missing (two concurrent
+   *  requestGlobalMarketExit() fan-outs for the same signal racing on
+   *  the same user rows, one losing a write and throwing into the
+   *  per-user try/catch that isolates other users). Per-symbol
+   *  serialization: a new LOX tick for a symbol is DROPPED (never
+   *  queued) if a previous one for that same symbol is still in
+   *  flight -- correct for a live tick feed, since only the freshest
+   *  price matters and a queued backlog would itself cause the same
+   *  kind of staleness this is meant to prevent. */
+  private readonly loxTickInFlight = new Set<string>();
   readonly wallTracker: WallTrackerService;
   readonly candleStore = new CandleStore();
   readonly tradeStore = new TradeStore();
@@ -889,46 +910,69 @@ export class MarketDataOrchestrator {
           .getWatchManager()
           .getLifecycle(b.symbol) !== null
       ) {
-        const lastClosed3m = this.candleStore.lastClosed(b.symbol, "3m");
-        const atr3m = this.atrTracker.getWilderATRAtOrBefore(
-          b.symbol,
-          "3m",
-          14,
-          b.timestamp,
-        );
-        const atr3mAgeMs =
-          lastClosed3m !== null ? b.timestamp - lastClosed3m.closeTime : null;
-        const oiHistory = this.oiTracker
-          .getOiHistory(b.symbol)
-          .map((s) => ({ contracts: s.contracts, fetchedAt: s.fetchedAt }));
-        const lifecycle = this.liquidationOiOrchestrator
-          .getWatchManager()
-          .getLifecycle(b.symbol)!;
-        const thresholds =
-          this.episodePercentileServiceForLox?.getThresholds(b.symbol) ?? null;
-        const dir =
-          lifecycle.episode.victim === "LONG"
-            ? thresholds?.long
-            : thresholds?.short;
-        const percentileContext = buildPercentileContext(
-          dir?.sampleCount ?? null,
-          dir?.p90 ?? null,
-          dir?.p95 ?? null,
-          dir?.p99 ?? null,
-          lifecycle.episode.sameDirectionLiqUsd,
-        );
-        void this.liquidationOiOrchestrator.onTick(
-          b.symbol,
-          percentileContext,
-          oiHistory,
-          mid,
-          atr3m,
-          atr3mAgeMs,
-          b.timestamp,
-          b.bid,
-          b.ask,
-          this.wallTracker,
-        );
+        if (this.loxTickInFlight.has(b.symbol)) {
+          // A previous tick for this symbol is still being processed --
+          // drop this one rather than queue it (queueing would only
+          // reintroduce the same staleness this guard exists to prevent).
+          // The NEXT bookTicker tick, once the in-flight call completes,
+          // will carry a price at least as fresh as this dropped one.
+        } else {
+          const lastClosed3m = this.candleStore.lastClosed(b.symbol, "3m");
+          const atr3m = this.atrTracker.getWilderATRAtOrBefore(
+            b.symbol,
+            "3m",
+            14,
+            b.timestamp,
+          );
+          const atr3mAgeMs =
+            lastClosed3m !== null ? b.timestamp - lastClosed3m.closeTime : null;
+          const oiHistory = this.oiTracker
+            .getOiHistory(b.symbol)
+            .map((s) => ({ contracts: s.contracts, fetchedAt: s.fetchedAt }));
+          const lifecycle = this.liquidationOiOrchestrator
+            .getWatchManager()
+            .getLifecycle(b.symbol)!;
+          const thresholds =
+            this.episodePercentileServiceForLox?.getThresholds(b.symbol) ??
+            null;
+          const dir =
+            lifecycle.episode.victim === "LONG"
+              ? thresholds?.long
+              : thresholds?.short;
+          const percentileContext = buildPercentileContext(
+            dir?.sampleCount ?? null,
+            dir?.p90 ?? null,
+            dir?.p95 ?? null,
+            dir?.p99 ?? null,
+            lifecycle.episode.sameDirectionLiqUsd,
+          );
+          this.loxTickInFlight.add(b.symbol);
+          this.liquidationOiOrchestrator
+            .onTick(
+              b.symbol,
+              percentileContext,
+              oiHistory,
+              mid,
+              atr3m,
+              atr3mAgeMs,
+              b.timestamp,
+              b.bid,
+              b.ask,
+              this.wallTracker,
+            )
+            .catch((err) => {
+              log.error(
+                {
+                  symbol: b.symbol,
+                  err: err instanceof Error ? err.message : String(err),
+                },
+                "[LOX_ON_TICK_UNEXPECTED_ERROR]",
+              );
+            })
+            .finally(() => {
+              this.loxTickInFlight.delete(b.symbol);
+            });
+        }
       }
       // Sep 10 2026 (Karo), operator-requested: DISCONNECTED, same
       // rationale as feedUnitResearchShadowAfter() above -- this call

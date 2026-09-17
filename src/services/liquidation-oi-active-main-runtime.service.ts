@@ -21,6 +21,7 @@ import {
   formatCloseMessage,
   formatTpUpdateMessage,
 } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
 import { displayNameFromUserId } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import type { ForensicEvent } from "../domain/liquidation-oi-strategy/forensic-events";
 import type { BinanceRestLike } from "../infrastructure/binance/liquidation-oi-user-execution.service";
@@ -342,7 +343,15 @@ export class LiquidationOiActiveMainRuntime {
           priceMovePct: pnl.priceMovePct,
           updatedAt: nowMs,
         };
-        await this.globalSignalRepo.upsertUserExecution(updated);
+        // Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- ATOMIC
+        // compare-and-swap (see the identical fix and full explanation
+        // in liquidation-oi-position-lifecycle.service.ts's own
+        // requestUserMarketExit). A read-then-write idempotency check
+        // is NOT sufficient against two truly overlapping ticks; the
+        // filter itself must require state==="ACTIVE" in the SAME
+        // atomic operation as the write.
+        const won = await this.globalSignalRepo.terminalizeIfActive(updated);
+        if (!won) continue;
         this.forensic({
           ts: nowMs,
           symbol,
@@ -377,7 +386,11 @@ export class LiquidationOiActiveMainRuntime {
               paperGrossPnlUsd: pnl.grossPnlUsd,
               displayName: displayNameFromUserId(userExec.userId),
             });
-            await runtime.telegram.sendMessage(text);
+            await sendTelegramWithRetry(
+              runtime.telegram,
+              text,
+              `PAPER_TP_CLOSE userId=${userExec.userId} symbol=${symbol}`,
+            );
           } catch (err) {
             log.error(
               {
@@ -466,7 +479,11 @@ export class LiquidationOiActiveMainRuntime {
               realReplaced: null,
               displayName: displayNameFromUserId(userExec.userId),
             });
-            await runtime.telegram.sendMessage(text);
+            await sendTelegramWithRetry(
+              runtime.telegram,
+              text,
+              `PAPER_TP_UPDATE userId=${userExec.userId} symbol=${symbol}`,
+            );
           } catch (err) {
             log.error(
               {
@@ -540,25 +557,24 @@ export class LiquidationOiActiveMainRuntime {
             detail: `TP verification returned status=${verify.status}`,
           });
           if (runtime.telegram !== null && userExec.entryPrice !== null) {
-            try {
-              await runtime.telegram.sendMessage(
-                formatTpUpdateMessage({
-                  symbol,
-                  candidateSide,
-                  globalSignalId,
-                  entryPrice: userExec.entryPrice,
-                  quantity: userExec.quantity ?? 0,
-                  oldTp,
-                  newTp: newTargetPrice,
-                  revision,
-                  mode: "REAL",
-                  realReplaced: false,
-                  displayName: displayNameFromUserId(userExec.userId),
-                }),
-              );
-            } catch {
-              /* isolated */
-            }
+            const text = formatTpUpdateMessage({
+              symbol,
+              candidateSide,
+              globalSignalId,
+              entryPrice: userExec.entryPrice,
+              quantity: userExec.quantity ?? 0,
+              oldTp,
+              newTp: newTargetPrice,
+              revision,
+              mode: "REAL",
+              realReplaced: false,
+              displayName: displayNameFromUserId(userExec.userId),
+            });
+            await sendTelegramWithRetry(
+              runtime.telegram,
+              text,
+              `REAL_TP_UPDATE_FAILED userId=${userExec.userId} symbol=${symbol}`,
+            );
           }
           continue;
         }
@@ -600,31 +616,24 @@ export class LiquidationOiActiveMainRuntime {
           detail: "applied",
         });
         if (runtime.telegram !== null && userExec.entryPrice !== null) {
-          try {
-            await runtime.telegram.sendMessage(
-              formatTpUpdateMessage({
-                symbol,
-                candidateSide,
-                globalSignalId,
-                entryPrice: userExec.entryPrice,
-                quantity: userExec.quantity ?? 0,
-                oldTp,
-                newTp: newTargetPrice,
-                revision,
-                mode: "REAL",
-                realReplaced: true,
-                displayName: displayNameFromUserId(userExec.userId),
-              }),
-            );
-          } catch (err) {
-            log.error(
-              {
-                userId: userExec.userId,
-                err: err instanceof Error ? err.message : String(err),
-              },
-              "[LOX_TELEGRAM_TP_UPDATE_SEND_FAILED] -- isolated",
-            );
-          }
+          const text = formatTpUpdateMessage({
+            symbol,
+            candidateSide,
+            globalSignalId,
+            entryPrice: userExec.entryPrice,
+            quantity: userExec.quantity ?? 0,
+            oldTp,
+            newTp: newTargetPrice,
+            revision,
+            mode: "REAL",
+            realReplaced: true,
+            displayName: displayNameFromUserId(userExec.userId),
+          });
+          await sendTelegramWithRetry(
+            runtime.telegram,
+            text,
+            `REAL_TP_UPDATE userId=${userExec.userId} symbol=${symbol}`,
+          );
         }
       } catch (err) {
         log.error(
