@@ -125,6 +125,31 @@ export class LiqAggregateRepository {
         "ttl_createdAt",
       );
 
+      // Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- this
+      // method was previously returning true and logging "indexes
+      // ensured" / the caller's own success-only [TTL] log line
+      // UNCONDITIONALLY, even when ttlResult.action === "failed"
+      // (confirmed live: a collMod permission error on the shared
+      // liqwatch_bot database was silently swallowed, yet main.ts
+      // still printed "[TTL] liq_minute_aggregates createdAt =
+      // 345600s (4d)" as if it had succeeded). The two non-TTL
+      // indexes above (symbol_minute_unique, symbol_minute_desc) are
+      // NOT gated by this -- they still succeed independently even
+      // when the TTL step fails, so indexesEnsured only needs to stay
+      // false long enough to let a LATER call retry the TTL step
+      // specifically; it is not worth re-creating the other two.
+      if (ttlResult.action === "failed") {
+        this.log.warn(
+          {
+            coll: COLL_AGGREGATES,
+            ttlDays: this.cfg.retentionDays,
+            detail: ttlResult.detail,
+          },
+          "TTL index could not be verified/updated -- retention may be WRONG until this is resolved (see detail)",
+        );
+        return false;
+      }
+
       // liq_state_meta: _id is the symbol, no extra indexes needed.
       this.indexesEnsured = true;
       this.log.info(

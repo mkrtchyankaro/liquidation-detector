@@ -104,6 +104,12 @@ export class RawLiquidationEventRepository {
         TTL_SECONDS,
         TTL_INDEX_NAME,
       );
+      // Note: not gating the return value on this result's success,
+      // unlike the other two repositories' own ensureIndexes() (fixed
+      // Sep 17 2026, operator-reported) -- this collection's TTL has
+      // been confirmed working correctly in production (345600s
+      // applied, matching this.mongo.ensureOwn()'s DB where collMod is
+      // permitted), and the backfill below must still run regardless.
 
       // Backfill: any existing document written before this fix has
       // no eventTimeDate yet, so it would never expire under the new

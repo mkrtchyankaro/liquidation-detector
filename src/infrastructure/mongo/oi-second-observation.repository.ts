@@ -73,13 +73,23 @@ export class OiSecondObservationRepository {
       const db = await this.mongo.ensureOwn();
       if (!col || !db) return false;
       await col.createIndex({ symbol: 1, timestamp: 1 });
-      await ensureTtlIndexSeconds(
+      const ttlResult = await ensureTtlIndexSeconds(
         db,
         "oi_second_observations",
         "timestamp",
         OI_SECOND_OBSERVATION_TTL_SECONDS,
         TTL_INDEX_NAME,
       );
+      // Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- same class
+      // of bug as liq-aggregate.repository.ts's own ensureIndexes(): the
+      // TTL result was being silently discarded, so this always returned
+      // true even when the collMod/create actually failed.
+      if (ttlResult.action === "failed") {
+        log.warn(
+          `[OI_SECOND_OBS_TTL_FAILED] retention may be WRONG until resolved: ${ttlResult.detail}`,
+        );
+        return false;
+      }
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
