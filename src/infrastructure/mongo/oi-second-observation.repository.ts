@@ -11,7 +11,7 @@ const log = childLogger({ mod: "oi-second-obs-repo" });
  *  audit: OiSecondObservationRepository is written to but never
  *  queried from anywhere in src/), so shortening retention carries no
  *  production risk. */
-const TTL_SECONDS = 3 * 24 * 3600;
+export const OI_SECOND_OBSERVATION_TTL_SECONDS = 3 * 24 * 3600;
 const TTL_INDEX_NAME = "ttl_timestamp";
 
 /** Buffer bounds: flushed on a timer OR when this size is reached,
@@ -77,7 +77,7 @@ export class OiSecondObservationRepository {
         db,
         "oi_second_observations",
         "timestamp",
-        TTL_SECONDS,
+        OI_SECOND_OBSERVATION_TTL_SECONDS,
         TTL_INDEX_NAME,
       );
       return true;

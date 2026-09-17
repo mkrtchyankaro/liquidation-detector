@@ -503,6 +503,23 @@ async function main(): Promise<void> {
   // writer.
   const persistenceConfig = loadPersistenceConfig();
   const liqAggregateRepo = new LiqAggregateRepository(mongo, persistenceConfig);
+  // Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- TTL/index
+  // correctness must never depend on LIQ_PERSIST_ENABLED. Previously
+  // liqAggregateRepo.ensureIndexes() was ONLY ever reached from inside
+  // warmup(), which returns immediately (before calling ensureIndexes
+  // at all) if persistence is disabled -- coupling "should we do a
+  // historical warmup read" with "should the TTL index be correct" is
+  // two different concerns that should never have been tied together.
+  // Called here, unconditionally, BEFORE warmup() -- idempotent
+  // (ensureIndexes() has its own indexesEnsured guard), so warmup()'s
+  // own internal call (when enabled) is simply a harmless no-op repeat.
+  const liqAggregateIndexesOk = await liqAggregateRepo.ensureIndexes();
+  if (liqAggregateIndexesOk) {
+    const liqRetentionSeconds = persistenceConfig.retentionDays * 24 * 3600;
+    log.info(
+      `[TTL] liq_minute_aggregates createdAt = ${liqRetentionSeconds}s (${persistenceConfig.retentionDays}d)`,
+    );
+  }
   const liqAggregateOrchestrator = new LiqAggregateOrchestrator(
     persistenceConfig,
     liqAggregateRepo,

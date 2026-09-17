@@ -6,7 +6,10 @@ import {
   type V5TradeCloseEvent,
 } from "../strategy/v5/v5-wave.service";
 import { OiTrackerService } from "../domain/liquidation/oi-tracker.service";
-import { OiSecondObservationRepository } from "../infrastructure/mongo/oi-second-observation.repository";
+import {
+  OiSecondObservationRepository,
+  OI_SECOND_OBSERVATION_TTL_SECONDS,
+} from "../infrastructure/mongo/oi-second-observation.repository";
 import { LiquidationOiRuntimeOrchestrator } from "./liquidation-oi-runtime-orchestrator";
 import { buildPercentileContext } from "../domain/liquidation-oi-strategy/percentile-rank-approximation";
 import { FundingStatsService } from "../domain/liquidation/funding-stats.service";
@@ -388,7 +391,11 @@ export class MarketDataOrchestrator {
     // doc comment for the duplicate-cascade-document race it fixes.
     await this.cascadeRepo.ensureIndexes();
     // Sep 16 2026 (Karo), operator-requested -- data collection only.
-    await this.oiSecondObservationRepo.ensureIndexes();
+    const oiIndexesOk = await this.oiSecondObservationRepo.ensureIndexes();
+    if (oiIndexesOk)
+      log.info(
+        `[TTL] oi_second_observations timestamp = ${OI_SECOND_OBSERVATION_TTL_SECONDS}s (${OI_SECOND_OBSERVATION_TTL_SECONDS / 86400}d)`,
+      );
   }
 
   async hydrateMainLocks(): Promise<void> {
