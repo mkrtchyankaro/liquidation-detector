@@ -20,10 +20,7 @@ export type GlobalLifecycleState =
   | "CLOSED"
   | "CANCELLED";
 
-const GLOBAL_TRANSITIONS: Record<
-  GlobalLifecycleState,
-  readonly GlobalLifecycleState[]
-> = {
+const GLOBAL_TRANSITIONS: Record<GlobalLifecycleState, readonly GlobalLifecycleState[]> = {
   IDLE: [],
   EPISODE_TRACKING: ["WATCH_QUALIFIED", "CANCELLED"],
   WATCH_QUALIFIED: ["EXHAUSTION_CANDIDATE", "CANCELLED"],
@@ -41,7 +38,10 @@ const GLOBAL_TRANSITIONS: Record<
   // post-episode-oi-creation.ts's own doc comment for why there is
   // deliberately NO timeout here (the XRP-type delayed-OI-creation
   // case this state exists to protect).
-  WAIT_FOR_POST_EPISODE_OI_CREATION: ["ENTRY_READY", "CANCELLED"],
+  // Sep 17 2026 (Karo), operator-approved final capacity architecture,
+  // Section 7 -- provisional episode end can be invalidated by
+  // continuation liquidation flow, returning to episode-end detection.
+  WAIT_FOR_POST_EPISODE_OI_CREATION: ["ENTRY_READY", "EXHAUSTION_CANDIDATE", "CANCELLED"],
   ENTRY_READY: ["ACTIVE", "CANCELLED"],
   ACTIVE: ["CLOSING"],
   CLOSING: ["CLOSED"],
@@ -49,10 +49,7 @@ const GLOBAL_TRANSITIONS: Record<
   CANCELLED: [],
 };
 
-export function isValidGlobalTransition(
-  from: GlobalLifecycleState,
-  to: GlobalLifecycleState,
-): boolean {
+export function isValidGlobalTransition(from: GlobalLifecycleState, to: GlobalLifecycleState): boolean {
   return GLOBAL_TRANSITIONS[from].includes(to);
 }
 
@@ -68,14 +65,7 @@ export function isGlobalTerminal(state: GlobalLifecycleState): boolean {
  *  baseline is to keep watching THIS symbol for post-episode entry
  *  evidence, not to release it. */
 export function holdsSymbolOwnership(state: GlobalLifecycleState): boolean {
-  return (
-    state === "WATCH_QUALIFIED" ||
-    state === "EXHAUSTION_CANDIDATE" ||
-    state === "WAIT_FOR_POST_EPISODE_OI_CREATION" ||
-    state === "ENTRY_READY" ||
-    state === "ACTIVE" ||
-    state === "CLOSING"
-  );
+  return state === "WATCH_QUALIFIED" || state === "EXHAUSTION_CANDIDATE" || state === "WAIT_FOR_POST_EPISODE_OI_CREATION" || state === "ENTRY_READY" || state === "ACTIVE" || state === "CLOSING";
 }
 
 export type UserExecutionState = "PENDING" | "ACTIVE" | "TERMINAL";
@@ -96,10 +86,7 @@ export type CleanupState = "PENDING" | "FAILED_RETRYING" | "COMPLETE";
 
 /** Once TERMINAL, never returns to ACTIVE or PENDING -- INVARIANT 1,
  *  enforced structurally rather than only by caller discipline. */
-export function isValidUserStateTransition(
-  from: UserExecutionState,
-  to: UserExecutionState,
-): boolean {
+export function isValidUserStateTransition(from: UserExecutionState, to: UserExecutionState): boolean {
   if (from === "TERMINAL") return false;
   if (from === "PENDING") return to === "ACTIVE" || to === "TERMINAL";
   if (from === "ACTIVE") return to === "TERMINAL";
@@ -133,39 +120,15 @@ export interface GlobalCloseEligibilityResult {
  *  remains) AND every user TERMINAL AND every user cleanupState
  *  COMPLETE AND zero unresolved strategy-owned orders. Never returns
  *  eligible=true on partial satisfaction. */
-export function isGlobalCloseEligible(
-  input: GlobalCloseEligibilityInput,
-): GlobalCloseEligibilityResult {
+export function isGlobalCloseEligible(input: GlobalCloseEligibilityInput): GlobalCloseEligibilityResult {
   const reasons: string[] = [];
-  const noManageableUserRemains = input.users.every(
-    (u) => u.state === "TERMINAL",
-  );
-  if (!input.mainThesisTerminal && !noManageableUserRemains)
-    reasons.push(
-      "main thesis not terminal and at least one user is still manageable",
-    );
+  const noManageableUserRemains = input.users.every((u) => u.state === "TERMINAL");
+  if (!input.mainThesisTerminal && !noManageableUserRemains) reasons.push("main thesis not terminal and at least one user is still manageable");
   const allUsersTerminal = input.users.every((u) => u.state === "TERMINAL");
-  if (!allUsersTerminal)
-    reasons.push(
-      `not all users terminal: ${input.users
-        .filter((u) => u.state !== "TERMINAL")
-        .map((u) => u.userId)
-        .join(",")}`,
-    );
-  const allCleanupComplete = input.users.every(
-    (u) => u.cleanupState === "COMPLETE",
-  );
-  if (!allCleanupComplete)
-    reasons.push(
-      `not all users have cleanupState=COMPLETE: ${input.users
-        .filter((u) => u.cleanupState !== "COMPLETE")
-        .map((u) => `${u.userId}:${u.cleanupState}`)
-        .join(",")}`,
-    );
-  if (input.unresolvedStrategyOrderCount > 0)
-    reasons.push(
-      `${input.unresolvedStrategyOrderCount} unresolved strategy-owned order(s) remain`,
-    );
+  if (!allUsersTerminal) reasons.push(`not all users terminal: ${input.users.filter((u) => u.state !== "TERMINAL").map((u) => u.userId).join(",")}`);
+  const allCleanupComplete = input.users.every((u) => u.cleanupState === "COMPLETE");
+  if (!allCleanupComplete) reasons.push(`not all users have cleanupState=COMPLETE: ${input.users.filter((u) => u.cleanupState !== "COMPLETE").map((u) => `${u.userId}:${u.cleanupState}`).join(",")}`);
+  if (input.unresolvedStrategyOrderCount > 0) reasons.push(`${input.unresolvedStrategyOrderCount} unresolved strategy-owned order(s) remain`);
   return { eligible: reasons.length === 0, reasons };
 }
 

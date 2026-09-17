@@ -31,7 +31,7 @@ export const PRIMARY_VARIANT_MIRROR = {
   candidate1mAtrMultiple: 0.75,
   confirm3mAtrMultiple: 1.0,
   confirm5mAtrMultiple: null as number | null,
-  recoveryFractionMinimum: 0.3,
+  recoveryFractionMinimum: 0.30,
 };
 export const MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE_MIRROR = 1.0;
 
@@ -50,17 +50,8 @@ export interface EpisodeEndDetectionState {
   lastProcessed3mCloseTime: number;
 }
 
-export function initEpisodeEndDetectionState(
-  episodeStartPrice: number,
-  episodeStartTs: number,
-): EpisodeEndDetectionState {
-  return {
-    extreme: episodeStartPrice,
-    extremeTime: episodeStartTs,
-    candidateTime: null,
-    lastProcessed1mCloseTime: episodeStartTs,
-    lastProcessed3mCloseTime: episodeStartTs,
-  };
+export function initEpisodeEndDetectionState(episodeStartPrice: number, episodeStartTs: number): EpisodeEndDetectionState {
+  return { extreme: episodeStartPrice, extremeTime: episodeStartTs, candidateTime: null, lastProcessed1mCloseTime: episodeStartTs, lastProcessed3mCloseTime: episodeStartTs };
 }
 
 export interface EpisodeEndResult {
@@ -73,14 +64,8 @@ export interface EpisodeEndResult {
   candidateInvalidated: boolean;
 }
 
-function isMoreAdverse(
-  direction: Side,
-  candidatePrice: number,
-  currentExtreme: number,
-): boolean {
-  return direction === "LONG"
-    ? candidatePrice < currentExtreme
-    : candidatePrice > currentExtreme;
+function isMoreAdverse(direction: Side, candidatePrice: number, currentExtreme: number): boolean {
+  return direction === "LONG" ? candidatePrice < currentExtreme : candidatePrice > currentExtreme;
 }
 
 export interface AtrLookup {
@@ -105,79 +90,45 @@ export function advanceEpisodeEndDetection(
   all3mCandlesSorted: readonly Candle[],
   atr: AtrLookup,
 ): EpisodeEndResult {
-  let extreme = state.extreme,
-    extremeTime = state.extremeTime;
+  let extreme = state.extreme, extremeTime = state.extremeTime;
   let candidateTime = state.candidateTime;
   let last1m = state.lastProcessed1mCloseTime;
   let last3m = state.lastProcessed3mCloseTime;
-  let extremeUpdated = false,
-    candidateStarted = false,
-    candidateInvalidated = false;
+  let extremeUpdated = false, candidateStarted = false, candidateInvalidated = false;
 
-  const relevant1m = new1mCandles
-    .filter((c) => c.closeTime > state.lastProcessed1mCloseTime)
-    .sort((a, b) => a.closeTime - b.closeTime);
+  const relevant1m = new1mCandles.filter((c) => c.closeTime > state.lastProcessed1mCloseTime).sort((a, b) => a.closeTime - b.closeTime);
 
   for (const c of relevant1m) {
     last1m = c.closeTime;
     const adverseCandidate = direction === "LONG" ? c.low : c.high;
     if (isMoreAdverse(direction, adverseCandidate, extreme)) {
-      extreme = adverseCandidate;
-      extremeTime = c.closeTime;
+      extreme = adverseCandidate; extremeTime = c.closeTime;
       extremeUpdated = true;
-      if (candidateTime !== null) {
-        candidateTime = null;
-        candidateInvalidated = true;
-      }
+      if (candidateTime !== null) { candidateTime = null; candidateInvalidated = true; }
     } else if (candidateTime === null) {
-      const recovery =
-        direction === "LONG" ? c.close - extreme : extreme - c.close;
+      const recovery = direction === "LONG" ? c.close - extreme : extreme - c.close;
       const atr1 = atr.get("1m", c.closeTime);
-      if (
-        atr1 !== null &&
-        recovery >= PRIMARY_VARIANT_MIRROR.candidate1mAtrMultiple * atr1
-      ) {
+      if (atr1 !== null && recovery >= PRIMARY_VARIANT_MIRROR.candidate1mAtrMultiple * atr1) {
         candidateTime = c.closeTime;
         candidateStarted = true;
       }
     }
 
     if (candidateTime !== null) {
-      const pending3m = all3mCandlesSorted.filter(
-        (c3) =>
-          c3.closeTime > last3m &&
-          c3.closeTime <= c.closeTime &&
-          c3.closeTime > candidateTime!,
-      );
+      const pending3m = all3mCandlesSorted.filter((c3) => c3.closeTime > last3m && c3.closeTime <= c.closeTime && c3.closeTime > candidateTime!);
       for (const c3 of pending3m) {
         last3m = c3.closeTime;
         const atr3 = atr.get("3m", c3.closeTime);
         const atr5 = atr.get("5m", c3.closeTime);
-        const recovery3m =
-          direction === "LONG" ? c3.close - extreme : extreme - c3.close;
-        const passes3m =
-          atr3 !== null &&
-          recovery3m >= PRIMARY_VARIANT_MIRROR.confirm3mAtrMultiple * atr3;
-        const passes5m =
-          PRIMARY_VARIANT_MIRROR.confirm5mAtrMultiple === null ||
-          (atr5 !== null &&
-            recovery3m >= PRIMARY_VARIANT_MIRROR.confirm5mAtrMultiple * atr5);
+        const recovery3m = direction === "LONG" ? c3.close - extreme : extreme - c3.close;
+        const passes3m = atr3 !== null && recovery3m >= PRIMARY_VARIANT_MIRROR.confirm3mAtrMultiple * atr3;
+        const passes5m = PRIMARY_VARIANT_MIRROR.confirm5mAtrMultiple === null || (atr5 !== null && recovery3m >= PRIMARY_VARIANT_MIRROR.confirm5mAtrMultiple * atr5);
 
         if (passes3m && passes5m) {
           return {
-            state: {
-              extreme,
-              extremeTime,
-              candidateTime: null,
-              lastProcessed1mCloseTime: last1m,
-              lastProcessed3mCloseTime: last3m,
-            },
-            confirmed: true,
-            confirmedAtCloseTime: c3.closeTime,
-            confirmedPrice: c3.close,
-            extremeUpdated,
-            candidateStarted,
-            candidateInvalidated,
+            state: { extreme, extremeTime, candidateTime: null, lastProcessed1mCloseTime: last1m, lastProcessed3mCloseTime: last3m },
+            confirmed: true, confirmedAtCloseTime: c3.closeTime, confirmedPrice: c3.close,
+            extremeUpdated, candidateStarted, candidateInvalidated,
           };
         }
         candidateTime = null;
@@ -188,19 +139,9 @@ export function advanceEpisodeEndDetection(
   }
 
   return {
-    state: {
-      extreme,
-      extremeTime,
-      candidateTime,
-      lastProcessed1mCloseTime: last1m,
-      lastProcessed3mCloseTime: last3m,
-    },
-    confirmed: false,
-    confirmedAtCloseTime: null,
-    confirmedPrice: null,
-    extremeUpdated,
-    candidateStarted,
-    candidateInvalidated,
+    state: { extreme, extremeTime, candidateTime, lastProcessed1mCloseTime: last1m, lastProcessed3mCloseTime: last3m },
+    confirmed: false, confirmedAtCloseTime: null, confirmedPrice: null,
+    extremeUpdated, candidateStarted, candidateInvalidated,
   };
 }
 
@@ -211,29 +152,14 @@ export function advanceEpisodeEndDetection(
  *  confirmation should be ACCEPTED (fraction gate passes or is not
  *  active -- below the minimum-displacement threshold for the gate
  *  to even apply). */
-export function passesRecoveryFractionGate(
-  direction: Side,
-  episodeStartPrice: number,
-  extreme: number,
-  confirmedPrice: number,
-  atr3mAtConfirm: number | null,
-): boolean {
+export function passesRecoveryFractionGate(direction: Side, episodeStartPrice: number, extreme: number, confirmedPrice: number, atr3mAtConfirm: number | null): boolean {
   if (PRIMARY_VARIANT_MIRROR.recoveryFractionMinimum === null) return true;
-  const episodeDisplacement =
-    direction === "LONG"
-      ? episodeStartPrice - extreme
-      : extreme - episodeStartPrice;
-  const episodeDisplacementAtr3m =
-    atr3mAtConfirm !== null && atr3mAtConfirm > 0
-      ? episodeDisplacement / atr3mAtConfirm
-      : null;
-  const fractionGateActive =
-    episodeDisplacementAtr3m !== null &&
-    episodeDisplacementAtr3m >= MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE_MIRROR;
+  const episodeDisplacement = direction === "LONG" ? episodeStartPrice - extreme : extreme - episodeStartPrice;
+  const episodeDisplacementAtr3m = atr3mAtConfirm !== null && atr3mAtConfirm > 0 ? episodeDisplacement / atr3mAtConfirm : null;
+  const fractionGateActive = episodeDisplacementAtr3m !== null && episodeDisplacementAtr3m >= MIN_DISPLACEMENT_ATR3M_FOR_FRACTION_GATE_MIRROR;
   if (!fractionGateActive) return true;
   if (episodeDisplacement <= 0) return true;
-  const recovery =
-    direction === "LONG" ? confirmedPrice - extreme : extreme - confirmedPrice;
+  const recovery = direction === "LONG" ? confirmedPrice - extreme : extreme - confirmedPrice;
   const recoveryFraction = recovery / episodeDisplacement;
   return recoveryFraction >= PRIMARY_VARIANT_MIRROR.recoveryFractionMinimum;
 }

@@ -11,6 +11,7 @@ import type { RotationEpisodeHistoryDoc } from "../../domain/signal/rotation-epi
 import type { OiSecondObservationDoc } from "./oi-second-observation.repository";
 import type { StrategyOrderDoc } from "./strategy-order.repository";
 import type { LiquidationOiGlobalSignalDoc } from "./liquidation-oi-global-signal.repository";
+import type { LiquidationOiWaitStateDoc } from "./liquidation-oi-wait-state.repository";
 import type { LiquidationOiUserExecutionState } from "../../domain/liquidation-oi-strategy/user-execution.types";
 import type { ExecutionRecordDoc } from "./execution-record.model";
 import type { ExecutionClaimDoc } from "./execution-claim.model";
@@ -64,13 +65,10 @@ export class MongoClientWrapper {
    *  from one MongoClient/one connection. */
   private async ensure(): Promise<{ shared: Db; own: Db } | null> {
     if (!this.cfg.enabled) return null;
-    if (this.sharedDb && this.ownDb)
-      return { shared: this.sharedDb, own: this.ownDb };
+    if (this.sharedDb && this.ownDb) return { shared: this.sharedDb, own: this.ownDb };
     if (this.connecting) {
       await this.connecting;
-      return this.sharedDb && this.ownDb
-        ? { shared: this.sharedDb, own: this.ownDb }
-        : null;
+      return this.sharedDb && this.ownDb ? { shared: this.sharedDb, own: this.ownDb } : null;
     }
 
     const sinceFailure = Date.now() - this.lastFailureAt;
@@ -80,10 +78,7 @@ export class MongoClientWrapper {
 
     this.connecting = (async (): Promise<void> => {
       try {
-        this.log.info(
-          { sharedDb: this.cfg.sharedMarketDataDb, ownDb: this.cfg.ownDb },
-          "connecting to mongo",
-        );
+        this.log.info({ sharedDb: this.cfg.sharedMarketDataDb, ownDb: this.cfg.ownDb }, "connecting to mongo");
         const client = new MongoClient(this.cfg.uri, {
           serverSelectionTimeoutMS: 8_000,
           maxPoolSize: 10,
@@ -98,10 +93,7 @@ export class MongoClientWrapper {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         this.lastFailureAt = Date.now();
-        this.log.error(
-          { err: msg, retryInSec: Math.round(this.failureCooldownMs / 1000) },
-          "mongo connection failed; persistence disabled until cooldown expires",
-        );
+        this.log.error({ err: msg, retryInSec: Math.round(this.failureCooldownMs / 1000) }, "mongo connection failed; persistence disabled until cooldown expires");
         this.sharedDb = null;
         this.ownDb = null;
       } finally {
@@ -110,9 +102,7 @@ export class MongoClientWrapper {
     })();
 
     await this.connecting;
-    return this.sharedDb && this.ownDb
-      ? { shared: this.sharedDb, own: this.ownDb }
-      : null;
+    return this.sharedDb && this.ownDb ? { shared: this.sharedDb, own: this.ownDb } : null;
   }
 
   async close(): Promise<void> {
@@ -153,18 +143,14 @@ export class MongoClientWrapper {
    *  minutes into this SAME, shared collection. */
   async liqMinuteAggregates(): Promise<Collection<LiqMinuteAggregateDoc> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.shared.collection<LiqMinuteAggregateDoc>("liq_minute_aggregates")
-      : null;
+    return dbs ? dbs.shared.collection<LiqMinuteAggregateDoc>("liq_minute_aggregates") : null;
   }
 
   /** Exact same collection name/shape as liqwatch-bot's own
    *  db/wall-aggregate.repository.ts (COLL_AGGREGATES = "wall_minute_aggregates"). */
   async wallMinuteAggregates(): Promise<Collection<WallMinuteAggregateDoc> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.shared.collection<WallMinuteAggregateDoc>("wall_minute_aggregates")
-      : null;
+    return dbs ? dbs.shared.collection<WallMinuteAggregateDoc>("wall_minute_aggregates") : null;
   }
 
   // ─── OWN, new (liquidation_detector database) ──────────────────────────
@@ -173,9 +159,7 @@ export class MongoClientWrapper {
    *  signal every user's own execution refers to by signalId. */
   async globalSignals(): Promise<Collection<GlobalSignalDoc> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<GlobalSignalDoc>("v5_global_signals")
-      : null;
+    return dbs ? dbs.own.collection<GlobalSignalDoc>("v5_global_signals") : null;
   }
 
   /** Sep 10 2026 (Karo), operator-requested restart-safe persistence
@@ -195,9 +179,7 @@ export class MongoClientWrapper {
    *  for dense-burst replay research. */
   async rawLiquidationEvents(): Promise<Collection<RawLiquidationEventDoc> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<RawLiquidationEventDoc>("liq_raw_events")
-      : null;
+    return dbs ? dbs.own.collection<RawLiquidationEventDoc>("liq_raw_events") : null;
   }
 
   /** Sep 16 2026 (Karo), operator-requested -- see
@@ -205,9 +187,7 @@ export class MongoClientWrapper {
    *  TEMPORARY/RESEARCH data, own database, TTL-bounded. */
   async oiSecondObservations(): Promise<Collection<OiSecondObservationDoc> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<OiSecondObservationDoc>("oi_second_observations")
-      : null;
+    return dbs ? dbs.own.collection<OiSecondObservationDoc>("oi_second_observations") : null;
   }
 
   /** Sep 16 2026 (Karo), operator-approved architecture -- see
@@ -221,21 +201,25 @@ export class MongoClientWrapper {
    *  Exhaustion strategy, structurally separate from v5_global_signals. */
   async liquidationOiGlobalSignals(): Promise<Collection<LiquidationOiGlobalSignalDoc> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<LiquidationOiGlobalSignalDoc>(
-          "liquidation_oi_global_signals",
-        )
-      : null;
+    return dbs ? dbs.own.collection<LiquidationOiGlobalSignalDoc>("liquidation_oi_global_signals") : null;
   }
 
   /** Structurally separate from v5_signals_<userId>. */
   async liquidationOiUserExecutions(): Promise<Collection<LiquidationOiUserExecutionState> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<LiquidationOiUserExecutionState>(
-          "liquidation_oi_user_executions",
-        )
-      : null;
+    return dbs ? dbs.own.collection<LiquidationOiUserExecutionState>("liquidation_oi_user_executions") : null;
+  }
+
+  /** Sep 17 2026 (Karo), operator-approved final capacity architecture,
+   *  Section 31 -- restart-safe persistence for pre-ENTRY_READY WAIT
+   *  state (previously RAM-only, lost on every restart). Structurally
+   *  separate from liquidation_oi_global_signals (which only ever
+   *  holds ENTRY_READY+ states) -- one doc per symbol currently
+   *  waiting, deleted the instant the symbol leaves WAIT (either
+   *  forward to ENTRY_READY or back to EXHAUSTION_CANDIDATE/CANCELLED). */
+  async liquidationOiWaitStates(): Promise<Collection<LiquidationOiWaitStateDoc> | null> {
+    const dbs = await this.ensure();
+    return dbs ? dbs.own.collection<LiquidationOiWaitStateDoc>("liquidation_oi_wait_states") : null;
   }
 
   /** Sep 14 2026 (Karo), operator-requested -- historical ROTATION
@@ -245,11 +229,7 @@ export class MongoClientWrapper {
    *  WAVE-mode episode totals). */
   async rotationEpisodeHistory(): Promise<Collection<RotationEpisodeHistoryDoc> | null> {
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<RotationEpisodeHistoryDoc>(
-          "rotation_episode_history",
-        )
-      : null;
+    return dbs ? dbs.own.collection<RotationEpisodeHistoryDoc>("rotation_episode_history") : null;
   }
 
   /** Sep 8 2026, operator-approved (Karo) -- PER-USER collection,
@@ -262,22 +242,16 @@ export class MongoClientWrapper {
   async userSignals(userId: string): Promise<Collection<UserSignalDoc> | null> {
     assertValidUserId(userId);
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<UserSignalDoc>(`v5_signals_${userId}`)
-      : null;
+    return dbs ? dbs.own.collection<UserSignalDoc>(`v5_signals_${userId}`) : null;
   }
 
   /** Per-user, per explicit operator instruction ("YES if those
    *  collections represent user-specific Binance execution state" --
    *  they do, each user has their own separate Binance account). */
-  async executionRecords(
-    userId: string,
-  ): Promise<Collection<ExecutionRecordDoc> | null> {
+  async executionRecords(userId: string): Promise<Collection<ExecutionRecordDoc> | null> {
     assertValidUserId(userId);
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<ExecutionRecordDoc>(`execution_records_${userId}`)
-      : null;
+    return dbs ? dbs.own.collection<ExecutionRecordDoc>(`execution_records_${userId}`) : null;
   }
 
   /** Per-user. Unlike liqwatch-bot's own GLOBAL execution_claims
@@ -285,13 +259,9 @@ export class MongoClientWrapper {
    *  underlying account/symbol-space), each user here has their OWN,
    *  separate Binance account -- a symbol-lock scoped per-user is the
    *  architecturally correct equivalent, not a cross-user global lock. */
-  async executionClaims(
-    userId: string,
-  ): Promise<Collection<ExecutionClaimDoc> | null> {
+  async executionClaims(userId: string): Promise<Collection<ExecutionClaimDoc> | null> {
     assertValidUserId(userId);
     const dbs = await this.ensure();
-    return dbs
-      ? dbs.own.collection<ExecutionClaimDoc>(`execution_claims_${userId}`)
-      : null;
+    return dbs ? dbs.own.collection<ExecutionClaimDoc>(`execution_claims_${userId}`) : null;
   }
 }

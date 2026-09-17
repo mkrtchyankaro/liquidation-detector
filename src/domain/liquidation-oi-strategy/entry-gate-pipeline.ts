@@ -1,11 +1,6 @@
 import type { Side } from "../../shared/common.types";
 import type { LiquidationOiEpisodeState } from "./episode-tracker";
-import {
-  detectClearingState,
-  isClearingEndDetected,
-  type OiHistorySample,
-  type ClearingState,
-} from "./oi-clearing-detector";
+import { detectClearingState, isClearingEndDetected, type OiHistorySample, type ClearingState } from "./oi-clearing-detector";
 import type { LiquidationOiStrategyConfig } from "./config";
 import { candidateTradeSideForVictim } from "./lifecycle.types";
 
@@ -36,10 +31,7 @@ export interface PriceConfirmationInput {
 
 /** Favorable counter-move from the extreme, in ATR3m units. */
 export function counterMoveAtr(input: PriceConfirmationInput): number {
-  const favorableMove =
-    input.victim === "LONG"
-      ? input.currentPrice - input.extremePrice
-      : input.extremePrice - input.currentPrice;
+  const favorableMove = input.victim === "LONG" ? input.currentPrice - input.extremePrice : input.extremePrice - input.currentPrice;
   return favorableMove / input.atr3m;
 }
 
@@ -49,6 +41,20 @@ export interface EntryGateSuccess {
   clearingState: ClearingState;
   counterMoveAtr: number;
   distanceFromExtremeAtr: number;
+  /** Sep 17 2026 (Karo), operator-approved final capacity architecture
+   *  -- populated by the NEW economic pre-validation gate in
+   *  liquidation-oi-watch-manager.ts's WAIT_FOR_POST_EPISODE_OI_CREATION
+   *  block (the only remaining producer of EntryGateSuccess). Optional
+   *  because the OLD entry-gate-pipeline.ts itself (now retired from
+   *  the live path, kept for reference) never populates them. */
+  capacityAtr?: number;
+  predictedTotalCapacityAtr?: number;
+  alreadyConsumedCapacityAtr?: number;
+  candidateTpPrice?: number;
+  candidateSlPrice?: number;
+  netRR?: number | null;
+  postEndOiCreationUsd?: number | null;
+  oiToLiqRatio?: number | null;
 }
 export interface EntryGateFailure {
   entryReady: false;
@@ -72,82 +78,34 @@ export interface EvaluateEntryGatesInput {
  *  not re-check percentile/sample-count/displacement, only the
  *  clearing+price gates specific to EXHAUSTION_CANDIDATE ->
  *  ENTRY_READY. */
-export function evaluateEntryGates(
-  input: EvaluateEntryGatesInput,
-): EntryGateResult {
-  if (
-    input.atr3m === null ||
-    input.atr3m <= 0 ||
-    input.atr3mAgeMs === null ||
-    input.atr3mAgeMs > input.config.maxAtrAgeMsForEntry
-  ) {
-    return {
-      entryReady: false,
-      reasonCode: "ATR_NOT_READY",
-      detail: `atr3m=${input.atr3m} atr3mAgeMs=${input.atr3mAgeMs} (max ${input.config.maxAtrAgeMsForEntry})`,
-      clearingState: null,
-    };
+export function evaluateEntryGates(input: EvaluateEntryGatesInput): EntryGateResult {
+  if (input.atr3m === null || input.atr3m <= 0 || input.atr3mAgeMs === null || input.atr3mAgeMs > input.config.maxAtrAgeMsForEntry) {
+    return { entryReady: false, reasonCode: "ATR_NOT_READY", detail: `atr3m=${input.atr3m} atr3mAgeMs=${input.atr3mAgeMs} (max ${input.config.maxAtrAgeMsForEntry})`, clearingState: null };
   }
 
-  const clearingState = detectClearingState(
-    input.oiHistory,
-    input.episode.firstLiqTs,
-    input.nowMs,
-    input.config,
-  );
+  const clearingState = detectClearingState(input.oiHistory, input.episode.firstLiqTs, input.nowMs, input.config);
 
-  if (
-    clearingState.mostRecentSampleAgeMs === null ||
-    clearingState.mostRecentSampleAgeMs > input.config.maxOiSampleAgeMsForEntry
-  ) {
-    return {
-      entryReady: false,
-      reasonCode: "STALE_OI",
-      detail: `mostRecentSampleAgeMs=${clearingState.mostRecentSampleAgeMs} (max ${input.config.maxOiSampleAgeMsForEntry}) -- stale OI must never be silently ignored`,
-      clearingState,
-    };
+  if (clearingState.mostRecentSampleAgeMs === null || clearingState.mostRecentSampleAgeMs > input.config.maxOiSampleAgeMsForEntry) {
+    return { entryReady: false, reasonCode: "STALE_OI", detail: `mostRecentSampleAgeMs=${clearingState.mostRecentSampleAgeMs} (max ${input.config.maxOiSampleAgeMsForEntry}) -- stale OI must never be silently ignored`, clearingState };
   }
 
   if (!isClearingEndDetected(clearingState, input.config)) {
-    return {
-      entryReady: false,
-      reasonCode: "CLEARING_NOT_DETECTED",
-      detail: `windowsShowingClearing=${clearingState.windowsShowingClearing} < minConsecutiveWindowsForClearingEnd=${input.config.minConsecutiveWindowsForClearingEnd}`,
-      clearingState,
-    };
+    return { entryReady: false, reasonCode: "CLEARING_NOT_DETECTED", detail: `windowsShowingClearing=${clearingState.windowsShowingClearing} < minConsecutiveWindowsForClearingEnd=${input.config.minConsecutiveWindowsForClearingEnd}`, clearingState };
   }
 
-  const moveAtr = counterMoveAtr({
-    currentPrice: input.currentPrice,
-    extremePrice: input.episode.extremePrice,
-    victim: input.episode.victim,
-    atr3m: input.atr3m,
-  });
+  const moveAtr = counterMoveAtr({ currentPrice: input.currentPrice, extremePrice: input.episode.extremePrice, victim: input.episode.victim, atr3m: input.atr3m });
   if (moveAtr < input.config.minCounterMoveAtrForEntry) {
-    return {
-      entryReady: false,
-      reasonCode: "NO_COUNTER_MOVE_YET",
-      detail: `counterMoveAtr=${moveAtr.toFixed(3)} < minCounterMoveAtrForEntry=${input.config.minCounterMoveAtrForEntry} -- OI clearing alone is not sufficient`,
-      clearingState,
-    };
+    return { entryReady: false, reasonCode: "NO_COUNTER_MOVE_YET", detail: `counterMoveAtr=${moveAtr.toFixed(3)} < minCounterMoveAtrForEntry=${input.config.minCounterMoveAtrForEntry} -- OI clearing alone is not sufficient`, clearingState };
   }
 
-  const distanceFromExtremeAtr =
-    Math.abs(input.currentPrice - input.episode.extremePrice) / input.atr3m;
+  const distanceFromExtremeAtr = Math.abs(input.currentPrice - input.episode.extremePrice) / input.atr3m;
   if (distanceFromExtremeAtr > input.config.maxDistanceFromExtremeAtrForEntry) {
-    return {
-      entryReady: false,
-      reasonCode: "TOO_FAR_FROM_EXTREME",
-      detail: `distanceFromExtremeAtr=${distanceFromExtremeAtr.toFixed(3)} > maxDistanceFromExtremeAtrForEntry=${input.config.maxDistanceFromExtremeAtrForEntry}`,
-      clearingState,
-    };
+    return { entryReady: false, reasonCode: "TOO_FAR_FROM_EXTREME", detail: `distanceFromExtremeAtr=${distanceFromExtremeAtr.toFixed(3)} > maxDistanceFromExtremeAtrForEntry=${input.config.maxDistanceFromExtremeAtrForEntry}`, clearingState };
   }
 
   return {
     entryReady: true,
     candidateSide: candidateTradeSideForVictim(input.episode.victim),
-    clearingState,
-    counterMoveAtr: moveAtr,
-    distanceFromExtremeAtr,
+    clearingState, counterMoveAtr: moveAtr, distanceFromExtremeAtr,
   };
 }

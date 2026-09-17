@@ -55,85 +55,35 @@ export interface PostEpisodeOiCreationResult {
   favorablePriceMoveAtr: number | null;
 }
 
-function destroyedOiMagnitude(
-  startOi: number | null,
-  minOi: number | null,
-): number | null {
+function destroyedOiMagnitude(startOi: number | null, minOi: number | null): number | null {
   if (startOi === null || minOi === null) return null;
   return Math.max(0, startOi - minOi);
 }
 
-export function evaluatePostEpisodeOiCreation(
-  input: PostEpisodeOiCreationInput,
-): PostEpisodeOiCreationResult {
+export function evaluatePostEpisodeOiCreation(input: PostEpisodeOiCreationInput): PostEpisodeOiCreationResult {
   if (input.atr3m === null || input.atr3m <= 0) {
-    return {
-      qualifies: false,
-      reasonCode: "ATR_NOT_READY",
-      detail: `atr3m=${input.atr3m}`,
-      postEpisodeOiCreationQuantity: null,
-      favorablePriceMoveAtr: null,
-    };
+    return { qualifies: false, reasonCode: "ATR_NOT_READY", detail: `atr3m=${input.atr3m}`, postEpisodeOiCreationQuantity: null, favorablePriceMoveAtr: null };
   }
   if (input.episodeEndOiQuantity === null || input.currentOiQuantity === null) {
-    return {
-      qualifies: false,
-      reasonCode: "OI_BASELINE_UNAVAILABLE",
-      detail: "no episode-end OI baseline or no current OI sample yet",
-      postEpisodeOiCreationQuantity: null,
-      favorablePriceMoveAtr: null,
-    };
+    return { qualifies: false, reasonCode: "OI_BASELINE_UNAVAILABLE", detail: "no episode-end OI baseline or no current OI sample yet", postEpisodeOiCreationQuantity: null, favorablePriceMoveAtr: null };
   }
 
   const creation = input.currentOiQuantity - input.episodeEndOiQuantity;
   if (creation <= 0) {
-    return {
-      qualifies: false,
-      reasonCode: "NO_POSITIVE_OI_CREATION",
-      detail: `postEpisodeOiCreationQuantity=${creation.toFixed(2)} <= 0 -- flat or still falling is never sufficient`,
-      postEpisodeOiCreationQuantity: creation,
-      favorablePriceMoveAtr: null,
-    };
+    return { qualifies: false, reasonCode: "NO_POSITIVE_OI_CREATION", detail: `postEpisodeOiCreationQuantity=${creation.toFixed(2)} <= 0 -- flat or still falling is never sufficient`, postEpisodeOiCreationQuantity: creation, favorablePriceMoveAtr: null };
   }
 
-  const destroyed = destroyedOiMagnitude(
-    input.episodeStartOiQuantity,
-    input.episodeMinOiQuantity,
-  );
-  const requiredCreation =
-    destroyed !== null && destroyed > 0
-      ? destroyed * MIN_POST_EPISODE_OI_CREATION_FRACTION_OF_DESTROYED
-      : null;
+  const destroyed = destroyedOiMagnitude(input.episodeStartOiQuantity, input.episodeMinOiQuantity);
+  const requiredCreation = destroyed !== null && destroyed > 0 ? destroyed * MIN_POST_EPISODE_OI_CREATION_FRACTION_OF_DESTROYED : null;
   if (requiredCreation !== null && creation < requiredCreation) {
-    return {
-      qualifies: false,
-      reasonCode: "OI_CREATION_BELOW_THRESHOLD",
-      detail: `postEpisodeOiCreationQuantity=${creation.toFixed(2)} < required=${requiredCreation.toFixed(2)} (${(MIN_POST_EPISODE_OI_CREATION_FRACTION_OF_DESTROYED * 100).toFixed(0)}% of destroyed=${destroyed!.toFixed(2)})`,
-      postEpisodeOiCreationQuantity: creation,
-      favorablePriceMoveAtr: null,
-    };
+    return { qualifies: false, reasonCode: "OI_CREATION_BELOW_THRESHOLD", detail: `postEpisodeOiCreationQuantity=${creation.toFixed(2)} < required=${requiredCreation.toFixed(2)} (${(MIN_POST_EPISODE_OI_CREATION_FRACTION_OF_DESTROYED * 100).toFixed(0)}% of destroyed=${destroyed!.toFixed(2)})`, postEpisodeOiCreationQuantity: creation, favorablePriceMoveAtr: null };
   }
 
-  const favorableMove =
-    input.candidateSide === "LONG"
-      ? input.currentPrice - input.episodeEndPrice
-      : input.episodeEndPrice - input.currentPrice;
+  const favorableMove = input.candidateSide === "LONG" ? input.currentPrice - input.episodeEndPrice : input.episodeEndPrice - input.currentPrice;
   const favorableMoveAtr = favorableMove / input.atr3m;
   if (favorableMoveAtr < MIN_FAVORABLE_PRICE_MOVE_ATR_SINCE_EPISODE_END) {
-    return {
-      qualifies: false,
-      reasonCode: "NO_FAVORABLE_PRICE_MOVE",
-      detail: `favorablePriceMoveAtr=${favorableMoveAtr.toFixed(3)} < required=${MIN_FAVORABLE_PRICE_MOVE_ATR_SINCE_EPISODE_END} -- OI creation alone is not sufficient`,
-      postEpisodeOiCreationQuantity: creation,
-      favorablePriceMoveAtr: favorableMoveAtr,
-    };
+    return { qualifies: false, reasonCode: "NO_FAVORABLE_PRICE_MOVE", detail: `favorablePriceMoveAtr=${favorableMoveAtr.toFixed(3)} < required=${MIN_FAVORABLE_PRICE_MOVE_ATR_SINCE_EPISODE_END} -- OI creation alone is not sufficient`, postEpisodeOiCreationQuantity: creation, favorablePriceMoveAtr: favorableMoveAtr };
   }
 
-  return {
-    qualifies: true,
-    reasonCode: null,
-    detail: `postEpisodeOiCreationQuantity=${creation.toFixed(2)}, favorablePriceMoveAtr=${favorableMoveAtr.toFixed(3)}`,
-    postEpisodeOiCreationQuantity: creation,
-    favorablePriceMoveAtr: favorableMoveAtr,
-  };
+  return { qualifies: true, reasonCode: null, detail: `postEpisodeOiCreationQuantity=${creation.toFixed(2)}, favorablePriceMoveAtr=${favorableMoveAtr.toFixed(3)}`, postEpisodeOiCreationQuantity: creation, favorablePriceMoveAtr: favorableMoveAtr };
 }

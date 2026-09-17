@@ -82,25 +82,24 @@ export interface LiquidationOiActiveLifecycleConfig {
   observationHorizonMs: number;
 }
 
-export const DEFAULT_ACTIVE_LIFECYCLE_CONFIG: LiquidationOiActiveLifecycleConfig =
-  {
-    oiEfficiencyMinMeaningfulOiCreationFraction: 0.01, // 1% of starting OI
-    oiEfficiencyMinMeaningfulPriceAtr: 0.05,
-    oiEfficiencyConfirmationCount: 3,
-    oiEfficiencyWindowMs: 15_000,
-    oiEfficiencyEvalIntervalMs: 5_000,
+export const DEFAULT_ACTIVE_LIFECYCLE_CONFIG: LiquidationOiActiveLifecycleConfig = {
+  oiEfficiencyMinMeaningfulOiCreationFraction: 0.01, // 1% of starting OI
+  oiEfficiencyMinMeaningfulPriceAtr: 0.05,
+  oiEfficiencyConfirmationCount: 3,
+  oiEfficiencyWindowMs: 15_000,
+  oiEfficiencyEvalIntervalMs: 5_000,
 
-    dynamicTpMinMeaningfulChangeAtr: 0.15,
-    dynamicTpCooldownMs: 5 * 60_000,
-    dynamicTpMinDistanceFromPriceAtr: 0.2,
+  dynamicTpMinMeaningfulChangeAtr: 0.15,
+  dynamicTpCooldownMs: 5 * 60_000,
+  dynamicTpMinDistanceFromPriceAtr: 0.2,
 
-    positionReconciliationIntervalMs: 15_000,
-    cleanupRetryIntervalMs: 30_000,
+  positionReconciliationIntervalMs: 15_000,
+  cleanupRetryIntervalMs: 30_000,
 
-    orderBookNearbyBandAtr: 1.0,
+  orderBookNearbyBandAtr: 1.0,
 
-    percentileRefreshIntervalMs: 6 * 3_600_000, // 6h -- well under the 3-day window itself
-    percentileRefreshConcurrency: 3,
+  percentileRefreshIntervalMs: 6 * 3_600_000, // 6h -- well under the 3-day window itself
+  percentileRefreshConcurrency: 3,
 
-    observationHorizonMs: 2 * 3_600_000, // 2h
-  };
+  observationHorizonMs: 2 * 3_600_000, // 2h
+};
