@@ -792,6 +792,45 @@ export class LiquidationOiWatchManager {
     });
   }
 
+  /** Sep 17 2026 (Karo), operator-requested Section O. The ONLY path
+   *  from ACTIVE onward -- previously CLOSING/CLOSED were defined in
+   *  lifecycle.types.ts but structurally unreachable from any code
+   *  path (confirmed by the prior source audit). Called by the
+   *  position-lifecycle service ONLY once isGlobalCloseEligible()
+   *  confirms every user is TERMINAL, every cleanup COMPLETE, and no
+   *  unresolved strategy order remains -- this method itself does NOT
+   *  re-check those conditions, it trusts the caller, matching
+   *  SymbolOwnershipRegistry.release()'s own existing doc comment
+   *  ("the orchestrator is responsible for calling this only at the
+   *  correct moment"). Transitions straight ACTIVE -> CLOSING -> CLOSED
+   *  in one call (mirrors the existing EPISODE_TRACKING -> WATCH_QUALIFIED
+   *  -> EXHAUSTION_CANDIDATE double-transition pattern), releases
+   *  ownership, and deletes the lifecycle entry so the symbol is
+   *  immediately available for a fresh, independent episode. */
+  closeActive(symbol: string, reason: string, nowMs: number): void {
+    const lifecycle = this.symbols.get(symbol);
+    if (lifecycle === undefined || lifecycle.globalState !== "ACTIVE") return;
+    this.assertTransition("ACTIVE", "CLOSING", symbol);
+    this.assertTransition("CLOSING", "CLOSED", symbol);
+    const wasOwned = this.ownership.isOwned(symbol);
+    if (wasOwned) this.ownership.release(symbol);
+    this.forensic({
+      ...this.base(lifecycle, symbol, nowMs),
+      type: "EPISODE_TERMINAL",
+      reason,
+      detail: `global lifecycle closed: ${reason}`,
+      lifetimeMs: nowMs - lifecycle.episode.firstLiqTs,
+      finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
+      finalPercentileRank: lifecycle.watchResult?.qualifies
+        ? lifecycle.watchResult.episodePercentileRank
+        : null,
+      finalExtreme: lifecycle.episode.extremePrice,
+      lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+      symbolReleased: wasOwned,
+    });
+    this.symbols.delete(symbol);
+  }
+
   private recomputeMeaningfulProgressCheckpoint(
     lifecycle: SymbolLifecycle,
     atr3m: number | null,

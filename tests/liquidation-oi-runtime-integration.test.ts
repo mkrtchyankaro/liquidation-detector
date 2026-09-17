@@ -165,6 +165,18 @@ function mockRestSuccess(): BinanceRestLike & { calls: string[] } {
       calls.push("getPositionRisk");
       return [{ symbol: "SOLUSDT", positionAmt: "10", entryPrice: "98" }];
     },
+    cancelOrder: async () => {
+      calls.push("cancelOrder");
+      return {};
+    },
+    getOpenOrders: async () => {
+      calls.push("getOpenOrders");
+      return [];
+    },
+    getOpenAlgoOrders: async () => {
+      calls.push("getOpenAlgoOrders");
+      return [];
+    },
   };
 }
 
@@ -904,19 +916,19 @@ async function main(): Promise<void> {
   );
 
   await scenario(
-    "G.10. a disabled user receives NO Telegram ENTRY message",
+    "G.10. a disabled user receives WATCH/ENTRY_READY observational Telegram but NEVER a REAL ENTRY confirmation",
     async () => {
       const { mongo } = fakeMongo();
       const rest = mockRestSuccess();
-      let telegramCalled = false;
+      const sentMessages: string[] = [];
       const runtime: LiquidationOiUserRuntimeRef = {
         userId: "karo",
         riskUsd: 1,
         liquidationOiExecutionEnabled: false,
         binanceRest: rest,
         telegram: {
-          sendMessage: async () => {
-            telegramCalled = true;
+          sendMessage: async (text: string) => {
+            sentMessages.push(text);
           },
         },
       };
@@ -930,10 +942,19 @@ async function main(): Promise<void> {
         true,
       );
       await driveToEntryReady(orch, "SOLUSDT", 18_000_000);
-      assert.strictEqual(
-        telegramCalled,
-        false,
-        "no Telegram ENTRY may be sent -- no position was ever opened for this user",
+      // Sep 17 2026 (Karo), production-completion pass: WATCH/ENTRY_READY are
+      // now OBSERVATIONAL messages sent to every user with Telegram configured,
+      // independent of that user's own liquidationOiExecutionEnabled -- this is
+      // the new, deliberate behavior (see Sections F/Q). What must STILL never
+      // happen for a disabled user is the REAL ENTRY confirmation, since no
+      // position was ever opened for them.
+      assert.ok(
+        sentMessages.length > 0,
+        "WATCH/ENTRY_READY observational messages ARE expected even for a disabled user",
+      );
+      assert.ok(
+        !sentMessages.some((m) => m.includes("Fill:") || m.includes("Qty:")),
+        "no REAL ENTRY confirmation (with a fill price/quantity) may ever be sent -- no position was ever opened for this user",
       );
     },
   );

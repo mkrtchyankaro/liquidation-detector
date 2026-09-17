@@ -224,6 +224,18 @@ export class BinanceRestClient {
     return this.signedGet("/fapi/v1/order", { symbol, orderId });
   }
 
+  /** Sep 17 2026 (Karo), operator-requested LOX cleanup prerequisite.
+   *  Cancels a single REGULAR order (e.g. a TAKE_PROFIT LIMIT order,
+   *  which uses this endpoint, not the algo-order one that
+   *  cancelAlgoOrder above targets) by its orderId. Mirrors
+   *  cancelAlgoOrder's own shape/semantics exactly -- "already
+   *  cancelled"/"doesn't exist" is the caller's problem to treat as
+   *  success, this method just forwards Binance's response/error. No
+   *  existing V3/V5 code path is touched by adding this. */
+  async cancelOrder(symbol: string, orderId: number): Promise<unknown> {
+    return this.signedDelete("/fapi/v1/order", { symbol, orderId });
+  }
+
   /** Aug 2026, production hardening. Queries an order by the
    *  client-assigned ID (origClientOrderId) instead of Binance's own
    *  orderId — critical for entry-ambiguity reconciliation, where we

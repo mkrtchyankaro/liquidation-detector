@@ -918,6 +918,9 @@ export class MarketDataOrchestrator {
           atr3m,
           atr3mAgeMs,
           b.timestamp,
+          b.bid,
+          b.ask,
+          this.wallTracker,
         );
       }
       // Sep 10 2026 (Karo), operator-requested: DISCONNECTED, same

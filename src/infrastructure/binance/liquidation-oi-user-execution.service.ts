@@ -43,6 +43,15 @@ export interface BinanceRestLike {
   cancelAlgoOrder(algoId: number): Promise<unknown>;
   getOrder(symbol: string, orderId: number): Promise<unknown>;
   getPositionRisk(symbol?: string): Promise<unknown>;
+  /** Sep 17 2026 (Karo), operator-requested Section M/N additions --
+   *  cancelOrder is the REGULAR-order counterpart to cancelAlgoOrder
+   *  (needed to cancel a TAKE_PROFIT LIMIT order during cleanup/TP
+   *  revision). getOpenOrders/getOpenAlgoOrders are the ground-truth
+   *  scans used by restart orphan-recovery (Section N) and cleanup's
+   *  own final verification. */
+  cancelOrder(symbol: string, orderId: number): Promise<unknown>;
+  getOpenOrders(symbol: string): Promise<unknown>;
+  getOpenAlgoOrders(symbol: string): Promise<unknown>;
 }
 
 export interface SymbolFilters {

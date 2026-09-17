@@ -40,6 +40,10 @@ export interface LiquidationOiUserExecutionState {
   expectedTpPnlUsd: number | null;
   realizedPnlUsd: number | null;
   pnlSource: "ESTIMATED" | "REALIZED" | null;
+  /** Sep 17 2026 (Karo), operator-requested Section L/M. */
+  exitPrice: number | null;
+  lastCleanupAttemptAt: number | null;
+  cleanupFailureReason: string | null;
 
   createdAt: number;
   updatedAt: number;
@@ -79,6 +83,9 @@ export function newPendingUserExecution(
     expectedTpPnlUsd: null,
     realizedPnlUsd: null,
     pnlSource: null,
+    exitPrice: null,
+    lastCleanupAttemptAt: null,
+    cleanupFailureReason: null,
     createdAt: now,
     updatedAt: now,
   };

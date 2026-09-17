@@ -24,6 +24,21 @@ import {
 } from "../infrastructure/binance/liquidation-oi-user-execution.service";
 import { LiquidationOiGlobalSignalRepository } from "../infrastructure/mongo/liquidation-oi-global-signal.repository";
 import { StrategyOrderRepository } from "../infrastructure/mongo/strategy-order.repository";
+import {
+  captureOrderBookObservation,
+  type OrderBookObservation,
+  type WallLookup,
+} from "../domain/liquidation-oi-strategy/order-book-observation";
+import {
+  DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
+  type LiquidationOiActiveLifecycleConfig,
+} from "../domain/liquidation-oi-strategy/active-lifecycle-config";
+import {
+  formatWatchMessage,
+  formatEntryReadyMessage,
+  formatRealEntryMessage,
+} from "../domain/liquidation-oi-strategy/telegram-formatter";
+import type { LiquidationOiActiveMainRuntime } from "./liquidation-oi-active-main-runtime.service";
 import { childLogger } from "../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "lox-runtime" });
@@ -97,6 +112,15 @@ export class LiquidationOiRuntimeOrchestrator {
     private readonly forensic: (
       event: import("../domain/liquidation-oi-strategy/forensic-events").ForensicEvent,
     ) => void = () => {},
+    /** Sep 17 2026 (Karo), operator-requested production-completion
+     *  pass -- optional, default no-op, settable late via
+     *  setActiveMainRuntime() to break the circular dependency
+     *  (LiquidationOiActiveMainRuntime needs this orchestrator's OWN
+     *  watchManager, which only exists after this constructor runs)
+     *  -- mirrors the existing orchestratorPlaceholder pattern already
+     *  used elsewhere in main.ts for the same class of dependency. */
+    private activeMainRuntime: LiquidationOiActiveMainRuntime | null = null,
+    private readonly activeLifecycleConfig: LiquidationOiActiveLifecycleConfig = DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
   ) {
     this.watchManager = new LiquidationOiWatchManager(
       strategyConfig,
@@ -111,6 +135,13 @@ export class LiquidationOiRuntimeOrchestrator {
 
   getWatchManager(): LiquidationOiWatchManager {
     return this.watchManager;
+  }
+
+  /** Sep 17 2026 (Karo), operator-requested. Late-binds the ACTIVE
+   *  MAIN runtime after construction -- see the constructor param's
+   *  own doc comment for why this is necessary. */
+  setActiveMainRuntime(runtime: LiquidationOiActiveMainRuntime): void {
+    this.activeMainRuntime = runtime;
   }
 
   onLiquidationEvent(
@@ -132,9 +163,39 @@ export class LiquidationOiRuntimeOrchestrator {
     atr3m: number | null,
     atr3mAgeMs: number | null,
     nowMs: number,
+    bestBid: number | null = null,
+    bestAsk: number | null = null,
+    wallLookup: WallLookup | null = null,
   ): Promise<void> {
     if (!this.observationEnabled) return;
     const before = this.watchManager.getLifecycle(symbol);
+
+    // Section J/K: ACTIVE symbols never re-enter watchManager.onTick() (it
+    // early-returns for them by design), but MAIN's own post-entry
+    // monitoring must still run every qualifying tick -- delegated to the
+    // SAME existing tick, never a separate stream.
+    if (
+      before !== null &&
+      before.globalState === "ACTIVE" &&
+      this.activeMainRuntime !== null
+    ) {
+      const oiQty =
+        oiHistory.length > 0
+          ? oiHistory[oiHistory.length - 1]!.contracts
+          : null;
+      await this.activeMainRuntime.onActiveTick(
+        symbol,
+        before.ownershipId,
+        before.episodeId,
+        candidateTradeSideForVictim(before.episode.victim),
+        currentPrice,
+        oiQty,
+        atr3m,
+        nowMs,
+      );
+      return;
+    }
+
     this.watchManager.onTick(
       symbol,
       percentile,
@@ -145,12 +206,44 @@ export class LiquidationOiRuntimeOrchestrator {
       nowMs,
     );
     const after = this.watchManager.getLifecycle(symbol);
+
+    // Section F: WATCH Telegram, sent exactly once per episode, at the
+    // EPISODE_TRACKING -> EXHAUSTION_CANDIDATE transition (i.e. the moment
+    // WATCH_QUALIFIED fires) -- independent of executionEnabled, per the
+    // operator's own explicit "we need to see signals before real
+    // execution" requirement.
+    if (
+      before?.globalState === "EPISODE_TRACKING" &&
+      after !== null &&
+      after.globalState === "EXHAUSTION_CANDIDATE" &&
+      after.watchResult?.qualifies
+    ) {
+      await this.sendWatchTelegram(
+        symbol,
+        after.episode.victim,
+        after.episode.sameDirectionLiqUsd,
+        after.watchResult.episodePercentileRank,
+        after.watchResult.displacementAtr,
+      );
+    }
+
     if (
       before?.globalState !== "ENTRY_READY" &&
       after !== null &&
       after.globalState === "ENTRY_READY" &&
       atr3m !== null
     ) {
+      const orderBook = captureOrderBookObservation(
+        symbol,
+        currentPrice,
+        after.episode.extremePrice,
+        atr3m,
+        bestBid,
+        bestAsk,
+        wallLookup,
+        this.activeLifecycleConfig,
+        nowMs,
+      );
       await this.handleEntryReady(
         symbol,
         after.ownershipId,
@@ -159,7 +252,42 @@ export class LiquidationOiRuntimeOrchestrator {
         currentPrice,
         atr3m,
         nowMs,
+        orderBook,
+        after.entryResult?.entryReady ? after.entryResult.counterMoveAtr : 0,
+        after.entryResult?.entryReady
+          ? after.entryResult.distanceFromExtremeAtr
+          : 0,
       );
+    }
+  }
+
+  private async sendWatchTelegram(
+    symbol: string,
+    victim: Side,
+    sameDirectionLiqUsd: number,
+    percentileRank: number,
+    displacementAtr: number,
+  ): Promise<void> {
+    const text = formatWatchMessage(
+      symbol,
+      candidateTradeSideForVictim(victim),
+      sameDirectionLiqUsd,
+      percentileRank,
+      displacementAtr,
+    );
+    for (const runtime of this.getUserRuntimes()) {
+      if (runtime.telegram === null) continue;
+      try {
+        await runtime.telegram.sendMessage(text);
+      } catch (err) {
+        log.error(
+          {
+            userId: runtime.userId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "[LOX_TELEGRAM_WATCH_SEND_FAILED] -- isolated, trading lifecycle unaffected",
+        );
+      }
     }
   }
 
@@ -175,6 +303,9 @@ export class LiquidationOiRuntimeOrchestrator {
     entryPrice: number,
     atr3m: number,
     nowMs: number,
+    orderBook: OrderBookObservation | null,
+    counterMoveAtr: number,
+    distanceFromExtremeAtr: number,
   ): Promise<void> {
     if (watchResult === null || !watchResult.qualifies) return;
     const globalSignalId = this.makeGlobalSignalId();
@@ -240,7 +371,43 @@ export class LiquidationOiRuntimeOrchestrator {
       initialCapacityAtr: capacity.initialCapacityAtr,
       initialTpPrice: tpPrice,
       tpRevision: 0,
+      currentTargetPrice: tpPrice,
+      orderBookAtEntryReady: orderBook,
     });
+
+    // Sections F/Q: ENTRY_READY Telegram -- sent regardless of
+    // executionEnabled, per the operator's own explicit "we need to
+    // see signals before real execution" requirement. Isolated,
+    // never blocks the fan-out below.
+    const entryReadyText = formatEntryReadyMessage(
+      symbol,
+      candidateSide,
+      episode.sameDirectionLiqUsd,
+      watchResult.episodePercentileRank,
+      episode.extremePrice,
+      entryPrice,
+      watchResult.oiDestructionFractionAtQualification,
+      counterMoveAtr,
+      distanceFromExtremeAtr,
+      strategyInvalidationPrice,
+      tpPrice,
+      orderBook,
+      !this.executionEnabled,
+    );
+    for (const runtime of this.getUserRuntimes()) {
+      if (runtime.telegram === null) continue;
+      try {
+        await runtime.telegram.sendMessage(entryReadyText);
+      } catch (err) {
+        log.error(
+          {
+            userId: runtime.userId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "[LOX_TELEGRAM_ENTRY_READY_SEND_FAILED] -- isolated, trading lifecycle unaffected",
+        );
+      }
+    }
 
     const outcomes: UserFanOutOutcome[] = [];
     for (const runtime of this.getUserRuntimes()) {
@@ -306,6 +473,8 @@ export class LiquidationOiRuntimeOrchestrator {
         initialCapacityAtr: capacity.initialCapacityAtr,
         initialTpPrice: tpPrice,
         tpRevision: 0,
+        currentTargetPrice: tpPrice,
+        orderBookAtEntryReady: orderBook,
       });
       this.forensic({
         ts: nowMs,
@@ -353,6 +522,8 @@ export class LiquidationOiRuntimeOrchestrator {
       initialCapacityAtr: capacity.initialCapacityAtr,
       initialTpPrice: tpPrice,
       tpRevision: 0,
+      currentTargetPrice: tpPrice,
+      orderBookAtEntryReady: orderBook,
     });
     this.forensic({
       ts: nowMs,
@@ -698,13 +869,19 @@ export class LiquidationOiRuntimeOrchestrator {
     // failure must never undo the already-persisted execution state.
     if (runtime.telegram !== null) {
       try {
-        const tpLine =
-          outcome.outcome === "ENTRY_ACTIVE_WITH_TP"
-            ? `TP: confirmed`
-            : `TP: not yet placed (${outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP" ? outcome.tpFailureReason : ""})`;
-        await runtime.telegram.sendMessage(
-          `${symbol} ${side} ENTRY (Liquidation+OI Exhaustion, experimental)\nEntry: ${outcome.entryPrice}\nQty: ${outcome.quantity}\nEmergency stop: confirmed\n${tpLine}`,
+        const text = formatRealEntryMessage(
+          symbol,
+          side,
+          userExec.riskUsd,
+          outcome.entryPrice,
+          outcome.quantity,
+          updated.emergencyStopPrice ?? emergencyHardStopPrice,
+          emergencyHardStopPrice,
+          updated.estimatedStrategyLossUsd ?? userExec.riskUsd,
+          updated.estimatedEmergencyMaxLossUsd ?? 0,
+          tpPrice,
         );
+        await runtime.telegram.sendMessage(text);
       } catch (err) {
         log.error(
           {

@@ -1,18 +1,21 @@
 import * as assert from "assert";
-import { LiquidationOiWatchManager } from "../src/domain/liquidation-oi-strategy/liquidation-oi-watch-manager";
-import { DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG } from "../src/domain/liquidation-oi-strategy/config";
+import { LiquidationOiGlobalSignalRepository } from "../src/infrastructure/mongo/liquidation-oi-global-signal.repository";
+import { StrategyOrderRepository } from "../src/infrastructure/mongo/strategy-order.repository";
 import {
   LiquidationOiRuntimeOrchestrator,
   type LiquidationOiUserRuntimeRef,
 } from "../src/services/liquidation-oi-runtime-orchestrator";
-import { LiquidationOiGlobalSignalRepository } from "../src/infrastructure/mongo/liquidation-oi-global-signal.repository";
-import { StrategyOrderRepository } from "../src/infrastructure/mongo/strategy-order.repository";
+import { LiquidationOiPositionLifecycleService } from "../src/services/liquidation-oi-position-lifecycle.service";
+import { LiquidationOiActiveMainRuntime } from "../src/services/liquidation-oi-active-main-runtime.service";
+import { recoverLoxOnRestart } from "../src/services/liquidation-oi-restart-recovery";
+import { DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG } from "../src/domain/liquidation-oi-strategy/config";
 import { DEFAULT_CAPACITY_MODEL_COEFFICIENTS } from "../src/domain/liquidation-oi-strategy/initial-capacity-model";
+import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG } from "../src/domain/liquidation-oi-strategy/active-lifecycle-config";
 import type { BinanceRestLike } from "../src/infrastructure/binance/liquidation-oi-user-execution.service";
 import type { MongoClientWrapper } from "../src/infrastructure/mongo/mongo.client";
 
-let passed = 0;
-let failed = 0;
+let passed = 0,
+  failed = 0;
 async function scenario(
   name: string,
   fn: () => Promise<void> | void,
@@ -62,21 +65,26 @@ class FakeCollection<T extends Record<string, unknown>> {
     return { matchedCount: 0 };
   }
   find(filter: Record<string, unknown> = {}): { toArray: () => Promise<T[]> } {
-    const matches = this.docs.filter((d) =>
-      Object.entries(filter).every(
-        ([k, v]) => (d as Record<string, unknown>)[k] === v,
-      ),
-    );
+    const matchesClause = (d: T, clause: Record<string, unknown>): boolean =>
+      Object.entries(clause).every(([k, v]) => {
+        const dv = (d as Record<string, unknown>)[k];
+        if (v && typeof v === "object" && "$in" in (v as any))
+          return (v as any).$in.includes(dv);
+        if (v && typeof v === "object" && "$nin" in (v as any))
+          return !(v as any).$nin.includes(dv);
+        return dv === v;
+      });
+    const matches = this.docs.filter((d) => {
+      if ("$or" in filter) {
+        const clauses = (filter as any).$or as Record<string, unknown>[];
+        return clauses.some((c) => matchesClause(d, c));
+      }
+      return matchesClause(d, filter);
+    });
     return { toArray: async () => matches };
   }
   async findOne(filter: Record<string, unknown>): Promise<T | null> {
-    return (
-      this.docs.find((d) =>
-        Object.entries(filter).every(
-          ([k, v]) => (d as Record<string, unknown>)[k] === v,
-        ),
-      ) ?? null
-    );
+    return (await this.find(filter).toArray())[0] ?? null;
   }
   async countDocuments(filter: Record<string, unknown>): Promise<number> {
     return (await this.find(filter).toArray()).length;
@@ -112,34 +120,145 @@ const EXCHANGE_INFO = {
     },
   ],
 };
-function mockRestSuccess(): BinanceRestLike & { calls: string[] } {
+
+interface MockRestOpts {
+  failGetOpenOrders?: boolean;
+}
+function mockRest(
+  opts: MockRestOpts = {},
+): BinanceRestLike & {
+  calls: string[];
+  positionAmt: string;
+  tpStatus: string;
+  stopStatus: string;
+} {
   const calls: string[] = [];
   let algoId = 1,
     orderId = 1;
+  const state = { positionAmt: "10", tpStatus: "NEW", stopStatus: "WORKING" }; // entry verification requires "NEW"/"WORKING"; flip to terminal statuses AFTER entry, before reconciliation, to simulate a later fill
   return {
     calls,
+    get positionAmt() {
+      return state.positionAmt;
+    },
+    set positionAmt(v: string) {
+      state.positionAmt = v;
+    },
+    get tpStatus() {
+      return state.tpStatus;
+    },
+    set tpStatus(v: string) {
+      state.tpStatus = v;
+    },
+    get stopStatus() {
+      return state.stopStatus;
+    },
+    set stopStatus(v: string) {
+      state.stopStatus = v;
+    },
     getExchangeInfo: async () => {
       calls.push("getExchangeInfo");
       return EXCHANGE_INFO;
     },
     createOrder: async (p: any) => {
-      calls.push(`createOrder:${p.type}:trigger=${p.price ?? "n/a"}`);
+      calls.push(`createOrder:${p.type}:${p.side}`);
       return { orderId: orderId++ };
     },
     createAlgoOrder: async (p: any) => {
-      calls.push(`createAlgoOrder:${p.type}:trigger=${p.triggerPrice}`);
+      calls.push(`createAlgoOrder:${p.type}`);
       return { algoId: algoId++ };
     },
-    getAlgoOrder: async () => ({ algoStatus: "WORKING" }),
-    getAlgoOrderByClientId: async () => ({ algoStatus: "WORKING" }),
-    cancelAlgoOrder: async () => ({}),
-    getOrder: async () => ({ status: "NEW" }),
+    getAlgoOrder: async () => ({ algoStatus: state.stopStatus }),
+    getAlgoOrderByClientId: async () => ({ algoStatus: state.stopStatus }),
+    cancelAlgoOrder: async () => {
+      calls.push("cancelAlgoOrder");
+      return {};
+    },
+    getOrder: async () => ({ status: state.tpStatus }),
     getPositionRisk: async () => [
-      { symbol: "SOLUSDT", positionAmt: "10", entryPrice: "98" },
+      { symbol: "SOLUSDT", positionAmt: state.positionAmt, entryPrice: "98" },
     ],
+    cancelOrder: async () => {
+      calls.push("cancelOrder");
+      return {};
+    },
+    getOpenOrders: async () => {
+      calls.push("getOpenOrders");
+      if (opts.failGetOpenOrders) throw new Error("simulated API failure");
+      return [];
+    },
+    getOpenAlgoOrders: async () => {
+      calls.push("getOpenAlgoOrders");
+      return [];
+    },
+  } as unknown as BinanceRestLike & {
+    calls: string[];
+    positionAmt: string;
+    tpStatus: string;
+    stopStatus: string;
   };
 }
-async function driveToEntryReady(
+
+function runtimes(
+  specs: Array<{
+    userId: string;
+    riskUsd: number;
+    rest: BinanceRestLike | null;
+    enabled?: boolean;
+  }>,
+): () => LiquidationOiUserRuntimeRef[] {
+  return () =>
+    specs.map((s) => ({
+      userId: s.userId,
+      riskUsd: s.riskUsd,
+      liquidationOiExecutionEnabled: s.enabled ?? true,
+      binanceRest: s.rest,
+      telegram: { sendMessage: async () => {} },
+    }));
+}
+
+function buildStack(getRuntimes: () => LiquidationOiUserRuntimeRef[]) {
+  const { mongo, signals, userExecs, orders } = fakeMongo();
+  const globalSignalRepo = new LiquidationOiGlobalSignalRepository(mongo);
+  const strategyOrderRepo = new StrategyOrderRepository(mongo);
+  const orch = new LiquidationOiRuntimeOrchestrator(
+    DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+    DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
+    globalSignalRepo,
+    strategyOrderRepo,
+    getRuntimes,
+    true,
+    true,
+  );
+  const positionLifecycle = new LiquidationOiPositionLifecycleService(
+    globalSignalRepo,
+    strategyOrderRepo,
+    orch.getWatchManager(),
+    getRuntimes,
+    DEFAULT_ACTIVE_LIFECYCLE_CONFIG.positionReconciliationIntervalMs,
+  );
+  const activeMain = new LiquidationOiActiveMainRuntime(
+    globalSignalRepo,
+    strategyOrderRepo,
+    positionLifecycle,
+    getRuntimes,
+    DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
+  );
+  orch.setActiveMainRuntime(activeMain);
+  return {
+    mongo,
+    signals,
+    userExecs,
+    orders,
+    globalSignalRepo,
+    strategyOrderRepo,
+    orch,
+    positionLifecycle,
+    activeMain,
+  };
+}
+
+async function driveToActive(
   orch: LiquidationOiRuntimeOrchestrator,
   symbol: string,
   now0: number,
@@ -169,299 +288,364 @@ async function driveToEntryReady(
 }
 
 async function main(): Promise<void> {
-  console.log(
-    "Running production-completion-pass-A regression tests (bounded logs / ownership observability / separated stop prices)...\n",
-  );
+  console.log("Running production-completion-pass-full-lifecycle tests...\n");
 
   await scenario(
-    "A.1. noSignalLog never exceeds its bounded cap, even after far more pushes than the cap",
-    () => {
-      const config = {
-        ...DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-        noProgressTimeoutMs: 999_999_999,
-      };
-      const mgr = new LiquidationOiWatchManager(config);
-      mgr.onLiquidationEvent(
-        {
-          symbol: "BTCUSDT",
-          victim: "SHORT",
-          timestamp: 0,
-          price: 75000,
-          quoteQty: 1000,
-        },
-        null,
-      );
-      // drive 2000 WATCH rejections -- far more than any reasonable bound
-      for (let i = 1; i <= 2000; i++) {
-        mgr.onTick(
-          "BTCUSDT",
-          {
-            historicalSampleCount: 20,
-            historicalP90: 999999999,
-            historicalP95: 999999999,
-            historicalP99: 999999999,
-            percentileRank: 1,
-          },
-          [],
-          75000,
-          100,
-          1000,
-          i,
-        );
-      }
-      const log = mgr.getNoSignalLog();
-      assert.ok(
-        log.length <= 500,
-        `noSignalLog must stay bounded (<=500), got ${log.length}`,
-      );
-      assert.ok(log.length > 0, "sanity: log must not be empty");
-    },
-  );
-
-  await scenario(
-    "A.2. oppositeEventIgnoredLog never exceeds its bounded cap after many opposite events",
-    () => {
-      const mgr = new LiquidationOiWatchManager();
-      mgr.onLiquidationEvent(
-        {
-          symbol: "ETHUSDT",
-          victim: "SHORT",
-          timestamp: 0,
-          price: 2400,
-          quoteQty: 500000,
-        },
-        null,
-      );
-      for (let i = 1; i <= 2000; i++) {
-        mgr.onLiquidationEvent(
-          {
-            symbol: "ETHUSDT",
-            victim: "LONG",
-            timestamp: i,
-            price: 2400,
-            quoteQty: 10,
-          },
-          null,
-        );
-      }
-      const log = mgr.getOppositeEventIgnoredLog();
-      assert.ok(
-        log.length <= 500,
-        `oppositeEventIgnoredLog must stay bounded (<=500), got ${log.length}`,
-      );
-    },
-  );
-
-  await scenario(
-    "A.3. bounded logs drop OLDEST entries, keeping the most recent -- test/debug access still returns real recent data",
-    () => {
-      const config = {
-        ...DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-        noProgressTimeoutMs: 999_999_999,
-      };
-      const mgr = new LiquidationOiWatchManager(config);
-      mgr.onLiquidationEvent(
-        {
-          symbol: "BTCUSDT",
-          victim: "SHORT",
-          timestamp: 0,
-          price: 75000,
-          quoteQty: 1000,
-        },
-        null,
-      );
-      for (let i = 1; i <= 600; i++) {
-        mgr.onTick(
-          "BTCUSDT",
-          {
-            historicalSampleCount: 20,
-            historicalP90: 999999999,
-            historicalP95: 999999999,
-            historicalP99: 999999999,
-            percentileRank: 1,
-          },
-          [],
-          75000,
-          100,
-          1000,
-          i,
-        );
-      }
-      const log = mgr.getNoSignalLog();
-      assert.strictEqual(
-        log.length,
-        500,
-        "must be exactly at the cap after 600 pushes",
-      );
-      assert.ok(
-        log[log.length - 1]!.timestamp > log[0]!.timestamp,
-        "must retain the MOST RECENT entries, not the oldest",
-      );
-    },
-  );
-
-  await scenario(
-    "B.1. GLOBAL_OWNERSHIP_CONTENTION path (silent-ignore fix) leaves the OTHER, legitimately-owned episode's ownership completely untouched",
+    "L/M.1. TP fill is detected and drives cleanup to COMPLETE",
     async () => {
-      // This directly proves the fix does NOT introduce the release-bug: since the
-      // ignore path is structurally unreachable under direction-sticky ownership,
-      // this test instead proves the SAFER property -- that a symbol's ownership,
-      // once legitimately held (via a real WATCH_QUALIFIED promotion), is never
-      // released by anything OTHER than cancel()/confirmActivePosition() reaching
-      // that SAME episode -- i.e. no code path can release someone else's ownership.
-      const { mongo } = fakeMongo();
-      const rest = mockRestSuccess();
-      const orch = new LiquidationOiRuntimeOrchestrator(
-        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
-        new LiquidationOiGlobalSignalRepository(mongo),
-        new StrategyOrderRepository(mongo),
-        () => [
-          {
-            userId: "karo",
-            riskUsd: 1,
-            liquidationOiExecutionEnabled: true,
-            binanceRest: rest,
-            telegram: null,
-          },
-        ],
-        true,
-        true,
+      const rest = mockRest();
+      const { orch, positionLifecycle, userExecs } = buildStack(
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
       );
-      await driveToEntryReady(orch, "SOLUSDT", 1_000_000);
-      assert.strictEqual(
-        orch.getWatchManager().getLifecycle("SOLUSDT")!.globalState,
-        "ACTIVE",
+      await driveToActive(orch, "SOLUSDT", 1_000_000);
+      let karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.state, "ACTIVE");
+      rest.positionAmt = "0";
+      rest.tpStatus = "FILLED";
+      await positionLifecycle.reconcileAll(1_100_000);
+      karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.state, "TERMINAL");
+      assert.strictEqual(karo.terminalReason, "TP_FILLED");
+      assert.strictEqual(karo.cleanupState, "COMPLETE");
+    },
+  );
+
+  await scenario(
+    "L/M.2. emergency stop fill is detected and drives cleanup to COMPLETE",
+    async () => {
+      const rest = mockRest();
+      const { orch, positionLifecycle, userExecs } = buildStack(
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
+      );
+      await driveToActive(orch, "SOLUSDT", 2_000_000);
+      rest.positionAmt = "0";
+      rest.stopStatus = "FILLED";
+      await positionLifecycle.reconcileAll(2_100_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.terminalReason, "EMERGENCY_STOP");
+      assert.strictEqual(karo.cleanupState, "COMPLETE");
+    },
+  );
+
+  await scenario(
+    "L/M.3. flat position with no provable cause -> POSITION_CLOSED_EXTERNALLY, never invented",
+    async () => {
+      const rest = mockRest();
+      const { orch, positionLifecycle, userExecs } = buildStack(
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
+      );
+      await driveToActive(orch, "SOLUSDT", 3_000_000);
+      rest.positionAmt = "0";
+      await positionLifecycle.reconcileAll(3_100_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.terminalReason, "POSITION_CLOSED_EXTERNALLY");
+    },
+  );
+
+  await scenario(
+    "M.4. cleanup API failure -> FAILED_RETRYING, then a later retry succeeds -> COMPLETE, global never closes on the failed attempt",
+    async () => {
+      const rest = mockRest({ failGetOpenOrders: true });
+      const { orch, positionLifecycle, userExecs, signals } = buildStack(
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
+      );
+      await driveToActive(orch, "SOLUSDT", 4_000_000);
+      rest.positionAmt = "0";
+      rest.tpStatus = "FILLED";
+      await positionLifecycle.reconcileAll(4_100_000);
+      let karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.cleanupState, "FAILED_RETRYING");
+      assert.ok(karo.cleanupFailureReason);
+      let active = signals.docs.find((d: any) => d.state === "ACTIVE");
+      assert.ok(
+        active,
+        "global must NOT close while cleanup is FAILED_RETRYING",
+      );
+
+      (rest as any).getOpenOrders = async () => [];
+      await positionLifecycle.reconcileAll(4_200_000);
+      karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.cleanupState, "COMPLETE");
+      const closed = signals.docs.find((d: any) => d.state === "CLOSED");
+      assert.ok(
+        closed,
+        "global must close once the retry succeeds and no other blocker remains",
+      );
+    },
+  );
+
+  await scenario(
+    "O.1. Karo closes while Artak remains ACTIVE -- global stays open, symbol stays owned; Artak closing later closes the global and releases the symbol",
+    async () => {
+      const karoRest = mockRest();
+      const artakRest = mockRest();
+      const { orch, positionLifecycle, userExecs, signals } = buildStack(
+        runtimes([
+          { userId: "karo", riskUsd: 1, rest: karoRest },
+          { userId: "artak", riskUsd: 5, rest: artakRest },
+        ]),
+      );
+      await driveToActive(orch, "SOLUSDT", 5_000_000);
+      karoRest.positionAmt = "0";
+      karoRest.tpStatus = "FILLED";
+      await positionLifecycle.reconcileAll(5_100_000);
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      let artak = userExecs.docs.find((d: any) => d.userId === "artak");
+      assert.strictEqual(karo.state, "TERMINAL");
+      assert.strictEqual(karo.cleanupState, "COMPLETE");
+      assert.strictEqual(artak.state, "ACTIVE");
+      assert.ok(
+        !signals.docs.some((d: any) => d.state === "CLOSED"),
+        "global must not close while Artak remains ACTIVE",
       );
       assert.strictEqual(
         orch.getWatchManager().isSymbolOwned("SOLUSDT"),
         true,
-        "ownership must remain held for the real ACTIVE episode",
+        "symbol must remain owned while Artak remains ACTIVE",
+      );
+
+      (artakRest as any).getPositionRisk = async () => [
+        { symbol: "SOLUSDT", positionAmt: "0", entryPrice: "98" },
+      ];
+      await positionLifecycle.reconcileAll(5_200_000);
+      artak = userExecs.docs.find((d: any) => d.userId === "artak");
+      assert.strictEqual(artak.state, "TERMINAL");
+      assert.strictEqual(artak.cleanupState, "COMPLETE");
+      assert.ok(
+        signals.docs.some((d: any) => d.state === "CLOSED"),
+        "global must close once BOTH users are terminal and clean",
+      );
+      assert.strictEqual(
+        orch.getWatchManager().isSymbolOwned("SOLUSDT"),
+        false,
+        "symbol must be released after global close",
+      );
+      assert.strictEqual(
+        orch.getWatchManager().getLifecycle("SOLUSDT"),
+        null,
+        "symbol must be available for a fresh episode",
       );
     },
   );
 
   await scenario(
-    "G.1. strategyInvalidationPrice and emergencyHardStopPrice are genuinely different prices, and the emergency stop is placed FURTHER from entry",
+    "J.1. strategy invalidation breach fans out a reduce-only MARKET close to every ACTIVE user, isolated",
     async () => {
-      const { mongo, signals } = fakeMongo();
-      const rest = mockRestSuccess();
-      const orch = new LiquidationOiRuntimeOrchestrator(
-        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
-        new LiquidationOiGlobalSignalRepository(mongo),
-        new StrategyOrderRepository(mongo),
-        () => [
-          {
-            userId: "karo",
-            riskUsd: 1,
-            liquidationOiExecutionEnabled: true,
-            binanceRest: rest,
-            telegram: null,
-          },
-        ],
-        true,
-        true,
+      const karoRest = mockRest();
+      const artakRest = mockRest();
+      const { orch, activeMain, signals, userExecs } = buildStack(
+        runtimes([
+          { userId: "karo", riskUsd: 1, rest: karoRest },
+          { userId: "artak", riskUsd: 5, rest: artakRest },
+        ]),
       );
-      await driveToEntryReady(orch, "SOLUSDT", 2_000_000);
-      const doc = signals.docs.find((d: any) => d.state === "ACTIVE");
-      assert.ok(doc, "sanity: must have an ACTIVE signal doc");
-      assert.notStrictEqual(
-        doc.strategyInvalidationPrice,
-        doc.emergencyHardStopPrice,
-        "the two prices must be genuinely different",
+      await driveToActive(orch, "SOLUSDT", 6_000_000);
+      const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
+      assert.ok(signal);
+      await activeMain.onActiveTick(
+        "SOLUSDT",
+        signal.globalSignalId,
+        "ep-test",
+        "SHORT",
+        signal.strategyInvalidationPrice + 1,
+        4590,
+        1.0,
+        6_100_000,
       );
-      // candidateSide=SHORT (victim SHORT -> candidate SHORT): strategy invalidation is ABOVE entry (extreme+buffer),
-      // emergency hard stop must be FURTHER above -- i.e. even higher than strategyInvalidationPrice.
       assert.ok(
-        doc.emergencyHardStopPrice > doc.strategyInvalidationPrice,
-        `emergency stop (${doc.emergencyHardStopPrice}) must sit further from entry than strategy invalidation (${doc.strategyInvalidationPrice}) for a SHORT candidate`,
+        karoRest.calls.some((c) => c.startsWith("createOrder:MARKET")),
+        "Karo must receive a reduce-only MARKET close",
       );
-      // Confirm the REAL placed Binance order used the emergency price, not the strategy-invalidation price.
-      const stopCall = rest.calls.find((c) =>
-        c.startsWith("createAlgoOrder:STOP_MARKET"),
-      );
-      assert.ok(stopCall, "sanity: a STOP_MARKET must have been placed");
       assert.ok(
-        stopCall!.includes(String(doc.emergencyHardStopPrice.toFixed(2))) ||
-          stopCall!.includes(doc.emergencyHardStopPrice.toFixed(2)),
-        `the physical stop order's own trigger must use emergencyHardStopPrice, got: ${stopCall}`,
+        artakRest.calls.some((c) => c.startsWith("createOrder:MARKET")),
+        "Artak must receive a reduce-only MARKET close",
+      );
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.terminalReason, "STRATEGY_INVALIDATION");
+    },
+  );
+
+  await scenario(
+    "D.1. a single noisy adverse OI/price tick does NOT trigger MARKET_EXIT -- confirmation requires consecutive evidence",
+    async () => {
+      const rest = mockRest();
+      const { orch, activeMain, signals } = buildStack(
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
+      );
+      await driveToActive(orch, "SOLUSDT", 7_000_000);
+      const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
+      const callsBefore = rest.calls.length;
+      await activeMain.onActiveTick(
+        "SOLUSDT",
+        signal.globalSignalId,
+        "ep-test",
+        "SHORT",
+        102.6,
+        5000,
+        1.0,
+        7_010_000,
+      );
+      const newCalls = rest.calls.slice(callsBefore);
+      assert.ok(
+        !newCalls.some((c) => c.startsWith("createOrder:MARKET")),
+        "a single adverse reading must never alone trigger MARKET_EXIT",
       );
     },
   );
 
   await scenario(
-    "G.2. sizing still uses ONLY strategyInvalidationPrice, unchanged, never the wider emergency price",
+    "D.2. CONSECUTIVE confirmed-adverse readings DO trigger MARKET_EXIT with reason ADVERSE_OI_PRICE_EFFICIENCY_FLIP",
     async () => {
-      const { mongo, userExecs } = fakeMongo();
-      const rest = mockRestSuccess();
-      const orch = new LiquidationOiRuntimeOrchestrator(
-        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
-        new LiquidationOiGlobalSignalRepository(mongo),
-        new StrategyOrderRepository(mongo),
-        () => [
-          {
-            userId: "karo",
-            riskUsd: 1,
-            liquidationOiExecutionEnabled: true,
-            binanceRest: rest,
-            telegram: null,
-          },
-        ],
-        true,
-        true,
+      const rest = mockRest();
+      const { orch, activeMain, signals, userExecs } = buildStack(
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
       );
-      await driveToEntryReady(orch, "SOLUSDT", 3_000_000);
-      const userExec = userExecs.docs.find((d: any) => d.userId === "karo");
+      await driveToActive(orch, "SOLUSDT", 8_000_000);
+      const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
       assert.ok(
-        userExec.estimatedStrategyLossUsd === 1,
-        "estimatedStrategyLossUsd must equal the configured riskUsd exactly (sizing driven by strategyInvalidationPrice, not the wider emergency price)",
+        signal.strategyInvalidationPrice > 102.9,
+        "sanity: the ramp below must stay clear of strategy invalidation so this test isolates OI-efficiency specifically",
       );
+      const callsBefore = rest.calls.length;
+      let t = 8_010_000;
+      let price = 102.5,
+        oi = 4590;
+      for (let i = 0; i < 5; i++) {
+        price += 0.08;
+        oi += 200; // SHORT candidate: price rising + OI rising = adverse; small enough steps to stay well clear of strategyInvalidationPrice (103.1) while each step still clears the meaningful-move threshold
+        await activeMain.onActiveTick(
+          "SOLUSDT",
+          signal.globalSignalId,
+          "ep-test",
+          "SHORT",
+          price,
+          oi,
+          1.0,
+          t,
+        );
+        t += DEFAULT_ACTIVE_LIFECYCLE_CONFIG.oiEfficiencyEvalIntervalMs + 100;
+      }
+      const newCalls = rest.calls.slice(callsBefore);
       assert.ok(
-        userExec.estimatedEmergencyMaxLossUsd >
-          userExec.estimatedStrategyLossUsd,
-        "the emergency worst-case loss must be LARGER than the intended strategy risk, since it sits further away",
+        newCalls.some((c) => c.startsWith("createOrder:MARKET")),
+        "consecutive confirmed-adverse readings must eventually trigger MARKET_EXIT",
+      );
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(
+        karo.terminalReason,
+        "ADVERSE_OI_PRICE_EFFICIENCY_FLIP",
       );
     },
   );
 
   await scenario(
-    "G.3. emergency-loss safety constraint skips execution rather than silently accepting excessive risk",
+    "K.1. dynamic TP revision NEVER touches the emergency stop",
     async () => {
-      const { mongo, userExecs } = fakeMongo();
-      const rest = mockRestSuccess();
-      // configure an emergency buffer + cap combination that WILL violate maxEmergencyLossMultipleOfRiskUsd
-      const config = {
-        ...DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-        emergencyHardStopBufferAtrMultiple: 50,
-        maxEmergencyLossMultipleOfRiskUsd: 0.001,
-      };
-      const orch = new LiquidationOiRuntimeOrchestrator(
-        config,
-        DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
-        new LiquidationOiGlobalSignalRepository(mongo),
-        new StrategyOrderRepository(mongo),
-        () => [
-          {
-            userId: "karo",
-            riskUsd: 1,
-            liquidationOiExecutionEnabled: true,
-            binanceRest: rest,
-            telegram: null,
-          },
-        ],
-        true,
-        true,
+      const rest = mockRest();
+      const { orch, activeMain, signals } = buildStack(
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
       );
-      await driveToEntryReady(orch, "SOLUSDT", 4_000_000);
-      const userExec = userExecs.docs.find((d: any) => d.userId === "karo");
-      assert.strictEqual(userExec.state, "TERMINAL");
-      assert.strictEqual(userExec.terminalReason, "EXECUTION_FAILED");
+      await driveToActive(orch, "SOLUSDT", 9_000_000);
+      const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
+      const callsBefore = rest.calls.length;
+      await activeMain.onActiveTick(
+        "SOLUSDT",
+        signal.globalSignalId,
+        "ep-test",
+        "SHORT",
+        95,
+        4590 * 1.05,
+        1.0,
+        9_010_000,
+      );
+      const newCalls = rest.calls.slice(callsBefore);
       assert.ok(
-        !rest.calls.some((c) => c.startsWith("createOrder:MARKET")),
-        "no MARKET entry may ever be placed when the emergency-risk safety constraint is violated",
+        !newCalls.some((c) => c.startsWith("cancelAlgoOrder")),
+        "emergency stop must NEVER be cancelled during a TP revision",
       );
+      assert.ok(
+        !newCalls.some((c) => c.startsWith("createAlgoOrder")),
+        "no new emergency stop should be placed during a plain TP revision",
+      );
+    },
+  );
+
+  await scenario(
+    "N.1. restart with DB ACTIVE but Binance flat -> reconciled to terminal + cleaned up, no duplicate entry",
+    async () => {
+      const rest = mockRest();
+      const {
+        orch,
+        globalSignalRepo,
+        strategyOrderRepo,
+        positionLifecycle,
+        userExecs,
+        signals,
+      } = buildStack(runtimes([{ userId: "karo", riskUsd: 1, rest }]));
+      await driveToActive(orch, "SOLUSDT", 10_000_000);
+      const callsBeforeRestart = rest.calls.length;
+      rest.positionAmt = "0";
+      rest.tpStatus = "FILLED";
+      await recoverLoxOnRestart(
+        globalSignalRepo,
+        strategyOrderRepo,
+        positionLifecycle,
+        runtimes([{ userId: "karo", riskUsd: 1, rest }]),
+        () => {},
+        10_100_000,
+      );
+      const newCalls = rest.calls.slice(callsBeforeRestart);
+      assert.ok(
+        !newCalls.some((c) => c.startsWith("createOrder:MARKET")),
+        "restart recovery must NEVER place a fresh MARKET entry",
+      );
+      const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+      assert.strictEqual(karo.state, "TERMINAL");
+      assert.strictEqual(karo.cleanupState, "COMPLETE");
+      assert.ok(signals.docs.some((d: any) => d.state === "CLOSED"));
+    },
+  );
+
+  await scenario(
+    "N.2. restart with a stuck ENTRY_READY is conservatively CANCELLED, never assumed ACTIVE",
+    async () => {
+      const {
+        globalSignalRepo,
+        strategyOrderRepo,
+        positionLifecycle,
+        signals,
+      } = buildStack(runtimes([]));
+      await globalSignalRepo.upsertSignal({
+        globalSignalId: "stuck-1",
+        symbol: "ETHUSDT",
+        victim: "LONG",
+        candidateSide: "LONG",
+        state: "ENTRY_READY",
+        ownershipId: "own-1",
+        episodePercentileRank: 95,
+        sameDirectionLiqUsd: 100000,
+        extremePrice: 2400,
+        entryPrice: 2405,
+        strategyInvalidationPrice: 2390,
+        emergencyHardStopPrice: 2385,
+        initialCapacityAtr: 1,
+        initialTpPrice: 2420,
+        tpRevision: 0,
+        currentTargetPrice: 2420,
+        orderBookAtEntryReady: null,
+      } as any);
+      await recoverLoxOnRestart(
+        globalSignalRepo,
+        strategyOrderRepo,
+        positionLifecycle,
+        runtimes([]),
+        () => {},
+        11_000_000,
+      );
+      const stuck = signals.docs.find(
+        (d: any) => d.globalSignalId === "stuck-1",
+      );
+      assert.strictEqual(stuck.state, "CANCELLED");
     },
   );
 

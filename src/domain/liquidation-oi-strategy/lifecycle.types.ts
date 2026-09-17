@@ -69,7 +69,9 @@ export type UserTerminalReason =
   | "EMERGENCY_STOP"
   | "EXECUTION_FAILED"
   | "PROTECTION_FAILED"
-  | "USER_STRATEGY_EXECUTION_DISABLED"; // Sep 16 2026 (Karo), operator-requested -- this user's own liquidationOiExecutionEnabled=false, MAIN still observing globally, no order ever attempted for this user
+  | "USER_STRATEGY_EXECUTION_DISABLED" // Sep 16 2026 (Karo), operator-requested -- this user's own liquidationOiExecutionEnabled=false, MAIN still observing globally, no order ever attempted for this user
+  | "ADVERSE_OI_PRICE_EFFICIENCY_FLIP" // Sep 17 2026 (Karo), operator-requested Section J -- MAIN's confirmed adverse OI-price-efficiency thesis flip closed this user
+  | "POSITION_CLOSED_EXTERNALLY"; // Sep 17 2026 (Karo), operator-requested Section L -- Binance position found flat but exact cause could not be proven from strategy-owned order status; never invented
 
 export type CleanupState = "PENDING" | "FAILED_RETRYING" | "COMPLETE";
 

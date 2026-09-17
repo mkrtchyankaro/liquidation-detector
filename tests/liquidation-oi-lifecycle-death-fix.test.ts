@@ -140,6 +140,9 @@ function mockRestSuccess(): BinanceRestLike & { calls: string[] } {
     getPositionRisk: async () => [
       { symbol: "SOLUSDT", positionAmt: "10", entryPrice: "98" },
     ],
+    cancelOrder: async () => ({}),
+    getOpenOrders: async () => [],
+    getOpenAlgoOrders: async () => [],
   };
 }
 function mockRestProtectionFails(): BinanceRestLike & { calls: string[] } {

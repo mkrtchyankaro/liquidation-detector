@@ -142,4 +142,20 @@ export class StrategyOrderRepository {
       state: { $in: ["OPEN", "FILLED"] },
     });
   }
+
+  /** Sep 17 2026 (Karo), operator-requested Section M/O. Distinct from
+   *  countUnresolved() above: a FILLED order (the ENTRY order, always;
+   *  a TP or EMERGENCY_STOP that filled and has already been through
+   *  cleanup's own residual-order verification) is PERMANENTLY,
+   *  correctly terminal -- it must never block global close. Only a
+   *  genuinely still-OPEN (resting) order should gate
+   *  isGlobalCloseEligible()'s own unresolvedStrategyOrderCount --
+   *  using countUnresolved() there would make global close
+   *  structurally unreachable, since the ENTRY order's own FILLED
+   *  state is permanent by design. */
+  async countOpen(globalSignalId: string): Promise<number> {
+    const col = await this.getCollection();
+    if (!col) return 0;
+    return col.countDocuments({ globalSignalId, state: "OPEN" });
+  }
 }

@@ -33,6 +33,15 @@ export interface LiquidationOiGlobalSignalDoc {
   initialCapacityAtr: number | null;
   initialTpPrice: number | null;
   tpRevision: number;
+  /** Sep 17 2026 (Karo), operator-requested Section K -- the CURRENT
+   *  live TP target, distinct from initialTpPrice (which stays the
+   *  original, never-mutated value from ENTRY_READY). */
+  currentTargetPrice: number | null;
+  /** Sep 17 2026 (Karo), operator-requested Section E -- captured at
+   *  ENTRY_READY. Strictly observational; never read by any decision. */
+  orderBookAtEntryReady:
+    | import("../../domain/liquidation-oi-strategy/order-book-observation").OrderBookObservation
+    | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -96,6 +105,17 @@ export class LiquidationOiGlobalSignalRepository {
     return col.find({ state: { $nin: ["CLOSED", "CANCELLED"] } }).toArray();
   }
 
+  /** Sep 17 2026 (Karo), operator-requested Section O. Single-doc
+   *  lookup by globalSignalId, used when a decision (MAIN market exit,
+   *  global close) needs to read/update ONE signal's own state. */
+  async findSignal(
+    globalSignalId: string,
+  ): Promise<LiquidationOiGlobalSignalDoc | null> {
+    const col = await this.getSignalCollection();
+    if (!col) return null;
+    return col.findOne({ globalSignalId });
+  }
+
   /** IDEMPOTENCY: used before starting an entry sequence for a user --
    *  if a PENDING/ACTIVE row already exists for this exact (userId,
    *  globalSignalId), the caller must not start a second entry
@@ -137,5 +157,20 @@ export class LiquidationOiGlobalSignalRepository {
     const col = await this.getUserExecCollection();
     if (!col) return [];
     return col.find({ globalSignalId }).toArray();
+  }
+
+  /** Sep 17 2026 (Karo), operator-requested Section L/M. Every user
+   *  execution row whose OWN state is still "ACTIVE", OR whose
+   *  cleanupState is "FAILED_RETRYING" (needs another cleanup attempt)
+   *  -- the two categories the periodic reconciler must act on. Rows
+   *  already TERMINAL+COMPLETE are never re-touched. */
+  async findNonTerminalUserExecutions(): Promise<
+    LiquidationOiUserExecutionState[]
+  > {
+    const col = await this.getUserExecCollection();
+    if (!col) return [];
+    return col
+      .find({ $or: [{ state: "ACTIVE" }, { cleanupState: "FAILED_RETRYING" }] })
+      .toArray();
   }
 }

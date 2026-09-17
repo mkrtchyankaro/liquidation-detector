@@ -153,6 +153,107 @@ export interface EpisodeTerminalEvent extends ForensicBase {
   symbolReleased: boolean;
 }
 
+// ---------------- Sep 17 2026 (Karo), Section 14: post-entry vocabulary ----------------
+
+export interface RealEntryAttemptEvent extends ForensicBase {
+  type: "REAL_ENTRY_ATTEMPT";
+  userId: string;
+}
+export interface RealEntryConfirmedEvent extends ForensicBase {
+  type: "REAL_ENTRY_CONFIRMED";
+  userId: string;
+  entryPrice: number;
+  quantity: number;
+}
+export interface ProtectionConfirmedEvent extends ForensicBase {
+  type: "PROTECTION_CONFIRMED";
+  userId: string;
+  emergencyHardStopPrice: number;
+}
+export interface TpConfirmedEvent extends ForensicBase {
+  type: "TP_CONFIRMED";
+  userId: string;
+  tpPrice: number;
+}
+export interface GlobalActiveEvent extends ForensicBase {
+  type: "GLOBAL_ACTIVE";
+}
+export interface ThesisStateChangedEvent extends ForensicBase {
+  type: "THESIS_STATE_CHANGED";
+  from: string;
+  to: string;
+}
+export interface StrategyInvalidationEvent extends ForensicBase {
+  type: "STRATEGY_INVALIDATION";
+  currentPrice: number;
+  strategyInvalidationPrice: number;
+}
+export interface OiPriceEfficiencyChangedEvent extends ForensicBase {
+  type: "OI_PRICE_EFFICIENCY_CHANGED";
+  from: string;
+  to: string;
+  deltaOiPct: number | null;
+  deltaPriceAtr: number | null;
+  consecutiveAdverseCount: number;
+}
+export interface TpRevisionRequestedEvent extends ForensicBase {
+  type: "TP_REVISION_REQUESTED";
+  decision: string;
+  reason: string;
+  proposedTargetPrice: number | null;
+}
+export interface TpRevisionAppliedEvent extends ForensicBase {
+  type: "TP_REVISION_APPLIED";
+  userId: string;
+  revision: number;
+  newTargetPrice: number;
+}
+export interface MarketExitRequestedEvent extends ForensicBase {
+  type: "MARKET_EXIT_REQUESTED";
+  reason: string;
+}
+export interface UserMarketExitConfirmedEvent extends ForensicBase {
+  type: "USER_MARKET_EXIT_CONFIRMED";
+  userId: string;
+}
+export interface PositionTerminalDetectedEvent extends ForensicBase {
+  type: "POSITION_TERMINAL_DETECTED";
+  userId: string;
+  reason: string;
+}
+export interface CleanupStartedEvent extends ForensicBase {
+  type: "CLEANUP_STARTED";
+  userId: string;
+}
+export interface OrderCancelledEvent extends ForensicBase {
+  type: "ORDER_CANCELLED";
+  userId: string;
+  purpose: string;
+}
+export interface CleanupCompleteEvent extends ForensicBase {
+  type: "CLEANUP_COMPLETE";
+  userId: string;
+}
+export interface CleanupFailedRetryingEvent extends ForensicBase {
+  type: "CLEANUP_FAILED_RETRYING";
+  userId: string;
+  reason: string;
+}
+export interface GlobalClosingEvent extends ForensicBase {
+  type: "GLOBAL_CLOSING";
+}
+export interface GlobalClosedEvent extends ForensicBase {
+  type: "GLOBAL_CLOSED";
+}
+export interface SymbolReleasedEvent extends ForensicBase {
+  type: "SYMBOL_RELEASED";
+}
+export interface RestartReconciliationEvent extends ForensicBase {
+  type: "RESTART_RECONCILIATION";
+  outcome: string;
+  detail: string;
+}
+
 export type ForensicEvent =
   | EpisodeStartEvent
   | LiqAccumulatedEvent
@@ -166,6 +267,27 @@ export type ForensicEvent =
   | EntryReadyEvent
   | EntryReadyResolutionEvent
   | EpisodeDeathEvaluationEvent
-  | EpisodeTerminalEvent;
+  | EpisodeTerminalEvent
+  | RealEntryAttemptEvent
+  | RealEntryConfirmedEvent
+  | ProtectionConfirmedEvent
+  | TpConfirmedEvent
+  | GlobalActiveEvent
+  | ThesisStateChangedEvent
+  | StrategyInvalidationEvent
+  | OiPriceEfficiencyChangedEvent
+  | TpRevisionRequestedEvent
+  | TpRevisionAppliedEvent
+  | MarketExitRequestedEvent
+  | UserMarketExitConfirmedEvent
+  | PositionTerminalDetectedEvent
+  | CleanupStartedEvent
+  | OrderCancelledEvent
+  | CleanupCompleteEvent
+  | CleanupFailedRetryingEvent
+  | GlobalClosingEvent
+  | GlobalClosedEvent
+  | SymbolReleasedEvent
+  | RestartReconciliationEvent;
 
 export type ClearingStateForForensics = ClearingState;

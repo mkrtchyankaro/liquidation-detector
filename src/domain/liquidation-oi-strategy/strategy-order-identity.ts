@@ -24,7 +24,12 @@ import { createHash } from "crypto";
 const PREFIX = "lox";
 const HASH_HEX_LENGTH = 20;
 
-export type StrategyOrderPurpose = "ENTRY" | "TAKE_PROFIT" | "EMERGENCY_STOP";
+export type StrategyOrderPurpose =
+  | "ENTRY"
+  | "TAKE_PROFIT"
+  | "EMERGENCY_STOP"
+  | "MARKET_EXIT"
+  | "FAILSAFE_CLOSE";
 
 /** Deterministic: the SAME (userId, globalSignalId, purpose, revision)
  *  ALWAYS produces the SAME id -- this is what makes retrying a failed

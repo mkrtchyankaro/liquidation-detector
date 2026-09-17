@@ -34,6 +34,11 @@ import { LiqAggregateOrchestrator } from "./infrastructure/mongo/liq-aggregate-p
 import { WallAggregateRepository } from "./infrastructure/mongo/wall-aggregate.repository";
 import { WallAggregateOrchestrator } from "./infrastructure/mongo/wall-aggregate-persistence.orchestrator";
 import { EpisodePercentileService } from "./domain/research/episode-percentile.service";
+import { LiquidationOiPositionLifecycleService } from "./services/liquidation-oi-position-lifecycle.service";
+import { LiquidationOiActiveMainRuntime } from "./services/liquidation-oi-active-main-runtime.service";
+import { LoxPercentileRefreshLifecycle } from "./services/lox-percentile-refresh-lifecycle";
+import { recoverLoxOnRestart } from "./services/liquidation-oi-restart-recovery";
+import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG } from "./domain/liquidation-oi-strategy/active-lifecycle-config";
 
 const log = childLogger({ mod: "main" });
 
@@ -225,6 +230,13 @@ async function main(): Promise<void> {
     log.info("LOX Mongo indexes ensured");
   }
   const liquidationOiForensicLogger = childLogger({ mod: "lox-forensic" });
+  const liquidationOiForensicSink = (
+    event: import("./domain/liquidation-oi-strategy/forensic-events").ForensicEvent,
+  ): void =>
+    liquidationOiForensicLogger.info(
+      { ...event },
+      `[LOX_FORENSIC_${event.type}]`,
+    );
   const liquidationOiOrchestrator = new LiquidationOiRuntimeOrchestrator(
     DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
     DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
@@ -247,11 +259,57 @@ async function main(): Promise<void> {
     // structured, event-driven (not per-tick spam), so the live bot's
     // own logs are as diagnosable as the replay tool without needing
     // a restart or a code change to add logging later.
-    (event) =>
-      liquidationOiForensicLogger.info(
-        { ...event },
-        `[LOX_FORENSIC_${event.type}]`,
-      ),
+    liquidationOiForensicSink,
+  );
+  // Sep 17 2026 (Karo), operator-requested production-completion pass --
+  // Sections L/M/O (termination detection, mandatory cleanup, multi-user
+  // global close) and J/K (ACTIVE MAIN monitoring, dynamic TP). Both reuse
+  // the SAME userRuntimes accessor and the orchestrator's OWN watchManager
+  // (late-bound below, breaking the circular construction dependency).
+  const liquidationOiPositionLifecycle =
+    new LiquidationOiPositionLifecycleService(
+      liquidationOiGlobalSignalRepo,
+      liquidationOiStrategyOrderRepo,
+      liquidationOiOrchestrator.getWatchManager(),
+      () =>
+        userRuntimes
+          .filter((r) => r.config.enabled)
+          .map((r) => ({
+            userId: r.config.userId,
+            riskUsd: r.config.risk.riskUsd,
+            liquidationOiExecutionEnabled:
+              r.config.liquidationOiExecutionEnabled,
+            binanceRest: r.binanceRest,
+            telegram: r.telegram,
+          })),
+      DEFAULT_ACTIVE_LIFECYCLE_CONFIG.positionReconciliationIntervalMs,
+      liquidationOiForensicSink,
+    );
+  const liquidationOiActiveMainRuntime = new LiquidationOiActiveMainRuntime(
+    liquidationOiGlobalSignalRepo,
+    liquidationOiStrategyOrderRepo,
+    liquidationOiPositionLifecycle,
+    () =>
+      userRuntimes
+        .filter((r) => r.config.enabled)
+        .map((r) => ({
+          userId: r.config.userId,
+          riskUsd: r.config.risk.riskUsd,
+          liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled,
+          binanceRest: r.binanceRest,
+          telegram: r.telegram,
+        })),
+    DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
+    liquidationOiForensicSink,
+  );
+  liquidationOiOrchestrator.setActiveMainRuntime(
+    liquidationOiActiveMainRuntime,
+  );
+  // Section C -- LOX-owned percentile refresh, independent of V3/V5 close events.
+  const loxPercentileRefreshLifecycle = new LoxPercentileRefreshLifecycle(
+    episodePercentileService,
+    symbols,
+    DEFAULT_ACTIVE_LIFECYCLE_CONFIG.percentileRefreshIntervalMs,
   );
   const reconciliation = new ReconciliationManager(
     mongo,
@@ -336,6 +394,33 @@ async function main(): Promise<void> {
   // run before any WS ticks flow, same ordering requirement as
   // hydrateMainLocks() above.
   await orchestrator.hydrateActiveCascades();
+
+  // Sep 17 2026 (Karo), operator-requested Section N -- LOX restart/crash
+  // recovery. Same ordering requirement as hydrateMainLocks()/
+  // hydrateActiveCascades() above: MUST run before any WS ticks flow, so a
+  // real liquidation event can never race ahead of reconciling whatever
+  // pre-restart state exists. Only runs meaningfully when Mongo is enabled
+  // (findOpenSignals() etc. are safe no-ops otherwise).
+  if (mongoCfg.enabled) {
+    await recoverLoxOnRestart(
+      liquidationOiGlobalSignalRepo,
+      liquidationOiStrategyOrderRepo,
+      liquidationOiPositionLifecycle,
+      () =>
+        userRuntimes
+          .filter((r) => r.config.enabled)
+          .map((r) => ({
+            userId: r.config.userId,
+            riskUsd: r.config.risk.riskUsd,
+            liquidationOiExecutionEnabled:
+              r.config.liquidationOiExecutionEnabled,
+            binanceRest: r.binanceRest,
+            telegram: r.telegram,
+          })),
+      liquidationOiForensicSink,
+      Date.now(),
+    );
+  }
 
   // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
   // app.ts "Restart safety — Phase A: ATR bootstrap from REST history"
@@ -488,13 +573,15 @@ async function main(): Promise<void> {
   // budget, but still real time across controlled concurrency), and
   // live liquidation detection must never wait on it. Each symbol's
   // cache entry starts NOT_READY (getThresholds() returns null) and
-  // becomes READY as its own warmup completes -- no signal-
-  // qualification code reads from this yet (that integration is a
-  // separate, future step). Failures are logged inside the service
-  // itself; they never throw here. The service instance itself was
-  // already constructed earlier (see its own comment there) so
-  // ReconciliationManager could be wired to it for the signal-CLOSE
+  // becomes READY as its own warmup completes. The service instance
+  // itself was already constructed earlier (see its own comment there)
+  // so ReconciliationManager could be wired to it for the signal-CLOSE
   // refresh hook.
+  // Sep 17 2026 (Karo), CORRECTION to a stale comment found during the
+  // Sep 17 source audit: WATCH qualification (qualifyWatch(), via
+  // market-data-orchestrator.ts's own bookTicker hook) DOES read from
+  // this service's getThresholds() output -- that integration has been
+  // live since the Phase 5-7 pass, not a future step.
   void episodePercentileService
     .warmupAll()
     .catch((err) =>
@@ -502,6 +589,14 @@ async function main(): Promise<void> {
         `[PERCENTILES] warmupAll failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
       ),
     );
+  // Sep 17 2026 (Karo), operator-requested Section C -- LOX's OWN
+  // low-frequency percentile refresh, independent of V3/V5 close events.
+  loxPercentileRefreshLifecycle.start();
+  // Sep 17 2026 (Karo), operator-requested Sections L/M/O -- periodic
+  // position-lifecycle reconciliation (termination detection + mandatory
+  // cleanup + multi-user global close), reusing each user's own existing
+  // Binance client, no new stream.
+  liquidationOiPositionLifecycle.start();
   // Sep 8 2026 (Karo) -- starts the 60s flush timer, AFTER ws.start()
   // (matching old app.ts's own ordering exactly -- "runs after WS so
   // live data flow is never blocked by Mongo index creation").
@@ -515,6 +610,8 @@ async function main(): Promise<void> {
     log.info("shutting down (SIGINT)");
     reconciliation.stop();
     orchestrator.stop();
+    loxPercentileRefreshLifecycle.stop();
+    liquidationOiPositionLifecycle.stop();
     await liqAggregateOrchestrator.stop();
     await wallAggregateOrchestrator.stop();
     await mongo.close();
@@ -524,6 +621,8 @@ async function main(): Promise<void> {
     log.info("shutting down (SIGTERM)");
     reconciliation.stop();
     orchestrator.stop();
+    loxPercentileRefreshLifecycle.stop();
+    liquidationOiPositionLifecycle.stop();
     await liqAggregateOrchestrator.stop();
     await wallAggregateOrchestrator.stop();
     await mongo.close();
