@@ -1,13 +1,19 @@
 import type { Db } from "mongodb";
 import type { Side } from "../../shared/common.types";
 import type { MongoClientWrapper } from "./mongo.client";
+import { ensureTtlIndexSeconds, dropStaleTtlIndex } from "./mongo-ttl-helper";
 import { childLogger } from "../logging/logger";
 
 const log = childLogger({ mod: "raw-liq-event-repo" });
 
-/** Retention window for the raw archive -- see this file's own module
- *  doc comment for why this is bounded rather than kept forever. */
-const TTL_SECONDS = 60 * 24 * 3600; // 60 days
+/** Sep 17 2026 (Karo), operator-requested retention pass. Changed
+ *  from the prior 60 days to 4 days: EpisodePercentileService (the
+ *  only production reader) needs a rolling 3-day window plus a 6h
+ *  left-censoring pad -- 78h of actual history -- so 4 days (96h)
+ *  gives it an 18h safety buffer. See this file's own module doc
+ *  comment for the full production-safety trace. */
+const TTL_SECONDS = 4 * 24 * 3600;
+const TTL_INDEX_NAME = "ttl_eventTimeDate";
 
 /**
  * Sep 8 2026 (Karo). One document per individual liquidation event,
@@ -45,6 +51,18 @@ export interface RawLiquidationEventDoc {
    *  omits it entirely if snapshot construction throws, rather than
    *  ever blocking or corrupting the base liquidation write. */
   marketSnapshot?: Record<string, unknown>;
+  /** Sep 17 2026 (Karo), operator-requested CRITICAL retention-pass
+   *  fix. `timestamp` above is a plain number (epoch ms) -- MongoDB
+   *  TTL indexes ONLY expire documents on a genuine BSON Date field;
+   *  a TTL index on a numeric field is silently a no-op (confirmed by
+   *  source audit: this collection's TTL index had existed since Sep
+   *  8 2026 and had never actually deleted anything). This field is
+   *  the SAME semantic value as `timestamp`, stored as a real Date,
+   *  used ONLY for TTL expiry -- `timestamp` itself is left
+   *  completely unchanged (every existing numeric-range query against
+   *  it, in production and research code alike, keeps working
+   *  identically). */
+  eventTimeDate?: Date;
 }
 
 export class RawLiquidationEventRepository {
@@ -57,12 +75,54 @@ export class RawLiquidationEventRepository {
   async ensureIndexes(): Promise<boolean> {
     try {
       const col = await this.mongo.rawLiquidationEvents();
-      if (!col) return false;
+      const db = await this.mongo.ensureOwn();
+      if (!col || !db) return false;
       await col.createIndex({ symbol: 1, timestamp: -1 });
-      await col.createIndex(
-        { timestamp: 1 },
-        { expireAfterSeconds: TTL_SECONDS },
+
+      // Sep 17 2026 (Karo), operator-requested CRITICAL fix -- the
+      // OLD TTL index lived on `timestamp` (a number), which MongoDB
+      // TTL can never expire (Date-only). Drop it explicitly (it did
+      // nothing functional, so this is safe) and create the REAL TTL
+      // index on the new eventTimeDate field instead. collMod cannot
+      // do this in one step because it changes the KEY, not just the
+      // options -- a genuine drop+create is required here, unlike the
+      // other two collections in this pass.
+      const droppedName = await dropStaleTtlIndex(
+        db,
+        "liq_raw_events",
+        "timestamp",
       );
+      if (droppedName !== null) {
+        log.warn(
+          `[RAW_LIQ_EVENT_STALE_TTL_DROPPED] name=${droppedName} -- this index existed but had NEVER expired anything (TTL requires a genuine Date field, timestamp is a number)`,
+        );
+      }
+      await ensureTtlIndexSeconds(
+        db,
+        "liq_raw_events",
+        "eventTimeDate",
+        TTL_SECONDS,
+        TTL_INDEX_NAME,
+      );
+
+      // Backfill: any existing document written before this fix has
+      // no eventTimeDate yet, so it would never expire under the new
+      // index either. Idempotent (only touches documents still
+      // missing the field) and cheap on every subsequent boot once
+      // the backfill has fully run once (the filter matches nothing).
+      // Derives the Date from the document's OWN original `timestamp`
+      // value (not "now"), so backfilled documents get their TRUE
+      // original retention window, never an artificially extended one.
+      const backfillResult = await col.updateMany(
+        { eventTimeDate: { $exists: false } },
+        [{ $set: { eventTimeDate: { $toDate: "$timestamp" } } }],
+      );
+      if (backfillResult.modifiedCount > 0) {
+        log.info(
+          `[RAW_LIQ_EVENT_BACKFILL_EVENT_TIME_DATE] modifiedCount=${backfillResult.modifiedCount}`,
+        );
+      }
+
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -80,7 +140,11 @@ export class RawLiquidationEventRepository {
     try {
       const col = await this.mongo.rawLiquidationEvents();
       if (!col) return;
-      await col.insertOne(doc);
+      // eventTimeDate is always derived here, unconditionally, from
+      // the same `timestamp` every caller already supplies -- no
+      // caller needs to change, and it can never silently be missing
+      // on a newly-written document going forward.
+      await col.insertOne({ ...doc, eventTimeDate: new Date(doc.timestamp) });
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       log.error(

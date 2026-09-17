@@ -99,7 +99,8 @@
     "test:liquidation-oi-telegram-ux-redesign": "tsx tests/liquidation-oi-telegram-ux-redesign.test.ts",
     "lox:reset": "tsx scripts/lox-reset.ts",
     "lox:status": "tsx scripts/lox-status.ts",
-    "test:liquidation-oi-stuck-signal-reset": "tsx tests/liquidation-oi-stuck-signal-reset.test.ts"
+    "test:liquidation-oi-stuck-signal-reset": "tsx tests/liquidation-oi-stuck-signal-reset.test.ts",
+    "retention:audit": "tsx scripts/retention-audit.ts"
   },
   "engines": {
     "node": ">=18.17"

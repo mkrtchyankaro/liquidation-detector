@@ -1,6 +1,7 @@
 import type { MongoClientWrapper } from "./mongo.client";
 import type { PersistenceConfig } from "../config/persistence.config";
-import { childLogger } from '../logging/logger';
+import { ensureTtlIndexSeconds } from "./mongo-ttl-helper";
+import { childLogger } from "../logging/logger";
 
 /** A single forensic event stored inside a minute aggregate. */
 export interface TopEvent {
@@ -90,7 +91,6 @@ export class LiqAggregateRepository {
     if (!db) return false;
     try {
       const aggregates = db.collection<LiqMinuteAggregateDoc>(COLL_AGGREGATES);
-      const ttlSeconds = this.cfg.retentionDays * 24 * 3600;
 
       await aggregates.createIndexes([
         // Idempotent upsert filter — uniqueness prevents double-counting on
@@ -102,17 +102,37 @@ export class LiqAggregateRepository {
         },
         // Warmup range scan: latest-first read of last N hours per symbol.
         { key: { symbol: 1, minuteStart: -1 }, name: "symbol_minute_desc" },
-        // TTL on createdAt (per design — set once at insert, never moves).
-        {
-          key: { createdAt: 1 },
-          name: `ttl_${this.cfg.retentionDays}d`,
-          expireAfterSeconds: ttlSeconds,
-        },
       ]);
+
+      // Sep 17 2026 (Karo), operator-requested retention pass. TTL on
+      // createdAt is now managed via ensureTtlIndexSeconds(), which
+      // updates the value IN PLACE (collMod) regardless of the
+      // existing index's name -- the OLD code named this index
+      // `ttl_${retentionDays}d`, so every time an operator changed
+      // LIQ_RETENTION_DAYS the next createIndexes() call would try to
+      // add a SECOND, differently-named TTL index on the exact same
+      // {createdAt:1} key and fail with IndexOptionsConflict (or, if
+      // it happened to succeed, leave two conflicting TTL indexes on
+      // the same field). This is fixed structurally now: whatever the
+      // existing TTL index on createdAt is named, its value is simply
+      // updated to match this.cfg.retentionDays going forward.
+      const ttlSeconds = this.cfg.retentionDays * 24 * 3600;
+      const ttlResult = await ensureTtlIndexSeconds(
+        db,
+        COLL_AGGREGATES,
+        "createdAt",
+        ttlSeconds,
+        "ttl_createdAt",
+      );
+
       // liq_state_meta: _id is the symbol, no extra indexes needed.
       this.indexesEnsured = true;
       this.log.info(
-        { coll: COLL_AGGREGATES, ttlDays: this.cfg.retentionDays },
+        {
+          coll: COLL_AGGREGATES,
+          ttlDays: this.cfg.retentionDays,
+          ttlAction: ttlResult.action,
+        },
         "indexes ensured",
       );
       return true;

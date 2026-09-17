@@ -78,6 +78,49 @@ class FakeCollection<T> {
     }
   }
 
+  /** Sep 17 2026 (Karo), operator-requested retention pass -- needed
+   *  by mongo-ttl-helper.ts's ensureTtlIndexSeconds/dropStaleTtlIndex,
+   *  which discover existing TTL indexes by listing them (real Mongo
+   *  behavior) rather than assuming a fixed name. Mirrors indexesCreated
+   *  as {name, key, expireAfterSeconds} shaped like real Mongo index
+   *  metadata. */
+  listIndexes(): {
+    toArray: () => Promise<
+      Array<{
+        name: string;
+        key: Record<string, number>;
+        expireAfterSeconds?: number;
+      }>
+    >;
+  } {
+    return {
+      toArray: async () =>
+        this.indexesCreated.map((ix, i) => ({
+          name: (ix.opts as { name?: string } | undefined)?.name ?? `idx_${i}`,
+          key: ix.spec as Record<string, number>,
+          expireAfterSeconds: (
+            ix.opts as { expireAfterSeconds?: number } | undefined
+          )?.expireAfterSeconds,
+        })),
+    };
+  }
+
+  async dropIndex(name: string): Promise<void> {
+    const idx = this.indexesCreated.findIndex(
+      (ix, i) =>
+        ((ix.opts as { name?: string } | undefined)?.name ?? `idx_${i}`) ===
+        name,
+    );
+    if (idx >= 0) this.indexesCreated.splice(idx, 1);
+  }
+
+  async updateMany(
+    _filter: unknown,
+    _update: unknown,
+  ): Promise<{ modifiedCount: number }> {
+    return { modifiedCount: 0 }; // no pre-existing documents lacking eventTimeDate in these tests
+  }
+
   get(signalId: string): (T & { researchCheckpoints?: unknown[] }) | undefined {
     return this.store.get(signalId);
   }
@@ -92,6 +135,20 @@ class FakeMongoClient {
   }
   async globalSignals() {
     return this.globalCol as unknown as never;
+  }
+  /** Sep 17 2026 (Karo), operator-requested retention pass -- fake Db
+   *  handle, matching the real MongoClientWrapper.ensureOwn(). Its
+   *  .collection("liq_raw_events") returns the SAME rawCol instance
+   *  the tests already inspect, so index/TTL assertions see a single
+   *  consistent state regardless of whether the call went through the
+   *  typed Collection<T> accessor or this raw Db path. command() is a
+   *  no-op stub -- these tests never exercise the collMod path (no
+   *  pre-existing differently-valued TTL index in a fresh FakeCollection). */
+  async ensureOwn() {
+    return {
+      collection: (_name: string) => this.rawCol as unknown as never,
+      command: async (_cmd: unknown) => ({ ok: 1 }),
+    } as unknown as never;
   }
 }
 
@@ -117,6 +174,7 @@ async function main(): Promise<void> {
         price: 2465.5,
         quoteQty: 71000,
         timestamp: 1_725_800_000_000,
+        eventTimeDate: new Date(1_725_800_000_000),
       });
     },
   );
@@ -137,7 +195,7 @@ async function main(): Promise<void> {
       assert.ok(ttlIndex, "expected a TTL index to be created");
       assert.strictEqual(
         (ttlIndex!.opts as { expireAfterSeconds: number }).expireAfterSeconds,
-        60 * 24 * 3600,
+        4 * 24 * 3600,
       );
       const symbolIndex = fake.rawCol.indexesCreated.find(
         (i) => (i.spec as Record<string, unknown>).symbol !== undefined,

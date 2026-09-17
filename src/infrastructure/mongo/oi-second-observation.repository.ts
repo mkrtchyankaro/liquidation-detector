@@ -1,13 +1,18 @@
 import type { Collection } from "mongodb";
 import type { MongoClientWrapper } from "./mongo.client";
+import { ensureTtlIndexSeconds } from "./mongo-ttl-helper";
 import { childLogger } from "../logging/logger";
 
 const log = childLogger({ mod: "oi-second-obs-repo" });
 
-/** Sep 16 2026 (Karo), operator-requested. TEMPORARY/RESEARCH data --
- *  see this file's own module doc comment. 7 days, matching the
- *  operator's own stated default. */
-const TTL_SECONDS = 7 * 24 * 3600;
+/** Sep 17 2026 (Karo), operator-requested retention pass. Changed
+ *  from the prior 7 days to 3 days -- this is high-frequency (~1s)
+ *  research-only data with no production reader (confirmed by source
+ *  audit: OiSecondObservationRepository is written to but never
+ *  queried from anywhere in src/), so shortening retention carries no
+ *  production risk. */
+const TTL_SECONDS = 3 * 24 * 3600;
+const TTL_INDEX_NAME = "ttl_timestamp";
 
 /** Buffer bounds: flushed on a timer OR when this size is reached,
  *  whichever comes first. Hard-capped (drop-oldest) so a prolonged
@@ -65,11 +70,15 @@ export class OiSecondObservationRepository {
   async ensureIndexes(): Promise<boolean> {
     try {
       const col = await this.getCollection();
-      if (!col) return false;
+      const db = await this.mongo.ensureOwn();
+      if (!col || !db) return false;
       await col.createIndex({ symbol: 1, timestamp: 1 });
-      await col.createIndex(
-        { timestamp: 1 },
-        { expireAfterSeconds: TTL_SECONDS },
+      await ensureTtlIndexSeconds(
+        db,
+        "oi_second_observations",
+        "timestamp",
+        TTL_SECONDS,
+        TTL_INDEX_NAME,
       );
       return true;
     } catch (err) {

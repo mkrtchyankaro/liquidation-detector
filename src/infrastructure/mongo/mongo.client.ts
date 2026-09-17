@@ -135,6 +135,16 @@ export class MongoClientWrapper {
     return dbs ? dbs.shared : null;
   }
 
+  /** Sep 17 2026 (Karo), operator-requested TTL-retention pass --
+   *  mirrors ensureShared() exactly, for the same reason: some
+   *  repositories need the raw Db handle directly (here: to run
+   *  `collMod` for in-place TTL value changes and `listIndexes` for
+   *  stale-index detection), not just a typed Collection<T>. */
+  async ensureOwn(): Promise<Db | null> {
+    const dbs = await this.ensure();
+    return dbs ? dbs.own : null;
+  }
+
   // ─── SHARED, historical (liqwatch_bot database) -- reused, never duplicated ───
 
   /** Exact same collection name/shape as liqwatch-bot's own
