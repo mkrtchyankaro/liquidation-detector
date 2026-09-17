@@ -560,6 +560,7 @@ async function main(): Promise<void> {
         globalSignalRepo,
         strategyOrderRepo,
         positionLifecycle,
+        orch.getWatchManager(),
         runtimes([{ userId: "friend", riskUsd: 1, rest, enabled: false }]),
         () => {},
         7_015_000,

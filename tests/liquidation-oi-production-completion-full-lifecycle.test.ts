@@ -590,6 +590,7 @@ async function main(): Promise<void> {
         globalSignalRepo,
         strategyOrderRepo,
         positionLifecycle,
+        orch.getWatchManager(),
         runtimes([{ userId: "karo", riskUsd: 1, rest }]),
         () => {},
         10_100_000,
@@ -613,6 +614,7 @@ async function main(): Promise<void> {
         globalSignalRepo,
         strategyOrderRepo,
         positionLifecycle,
+        orch,
         signals,
       } = buildStack(runtimes([]));
       await globalSignalRepo.upsertSignal({
@@ -638,6 +640,7 @@ async function main(): Promise<void> {
         globalSignalRepo,
         strategyOrderRepo,
         positionLifecycle,
+        orch.getWatchManager(),
         runtimes([]),
         () => {},
         11_000_000,

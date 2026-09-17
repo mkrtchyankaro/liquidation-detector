@@ -406,6 +406,7 @@ async function main(): Promise<void> {
       liquidationOiGlobalSignalRepo,
       liquidationOiStrategyOrderRepo,
       liquidationOiPositionLifecycle,
+      liquidationOiOrchestrator.getWatchManager(),
       () =>
         userRuntimes
           .filter((r) => r.config.enabled)

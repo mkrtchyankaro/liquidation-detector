@@ -1,6 +1,7 @@
 import { LiquidationOiGlobalSignalRepository } from "../infrastructure/mongo/liquidation-oi-global-signal.repository";
 import { StrategyOrderRepository } from "../infrastructure/mongo/strategy-order.repository";
 import type { LiquidationOiPositionLifecycleService } from "./liquidation-oi-position-lifecycle.service";
+import type { LiquidationOiWatchManager } from "../domain/liquidation-oi-strategy/liquidation-oi-watch-manager";
 import type { LiquidationOiUserRuntimeRef } from "./liquidation-oi-runtime-orchestrator";
 import { strategyClientOrderId } from "../domain/liquidation-oi-strategy/strategy-order-identity";
 import type { BinanceRestLike } from "../infrastructure/binance/liquidation-oi-user-execution.service";
@@ -11,28 +12,45 @@ const log = childLogger({ mod: "lox-restart-recovery" });
 
 /**
  * Sep 17 2026 (Karo), operator-requested production-completion pass,
- * Section N. Called ONCE from main.ts, before any new liquidation
- * event or tick is processed. Reuses
- * LiquidationOiPositionLifecycleService's OWN reconcileAll() for the
- * bulk of the work -- this file adds ONLY the two genuinely
- * restart-specific pieces reconcileAll() does not already cover: a
- * stuck in-flight ENTRY_READY signal, and re-verifying emergency
- * protection still exists for a position confirmed to genuinely
- * still be open.
+ * Section N -- EXTENDED Sep 17 2026 (Karo), operator-requested
+ * operational-safety pass, to close two source-audit-confirmed gaps:
+ *
+ * GAP 1 -- "stuck ACTIVE forever": maybeCloseGlobal() was previously
+ * only ever called from inside runCleanup(), which only runs for a
+ * user actively being reconciled THIS pass. If every user for a
+ * signal was ALREADY terminal+COMPLETE before a crash (e.g. the crash
+ * landed between the last user's cleanup completing and its own
+ * maybeCloseGlobal() call), restart's own per-user loop (which only
+ * looks at state==="ACTIVE" rows) found nothing to act on for that
+ * signal, and the global row stayed ACTIVE forever. Fixed by sweeping
+ * maybeCloseGlobal() for EVERY open signal, unconditionally, after
+ * per-user reconciliation.
+ *
+ * GAP 2 -- "restart loses the lock": LiquidationOiWatchManager's own
+ * `symbols` map and SymbolOwnershipRegistry both started COMPLETELY
+ * EMPTY after every restart (confirmed: hydrate() was never called
+ * anywhere in this codebase) -- a symbol with a genuinely still-ACTIVE
+ * global signal in Mongo was NOT locked in-memory, so a fresh
+ * liquidation event for that same symbol post-restart would have
+ * started a competing episode. Fixed by calling the new
+ * watchManager.restoreActiveLifecycle() for every signal confirmed
+ * (after the sweep above) to still be genuinely ACTIVE.
  *
  * RESTART INVARIANT: this function NEVER calls createOrder with a
  * MARKET entry type, and NEVER constructs a fresh
  * LiquidationOiUserExecutionState -- it only reads existing Mongo
- * rows and either marks them terminal (via the shared reconciler) or
+ * rows, marks genuinely-resolved ones terminal/closed (via the shared
+ * reconciler and eligibility rules -- never a bare timeout), and
  * re-verifies/re-places PROTECTIVE orders using deterministic
  * clientOrderIds (idempotent). Nothing here can create a second
- * position.
+ * position, and nothing here closes a signal merely because it is old.
  */
 
 export async function recoverLoxOnRestart(
   globalSignalRepo: LiquidationOiGlobalSignalRepository,
   strategyOrderRepo: StrategyOrderRepository,
   positionLifecycle: LiquidationOiPositionLifecycleService,
+  watchManager: LiquidationOiWatchManager,
   getUserRuntimes: () => readonly LiquidationOiUserRuntimeRef[],
   forensic: (event: ForensicEvent) => void,
   nowMs: number,
@@ -61,6 +79,7 @@ export async function recoverLoxOnRestart(
         log.warn(
           `[LOX_RESTART_STUCK_ENTRY_READY_CANCELLED] symbol=${signal.symbol} globalSignalId=${signal.globalSignalId}`,
         );
+        continue; // not ACTIVE -- nothing further to reconcile or hydrate for this one
       }
 
       const userExecs = await globalSignalRepo.findUserExecutionsForSignal(
@@ -209,6 +228,55 @@ export async function recoverLoxOnRestart(
     }
   }
 
+  // Sep 17 2026 (Karo) -- per-user reconciliation (TP/stop-fill detection,
+  // cleanup) BEFORE the close-eligibility sweep below, so a user who
+  // becomes terminal here is already accounted for when we check whether
+  // each signal is now eligible to close.
   await positionLifecycle.reconcileAll(nowMs);
-  log.info("[LOX_RESTART_RECONCILIATION_COMPLETE]");
+
+  // GAP 1 fix: sweep every open signal for close-eligibility, not just
+  // ones whose users happened to be freshly reconciled above. This is
+  // the ONLY thing that can advance a signal whose every user was
+  // ALREADY terminal+COMPLETE before this restart even began.
+  for (const signal of openSignals) {
+    if (signal.state === "ACTIVE") {
+      try {
+        await positionLifecycle.maybeCloseGlobal(signal.globalSignalId, nowMs);
+      } catch (err) {
+        log.error(
+          {
+            globalSignalId: signal.globalSignalId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          "[LOX_RESTART_CLOSE_ELIGIBILITY_SWEEP_FAILED] -- isolated",
+        );
+      }
+    }
+  }
+
+  // GAP 2 fix: for every signal STILL genuinely ACTIVE after the sweep
+  // above, restore its in-memory lock -- otherwise a fresh liquidation
+  // event on that same symbol would start a competing episode. Never
+  // closes a healthy signal merely because it survived restart; this
+  // only LOCKS what genuinely remains open.
+  let restoredCount = 0;
+  for (const globalSignalId of new Set(
+    openSignals.map((s) => s.globalSignalId),
+  )) {
+    const current = await globalSignalRepo.findSignal(globalSignalId);
+    if (current === null || current.state !== "ACTIVE") continue;
+    watchManager.restoreActiveLifecycle(
+      current.symbol,
+      current.globalSignalId,
+      current.ownershipId,
+      current.victim,
+      current.sameDirectionLiqUsd,
+      current.extremePrice,
+      nowMs,
+    );
+    restoredCount++;
+  }
+  log.info(
+    `[LOX_RESTART_RECONCILIATION_COMPLETE] restoredActiveLocks=${restoredCount}`,
+  );
 }

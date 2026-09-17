@@ -831,6 +831,80 @@ export class LiquidationOiWatchManager {
     this.symbols.delete(symbol);
   }
 
+  /** Sep 17 2026 (Karo), operator-requested CRITICAL restart-safety
+   *  fix. Source audit confirmed: this class's own `symbols` map and
+   *  SymbolOwnershipRegistry both start COMPLETELY EMPTY after every
+   *  process restart (nothing previously called `hydrate()` on
+   *  either) -- meaning a symbol with a genuinely still-ACTIVE global
+   *  signal in Mongo was NOT locked in-memory post-restart, and a
+   *  fresh liquidation event for that same symbol would start a
+   *  competing episode. This method is the fix: called ONCE per
+   *  symbol during restart recovery, for every global signal
+   *  confirmed (after reconciliation) to still be genuinely ACTIVE,
+   *  BEFORE any new WS liquidation event can be processed.
+   *
+   *  Reconstructs a MINIMAL, APPROXIMATE episode state -- exact
+   *  original firstLiqTs/eventCount/OI history are not persisted on
+   *  the global signal doc and are NOT reconstructed here (nothing
+   *  reads them again once a symbol is ACTIVE -- see onTick's own
+   *  unconditional early-return for ACTIVE/CLOSING/CLOSED). The ONLY
+   *  purpose of this reconstruction is correct symbol locking
+   *  (isSymbolOwned() / onLiquidationEvent's own existing-lifecycle
+   *  branch) and a valid forensic base for any FUTURE closeActive()
+   *  call -- not historical fidelity. */
+  restoreActiveLifecycle(
+    symbol: string,
+    episodeId: string,
+    ownershipId: string,
+    victim: Side,
+    sameDirectionLiqUsd: number,
+    extremePrice: number,
+    nowMs: number,
+  ): void {
+    if (this.symbols.has(symbol)) return; // never overwrite a genuinely live in-memory lifecycle
+    const episode: LiquidationOiEpisodeState = {
+      symbol,
+      victim,
+      firstLiqTs: nowMs,
+      latestLiqTs: nowMs,
+      eventCount: 1,
+      sameDirectionLiqUsd,
+      startPrice: extremePrice,
+      extremePrice,
+      extremeTs: nowMs,
+      startOiQuantity: null,
+      currentOiQuantity: null,
+      currentOiTs: null,
+      minOiQuantity: null,
+      minOiTs: null,
+    };
+    const lifecycle: SymbolLifecycle = {
+      episodeId,
+      ownershipId,
+      globalState: "ACTIVE",
+      episode,
+      watchResult: null,
+      entryResult: null,
+      enteredExhaustionCandidateAt: null,
+      lastTickAt: nowMs,
+      lastMeaningfulProgressAt: nowMs,
+      liqUsdAtLastMeaningfulProgress: sameDirectionLiqUsd,
+      extremeAtLastMeaningfulProgress: extremePrice,
+      minOiAtLastMeaningfulProgress: null,
+      lastLoggedWatchReasonCode: null,
+      lastLoggedEntryReasonCode: null,
+      lastLoggedClearingResult: null,
+    };
+    this.symbols.set(symbol, lifecycle);
+    this.ownership.hydrate(symbol, ownershipId, victim);
+    this.forensic({
+      ...this.base(lifecycle, symbol, nowMs),
+      type: "RESTART_RECONCILIATION",
+      outcome: "ACTIVE_LIFECYCLE_RESTORED",
+      detail: `symbol locked in-memory after restart, ownershipId=${ownershipId}`,
+    } as unknown as ForensicEvent);
+  }
+
   private recomputeMeaningfulProgressCheckpoint(
     lifecycle: SymbolLifecycle,
     atr3m: number | null,
