@@ -56,6 +56,7 @@ class FakeDb {
     collMod: string;
     index: { name: string; expireAfterSeconds: number };
   }> = [];
+  collModShouldFail = false;
   constructor(private readonly coll: FakeCollection) {}
   collection(_name: string) {
     return this.coll as unknown as never;
@@ -65,6 +66,10 @@ class FakeDb {
     index: { name: string; expireAfterSeconds: number };
   }): Promise<{ ok: number }> {
     this.commandCalls.push(cmd);
+    if (this.collModShouldFail)
+      throw new Error(
+        `user is not allowed to do action [collMod] on [${cmd.collMod}]`,
+      );
     const ix = this.coll.indexes.find((i) => i.name === cmd.index.name);
     if (ix) ix.expireAfterSeconds = cmd.index.expireAfterSeconds;
     return { ok: 1 };
@@ -244,6 +249,58 @@ async function main(): Promise<void> {
         db.commandCalls.length,
         1,
         "a second, already-correct call must not issue another collMod",
+      );
+    },
+  );
+
+  await scenario(
+    "ATLAS SHARED-TIER FALLBACK: collMod disabled (Atlas M0/M2/M5) -> falls back to drop+recreate the SAME index name/key, still updates the value correctly",
+    async () => {
+      const coll = new FakeCollection([
+        {
+          name: "timestamp_1",
+          key: { timestamp: 1 },
+          expireAfterSeconds: 604800,
+        },
+      ]);
+      const db = new FakeDb(coll);
+      db.collModShouldFail = true;
+      const result = await ensureTtlIndexSeconds(
+        db as unknown as never,
+        "oi_second_observations",
+        "timestamp",
+        259200,
+        "ttl_timestamp",
+      );
+
+      assert.strictEqual(
+        result.action,
+        "updated",
+        "must still succeed via the fallback, not report failure",
+      );
+      assert.strictEqual(result.before, 604800);
+      assert.strictEqual(result.after, 259200);
+      assert.strictEqual(
+        coll.indexes.length,
+        1,
+        "no duplicate index left behind",
+      );
+      assert.strictEqual(
+        coll.indexes[0]!.name,
+        "timestamp_1",
+        "the index name is preserved even through the drop+recreate fallback",
+      );
+      assert.strictEqual(coll.indexes[0]!.expireAfterSeconds, 259200);
+      assert.strictEqual(
+        coll.dropIndexCalls.length,
+        1,
+        "exactly one drop, of the old index",
+      );
+      assert.strictEqual(coll.dropIndexCalls[0], "timestamp_1");
+      assert.strictEqual(
+        coll.createIndexCalls.length,
+        1,
+        "exactly one recreate",
       );
     },
   );

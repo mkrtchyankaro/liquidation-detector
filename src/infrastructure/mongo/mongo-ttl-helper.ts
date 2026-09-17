@@ -83,19 +83,53 @@ export async function ensureTtlIndexSeconds(
       };
     }
 
-    await db.command({
-      collMod: collectionName,
-      index: { name: existing.name, expireAfterSeconds: ttlSeconds },
-    });
-    log.info(
-      `[TTL_INDEX_UPDATED] coll=${collectionName} field=${fieldName} name=${existing.name} before=${before} after=${ttlSeconds}`,
-    );
-    return {
-      action: "updated",
-      indexName: existing.name as string,
-      before,
-      after: ttlSeconds,
-    };
+    try {
+      await db.command({
+        collMod: collectionName,
+        index: { name: existing.name, expireAfterSeconds: ttlSeconds },
+      });
+      log.info(
+        `[TTL_INDEX_UPDATED] coll=${collectionName} field=${fieldName} name=${existing.name} before=${before} after=${ttlSeconds} method=collMod`,
+      );
+      return {
+        action: "updated",
+        indexName: existing.name as string,
+        before,
+        after: ttlSeconds,
+      };
+    } catch (collModErr) {
+      // Sep 17 2026 (Karo), operator-reported production finding --
+      // collMod is disabled entirely on MongoDB Atlas shared-tier
+      // clusters (M0/M2/M5), REGARDLESS of the user's granted roles --
+      // no permission grant can ever make it succeed there. Falling
+      // back to drop+recreate of the SAME index (identical key,
+      // identical name, only expireAfterSeconds differs) achieves the
+      // exact same end state using only standard index create/drop
+      // privileges (part of ordinary readWrite), which DO work on
+      // shared tiers. There is a brief window with no TTL index on
+      // this field between the drop and the create -- acceptable:
+      // this runs once at startup, not on a hot path, and TTL
+      // enforcement is inherently best-effort/asynchronous already.
+      const collModMsg =
+        collModErr instanceof Error ? collModErr.message : String(collModErr);
+      log.warn(
+        `[TTL_INDEX_COLLMOD_FAILED_FALLBACK_TO_RECREATE] coll=${collectionName} field=${fieldName} name=${existing.name}: ${collModMsg}`,
+      );
+      await coll.dropIndex(existing.name as string);
+      await coll.createIndex({ [fieldName]: 1 } as Record<string, 1>, {
+        name: existing.name as string,
+        expireAfterSeconds: ttlSeconds,
+      });
+      log.info(
+        `[TTL_INDEX_UPDATED] coll=${collectionName} field=${fieldName} name=${existing.name} before=${before} after=${ttlSeconds} method=drop_recreate_fallback`,
+      );
+      return {
+        action: "updated",
+        indexName: existing.name as string,
+        before,
+        after: ttlSeconds,
+      };
+    }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     log.error(
