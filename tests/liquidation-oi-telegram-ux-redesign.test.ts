@@ -44,6 +44,27 @@ const PCTX = {
   historicalP99: 400000,
   percentileRank: 96,
 };
+function candle(
+  closeTime: number,
+  open: number,
+  high: number,
+  low: number,
+  close: number,
+) {
+  return {
+    symbol: "X",
+    interval: "1m",
+    openTime: closeTime - 60_000,
+    closeTime,
+    open,
+    high,
+    low,
+    close,
+    volume: 0,
+    isClosed: true,
+  } as any;
+}
+const FLAT_ATR = { get: (_i: string, _t: number) => 1.0 };
 
 class FakeCollection<T extends Record<string, unknown>> {
   docs: T[] = [];
@@ -270,6 +291,12 @@ function buildStack(
     activeMain,
   };
 }
+/** Sep 17 2026 (Karo), operator-approved lifecycle correction --
+ *  drives an episode all the way to ACTIVE through the REAL, new
+ *  pipeline (episode -> causal candle-confirmed episode end -> WAIT
+ *  for post-episode OI creation -> ENTRY_READY -> ACTIVE), never
+ *  bypassing it. victim=SHORT -> candidateSide=SHORT (identity
+ *  mapping), so favorable price movement is DOWNWARD throughout. */
 async function driveToActive(
   orch: LiquidationOiRuntimeOrchestrator,
   symbol: string,
@@ -289,14 +316,83 @@ async function driveToActive(
     },
     { quantity: 4700, timestamp: now0 + 10_000 },
   );
-  await orch.onTick(symbol, PCTX, [], 103, 1.0, 1000, now0 + 11_000);
-  const history = [
+  await orch.onTick(
+    symbol,
+    PCTX,
+    [],
+    103,
+    1.0,
+    1000,
+    now0 + 11_000,
+    null,
+    null,
+    null,
+    [],
+    [],
+    FLAT_ATR,
+  );
+
+  const c1 = candle(now0 + 60_000, 103, 103, 102.1, 102.1);
+  await orch.onTick(
+    symbol,
+    PCTX,
+    [],
+    102.1,
+    1.0,
+    1000,
+    now0 + 65_000,
+    null,
+    null,
+    null,
+    [c1],
+    [],
+    FLAT_ATR,
+  );
+
+  const c2 = candle(now0 + 120_000, 102.1, 102.3, 101.9, 102.0);
+  const c3 = candle(now0 + 180_000, 102.0, 102.2, 101.7, 101.8);
+  const c3m = candle(now0 + 180_000, 103, 103, 101.7, 101.8);
+  const historyAtEpisodeEnd = [
     { contracts: 5000, fetchedAt: now0 },
     { contracts: 4600, fetchedAt: now0 + 15_000 },
     { contracts: 4590, fetchedAt: now0 + 25_000 },
-    { contracts: 4590, fetchedAt: now0 + 30_000 },
+    { contracts: 4590, fetchedAt: now0 + 180_000 },
   ];
-  await orch.onTick(symbol, PCTX, history, 102.5, 1.0, 1000, now0 + 30_000);
+  await orch.onTick(
+    symbol,
+    PCTX,
+    historyAtEpisodeEnd,
+    101.8,
+    1.0,
+    1000,
+    now0 + 185_000,
+    null,
+    null,
+    null,
+    [c2, c3],
+    [c3m],
+    FLAT_ATR,
+  );
+
+  const historyWithCreation = [
+    ...historyAtEpisodeEnd,
+    { contracts: 4650, fetchedAt: now0 + 200_000 },
+  ];
+  await orch.onTick(
+    symbol,
+    PCTX,
+    historyWithCreation,
+    101.7,
+    1.0,
+    1000,
+    now0 + 200_000,
+    null,
+    null,
+    null,
+    [],
+    [],
+    FLAT_ATR,
+  );
 }
 
 async function main(): Promise<void> {

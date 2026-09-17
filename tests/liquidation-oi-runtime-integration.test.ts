@@ -230,6 +230,32 @@ function karoArtakRuntimes(
   ];
 }
 
+function candle(
+  closeTime: number,
+  open: number,
+  high: number,
+  low: number,
+  close: number,
+) {
+  return {
+    symbol: "X",
+    interval: "1m",
+    openTime: closeTime - 60_000,
+    closeTime,
+    open,
+    high,
+    low,
+    close,
+    volume: 0,
+    isClosed: true,
+  } as any;
+}
+const FLAT_ATR = { get: (_i: string, _t: number) => 1.0 };
+
+/** Sep 17 2026 (Karo), operator-approved lifecycle correction --
+ *  drives an episode all the way to ENTRY_READY through the REAL, new
+ *  pipeline. victim=SHORT -> candidateSide=SHORT, favorable price
+ *  movement is DOWNWARD throughout. */
 async function driveToEntryReady(
   orch: LiquidationOiRuntimeOrchestrator,
   symbol: string,
@@ -256,21 +282,82 @@ async function driveToEntryReady(
     historicalP99: 400000,
     percentileRank: 96,
   };
-  await orch.onTick(symbol, percentile, [], 103, 1.0, 1000, now0 + 11_000);
-  const history = [
+  await orch.onTick(
+    symbol,
+    percentile,
+    [],
+    103,
+    1.0,
+    1000,
+    now0 + 11_000,
+    null,
+    null,
+    null,
+    [],
+    [],
+    FLAT_ATR,
+  );
+
+  const c1 = candle(now0 + 60_000, 103, 103, 102.1, 102.1);
+  await orch.onTick(
+    symbol,
+    percentile,
+    [],
+    102.1,
+    1.0,
+    1000,
+    now0 + 65_000,
+    null,
+    null,
+    null,
+    [c1],
+    [],
+    FLAT_ATR,
+  );
+
+  const c2 = candle(now0 + 120_000, 102.1, 102.3, 101.9, 102.0);
+  const c3 = candle(now0 + 180_000, 102.0, 102.2, 101.7, 101.8);
+  const c3m = candle(now0 + 180_000, 103, 103, 101.7, 101.8);
+  const historyAtEpisodeEnd = [
     { contracts: 5000, fetchedAt: now0 },
     { contracts: 4600, fetchedAt: now0 + 15_000 },
     { contracts: 4590, fetchedAt: now0 + 25_000 },
-    { contracts: 4590, fetchedAt: now0 + 30_000 },
+    { contracts: 4590, fetchedAt: now0 + 180_000 },
   ];
   await orch.onTick(
     symbol,
     percentile,
-    history,
-    102.5,
+    historyAtEpisodeEnd,
+    101.8,
     1.0,
     1000,
-    now0 + 30_000,
+    now0 + 185_000,
+    null,
+    null,
+    null,
+    [c2, c3],
+    [c3m],
+    FLAT_ATR,
+  );
+
+  const historyWithCreation = [
+    ...historyAtEpisodeEnd,
+    { contracts: 4650, fetchedAt: now0 + 200_000 },
+  ];
+  await orch.onTick(
+    symbol,
+    percentile,
+    historyWithCreation,
+    101.7,
+    1.0,
+    1000,
+    now0 + 200_000,
+    null,
+    null,
+    null,
+    [],
+    [],
+    FLAT_ATR,
   );
 }
 

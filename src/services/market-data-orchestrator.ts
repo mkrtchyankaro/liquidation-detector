@@ -959,6 +959,22 @@ export class MarketDataOrchestrator {
               b.bid,
               b.ask,
               this.wallTracker,
+              this.candleStore.closedAfter(
+                b.symbol,
+                "1m",
+                lifecycle.episodeEndDetection?.lastProcessed1mCloseTime ??
+                  lifecycle.episode.firstLiqTs,
+              ),
+              this.candleStore.getClosed(b.symbol, "3m"),
+              {
+                get: (interval, atMs) =>
+                  this.atrTracker.getWilderATRAtOrBefore(
+                    b.symbol,
+                    interval,
+                    14,
+                    atMs,
+                  ),
+              },
             )
             .catch((err) => {
               log.error(

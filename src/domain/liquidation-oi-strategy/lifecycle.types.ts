@@ -13,6 +13,7 @@ export type GlobalLifecycleState =
   | "EPISODE_TRACKING"
   | "WATCH_QUALIFIED"
   | "EXHAUSTION_CANDIDATE"
+  | "WAIT_FOR_POST_EPISODE_OI_CREATION"
   | "ENTRY_READY"
   | "ACTIVE"
   | "CLOSING"
@@ -26,7 +27,21 @@ const GLOBAL_TRANSITIONS: Record<
   IDLE: [],
   EPISODE_TRACKING: ["WATCH_QUALIFIED", "CANCELLED"],
   WATCH_QUALIFIED: ["EXHAUSTION_CANDIDATE", "CANCELLED"],
-  EXHAUSTION_CANDIDATE: ["ENTRY_READY", "CANCELLED"],
+  // Sep 17 2026 (Karo), operator-requested lifecycle correction --
+  // EXHAUSTION_CANDIDATE no longer jumps straight to ENTRY_READY. It
+  // now means "watching for the causal, candle-confirmed episode end"
+  // (the ported DISPLACEMENT_BALANCED recovery-candidate/confirm
+  // structure). Reaching ENTRY_READY directly from here is no longer
+  // valid -- see episode-end-detector.ts's own doc comment for why OI
+  // clearing/stabilization must never be this gate.
+  EXHAUSTION_CANDIDATE: ["WAIT_FOR_POST_EPISODE_OI_CREATION", "CANCELLED"],
+  // New state: episode end is CAUSALLY CONFIRMED (candle/ATR
+  // structure, never OI) and the post-episode OI baseline is frozen.
+  // May persist across many 1m candles -- see
+  // post-episode-oi-creation.ts's own doc comment for why there is
+  // deliberately NO timeout here (the XRP-type delayed-OI-creation
+  // case this state exists to protect).
+  WAIT_FOR_POST_EPISODE_OI_CREATION: ["ENTRY_READY", "CANCELLED"],
   ENTRY_READY: ["ACTIVE", "CANCELLED"],
   ACTIVE: ["CLOSING"],
   CLOSING: ["CLOSED"],
@@ -48,11 +63,15 @@ export function isGlobalTerminal(state: GlobalLifecycleState): boolean {
 /** Symbol ownership held for every non-IDLE, non-terminal state
  *  except EPISODE_TRACKING itself -- ownership begins at
  *  WATCH_QUALIFIED per the approved architecture, and is held through
- *  CLOSING (never released early). */
+ *  CLOSING (never released early). WAIT_FOR_POST_EPISODE_OI_CREATION
+ *  holds ownership too -- the whole point of freezing the episode end
+ *  baseline is to keep watching THIS symbol for post-episode entry
+ *  evidence, not to release it. */
 export function holdsSymbolOwnership(state: GlobalLifecycleState): boolean {
   return (
     state === "WATCH_QUALIFIED" ||
     state === "EXHAUSTION_CANDIDATE" ||
+    state === "WAIT_FOR_POST_EPISODE_OI_CREATION" ||
     state === "ENTRY_READY" ||
     state === "ACTIVE" ||
     state === "CLOSING"

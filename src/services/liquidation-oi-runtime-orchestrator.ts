@@ -1,4 +1,4 @@
-import type { Side } from "../shared/common.types";
+import type { Side, Candle } from "../shared/common.types";
 import { LiquidationOiWatchManager } from "../domain/liquidation-oi-strategy/liquidation-oi-watch-manager";
 import type { LiquidationOiEventInput } from "../domain/liquidation-oi-strategy/episode-tracker";
 import type {
@@ -6,6 +6,7 @@ import type {
   WatchQualificationResult,
 } from "../domain/liquidation-oi-strategy/watch-qualification";
 import type { OiHistorySample } from "../domain/liquidation-oi-strategy/oi-clearing-detector";
+import type { AtrLookup } from "../domain/liquidation-oi-strategy/episode-end-detector";
 import type { LiquidationOiStrategyConfig } from "../domain/liquidation-oi-strategy/config";
 import {
   computeInitialCapacity,
@@ -172,6 +173,9 @@ export class LiquidationOiRuntimeOrchestrator {
     bestBid: number | null = null,
     bestAsk: number | null = null,
     wallLookup: WallLookup | null = null,
+    new1mCandles: readonly Candle[] = [],
+    all3mCandlesSorted: readonly Candle[] = [],
+    atrLookup: AtrLookup | null = null,
   ): Promise<void> {
     if (!this.observationEnabled) return;
     const before = this.watchManager.getLifecycle(symbol);
@@ -228,6 +232,9 @@ export class LiquidationOiRuntimeOrchestrator {
       atr3m,
       atr3mAgeMs,
       nowMs,
+      new1mCandles,
+      all3mCandlesSorted,
+      atrLookup,
     );
     const after = this.watchManager.getLifecycle(symbol);
 
@@ -268,6 +275,7 @@ export class LiquidationOiRuntimeOrchestrator {
         after.entryResult?.entryReady
           ? after.entryResult.distanceFromExtremeAtr
           : 0,
+        after.episodeEndOiQuantity,
       );
     }
   }
@@ -281,6 +289,7 @@ export class LiquidationOiRuntimeOrchestrator {
       sameDirectionLiqUsd: number;
       startOiQuantity: number | null;
       minOiQuantity: number | null;
+      currentOiQuantity: number | null;
     },
     watchResult: WatchQualificationResult | null,
     entryPrice: number,
@@ -289,6 +298,7 @@ export class LiquidationOiRuntimeOrchestrator {
     orderBook: OrderBookObservation | null,
     counterMoveAtr: number,
     distanceFromExtremeAtr: number,
+    episodeEndOiQuantity: number | null,
   ): Promise<void> {
     if (watchResult === null || !watchResult.qualifies) return;
     const globalSignalId = this.makeGlobalSignalId();
@@ -348,6 +358,22 @@ export class LiquidationOiRuntimeOrchestrator {
         (episode.startOiQuantity - episode.minOiQuantity) * entryPrice;
       if (destroyedUsd > 0) {
         oiMetricLine = `\ud83d\udcca OI Clear  -${formatCompactUsd(destroyedUsd)}  (-${(watchResult.oiDestructionFractionAtQualification * 100).toFixed(2)}%)`;
+      }
+    }
+    // Sep 17 2026 (Karo), operator-approved lifecycle correction --
+    // POST-EPISODE OI creation is a SEPARATE metric from episode
+    // clearing above, never conflated. Shown only when the new
+    // WAIT_FOR_POST_EPISODE_OI_CREATION baseline actually produced a
+    // value (episodeEndOiQuantity non-null) and current OI is known.
+    if (episodeEndOiQuantity !== null && episode.currentOiQuantity !== null) {
+      const creationQty = episode.currentOiQuantity - episodeEndOiQuantity;
+      if (creationQty > 0) {
+        const creationUsd = creationQty * entryPrice;
+        const creationLine = `\ud83d\udcc8 OI Creation  +${formatCompactUsd(creationUsd)}`;
+        oiMetricLine =
+          oiMetricLine !== null
+            ? `${oiMetricLine}\n${creationLine}`
+            : creationLine;
       }
     }
 

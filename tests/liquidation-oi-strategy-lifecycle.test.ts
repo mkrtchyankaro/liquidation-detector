@@ -38,6 +38,7 @@ function main(): void {
         "EPISODE_TRACKING",
         "WATCH_QUALIFIED",
         "EXHAUSTION_CANDIDATE",
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
         "ENTRY_READY",
         "ACTIVE",
         "CLOSING",
@@ -58,6 +59,7 @@ function main(): void {
         "EPISODE_TRACKING",
         "WATCH_QUALIFIED",
         "EXHAUSTION_CANDIDATE",
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
         "ENTRY_READY",
       ] as const)
         assert.ok(isValidGlobalTransition(s, "CANCELLED"));
@@ -103,6 +105,7 @@ function main(): void {
       for (const s of [
         "WATCH_QUALIFIED",
         "EXHAUSTION_CANDIDATE",
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
         "ENTRY_READY",
         "ACTIVE",
         "CLOSING",

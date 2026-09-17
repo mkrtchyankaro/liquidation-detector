@@ -1,4 +1,4 @@
-import type { Side } from "../../shared/common.types";
+import type { Side, Candle } from "../../shared/common.types";
 import { SymbolOwnershipRegistry } from "./symbol-ownership";
 import {
   startEpisode,
@@ -13,10 +13,15 @@ import {
   type EpisodePercentileContext,
   type WatchQualificationResult,
 } from "./watch-qualification";
+import type { EntryGateResult } from "./entry-gate-pipeline";
 import {
-  evaluateEntryGates,
-  type EntryGateResult,
-} from "./entry-gate-pipeline";
+  advanceEpisodeEndDetection,
+  initEpisodeEndDetectionState,
+  passesRecoveryFractionGate,
+  type EpisodeEndDetectionState,
+  type AtrLookup,
+} from "./episode-end-detector";
+import { evaluatePostEpisodeOiCreation } from "./post-episode-oi-creation";
 import type { OiHistorySample } from "./oi-clearing-detector";
 import {
   isValidGlobalTransition,
@@ -138,6 +143,17 @@ interface SymbolLifecycle {
   lastLoggedWatchReasonCode: string | null;
   lastLoggedEntryReasonCode: string | null;
   lastLoggedClearingResult: boolean | null;
+  /** Sep 17 2026 (Karo), operator-approved lifecycle correction --
+   *  causal, candle-driven episode-end detection state (see
+   *  episode-end-detector.ts). Only meaningful while globalState is
+   *  EXHAUSTION_CANDIDATE; null before that. */
+  episodeEndDetection: EpisodeEndDetectionState | null;
+  /** Frozen the instant EPISODE_END_CONFIRMED fires -- the baseline
+   *  everything in WAIT_FOR_POST_EPISODE_OI_CREATION is measured
+   *  against. Never mutated afterward. */
+  episodeEndOiQuantity: number | null;
+  episodeEndPrice: number | null;
+  episodeEndTime: number | null;
 }
 
 export interface NoSignalEvent {
@@ -246,6 +262,10 @@ export class LiquidationOiWatchManager {
         lastLoggedWatchReasonCode: null,
         lastLoggedEntryReasonCode: null,
         lastLoggedClearingResult: null,
+        episodeEndDetection: null,
+        episodeEndOiQuantity: null,
+        episodeEndPrice: null,
+        episodeEndTime: null,
       };
       this.symbols.set(event.symbol, lifecycle);
       this.forensic({
@@ -340,6 +360,9 @@ export class LiquidationOiWatchManager {
     atr3m: number | null,
     atr3mAgeMs: number | null,
     nowMs: number,
+    new1mCandles: readonly Candle[] = [],
+    all3mCandlesSorted: readonly Candle[] = [],
+    atrLookup: AtrLookup | null = null,
   ): void {
     let lifecycle = this.symbols.get(symbol);
     if (lifecycle === undefined) return;
@@ -545,6 +568,10 @@ export class LiquidationOiWatchManager {
         enteredExhaustionCandidateAt: nowMs,
         lastTickAt: nowMs,
         lastLoggedWatchReasonCode: watchReasonCode,
+        episodeEndDetection: initEpisodeEndDetectionState(
+          lifecycle.episode.extremePrice,
+          nowMs,
+        ),
       };
       this.symbols.set(symbol, next);
       this.forensic({
@@ -566,7 +593,7 @@ export class LiquidationOiWatchManager {
         this.cancel(
           symbol,
           "ENTRY_WINDOW_MISSED",
-          `${sinceEnteredExhaustion}ms in EXHAUSTION_CANDIDATE without reaching ENTRY_READY, exceeds entryWindowTimeoutMs=${this.config.entryWindowTimeoutMs}ms`,
+          `${sinceEnteredExhaustion}ms in EXHAUSTION_CANDIDATE (episode-end detection) without reaching EPISODE_END_CONFIRMED, exceeds entryWindowTimeoutMs=${this.config.entryWindowTimeoutMs}ms`,
           nowMs,
         );
         return;
@@ -591,148 +618,248 @@ export class LiquidationOiWatchManager {
         }
       }
 
-      const result = evaluateEntryGates({
-        episode: lifecycle.episode,
-        oiHistory,
-        currentPrice,
-        atr3m,
-        atr3mAgeMs,
-        nowMs,
-        config: this.config,
-      });
-      const entryReasonCode = result.entryReady
-        ? "ENTRY_READY"
-        : result.reasonCode;
-
-      if (
-        result.clearingState !== null &&
-        result.clearingState.windows.length > 0
-      ) {
-        const clearingPass =
-          result.entryReady || result.reasonCode !== "CLEARING_NOT_DETECTED";
-        if (
-          lifecycle.lastLoggedClearingResult === null ||
-          clearingPass !== lifecycle.lastLoggedClearingResult ||
-          entryReasonCode !== lifecycle.lastLoggedEntryReasonCode
-        ) {
-          this.forensic({
-            ...this.base(lifecycle, symbol, nowMs),
-            type: "CLEARING_EVALUATION",
-            windows: result.clearingState.windows.map((w) => ({
-              windowSec: w.windowSec,
-              slopeContractsPerSec: w.slopeContractsPerSec,
-              sampleCount: w.sampleCount,
-            })),
-            peakDestructionSlopeContractsPerSec:
-              result.clearingState.peakDestructionSlopeContractsPerSec,
-            windowsPassed: result.clearingState.windowsShowingClearing,
-            windowsRequired: this.config.minConsecutiveWindowsForClearingEnd,
-            result: clearingPass ? "PASS" : "FAIL",
-          });
-        }
+      // Sep 17 2026 (Karo), operator-approved lifecycle correction --
+      // EPISODE END is now decided ENTIRELY by causal closed-candle
+      // price/ATR structure (the ported DISPLACEMENT_BALANCED state
+      // machine), NEVER by OI. oiHistory/atr3m/atr3mAgeMs are not
+      // referenced anywhere in this branch anymore.
+      if (atrLookup === null || lifecycle.episodeEndDetection === null) {
+        // No candle/ATR data available yet this tick -- nothing to
+        // advance; remain EXHAUSTION_CANDIDATE and wait for the next
+        // tick that supplies it. Never a reason to cancel.
+        this.symbols.set(symbol, { ...lifecycle, lastTickAt: nowMs });
+        return;
       }
+      const advance = advanceEpisodeEndDetection(
+        lifecycle.episodeEndDetection,
+        lifecycle.episode.victim,
+        new1mCandles,
+        all3mCandlesSorted,
+        atrLookup,
+      );
 
-      if (entryReasonCode !== lifecycle.lastLoggedEntryReasonCode) {
-        const atrReady = {
-          pass:
-            atr3m !== null &&
-            atr3m > 0 &&
-            atr3mAgeMs !== null &&
-            atr3mAgeMs <= this.config.maxAtrAgeMsForEntry,
-          detail: `atr3m=${atr3m} atr3mAgeMs=${atr3mAgeMs}`,
-        };
-        const clearingOk =
-          result.clearingState !== null &&
-          (result.entryReady ||
-            (result.reasonCode !== "CLEARING_NOT_DETECTED" &&
-              result.reasonCode !== "STALE_OI"));
-        const oiFresh = {
-          pass:
-            result.clearingState !== null &&
-            (result.entryReady || result.reasonCode !== "STALE_OI"),
-          detail: `mostRecentSampleAgeMs=${result.clearingState?.mostRecentSampleAgeMs ?? "null"}`,
-        };
-        const clearing = {
-          pass: clearingOk,
-          detail:
-            result.clearingState !== null
-              ? `windowsShowingClearing=${result.clearingState.windowsShowingClearing}`
-              : "no clearing state",
-        };
-        const counterMove = {
-          pass:
-            result.entryReady ||
-            (result.reasonCode !== "NO_COUNTER_MOVE_YET" &&
-              atrReady.pass &&
-              clearingOk),
-          detail: result.entryReady
-            ? `counterMoveAtr=${result.counterMoveAtr.toFixed(3)}`
-            : result.reasonCode === "NO_COUNTER_MOVE_YET"
-              ? result.detail
-              : "not yet evaluated",
-        };
-        const distanceFromExtreme = {
-          pass:
-            result.entryReady || result.reasonCode !== "TOO_FAR_FROM_EXTREME",
-          detail: result.entryReady
-            ? `distanceFromExtremeAtr=${result.distanceFromExtremeAtr.toFixed(3)}`
-            : result.reasonCode === "TOO_FAR_FROM_EXTREME"
-              ? result.detail
-              : "not yet evaluated",
-        };
-        const blockedBy: string[] = result.entryReady
-          ? []
-          : [result.reasonCode];
+      if (advance.extremeUpdated) {
         this.forensic({
           ...this.base(lifecycle, symbol, nowMs),
-          type: "ENTRY_GATE_EVALUATION",
-          atrReady,
-          oiFresh,
-          clearing,
-          counterMove,
-          distanceFromExtreme,
-          final: result.entryReady ? "ENTRY_READY" : "NO_ENTRY",
-          blockedBy,
-        });
+          type: "EXTREME_UPDATE",
+          previousExtreme: lifecycle.episodeEndDetection.extreme,
+          newExtreme: advance.state.extreme,
+          extensionPrice: Math.abs(
+            advance.state.extreme - lifecycle.episodeEndDetection.extreme,
+          ),
+          extensionAtr:
+            atr3m !== null && atr3m > 0
+              ? Math.abs(
+                  advance.state.extreme - lifecycle.episodeEndDetection.extreme,
+                ) / atr3m
+              : null,
+          meaningfulExtremeProgress: true,
+        } as unknown as ForensicEvent);
+      }
+      if (advance.candidateStarted) {
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "STATE_TRANSITION",
+          from: "EXHAUSTION_CANDIDATE",
+          to: "EXHAUSTION_CANDIDATE",
+          reason: `1M_RECOVERY_CANDIDATE at ${advance.state.candidateTime}`,
+        } as unknown as ForensicEvent);
+      }
+      if (advance.candidateInvalidated && !advance.confirmed) {
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "STATE_TRANSITION",
+          from: "EXHAUSTION_CANDIDATE",
+          to: "EXHAUSTION_CANDIDATE",
+          reason:
+            "RECOVERY_INVALIDATED -- new adverse extreme or 3m confirmation failed, still watching for episode end",
+        } as unknown as ForensicEvent);
       }
 
-      if (!result.entryReady) {
-        this.noSignalLog.push({
-          symbol,
-          victim: lifecycle.episode.victim,
-          atStage: "ENTRY",
-          reasonCode: result.reasonCode,
-          detail: result.detail,
-          timestamp: nowMs,
-        });
+      if (!advance.confirmed) {
         this.symbols.set(symbol, {
           ...lifecycle,
-          entryResult: result,
+          episodeEndDetection: advance.state,
           lastTickAt: nowMs,
-          lastLoggedEntryReasonCode: entryReasonCode,
-          lastLoggedClearingResult:
-            result.clearingState !== null
-              ? result.reasonCode !== "CLEARING_NOT_DETECTED"
-              : lifecycle.lastLoggedClearingResult,
         });
         return;
       }
-      this.assertTransition("EXHAUSTION_CANDIDATE", "ENTRY_READY", symbol);
+
+      const atr3mAtConfirm = atrLookup.get("3m", advance.confirmedAtCloseTime!);
+      const fractionOk = passesRecoveryFractionGate(
+        lifecycle.episode.victim,
+        lifecycle.episode.startPrice,
+        advance.state.extreme,
+        advance.confirmedPrice!,
+        atr3mAtConfirm,
+      );
+      if (!fractionOk) {
+        // 3m ATR condition passed but the recovery-fraction gate
+        // (30% of episode displacement, active only once displacement
+        // >= 1.0x ATR3m) did not -- treat exactly like any other
+        // RECOVERY_INVALIDATED: clear the candidate, keep watching.
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          episodeEndDetection: { ...advance.state, candidateTime: null },
+        });
+        return;
+      }
+
+      // EPISODE_END_CONFIRMED. Freeze the causal OI baseline (most
+      // recent OI sample available at this exact moment -- never a
+      // future sample) and transition to WAIT_FOR_POST_EPISODE_OI_CREATION.
+      // Per the operator's own explicit requirement: this is NOT entry,
+      // and there is deliberately NO timeout applied to the new state.
+      const mostRecentOi =
+        oiHistory.length > 0
+          ? oiHistory.reduce((a, b) => (a.fetchedAt > b.fetchedAt ? a : b))
+          : null;
+      this.assertTransition(
+        "EXHAUSTION_CANDIDATE",
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        symbol,
+      );
       const next: SymbolLifecycle = {
         ...lifecycle,
-        globalState: "ENTRY_READY",
-        entryResult: result,
+        globalState: "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        episodeEndDetection: advance.state,
+        episodeEndOiQuantity: mostRecentOi?.contracts ?? null,
+        episodeEndPrice: advance.confirmedPrice!,
+        episodeEndTime: advance.confirmedAtCloseTime!,
         lastTickAt: nowMs,
-        lastLoggedEntryReasonCode: entryReasonCode,
-        lastLoggedClearingResult: true,
       };
       this.symbols.set(symbol, next);
       this.forensic({
         ...this.base(next, symbol, nowMs),
         type: "STATE_TRANSITION",
         from: "EXHAUSTION_CANDIDATE",
+        to: "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        reason: `EPISODE_END_CONFIRMED at ${advance.confirmedAtCloseTime}, price=${advance.confirmedPrice}, episodeEndOiQuantity=${mostRecentOi?.contracts ?? "null"}`,
+      });
+      return;
+    }
+
+    if (lifecycle.globalState === "WAIT_FOR_POST_EPISODE_OI_CREATION") {
+      // Sep 17 2026 (Karo), operator-requested -- deliberately NO
+      // timeout/staleness cancellation in this state (beyond the
+      // existing generic marketDataStaleTimeoutMs/preEntryFailsafe
+      // checks already applied above, unconditionally, for every
+      // pre-ACTIVE state). This state may legitimately persist across
+      // many 1m candles (the XRP-type delayed OI creation case).
+      const candidateSide = candidateTradeSideForVictim(
+        lifecycle.episode.victim,
+      );
+      const mostRecentOi =
+        oiHistory.length > 0
+          ? oiHistory.reduce((a, b) => (a.fetchedAt > b.fetchedAt ? a : b))
+          : null;
+      const result = evaluatePostEpisodeOiCreation({
+        candidateSide,
+        episodeEndOiQuantity: lifecycle.episodeEndOiQuantity,
+        currentOiQuantity: mostRecentOi?.contracts ?? null,
+        episodeStartOiQuantity: lifecycle.episode.startOiQuantity,
+        episodeMinOiQuantity: lifecycle.episode.minOiQuantity,
+        episodeEndPrice: lifecycle.episodeEndPrice!,
+        currentPrice,
+        atr3m,
+      });
+
+      if (result.reasonCode !== lifecycle.lastLoggedEntryReasonCode) {
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "ENTRY_GATE_EVALUATION",
+          atrReady: {
+            pass: atr3m !== null && atr3m > 0,
+            detail: `atr3m=${atr3m}`,
+          },
+          oiFresh: {
+            pass: mostRecentOi !== null,
+            detail:
+              mostRecentOi !== null
+                ? `age=${nowMs - mostRecentOi.fetchedAt}ms`
+                : "no OI sample",
+          },
+          clearing: {
+            pass: true,
+            detail: "N/A -- clearing OI is not part of the entry gate anymore",
+          },
+          counterMove: { pass: result.qualifies, detail: result.detail },
+          distanceFromExtreme: {
+            pass: true,
+            detail:
+              "N/A -- see capacity model for the existing distanceFromExtreme use",
+          },
+          final: result.qualifies ? "ENTRY_READY" : "NO_ENTRY",
+          blockedBy: result.qualifies ? [] : [result.reasonCode!],
+        } as unknown as ForensicEvent);
+      }
+
+      if (!result.qualifies) {
+        this.noSignalLog.push({
+          symbol,
+          victim: lifecycle.episode.victim,
+          atStage: "ENTRY",
+          reasonCode: result.reasonCode ?? "UNKNOWN",
+          detail: result.detail,
+          timestamp: nowMs,
+        });
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          lastTickAt: nowMs,
+          lastLoggedEntryReasonCode: result.reasonCode,
+        });
+        return;
+      }
+
+      // POST_EPISODE_OI_CREATION_CONFIRMED -> ENTRY_READY. entryResult
+      // is populated in the SAME shape entry-gate-pipeline.ts's
+      // EntryGateSuccess used, so every existing downstream reader
+      // (capacity model, Telegram, sizing) keeps working unchanged --
+      // counterMoveAtr is now the POST-EPISODE favorable price move
+      // (not the old counter-move-from-liquidation-extreme), and
+      // distanceFromExtremeAtr is kept as distance from the episode's
+      // own liquidation extreme (unchanged meaning, still feeding the
+      // existing, not-yet-redesigned capacity/TP model per the
+      // operator's own explicit instruction not to touch TP yet).
+      const distanceFromExtremeAtr =
+        atr3m !== null && atr3m > 0
+          ? Math.abs(currentPrice - lifecycle.episode.extremePrice) / atr3m
+          : 0;
+      const entryResult: EntryGateResult = {
+        entryReady: true,
+        candidateSide,
+        clearingState: {
+          windows: [],
+          peakDestructionSlopeContractsPerSec: null,
+          isDecelerating: null,
+          isStabilizing: null,
+          hasEarlyRebuildSign: null,
+          windowsShowingClearing: 0,
+          mostRecentSampleAgeMs:
+            mostRecentOi !== null ? nowMs - mostRecentOi.fetchedAt : null,
+        },
+        counterMoveAtr: result.favorablePriceMoveAtr ?? 0,
+        distanceFromExtremeAtr,
+      };
+      this.assertTransition(
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        "ENTRY_READY",
+        symbol,
+      );
+      const next: SymbolLifecycle = {
+        ...lifecycle,
+        globalState: "ENTRY_READY",
+        entryResult,
+        lastTickAt: nowMs,
+        lastLoggedEntryReasonCode: null,
+      };
+      this.symbols.set(symbol, next);
+      this.forensic({
+        ...this.base(next, symbol, nowMs),
+        type: "STATE_TRANSITION",
+        from: "WAIT_FOR_POST_EPISODE_OI_CREATION",
         to: "ENTRY_READY",
-        reason: "entry gates passed",
+        reason: `POST_EPISODE_OI_CREATION_CONFIRMED: ${result.detail}`,
       });
       this.forensic({
         ...this.base(next, symbol, nowMs),
@@ -743,8 +870,8 @@ export class LiquidationOiWatchManager {
         percentileRank: next.watchResult?.qualifies
           ? next.watchResult.episodePercentileRank
           : 0,
-        counterMoveAtr: result.counterMoveAtr,
-        distanceFromExtremeAtr: result.distanceFromExtremeAtr,
+        counterMoveAtr: entryResult.counterMoveAtr,
+        distanceFromExtremeAtr: entryResult.distanceFromExtremeAtr,
       });
       return;
     }
@@ -923,6 +1050,10 @@ export class LiquidationOiWatchManager {
       lastLoggedWatchReasonCode: null,
       lastLoggedEntryReasonCode: null,
       lastLoggedClearingResult: null,
+      episodeEndDetection: null,
+      episodeEndOiQuantity: null,
+      episodeEndPrice: null,
+      episodeEndTime: null,
     };
     this.symbols.set(symbol, lifecycle);
     this.ownership.hydrate(symbol, ownershipId, victim);

@@ -184,6 +184,27 @@ const PCTX = {
   historicalP99: 400000,
   percentileRank: 96,
 };
+function candle(
+  closeTime: number,
+  open: number,
+  high: number,
+  low: number,
+  close: number,
+) {
+  return {
+    symbol: "X",
+    interval: "1m",
+    openTime: closeTime - 60_000,
+    closeTime,
+    open,
+    high,
+    low,
+    close,
+    volume: 0,
+    isClosed: true,
+  } as any;
+}
+const FLAT_ATR = { get: (_i: string, _t: number) => 1.0 };
 
 /** Drives a fresh LONG episode to ACTIVE via the REAL entry pipeline,
  *  then returns a tick() helper that calls orch.onTick() -- the EXACT
@@ -197,6 +218,12 @@ const PCTX = {
  *  upward counter-move triggers ENTRY_READY). Mirrors the same
  *  ATR-relative shape (3.0 ATR displacement, 0.5 ATR counter-move)
  *  proven to qualify WATCH/ENTRY in every earlier test in this repo. */
+/** Sep 17 2026 (Karo), operator-approved lifecycle correction --
+ *  drives an episode all the way to ACTIVE through the REAL pipeline.
+ *  victim=LONG -> candidateSide=LONG, favorable price movement is
+ *  UPWARD throughout. The returned tick() is for the POST-ACTIVE
+ *  phase only (TP/SL monitoring) -- unrelated to entry, reuses
+ *  whatever OI history was current at the moment ACTIVE was reached. */
 async function driveLongEpisodeToActive(
   orch: LiquidationOiRuntimeOrchestrator,
   symbol: string,
@@ -222,17 +249,94 @@ async function driveLongEpisodeToActive(
     },
     { quantity: 5600, timestamp: now0 + 10_000 },
   );
-  await orch.onTick(symbol, PCTX, [], 100, 1.0, 1000, now0 + 11_000);
-  const history = [
+  await orch.onTick(
+    symbol,
+    PCTX,
+    [],
+    100,
+    1.0,
+    1000,
+    now0 + 11_000,
+    null,
+    null,
+    null,
+    [],
+    [],
+    FLAT_ATR,
+  );
+
+  const c1 = candle(now0 + 60_000, 100, 100.9, 100, 100.9);
+  await orch.onTick(
+    symbol,
+    PCTX,
+    [],
+    100.9,
+    1.0,
+    1000,
+    now0 + 65_000,
+    null,
+    null,
+    null,
+    [c1],
+    [],
+    FLAT_ATR,
+  );
+
+  const c2 = candle(now0 + 120_000, 100.9, 101.1, 100.7, 101.0);
+  const c3 = candle(now0 + 180_000, 101.0, 101.3, 100.8, 101.2);
+  const c3m = candle(now0 + 180_000, 100, 101.3, 100, 101.2);
+  const historyAtEpisodeEnd = [
     { contracts: 6000, fetchedAt: now0 },
     { contracts: 5500, fetchedAt: now0 + 15_000 },
     { contracts: 5480, fetchedAt: now0 + 25_000 },
-    { contracts: 5480, fetchedAt: now0 + 30_000 },
+    { contracts: 5480, fetchedAt: now0 + 180_000 },
   ];
-  await orch.onTick(symbol, PCTX, history, 100.5, 1.0, 1000, now0 + 30_000);
+  await orch.onTick(
+    symbol,
+    PCTX,
+    historyAtEpisodeEnd,
+    101.2,
+    1.0,
+    1000,
+    now0 + 185_000,
+    null,
+    null,
+    null,
+    [c2, c3],
+    [c3m],
+    FLAT_ATR,
+  );
+
+  const historyWithCreation = [
+    ...historyAtEpisodeEnd,
+    { contracts: 5560, fetchedAt: now0 + 200_000 },
+  ];
+  await orch.onTick(
+    symbol,
+    PCTX,
+    historyWithCreation,
+    101.3,
+    1.0,
+    1000,
+    now0 + 200_000,
+    null,
+    null,
+    null,
+    [],
+    [],
+    FLAT_ATR,
+  );
   return {
     tick: async (price: number, tMs: number) => {
-      await orch.onTick(symbol, PCTX, history, price, 1.0, 1000, tMs);
+      await orch.onTick(
+        symbol,
+        PCTX,
+        historyWithCreation,
+        price,
+        1.0,
+        1000,
+        tMs,
+      );
     },
   };
 }
@@ -456,14 +560,80 @@ async function main(): Promise<void> {
         },
         { quantity: 5600, timestamp: 4_010_000 },
       );
-      await orch.onTick("ETHUSDT", PCTX, [], 103, 1.0, 1000, 4_011_000);
-      const history = [
+      await orch.onTick(
+        "ETHUSDT",
+        PCTX,
+        [],
+        103,
+        1.0,
+        1000,
+        4_011_000,
+        null,
+        null,
+        null,
+        [],
+        [],
+        FLAT_ATR,
+      );
+      const c1 = candle(4_060_000, 103, 103, 102.1, 102.1);
+      await orch.onTick(
+        "ETHUSDT",
+        PCTX,
+        [],
+        102.1,
+        1.0,
+        1000,
+        4_065_000,
+        null,
+        null,
+        null,
+        [c1],
+        [],
+        FLAT_ATR,
+      );
+      const c2 = candle(4_120_000, 102.1, 102.3, 101.9, 102.0);
+      const c3 = candle(4_180_000, 102.0, 102.2, 101.7, 101.8);
+      const c3m = candle(4_180_000, 103, 103, 101.7, 101.8);
+      const historyAtEpisodeEnd = [
         { contracts: 6000, fetchedAt: 4_000_000 },
         { contracts: 5500, fetchedAt: 4_015_000 },
         { contracts: 5480, fetchedAt: 4_025_000 },
-        { contracts: 5480, fetchedAt: 4_030_000 },
+        { contracts: 5480, fetchedAt: 4_180_000 },
       ];
-      await orch.onTick("ETHUSDT", PCTX, history, 102.5, 1.0, 1000, 4_030_000);
+      await orch.onTick(
+        "ETHUSDT",
+        PCTX,
+        historyAtEpisodeEnd,
+        101.8,
+        1.0,
+        1000,
+        4_185_000,
+        null,
+        null,
+        null,
+        [c2, c3],
+        [c3m],
+        FLAT_ATR,
+      );
+      const history = [
+        ...historyAtEpisodeEnd,
+        { contracts: 5540, fetchedAt: 4_200_000 },
+      ];
+      await orch.onTick(
+        "ETHUSDT",
+        PCTX,
+        history,
+        101.7,
+        1.0,
+        1000,
+        4_200_000,
+        null,
+        null,
+        null,
+        [],
+        [],
+        FLAT_ATR,
+      );
       const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
       assert.strictEqual(signal.candidateSide, "SHORT");
       const tpPrice = signal.initialTpPrice;
@@ -476,7 +646,13 @@ async function main(): Promise<void> {
         tpPrice,
         1.0,
         1000,
-        4_100_000,
+        4_300_000,
+        null,
+        null,
+        null,
+        [],
+        [],
+        FLAT_ATR,
       );
       const user = userExecs.docs.find((d: any) => d.userId === "main");
       assert.strictEqual(user.state, "TERMINAL");

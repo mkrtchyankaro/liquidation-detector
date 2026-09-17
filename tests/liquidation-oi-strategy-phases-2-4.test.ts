@@ -872,6 +872,26 @@ function main(): void {
     () => {
       const mgr = new LiquidationOiWatchManager();
       const now0 = 1_000_000;
+      const flatAtr = { get: (_i: string, _t: number) => 1.0 };
+      const candle = (
+        closeTime: number,
+        open: number,
+        high: number,
+        low: number,
+        close: number,
+      ) =>
+        ({
+          symbol: "AVAXUSDT",
+          interval: "1m",
+          openTime: closeTime - 60_000,
+          closeTime,
+          open,
+          high,
+          low,
+          close,
+          volume: 0,
+          isClosed: true,
+        }) as any;
       mgr.onLiquidationEvent(
         {
           symbol: "AVAXUSDT",
@@ -906,17 +926,44 @@ function main(): void {
         1.0,
         1000,
         now0 + 11_000,
+        [],
+        [],
+        flatAtr,
       );
       assert.strictEqual(
         mgr.getLifecycle("AVAXUSDT")!.globalState,
         "EXHAUSTION_CANDIDATE",
       );
 
-      const history = [
+      // 1m recovery candidate: SHORT favorable = price falling, >=0.75 ATR from extreme(31).
+      const c1 = candle(now0 + 60_000, 31, 31, 30.1, 30.1);
+      mgr.onTick(
+        "AVAXUSDT",
+        {
+          historicalSampleCount: 15,
+          historicalP90: 200000,
+          historicalP95: 400000,
+          historicalP99: 700000,
+          percentileRank: 96,
+        },
+        [],
+        30.1,
+        1.0,
+        1000,
+        now0 + 65_000,
+        [c1],
+        [],
+        flatAtr,
+      );
+
+      const c2 = candle(now0 + 120_000, 30.1, 30.3, 29.9, 30.0);
+      const c3 = candle(now0 + 180_000, 30.0, 30.2, 29.7, 29.8);
+      const c3m = candle(now0 + 180_000, 31, 31, 29.7, 29.8);
+      const historyAtEpisodeEnd = [
         { contracts: 5000, fetchedAt: now0 },
         { contracts: 4600, fetchedAt: now0 + 20_000 },
         { contracts: 4590, fetchedAt: now0 + 25_000 },
-        { contracts: 4590, fetchedAt: now0 + 30_000 },
+        { contracts: 4590, fetchedAt: now0 + 180_000 },
       ];
       mgr.onTick(
         "AVAXUSDT",
@@ -927,11 +974,42 @@ function main(): void {
           historicalP99: 700000,
           percentileRank: 96,
         },
-        history,
-        30.7,
+        historyAtEpisodeEnd,
+        29.8,
         1.0,
         1000,
-        now0 + 30_000,
+        now0 + 185_000,
+        [c2, c3],
+        [c3m],
+        flatAtr,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("AVAXUSDT")!.globalState,
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        "episode end must be confirmed before entry, never OI-driven",
+      );
+
+      const historyWithCreation = [
+        ...historyAtEpisodeEnd,
+        { contracts: 4640, fetchedAt: now0 + 200_000 },
+      ];
+      mgr.onTick(
+        "AVAXUSDT",
+        {
+          historicalSampleCount: 15,
+          historicalP90: 200000,
+          historicalP95: 400000,
+          historicalP99: 700000,
+          percentileRank: 96,
+        },
+        historyWithCreation,
+        29.7,
+        1.0,
+        1000,
+        now0 + 200_000,
+        [],
+        [],
+        flatAtr,
       );
       const finalLc = mgr.getLifecycle("AVAXUSDT")!;
       assert.strictEqual(finalLc.globalState, "ENTRY_READY");
