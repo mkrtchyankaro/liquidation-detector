@@ -58,6 +58,12 @@ export class LiquidationOiActiveMainRuntime {
     string,
     DynamicExitControllerState
   >();
+  /** Sep 17 2026 (Karo), operator-requested Section 9 -- throttled
+   *  [LOX ACTIVE] proof-of-monitoring log, at most once per signal per
+   *  this interval (never every tick). Bounded (evicted with the rest
+   *  of a signal's state on close). */
+  private readonly lastActiveLogAt = new Map<string, number>();
+  private readonly ACTIVE_LOG_THROTTLE_MS = 15_000;
 
   constructor(
     private readonly globalSignalRepo: LiquidationOiGlobalSignalRepository,
@@ -95,6 +101,30 @@ export class LiquidationOiActiveMainRuntime {
         state: "ACTIVE",
         episodeAgeSec: 0,
       };
+
+      // Sep 17 2026 (Karo), operator-requested Section 9 -- throttled
+      // proof-of-monitoring log. This is the direct answer to "prove
+      // whether active ticks are reaching it": if this line is not
+      // appearing in logs for a signal you believe is ACTIVE, ticks
+      // are NOT reaching onActiveTick for it -- check the call site in
+      // liquidation-oi-runtime-orchestrator.ts's onTick() instead.
+      const lastLog = this.lastActiveLogAt.get(globalSignalId) ?? 0;
+      if (nowMs - lastLog >= this.ACTIVE_LOG_THROTTLE_MS) {
+        this.lastActiveLogAt.set(globalSignalId, nowMs);
+        const userExecs =
+          await this.globalSignalRepo.findUserExecutionsForSignal(
+            globalSignalId,
+          );
+        const activePaperUsers = userExecs.filter(
+          (u) => u.mode === "PAPER" && u.state === "ACTIVE",
+        ).length;
+        const activeRealUsers = userExecs.filter(
+          (u) => u.mode === "REAL" && u.state === "ACTIVE",
+        ).length;
+        log.info(
+          `[LOX_ACTIVE] signalId=${globalSignalId} symbol=${symbol} price=${currentPrice} tp=${signal.currentTargetPrice ?? signal.initialTpPrice} strategyInvalidation=${signal.strategyInvalidationPrice} globalState=${signal.state} activePaperUsers=${activePaperUsers} activeRealUsers=${activeRealUsers} tpRevision=${signal.tpRevision}`,
+        );
+      }
 
       if (
         isStrategyInvalidated(

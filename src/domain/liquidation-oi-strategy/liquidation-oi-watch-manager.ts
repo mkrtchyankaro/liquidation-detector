@@ -102,6 +102,24 @@ class BoundedLog<T> {
 interface SymbolLifecycle {
   episodeId: string;
   ownershipId: string;
+  /** Sep 17 2026 (Karo), operator-reported CRITICAL LIVE BUG FIX.
+   *  Root cause of the ETHUSDT PAPER signal (lox-sig-1789639397924-
+   *  i4yq1asq) getting stuck ACTIVE forever, TP and SL both silently
+   *  ignored: this field DID NOT EXIST before this fix. onTick()'s
+   *  own ACTIVE branch needed the Mongo document id to call
+   *  activeMainRuntime.onActiveTick(symbol, globalSignalId, ...), but
+   *  had nothing on SymbolLifecycle to read it from -- so it read
+   *  `before.ownershipId` instead (a COMPLETELY DIFFERENT id scheme,
+   *  from symbol-ownership.ts's own makeOwnershipId(), never equal to
+   *  a real globalSignalId). Every onActiveTick() call, for every
+   *  ACTIVE signal that has ever existed, therefore called
+   *  globalSignalRepo.findSignal(<wrong id>), which always returned
+   *  null, which made onActiveTick() return on its very first line --
+   *  strategy invalidation, paper TP hits, OI efficiency, dynamic TP,
+   *  ALL of it silently never ran, for every single ACTIVE signal.
+   *  null until confirmActivePosition()/restoreActiveLifecycle() sets
+   *  it (there is nothing to set before ACTIVE is actually reached). */
+  globalSignalId: string | null;
   globalState: GlobalLifecycleState;
   episode: LiquidationOiEpisodeState;
   watchResult: WatchQualificationResult | null;
@@ -214,6 +232,7 @@ export class LiquidationOiWatchManager {
       const lifecycle: SymbolLifecycle = {
         episodeId,
         ownershipId: "",
+        globalSignalId: null,
         globalState: "EPISODE_TRACKING",
         episode,
         watchResult: null,
@@ -731,13 +750,22 @@ export class LiquidationOiWatchManager {
     }
   }
 
-  /** Sep 16 2026 (Karo), operator-requested. The ONLY path to ACTIVE. */
-  confirmActivePosition(symbol: string, nowMs: number): void {
+  /** Sep 16 2026 (Karo), operator-requested. The ONLY path to ACTIVE.
+   *  Sep 17 2026 (Karo), operator-reported CRITICAL FIX -- now takes
+   *  globalSignalId explicitly and stores it on the lifecycle (see
+   *  SymbolLifecycle's own doc comment on this field for the full
+   *  root-cause story). */
+  confirmActivePosition(
+    symbol: string,
+    globalSignalId: string,
+    nowMs: number,
+  ): void {
     const lifecycle = this.symbols.get(symbol);
     if (lifecycle === undefined) return;
     this.assertTransition(lifecycle.globalState, "ACTIVE", symbol);
     const next = {
       ...lifecycle,
+      globalSignalId,
       globalState: "ACTIVE" as const,
       lastTickAt: nowMs,
     };
@@ -854,7 +882,7 @@ export class LiquidationOiWatchManager {
    *  call -- not historical fidelity. */
   restoreActiveLifecycle(
     symbol: string,
-    episodeId: string,
+    globalSignalId: string,
     ownershipId: string,
     victim: Side,
     sameDirectionLiqUsd: number,
@@ -879,8 +907,9 @@ export class LiquidationOiWatchManager {
       minOiTs: null,
     };
     const lifecycle: SymbolLifecycle = {
-      episodeId,
+      episodeId: globalSignalId,
       ownershipId,
+      globalSignalId,
       globalState: "ACTIVE",
       episode,
       watchResult: null,

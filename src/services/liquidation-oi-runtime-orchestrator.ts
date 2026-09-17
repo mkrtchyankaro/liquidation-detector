@@ -184,13 +184,31 @@ export class LiquidationOiRuntimeOrchestrator {
       before.globalState === "ACTIVE" &&
       this.activeMainRuntime !== null
     ) {
+      // Sep 17 2026 (Karo), operator-reported CRITICAL LIVE BUG FIX --
+      // this MUST be the real globalSignalId (the Mongo document id),
+      // never ownershipId (a completely different id scheme from
+      // symbol-ownership.ts). Passing the wrong id here made every
+      // onActiveTick() call silently no-op forever (globalSignalRepo.
+      // findSignal(<wrong id>) always returned null) -- see
+      // SymbolLifecycle's own doc comment on the globalSignalId field
+      // for the full root-cause trace. If this is ever null here
+      // (should be structurally impossible -- confirmActivePosition
+      // and restoreActiveLifecycle are the only two ways to reach
+      // ACTIVE, and both now set it), skip the tick rather than call
+      // onActiveTick with a null id.
+      if (before.globalSignalId === null) {
+        log.error(
+          `[LOX_ACTIVE_TICK_MISSING_SIGNAL_ID] symbol=${symbol} -- ACTIVE lifecycle with no globalSignalId, structurally unexpected; skipping this tick`,
+        );
+        return;
+      }
       const oiQty =
         oiHistory.length > 0
           ? oiHistory[oiHistory.length - 1]!.contracts
           : null;
       await this.activeMainRuntime.onActiveTick(
         symbol,
-        before.ownershipId,
+        before.globalSignalId,
         before.episodeId,
         candidateTradeSideForVictim(before.episode.victim),
         currentPrice,
@@ -419,7 +437,7 @@ export class LiquidationOiRuntimeOrchestrator {
       this.watchManager.getLifecycle(symbol)?.episodeId ?? "unknown";
     const enabledUsers = this.getUserRuntimes().length;
     if (hasManageableUser) {
-      this.watchManager.confirmActivePosition(symbol, nowMs);
+      this.watchManager.confirmActivePosition(symbol, globalSignalId, nowMs);
       await this.globalSignalRepo.upsertSignal({
         globalSignalId,
         symbol,
