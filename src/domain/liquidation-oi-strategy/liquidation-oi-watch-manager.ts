@@ -71,6 +71,34 @@ import type { ForensicEvent } from "./forensic-events";
  * the top of onTick() for ACTIVE/CLOSING states.
  */
 
+/** Sep 17 2026 (Karo), operator-requested CRITICAL FIX -- confirmed live
+ *  production root cause of an OOM crash-loop (PM2 restart count 100,
+ *  "JavaScript heap out of memory"). noSignalLog/oppositeEventIgnoredLog
+ *  previously grew without bound for the entire process lifetime --
+ *  onTick() is bookTicker-driven (not throttled to 1/sec) and pushes a
+ *  NoSignalEvent on essentially every tick for any symbol with a
+ *  tracked-but-unqualified episode. This bounded ring buffer preserves
+ *  the SAME public read API (getNoSignalLog/getOppositeEventIgnoredLog
+ *  both still return a plain array, tests unaffected) while capping
+ *  memory at a fixed, conservative size, drop-oldest. Structured
+ *  forensic logging (forensic-events.ts) is the primary production
+ *  observability mechanism now -- these two logs remain for
+ *  test/debug convenience only, per the operator's own explicit
+ *  instruction to preserve that access rather than remove them. */
+const DIAGNOSTIC_LOG_MAX_SIZE = 500; // conservative, UNTUNED -- a mechanical safety bound, not a strategy parameter
+
+class BoundedLog<T> {
+  private readonly items: T[] = [];
+  constructor(private readonly maxSize: number) {}
+  push(item: T): void {
+    this.items.push(item);
+    if (this.items.length > this.maxSize) this.items.shift();
+  }
+  toArray(): readonly T[] {
+    return this.items;
+  }
+}
+
 interface SymbolLifecycle {
   episodeId: string;
   ownershipId: string;
@@ -114,8 +142,11 @@ export interface OppositeEventIgnoredEvent {
 export class LiquidationOiWatchManager {
   private readonly ownership = new SymbolOwnershipRegistry();
   private readonly symbols = new Map<string, SymbolLifecycle>();
-  private readonly noSignalLog: NoSignalEvent[] = [];
-  private readonly oppositeEventIgnoredLog: OppositeEventIgnoredEvent[] = [];
+  private readonly noSignalLog = new BoundedLog<NoSignalEvent>(
+    DIAGNOSTIC_LOG_MAX_SIZE,
+  );
+  private readonly oppositeEventIgnoredLog =
+    new BoundedLog<OppositeEventIgnoredEvent>(DIAGNOSTIC_LOG_MAX_SIZE);
 
   constructor(
     private readonly config: LiquidationOiStrategyConfig = DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
@@ -133,10 +164,10 @@ export class LiquidationOiWatchManager {
     return this.ownership.isOwned(symbol);
   }
   getNoSignalLog(): readonly NoSignalEvent[] {
-    return this.noSignalLog;
+    return this.noSignalLog.toArray();
   }
   getOppositeEventIgnoredLog(): readonly OppositeEventIgnoredEvent[] {
-    return this.oppositeEventIgnoredLog;
+    return this.oppositeEventIgnoredLog.toArray();
   }
 
   private base(
@@ -433,6 +464,53 @@ export class LiquidationOiWatchManager {
         this.makeOwnershipId,
       );
       if (resolution.action === "ignore") {
+        // Sep 17 2026 (Karo), operator-requested fix -- NO lifecycle may
+        // disappear silently. Previously this branch deleted the map
+        // entry directly, bypassing noSignalLog/oppositeEventIgnoredLog
+        // and every forensic EPISODE_TERMINAL event -- the one
+        // termination path in this class with zero observability.
+        // Deliberately NOT routed through cancel(): this episode never
+        // actually HELD global ownership (resolve() just told it "no"),
+        // so calling cancel() here would incorrectly call
+        // ownership.release(symbol) and free the OTHER, legitimately-
+        // owned episode's ownership out from under it. Replicates
+        // cancel()'s own OBSERVABILITY (noSignalLog + forensic
+        // EPISODE_TERMINAL) without its release side effect.
+        // NOTE: given the direction-sticky internal-episode-ownership
+        // fix (see onLiquidationEvent's own header comment), this
+        // branch is CONFIRMED STRUCTURALLY UNREACHABLE from current
+        // code -- SymbolOwnershipRegistry can only ever be asked to
+        // resolve() the SAME single victim direction a symbol's one
+        // internal lifecycle is tracking, since an opposite-victim
+        // episode is never allowed to reach EPISODE_TRACKING (let
+        // alone WATCH_QUALIFIED) while another is already alive. Fixed
+        // defensively anyway, in case a future change reintroduces
+        // reachability -- this must never again be a silent path.
+        const reasonCode = "GLOBAL_OWNERSHIP_CONTENTION";
+        const detail =
+          "SymbolOwnershipRegistry.resolve() returned action=ignore -- another victim direction already holds global ownership for this symbol (should be structurally unreachable under direction-sticky internal ownership; hardened defensively). This episode's own attempted ownership is discarded WITHOUT releasing the other, legitimately-owned episode.";
+        this.noSignalLog.push({
+          symbol,
+          victim: lifecycle.episode.victim,
+          atStage: "WATCH",
+          reasonCode,
+          detail,
+          timestamp: nowMs,
+        });
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "EPISODE_TERMINAL",
+          reason: reasonCode,
+          detail,
+          lifetimeMs: nowMs - lifecycle.episode.firstLiqTs,
+          finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
+          finalPercentileRank: lifecycle.watchResult?.qualifies
+            ? lifecycle.watchResult.episodePercentileRank
+            : null,
+          finalExtreme: lifecycle.episode.extremePrice,
+          lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+          symbolReleased: false,
+        });
         this.symbols.delete(symbol);
         return;
       }

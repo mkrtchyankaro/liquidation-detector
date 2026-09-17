@@ -57,6 +57,26 @@ export interface LiquidationOiStrategyConfig {
    *  through ENTRY_READY-awaiting-resolution), measured from the
    *  episode's own first liquidation event. */
   preEntryFailsafeMaxLifetimeMs: number;
+
+  /** Sep 17 2026 (Karo), operator-requested SEPARATION of strategy
+   *  invalidation from emergency hard stop -- source-audit found these
+   *  had collapsed into the same price. Two distinct layers now:
+   *  strategyInvalidationPrice (the normal market-thesis level, used
+   *  for sizing, MAIN's own future software-side monitoring) and
+   *  emergencyHardStopPrice (the catastrophe-only physical Binance
+   *  order, explicitly OUTSIDE strategyInvalidationPrice by this
+   *  additional buffer). UNTUNED -- no previously-approved value
+   *  exists for this distance; kept intentionally simple (a further
+   *  ATR multiple beyond strategyInvalidationPrice) rather than
+   *  invented as a percentage, per the operator's own explicit
+   *  instruction against inventing a random hard-stop percentage. */
+  emergencyHardStopBufferAtrMultiple: number;
+  /** Sep 17 2026 (Karo), operator-requested safety constraint: if the
+   *  emergency hard stop's own implied worst-case loss would exceed
+   *  this multiple of the user's own configured riskUsd, execution is
+   *  skipped for that user rather than silently accepting the larger
+   *  risk. UNTUNED. */
+  maxEmergencyLossMultipleOfRiskUsd: number;
 }
 
 /**
@@ -158,4 +178,14 @@ export const DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG: LiquidationOiStrategyConfig
     // episode's own minimum OI drops by at least this much (as a
     // fraction of its own starting OI) versus the last checkpoint.
     minMeaningfulOiProgressFraction: 0.02,
+
+    // emergencyHardStopBufferAtrMultiple (default 0.4 ATR): the emergency
+    // hard-stop physical Binance order sits this many ADDITIONAL ATR
+    // beyond strategyInvalidationPrice -- UNTUNED, no previously-approved
+    // value exists.
+    emergencyHardStopBufferAtrMultiple: 0.4,
+    // maxEmergencyLossMultipleOfRiskUsd (default 3.0x): if the emergency
+    // stop's own implied worst-case loss exceeds this multiple of the
+    // user's own riskUsd, execution is skipped for that user. UNTUNED.
+    maxEmergencyLossMultipleOfRiskUsd: 3.0,
   };

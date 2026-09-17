@@ -80,7 +80,7 @@ export class LiquidationOiRuntimeOrchestrator {
   private readonly watchManager: LiquidationOiWatchManager;
 
   constructor(
-    strategyConfig: LiquidationOiStrategyConfig,
+    private readonly strategyConfig: LiquidationOiStrategyConfig,
     private readonly capacityCoeffs: CapacityModelCoefficients,
     private readonly globalSignalRepo: LiquidationOiGlobalSignalRepository,
     private readonly strategyOrderRepo: StrategyOrderRepository,
@@ -179,10 +179,23 @@ export class LiquidationOiRuntimeOrchestrator {
     if (watchResult === null || !watchResult.qualifies) return;
     const globalSignalId = this.makeGlobalSignalId();
     const candidateSide = candidateTradeSideForVictim(episode.victim);
-    const structuralInvalidationPrice =
+    // Sep 17 2026 (Karo), operator-requested SEPARATION (source-audit
+    // finding: these had collapsed into the same price). Two layers:
+    // strategyInvalidationPrice (normal market-thesis level, used for
+    // sizing) and emergencyHardStopPrice (catastrophe-only, explicitly
+    // FURTHER from entry than strategyInvalidationPrice by
+    // emergencyHardStopBufferAtrMultiple -- an ADDITIONAL buffer, not
+    // a replacement).
+    const strategyInvalidationPrice =
       candidateSide === "LONG"
         ? episode.extremePrice - atr3m * STRUCTURAL_INVALIDATION_BUFFER_ATR
         : episode.extremePrice + atr3m * STRUCTURAL_INVALIDATION_BUFFER_ATR;
+    const emergencyHardStopPrice =
+      candidateSide === "LONG"
+        ? strategyInvalidationPrice -
+          atr3m * this.strategyConfig.emergencyHardStopBufferAtrMultiple
+        : strategyInvalidationPrice +
+          atr3m * this.strategyConfig.emergencyHardStopBufferAtrMultiple;
 
     const capacity = computeInitialCapacity(
       {
@@ -201,7 +214,7 @@ export class LiquidationOiRuntimeOrchestrator {
     );
 
     log.info(
-      `[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} invalidation=${structuralInvalidationPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} components=${JSON.stringify(capacity.components)}`,
+      `[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} strategyInvalidation=${strategyInvalidationPrice} emergencyHardStop=${emergencyHardStopPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} components=${JSON.stringify(capacity.components)}`,
     );
 
     // Sep 16 2026 (Karo), operator-requested lifecycle fix: the
@@ -222,7 +235,8 @@ export class LiquidationOiRuntimeOrchestrator {
       sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
       extremePrice: episode.extremePrice,
       entryPrice,
-      strategyInvalidationPrice: structuralInvalidationPrice,
+      strategyInvalidationPrice,
+      emergencyHardStopPrice,
       initialCapacityAtr: capacity.initialCapacityAtr,
       initialTpPrice: tpPrice,
       tpRevision: 0,
@@ -238,7 +252,8 @@ export class LiquidationOiRuntimeOrchestrator {
             globalSignalId,
             candidateSide,
             entryPrice,
-            structuralInvalidationPrice,
+            strategyInvalidationPrice,
+            emergencyHardStopPrice,
             tpPrice,
             nowMs,
           ),
@@ -286,7 +301,8 @@ export class LiquidationOiRuntimeOrchestrator {
         sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
         extremePrice: episode.extremePrice,
         entryPrice,
-        strategyInvalidationPrice: structuralInvalidationPrice,
+        strategyInvalidationPrice,
+        emergencyHardStopPrice,
         initialCapacityAtr: capacity.initialCapacityAtr,
         initialTpPrice: tpPrice,
         tpRevision: 0,
@@ -332,7 +348,8 @@ export class LiquidationOiRuntimeOrchestrator {
       sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
       extremePrice: episode.extremePrice,
       entryPrice,
-      strategyInvalidationPrice: structuralInvalidationPrice,
+      strategyInvalidationPrice,
+      emergencyHardStopPrice,
       initialCapacityAtr: capacity.initialCapacityAtr,
       initialTpPrice: tpPrice,
       tpRevision: 0,
@@ -405,7 +422,8 @@ export class LiquidationOiRuntimeOrchestrator {
     globalSignalId: string,
     side: Side,
     entryPrice: number,
-    structuralInvalidationPrice: number,
+    strategyInvalidationPrice: number,
+    emergencyHardStopPrice: number,
     tpPrice: number,
     nowMs: number,
   ): Promise<UserFanOutOutcome> {
@@ -422,9 +440,14 @@ export class LiquidationOiRuntimeOrchestrator {
         : "ALREADY_TERMINAL";
     }
 
+    // Sep 17 2026 (Karo), operator-requested -- SIZING STILL USES
+    // strategyInvalidationPrice, unchanged (Section H: preserve the
+    // exact risk principle). The wider emergencyHardStopPrice never
+    // feeds sizing -- it is purely the physical catastrophe-protection
+    // order's own placement price.
     const sizing = computePositionSizing({
       entry: entryPrice,
-      structuralInvalidationPrice,
+      structuralInvalidationPrice: strategyInvalidationPrice,
       riskUsd: runtime.riskUsd,
     });
     let userExec = newPendingUserExecution(
@@ -449,11 +472,41 @@ export class LiquidationOiRuntimeOrchestrator {
       );
       return "FAILED";
     }
+
+    // Sep 17 2026 (Karo), operator-requested safety constraint --
+    // "If emergency protection would violate an explicit risk/safety
+    // constraint, skip execution rather than silently taking larger
+    // risk." The emergency hard stop's OWN implied worst-case loss
+    // (at the wider, catastrophe-only price) must not exceed
+    // maxEmergencyLossMultipleOfRiskUsd times this user's own riskUsd.
+    const estimatedEmergencyMaxLossUsd =
+      Math.abs(entryPrice - emergencyHardStopPrice) * sizing.positionQty;
+    const emergencyLossMultiple =
+      estimatedEmergencyMaxLossUsd / runtime.riskUsd;
+    if (
+      emergencyLossMultiple >
+      this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd
+    ) {
+      userExec = {
+        ...userExec,
+        state: "TERMINAL",
+        terminalReason: "EXECUTION_FAILED",
+        cleanupState: "COMPLETE",
+        updatedAt: nowMs,
+      };
+      await this.globalSignalRepo.upsertUserExecution(userExec);
+      log.warn(
+        `[LOX_EMERGENCY_RISK_CONSTRAINT_VIOLATED] userId=${runtime.userId} symbol=${symbol} estimatedEmergencyMaxLossUsd=${estimatedEmergencyMaxLossUsd.toFixed(2)} riskUsd=${runtime.riskUsd} multiple=${emergencyLossMultiple.toFixed(2)}x exceeds maxEmergencyLossMultipleOfRiskUsd=${this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd}x -- skipping rather than silently accepting larger risk`,
+      );
+      return "FAILED";
+    }
+
     userExec = {
       ...userExec,
       quantity: sizing.positionQty,
       positionSizeUsdt: sizing.positionSizeUsdt,
       estimatedStrategyLossUsd: runtime.riskUsd,
+      estimatedEmergencyMaxLossUsd,
     };
     await this.globalSignalRepo.upsertUserExecution(userExec);
 
@@ -501,6 +554,9 @@ export class LiquidationOiRuntimeOrchestrator {
       return "FAILED";
     }
 
+    // Sep 17 2026 (Karo), operator-requested -- the PHYSICAL Binance
+    // order is placed at emergencyHardStopPrice (the wider,
+    // catastrophe-only level), never at strategyInvalidationPrice.
     const outcome = await runEntrySequence(runtime.binanceRest, {
       userId: runtime.userId,
       globalSignalId,
@@ -508,7 +564,7 @@ export class LiquidationOiRuntimeOrchestrator {
       side,
       quantity: sizing.positionQty,
       entryPriceEstimate: entryPrice,
-      emergencyStopPrice: structuralInvalidationPrice,
+      emergencyStopPrice: emergencyHardStopPrice,
       initialTpPrice: tpPrice,
     });
 
@@ -517,7 +573,7 @@ export class LiquidationOiRuntimeOrchestrator {
       outcome,
       symbol,
       side,
-      structuralInvalidationPrice,
+      emergencyHardStopPrice,
       tpPrice,
       runtime,
     );
@@ -528,7 +584,7 @@ export class LiquidationOiRuntimeOrchestrator {
     outcome: Awaited<ReturnType<typeof runEntrySequence>>,
     symbol: string,
     side: Side,
-    structuralInvalidationPrice: number,
+    emergencyHardStopPrice: number,
     tpPrice: number,
     runtime: LiquidationOiUserRuntimeRef,
   ): Promise<UserFanOutOutcome> {
@@ -608,9 +664,9 @@ export class LiquidationOiRuntimeOrchestrator {
       entryClientOrderId: outcome.entryClientOrderId,
       emergencyStopClientAlgoId: outcome.emergencyStopClientAlgoId,
       emergencyStopBinanceAlgoId: outcome.emergencyStopBinanceAlgoId,
-      emergencyStopPrice: structuralInvalidationPrice,
+      emergencyStopPrice: emergencyHardStopPrice,
       estimatedEmergencyMaxLossUsd:
-        Math.abs(outcome.entryPrice - structuralInvalidationPrice) *
+        Math.abs(outcome.entryPrice - emergencyHardStopPrice) *
         outcome.quantity,
       pnlSource: "ESTIMATED",
       updatedAt: now,

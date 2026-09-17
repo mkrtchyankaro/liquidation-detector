@@ -213,6 +213,17 @@ async function main(): Promise<void> {
     mongo,
   );
   const liquidationOiStrategyOrderRepo = new StrategyOrderRepository(mongo);
+  // Sep 17 2026 (Karo), operator-requested fix -- these repositories' own
+  // ensureIndexes() methods existed (uniqueness on globalSignalId, on
+  // userId+globalSignalId) but were never called anywhere -- a real
+  // source-audit finding. Runs only when Mongo is enabled, matching the
+  // existing pattern above; each ensureIndexes() is a safe no-op if its
+  // own collection accessor returns null.
+  if (mongoCfg.enabled) {
+    await liquidationOiGlobalSignalRepo.ensureIndexes();
+    await liquidationOiStrategyOrderRepo.ensureIndexes();
+    log.info("LOX Mongo indexes ensured");
+  }
   const liquidationOiForensicLogger = childLogger({ mod: "lox-forensic" });
   const liquidationOiOrchestrator = new LiquidationOiRuntimeOrchestrator(
     DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
