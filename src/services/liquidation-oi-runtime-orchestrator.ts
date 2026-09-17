@@ -89,8 +89,21 @@ export class LiquidationOiRuntimeOrchestrator {
     private readonly executionEnabled: boolean = false,
     private readonly makeGlobalSignalId: () => string = () =>
       `lox-sig-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    /** Sep 16 2026 (Karo), operator-requested forensic observability
+     *  -- strictly additive, default no-op. Threaded into the watch
+     *  manager (which owns most emissions) and used here only for
+     *  ENTRY_READY_RESOLUTION, since the fan-out outcome data lives
+     *  in this class, not the watch manager. */
+    private readonly forensic: (
+      event: import("../domain/liquidation-oi-strategy/forensic-events").ForensicEvent,
+    ) => void = () => {},
   ) {
-    this.watchManager = new LiquidationOiWatchManager(strategyConfig);
+    this.watchManager = new LiquidationOiWatchManager(
+      strategyConfig,
+      undefined,
+      undefined,
+      forensic,
+    );
     log.info(
       `[LOX_RUNTIME] constructed observationEnabled=${observationEnabled} executionEnabled=${executionEnabled}`,
     );
@@ -255,6 +268,11 @@ export class LiquidationOiRuntimeOrchestrator {
     const hasRealPosition = outcomes.some(
       (o) => o === "ACTIVE" || o === "ALREADY_ACTIVE",
     );
+    const episodeIdForForensics =
+      this.watchManager.getLifecycle(symbol)?.episodeId ?? "unknown";
+    const enabledUsers = this.getUserRuntimes().filter(
+      (r) => r.liquidationOiExecutionEnabled,
+    ).length;
     if (hasRealPosition) {
       this.watchManager.confirmActivePosition(symbol, nowMs);
       await this.globalSignalRepo.upsertSignal({
@@ -272,6 +290,28 @@ export class LiquidationOiRuntimeOrchestrator {
         initialCapacityAtr: capacity.initialCapacityAtr,
         initialTpPrice: tpPrice,
         tpRevision: 0,
+      });
+      this.forensic({
+        ts: nowMs,
+        symbol,
+        episodeId: episodeIdForForensics,
+        victim: episode.victim,
+        state: "ACTIVE",
+        episodeAgeSec: 0,
+        type: "ENTRY_READY_RESOLUTION",
+        observationEnabled: this.observationEnabled,
+        globalExecutionEnabled: this.executionEnabled,
+        eligibleUsers: outcomes.length,
+        enabledUsers,
+        attemptedUsers: outcomes.filter(
+          (o) => o !== "GLOBAL_DISABLED" && o !== "USER_DISABLED",
+        ).length,
+        activeUsers: outcomes.filter(
+          (o) => o === "ACTIVE" || o === "ALREADY_ACTIVE",
+        ).length,
+        failedUsers: outcomes.filter((o) => o === "FAILED").length,
+        resolution: "ACTIVE",
+        terminalReason: null,
       });
       log.info(
         `[LOX_GLOBAL_ACTIVE] ${symbol} globalSignalId=${globalSignalId} -- at least one real user position confirmed, symbol ownership retained`,
@@ -296,6 +336,26 @@ export class LiquidationOiRuntimeOrchestrator {
       initialCapacityAtr: capacity.initialCapacityAtr,
       initialTpPrice: tpPrice,
       tpRevision: 0,
+    });
+    this.forensic({
+      ts: nowMs,
+      symbol,
+      episodeId: episodeIdForForensics,
+      victim: episode.victim,
+      state: "CANCELLED",
+      episodeAgeSec: 0,
+      type: "ENTRY_READY_RESOLUTION",
+      observationEnabled: this.observationEnabled,
+      globalExecutionEnabled: this.executionEnabled,
+      eligibleUsers: outcomes.length,
+      enabledUsers,
+      attemptedUsers: outcomes.filter(
+        (o) => o !== "GLOBAL_DISABLED" && o !== "USER_DISABLED",
+      ).length,
+      activeUsers: 0,
+      failedUsers: outcomes.filter((o) => o === "FAILED").length,
+      resolution: "CANCELLED",
+      terminalReason: code,
     });
     log.info(
       `[LOX_GLOBAL_CANCELLED] ${symbol} globalSignalId=${globalSignalId} reason=${code} -- no real position resulted, symbol released for the next independent episode`,

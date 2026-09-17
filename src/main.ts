@@ -213,6 +213,7 @@ async function main(): Promise<void> {
     mongo,
   );
   const liquidationOiStrategyOrderRepo = new StrategyOrderRepository(mongo);
+  const liquidationOiForensicLogger = childLogger({ mod: "lox-forensic" });
   const liquidationOiOrchestrator = new LiquidationOiRuntimeOrchestrator(
     DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
     DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
@@ -230,6 +231,16 @@ async function main(): Promise<void> {
         })),
     true, // observationEnabled
     false, // executionEnabled -- MUST be explicitly changed to true here to allow real orders
+    undefined,
+    // Sep 16 2026 (Karo), operator-requested forensic observability --
+    // structured, event-driven (not per-tick spam), so the live bot's
+    // own logs are as diagnosable as the replay tool without needing
+    // a restart or a code change to add logging later.
+    (event) =>
+      liquidationOiForensicLogger.info(
+        { ...event },
+        `[LOX_FORENSIC_${event.type}]`,
+      ),
   );
   const reconciliation = new ReconciliationManager(
     mongo,

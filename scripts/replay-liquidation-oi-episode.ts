@@ -6,7 +6,6 @@ import {
 import {
   loadRawEvents,
   fetchKlines,
-  computeAtrSeries,
   reconstructCompleteEpisodes,
   episodeUsd,
 } from "../src/domain/research/displacement-balanced-core";
@@ -18,18 +17,16 @@ import { fetchKlinesWithRetry } from "../src/domain/research/research-fetch-retr
 import { LiquidationOiWatchManager } from "../src/domain/liquidation-oi-strategy/liquidation-oi-watch-manager";
 import { DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG } from "../src/domain/liquidation-oi-strategy/config";
 import type { OiHistorySample } from "../src/domain/liquidation-oi-strategy/oi-clearing-detector";
+import type { ForensicEvent } from "../src/domain/liquidation-oi-strategy/forensic-events";
 
 /**
- * Sep 16 2026 (Karo), operator-requested. READ-ONLY forensic replay.
- * Feeds REAL stored data through the ACTUAL production
- * LiquidationOiWatchManager (the exact class market-data-orchestrator.ts
- * drives live) in timestamp order -- not a reimplementation. Prints
- * every state transition and every rejection reason as they occur,
- * plus the ignored-opposite-event log explicitly (to catch the
- * stale-episode-blocking bug directly if it occurred).
- *
- * Requires MONGO_URI and network access to Binance -- run this on the
- * server that actually has the real data, not in an isolated sandbox.
+ * Sep 16 2026 (Karo), operator-requested THIRD pass: FORENSIC
+ * OBSERVABILITY replay. Feeds real stored data through the ACTUAL
+ * production LiquidationOiWatchManager, consuming its structured
+ * ForensicEvent stream (not per-tick spam) to print a compact,
+ * event-driven forensic log plus a per-episode summary and aggregate
+ * counts at the end. Strategy behavior/decision logic is completely
+ * unchanged from the prior replay pass -- this only adds observability.
  *
  *   npx tsx scripts/replay-liquidation-oi-episode.ts BTCUSDT "2026-09-16 00:00" "2026-09-16 23:59"
  */
@@ -46,6 +43,9 @@ function parseUtcDatetime(input: string): number {
 }
 function fmt(ms: number): string {
   return new Date(ms).toISOString();
+}
+function n(x: number | null, digits = 2): string {
+  return x === null ? "null" : x.toFixed(digits);
 }
 
 function mongoConfig(): MongoDetectorConfig {
@@ -77,7 +77,7 @@ async function loadOiObservations(
     .toArray();
   if (docs.length === 0)
     console.log(
-      `*** WARNING: zero OI observations found for ${symbol} in [${fmt(fromMs)}, ${fmt(toMs)}] -- either persistence hadn't started yet, or this window predates it. ***`,
+      `*** WARNING: zero OI observations found for ${symbol} in [${fmt(fromMs)}, ${fmt(toMs)}] ***`,
     );
   return docs.map((d) => ({
     contracts: d.openInterest,
@@ -86,6 +86,179 @@ async function loadOiObservations(
         ? d.timestamp.getTime()
         : new Date(d.timestamp as unknown as string).getTime(),
   }));
+}
+
+// ---------------- per-episode forensic summary ----------------
+
+interface EpisodeSummary {
+  episodeId: string;
+  symbol: string;
+  victim: string;
+  startTime: number;
+  endTime: number | null;
+  startPrice: number;
+  extreme: number;
+  totalLiqUsd: number;
+  finalPercentileRank: number | null;
+  watchQualified: boolean;
+  clearingDetected: boolean;
+  entryReady: boolean;
+  entryReadyTime: number | null;
+  entryBlockedReasons: Set<string>;
+  terminalReason: string | null;
+  lastMeaningfulProgressTrigger: "LIQ" | "EXTREME" | "OI" | null;
+  symbolReleased: boolean | null;
+}
+
+const aggregate = {
+  episodesStarted: 0,
+  watchQualified: 0,
+  clearingDetected: 0,
+  entryReady: 0,
+  observationalEntryReady: 0,
+  cancelled: 0,
+  noProgressDeaths: 0,
+  failsafeDeaths: 0,
+  marketDataStaleDeaths: 0,
+  entryWindowMissed: 0,
+  oppositeEventsIgnored: 0,
+};
+const episodes = new Map<string, EpisodeSummary>();
+
+function forensicHandler(event: ForensicEvent): void {
+  const s = episodes.get(event.episodeId);
+  switch (event.type) {
+    case "EPISODE_START": {
+      episodes.set(event.episodeId, {
+        episodeId: event.episodeId,
+        symbol: event.symbol,
+        victim: event.victim,
+        startTime: event.ts,
+        endTime: null,
+        startPrice: event.startPrice,
+        extreme: event.startPrice,
+        totalLiqUsd: event.triggerUsd,
+        finalPercentileRank: null,
+        watchQualified: false,
+        clearingDetected: false,
+        entryReady: false,
+        entryReadyTime: null,
+        entryBlockedReasons: new Set(),
+        terminalReason: null,
+        lastMeaningfulProgressTrigger: null,
+        symbolReleased: null,
+      });
+      aggregate.episodesStarted++;
+      console.log(
+        `[${fmt(event.ts)}] [EPISODE_START] ${event.symbol} ${event.victim} episodeId=${event.episodeId} triggerUsd=${event.triggerUsd.toFixed(0)} triggerPrice=${event.triggerPrice} startPrice=${event.startPrice} startingOi=${event.startingOi}`,
+      );
+      break;
+    }
+    case "LIQ_ACCUMULATED":
+      if (s) s.totalLiqUsd = event.newTotal;
+      console.log(
+        `[${fmt(event.ts)}] [LIQ_ACCUMULATED] ${event.symbol} episodeId=${event.episodeId} eventUsd=${event.eventUsd.toFixed(0)} total ${event.previousTotal.toFixed(0)} -> ${event.newTotal.toFixed(0)} meaningfulLiqProgress=${event.meaningfulLiqProgress}`,
+      );
+      break;
+    case "EXTREME_UPDATE":
+      if (s) s.extreme = event.newExtreme;
+      console.log(
+        `[${fmt(event.ts)}] [EXTREME_UPDATE] ${event.symbol} episodeId=${event.episodeId} ${event.previousExtreme} -> ${event.newExtreme} (extension=${event.extensionPrice})`,
+      );
+      break;
+    case "OI_PROGRESS":
+      console.log(
+        `[${fmt(event.ts)}] [OI_PROGRESS] ${event.symbol} episodeId=${event.episodeId} startingOi=${event.startingOi} currentOi=${event.currentOi} minOi=${event.minOi} destructionFraction=${n(event.destructionFraction, 4)}`,
+      );
+      break;
+    case "MEANINGFUL_PROGRESS_REFRESH":
+      if (s) s.lastMeaningfulProgressTrigger = event.trigger;
+      console.log(
+        `[${fmt(event.ts)}] [MEANINGFUL_PROGRESS_REFRESH] ${event.symbol} episodeId=${event.episodeId} trigger=${event.trigger} oldTs=${fmt(event.oldTimestamp)} newTs=${fmt(event.newTimestamp)} thresholdCrossed="${event.thresholdCrossed}" oldCheckpoint=${JSON.stringify(event.oldCheckpoint)} newCheckpoint=${JSON.stringify(event.newCheckpoint)}`,
+      );
+      break;
+    case "WATCH_EVALUATION": {
+      if (event.result === "PASS" && s) {
+        s.watchQualified = true;
+        s.finalPercentileRank = event.percentileRank;
+        aggregate.watchQualified++;
+      }
+      console.log(
+        `[${fmt(event.ts)}] [WATCH_EVALUATION] ${event.symbol} episodeId=${event.episodeId} result=${event.result} reason=${event.reasonCode} totalLiqUsd=${event.totalLiqUsd.toFixed(0)} percentileRank=${n(event.percentileRank, 1)} required=${event.requiredPercentile} displacementAtr=${n(event.displacementAtr, 3)} requiredDisplacement=${event.requiredDisplacement}`,
+      );
+      break;
+    }
+    case "STATE_TRANSITION":
+      console.log(
+        `[${fmt(event.ts)}] [STATE_TRANSITION] ${event.symbol} episodeId=${event.episodeId} ${event.from} -> ${event.to} (${event.reason})`,
+      );
+      break;
+    case "CLEARING_EVALUATION": {
+      if (event.result === "PASS" && s) {
+        s.clearingDetected = true;
+        aggregate.clearingDetected++;
+      }
+      const windowsStr = event.windows
+        .map(
+          (w) =>
+            `${w.windowSec}s:${n(w.slopeContractsPerSec, 2)}(n=${w.sampleCount})`,
+        )
+        .join(" ");
+      console.log(
+        `[${fmt(event.ts)}] [CLEARING_EVALUATION] ${event.symbol} episodeId=${event.episodeId} result=${event.result} windowsPassed=${event.windowsPassed}/${event.windowsRequired} peakSlope=${n(event.peakDestructionSlopeContractsPerSec, 2)} windows=[${windowsStr}]`,
+      );
+      break;
+    }
+    case "ENTRY_GATE_EVALUATION": {
+      if (s) {
+        if (event.final === "NO_ENTRY")
+          event.blockedBy.forEach((b) => s.entryBlockedReasons.add(b));
+      }
+      console.log(
+        `[${fmt(event.ts)}] [ENTRY_GATE_EVALUATION] ${event.symbol} episodeId=${event.episodeId} FINAL=${event.final} blockedBy=[${event.blockedBy.join(",")}] ATR_READY=${event.atrReady.pass}(${event.atrReady.detail}) OI_FRESH=${event.oiFresh.pass}(${event.oiFresh.detail}) CLEARING=${event.clearing.pass}(${event.clearing.detail}) COUNTER_MOVE=${event.counterMove.pass}(${event.counterMove.detail}) DISTANCE=${event.distanceFromExtreme.pass}(${event.distanceFromExtreme.detail})`,
+      );
+      break;
+    }
+    case "ENTRY_READY": {
+      if (s) {
+        s.entryReady = true;
+        s.entryReadyTime = event.ts;
+      }
+      aggregate.entryReady++;
+      console.log(
+        `[${fmt(event.ts)}] [ENTRY_READY] ${event.symbol} episodeId=${event.episodeId} entryRef=${event.entryReferencePrice} extreme=${event.extreme} totalLiqUsd=${event.totalLiqUsd.toFixed(0)} percentileRank=${n(event.percentileRank, 1)} counterMoveAtr=${n(event.counterMoveAtr, 3)} distanceFromExtremeAtr=${n(event.distanceFromExtremeAtr, 3)}`,
+      );
+      break;
+    }
+    case "ENTRY_READY_RESOLUTION": {
+      if (event.resolution === "CANCELLED" && !event.globalExecutionEnabled)
+        aggregate.observationalEntryReady++;
+      console.log(
+        `[${fmt(event.ts)}] [ENTRY_READY_RESOLUTION] ${event.symbol} episodeId=${event.episodeId} resolution=${event.resolution} terminalReason=${event.terminalReason} observationEnabled=${event.observationEnabled} globalExecutionEnabled=${event.globalExecutionEnabled} eligibleUsers=${event.eligibleUsers} enabledUsers=${event.enabledUsers} attemptedUsers=${event.attemptedUsers} activeUsers=${event.activeUsers} failedUsers=${event.failedUsers}`,
+      );
+      break;
+    }
+    case "EPISODE_TERMINAL": {
+      if (s) {
+        s.endTime = event.ts;
+        s.terminalReason = event.reason;
+        s.symbolReleased = event.symbolReleased;
+        s.finalPercentileRank =
+          event.finalPercentileRank ?? s.finalPercentileRank;
+      }
+      aggregate.cancelled++;
+      if (event.reason === "EPISODE_NO_PROGRESS") aggregate.noProgressDeaths++;
+      if (event.reason === "PRE_ENTRY_FAILSAFE_MAX_LIFETIME")
+        aggregate.failsafeDeaths++;
+      if (event.reason === "MARKET_DATA_STALE_TIMEOUT")
+        aggregate.marketDataStaleDeaths++;
+      if (event.reason === "ENTRY_WINDOW_MISSED") aggregate.entryWindowMissed++;
+      console.log(
+        `[${fmt(event.ts)}] [EPISODE_TERMINAL] ${event.symbol} episodeId=${event.episodeId} reason=${event.reason} lifetimeMs=${event.lifetimeMs} (${(event.lifetimeMs / 3_600_000).toFixed(2)}h) finalTotalLiqUsd=${event.finalTotalLiqUsd.toFixed(0)} finalPercentileRank=${n(event.finalPercentileRank, 1)} finalExtreme=${event.finalExtreme} symbolReleased=${event.symbolReleased} detail="${event.detail}"`,
+      );
+      break;
+    }
+  }
 }
 
 async function main(): Promise<void> {
@@ -99,13 +272,10 @@ async function main(): Promise<void> {
   const symbol = symbolArg.toUpperCase();
   const fromMs = parseUtcDatetime(fromArg);
   const toMs = parseUtcDatetime(toArg);
-  const priorWindowMs = 3 * 86_400_000; // matches EpisodePercentileService's own rolling-3-day window
+  const priorWindowMs = 3 * 86_400_000;
 
   console.log(`Symbol: ${symbol}`);
-  console.log(`Replay window: ${fmt(fromMs)} -> ${fmt(toMs)}`);
-  console.log(
-    `Percentile context window: ${fmt(fromMs - priorWindowMs)} -> ${fmt(fromMs)} (prior 3 days)\n`,
-  );
+  console.log(`Replay window: ${fmt(fromMs)} -> ${fmt(toMs)}\n`);
 
   const mongo = new MongoClientWrapper(mongoConfig());
   const rawEvents = await loadRawEvents(symbol, fromMs - priorWindowMs, toMs);
@@ -117,12 +287,6 @@ async function main(): Promise<void> {
   );
   await mongo.close();
 
-  console.log(
-    `Raw liquidation events loaded: ${rawEvents.length} (including prior-window context)`,
-  );
-  console.log(`OI observations loaded: ${oiHistory.length}\n`);
-
-  // ---- percentile context: prior completed DISPLACEMENT_BALANCED episodes, matching what EpisodePercentileService actually tracks in production ----
   const priorResult = await reconstructCompleteEpisodes(
     symbol,
     fromMs - priorWindowMs,
@@ -135,14 +299,7 @@ async function main(): Promise<void> {
     endTime: e.endTime!,
     sameDirectionUsd: episodeUsd(e),
   }));
-  console.log(
-    `Prior completed DISPLACEMENT_BALANCED episodes for percentile context: ${priorRefs.length}`,
-  );
-  console.log(
-    `(left-censored excluded: ${priorResult.leftCensoredExcluded}, right-censored excluded: ${priorResult.rightCensoredExcluded})\n`,
-  );
 
-  // ---- candles for the replay window itself (price + a crude ATR proxy) ----
   const c1m = await fetchKlinesWithRetry(
     symbol,
     60_000,
@@ -150,11 +307,12 @@ async function main(): Promise<void> {
     toMs,
   );
   const c3m = await fetchKlines(symbol, 180_000, fromMs - 3_600_000, toMs);
-  void computeAtrSeries; // available if a proper Wilder ATR reconstruction is wanted later -- not used for the crude proxy below
 
-  // ---- feed the REAL production LiquidationOiWatchManager, in timestamp order ----
   const manager = new LiquidationOiWatchManager(
     DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+    undefined,
+    undefined,
+    forensicHandler,
   );
   const eventsInWindow = rawEvents
     .filter((e) => e.timestamp >= fromMs && e.timestamp <= toMs)
@@ -169,7 +327,6 @@ async function main(): Promise<void> {
     ...oiInWindow.map((o) => ({ ts: o.fetchedAt, kind: "oi_tick" as const })),
   ].sort((a, b) => a.ts - b.ts);
 
-  let lastState: string | null = null;
   const oiCursor: OiHistorySample[] = [];
   for (const item of stream) {
     if (item.kind === "liq") {
@@ -184,9 +341,6 @@ async function main(): Promise<void> {
         },
         null,
       );
-      console.log(
-        `[${fmt(ev.timestamp)}] LIQUIDATION ${ev.victim} price=${ev.price} usd=${ev.quoteQty.toFixed(0)}`,
-      );
     } else {
       const oi = oiInWindow.find((o) => o.fetchedAt === item.ts)!;
       oiCursor.push(oi);
@@ -200,7 +354,7 @@ async function main(): Promise<void> {
         .sort((a, b) => b.closeTime - a.closeTime)[0];
       const atr3m = atr3mCandle
         ? Math.abs(atr3mCandle.high - atr3mCandle.low)
-        : null; // crude proxy -- see report's own caveat
+        : null;
       const atr3mAgeMs = atr3mCandle
         ? oi.fetchedAt - atr3mCandle.closeTime
         : null;
@@ -216,13 +370,12 @@ async function main(): Promise<void> {
         percentileRank: null as number | null,
       };
       if (lc.globalState === "EPISODE_TRACKING") {
-        const sameDirUsd = lc.episode.sameDirectionLiqUsd;
         const hist = computeCausalHistoricalPercentile(
           {
             symbol,
             direction: lc.episode.victim,
             endTime: oi.fetchedAt,
-            sameDirectionUsd: sameDirUsd,
+            sameDirectionUsd: lc.episode.sameDirectionLiqUsd,
           },
           priorRefs,
         );
@@ -234,8 +387,7 @@ async function main(): Promise<void> {
           percentileRank: hist.percentileRank,
         };
       }
-
-      await manager.onTick(
+      manager.onTick(
         symbol,
         percentileContext,
         oiCursor.slice(-60),
@@ -244,51 +396,42 @@ async function main(): Promise<void> {
         atr3mAgeMs,
         oi.fetchedAt,
       );
-      const after = manager.getLifecycle(symbol);
-      const stateNow = after ? `${after.globalState}` : "IDLE";
-      if (stateNow !== lastState) {
-        console.log(
-          `[${fmt(oi.fetchedAt)}] STATE -> ${stateNow} (price=${price} oi=${oi.contracts})`,
-        );
-        if (after?.watchResult && !after.watchResult.qualifies)
-          console.log(
-            `    WATCH rejection: ${after.watchResult.reasonCode} -- ${after.watchResult.detail}`,
-          );
-        if (after?.entryResult && !after.entryResult.entryReady)
-          console.log(
-            `    ENTRY rejection: ${after.entryResult.reasonCode} -- ${after.entryResult.detail}`,
-          );
-        lastState = stateNow;
-      }
     }
   }
 
-  console.log(`\n=== FINAL STATE ===`);
-  const finalLc = manager.getLifecycle(symbol);
-  console.log(
-    finalLc
-      ? `${finalLc.globalState}`
-      : "no tracked lifecycle (IDLE) at end of window",
-  );
+  console.log(`\n=== AGGREGATE COUNTS ===`);
+  console.log(JSON.stringify(aggregate, null, 2));
 
-  console.log(
-    `\n=== NO-SIGNAL LOG (${manager.getNoSignalLog().length} entries) ===`,
-  );
-  for (const n of manager.getNoSignalLog())
+  console.log(`\n=== PER-EPISODE SUMMARY (${episodes.size} episodes) ===`);
+  for (const s of episodes.values()) {
     console.log(
-      `  [${fmt(n.timestamp)}] ${n.symbol} ${n.victim} ${n.atStage} ${n.reasonCode}: ${n.detail}`,
+      JSON.stringify({
+        episodeId: s.episodeId,
+        startTime: fmt(s.startTime),
+        endTime:
+          s.endTime !== null ? fmt(s.endTime) : "still open at replay end",
+        direction: s.victim,
+        startPrice: s.startPrice,
+        extreme: s.extreme,
+        totalLiqUsd: s.totalLiqUsd,
+        finalPercentileRank: s.finalPercentileRank,
+        watchQualified: s.watchQualified,
+        clearingDetected: s.clearingDetected,
+        entryReady: s.entryReady,
+        entryReadyTime:
+          s.entryReadyTime !== null ? fmt(s.entryReadyTime) : null,
+        entryBlockedReasons: [...s.entryBlockedReasons],
+        terminalReason: s.terminalReason,
+        lifetimeSec:
+          s.endTime !== null ? (s.endTime - s.startTime) / 1000 : null,
+        lastMeaningfulProgressTrigger: s.lastMeaningfulProgressTrigger,
+        symbolReleased: s.symbolReleased,
+      }),
     );
+  }
 
   console.log(
-    `\n=== OPPOSITE-EVENT-IGNORED LOG (${manager.getOppositeEventIgnoredLog().length} entries) -- directly surfaces the stale-episode-blocking bug if it occurred ===`,
-  );
-  for (const o of manager.getOppositeEventIgnoredLog())
-    console.log(
-      `  [${fmt(o.timestamp)}] ${o.symbol} tracked=${o.trackedVictim} IGNORED opposite ${o.ignoredVictim} usd=${o.ignoredQuoteQty.toFixed(0)} <-- if near your BOTTOM/TOP timestamps, THIS is why the opposite candidate never got its own episode`,
-    );
-
-  console.log(
-    `\n*** CAVEAT: ATR3m used above is a crude (high-low) proxy from raw candles, NOT the real bootstrapped ATRTrackerService/DirectionalAtrTracker value the live bot actually used -- this replay cannot reconstruct that exactly offline. Treat ATR-dependent gate values (DISPLACEMENT_ATR, counterMoveAtr, distanceFromExtremeAtr) as approximate; treat WATCH/CLEARING/ENTRY state transitions and the opposite-event-ignored log as exact, since those don't depend on this proxy. ***`,
+    `\n*** CAVEAT: ATR3m used above is a crude (high-low) proxy from raw candles, NOT the real bootstrapped ATRTrackerService/DirectionalAtrTracker value the live bot actually used. Treat ATR-dependent values as approximate; treat episode boundaries, state transitions, and termination reasons as exact. ***`,
   );
 }
 
