@@ -6,7 +6,10 @@ import {
   type V5TradeCloseEvent,
 } from "../strategy/v5/v5-wave.service";
 import { OiTrackerService } from "../domain/liquidation/oi-tracker.service";
-import { OiSecondObservationRepository, OI_SECOND_OBSERVATION_TTL_SECONDS } from "../infrastructure/mongo/oi-second-observation.repository";
+import {
+  OiSecondObservationRepository,
+  OI_SECOND_OBSERVATION_TTL_SECONDS,
+} from "../infrastructure/mongo/oi-second-observation.repository";
 import { LiquidationOiRuntimeOrchestrator } from "./liquidation-oi-runtime-orchestrator";
 import { buildPercentileContext } from "../domain/liquidation-oi-strategy/percentile-rank-approximation";
 import { FundingStatsService } from "../domain/liquidation/funding-stats.service";
@@ -27,7 +30,12 @@ import {
   type ShadowNoEntryEvent,
 } from "../domain/research/unit-research-shadow.service";
 import { CommonHorizonEpisodeRegistry } from "../domain/research/common-horizon-episode-registry";
-import { CascadeCandidateService, type CascadeSignalReadyEvent, type CascadeCancelEvent, type WaveSummary } from "../domain/cascade/cascade-candidate.service";
+import {
+  CascadeCandidateService,
+  type CascadeSignalReadyEvent,
+  type CascadeCancelEvent,
+  type WaveSummary,
+} from "../domain/cascade/cascade-candidate.service";
 import { CascadeRegistry } from "../domain/cascade/cascade-registry";
 import { CascadeRepository } from "../infrastructure/mongo/cascade.repository";
 import type { CascadeCandidateStateDoc } from "../domain/cascade/cascade.model";
@@ -42,11 +50,18 @@ import { deriveLiquidationPhysicsTradePlan } from "../domain/trading/liquidation
 import { deriveEpisodeDisplacementTradePlan } from "../domain/trading/episode-displacement-trade-plan";
 import { computeWaveEfficiencyAnalysis } from "../domain/trading/wave-efficiency-analysis";
 import { deriveLastTwoWaveTradePlan } from "../domain/trading/last-two-wave-trade-plan";
-import { CandlePhysicsEngine, type CompletedWaveSummary } from "../domain/cascade/candle-physics-engine";
+import {
+  CandlePhysicsEngine,
+  type CompletedWaveSummary,
+} from "../domain/cascade/candle-physics-engine";
 import { evaluateDragon } from "../domain/research/unit-competition-dragon";
 import type { V5Wave } from "../strategy/v5/v5-wave.model";
 import { DirectionalAtrTracker } from "../strategy/v5/directional-atr";
-import { v5EntryMode, v5RotationSlPct, v5RotationTpPct } from "../strategy/v5/v5.config";
+import {
+  v5EntryMode,
+  v5RotationSlPct,
+  v5RotationTpPct,
+} from "../strategy/v5/v5.config";
 import type { SignalDistributor } from "./signal-distributor";
 import type { ReconciliationManager } from "./reconciliation-manager";
 import type { MongoClientWrapper } from "../infrastructure/mongo/mongo.client";
@@ -285,7 +300,11 @@ export class MarketDataOrchestrator {
   readonly directionalAtr5m = new DirectionalAtrTracker();
   private readonly cascadeCandidate3m = new CascadeCandidateService();
   private readonly cascadeCandidate5m = new CascadeCandidateService();
-  private readonly cascadeRegistry = new CascadeRegistry(this.cascadeCandidate1m, this.cascadeCandidate3m, this.cascadeCandidate5m);
+  private readonly cascadeRegistry = new CascadeRegistry(
+    this.cascadeCandidate1m,
+    this.cascadeCandidate3m,
+    this.cascadeCandidate5m,
+  );
   private readonly mainTelegram: {
     sendMessage: (text: string) => Promise<unknown>;
   } | null;
@@ -334,7 +353,24 @@ export class MarketDataOrchestrator {
      *  orchestrator never checks or overrides those flags itself, it
      *  only forwards real events/ticks when the reference is non-null. */
     private readonly liquidationOiOrchestrator: LiquidationOiRuntimeOrchestrator | null = null,
-    private readonly episodePercentileServiceForLox: { getThresholds(symbol: string): { long: { p90: number | null; p95: number | null; p99: number | null; sampleCount: number }; short: { p90: number | null; p95: number | null; p99: number | null; sampleCount: number } } | null } | null = null,
+    private readonly episodePercentileServiceForLox: {
+      getThresholds(
+        symbol: string,
+      ): {
+        long: {
+          p90: number | null;
+          p95: number | null;
+          p99: number | null;
+          sampleCount: number;
+        };
+        short: {
+          p90: number | null;
+          p95: number | null;
+          p99: number | null;
+          sampleCount: number;
+        };
+      } | null;
+    } | null = null,
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
@@ -342,14 +378,17 @@ export class MarketDataOrchestrator {
     this.oiSecondObservationRepo = new OiSecondObservationRepository(mongo);
     this.oiTracker = new OiTrackerService(
       symbols,
-      (obs) => this.oiSecondObservationRepo.bufferedInsert({
-        symbol: obs.symbol,
-        timestamp: new Date(obs.fetchedAt),
-        oiUpdatedAt: obs.oiUpdatedAtMs !== null ? new Date(obs.oiUpdatedAtMs) : null,
-        openInterest: obs.contracts,
-        openInterestUsd: obs.price !== null ? obs.contracts * obs.price : null,
-        price: obs.price,
-      }),
+      (obs) =>
+        this.oiSecondObservationRepo.bufferedInsert({
+          symbol: obs.symbol,
+          timestamp: new Date(obs.fetchedAt),
+          oiUpdatedAt:
+            obs.oiUpdatedAtMs !== null ? new Date(obs.oiUpdatedAtMs) : null,
+          openInterest: obs.contracts,
+          openInterestUsd:
+            obs.price !== null ? obs.contracts * obs.price : null,
+          price: obs.price,
+        }),
       (symbol) => this.orderbookStore.midPrice(symbol),
     );
     this.fundingStats = new FundingStatsService(symbols);
@@ -359,7 +398,9 @@ export class MarketDataOrchestrator {
       "[market-snapshot] enrichment components initialized -- taker-flow history(5m), order-book+price history(5m), OI tracker, funding-rate tracker, directional ATR 1m/3m/5m, enriched liquidation snapshot enabled",
     );
     this.globalSignalRepo = new GlobalSignalRepository(mongo);
-    this.rotationEpisodeHistoryRepo = new RotationEpisodeHistoryRepository(mongo);
+    this.rotationEpisodeHistoryRepo = new RotationEpisodeHistoryRepository(
+      mongo,
+    );
     this.cascadeRepo = new CascadeRepository(mongo);
     this.rawLiquidationEventRepo = new RawLiquidationEventRepository(mongo);
     this.mainTelegram = mainTelegram;
@@ -387,7 +428,10 @@ export class MarketDataOrchestrator {
     await this.cascadeRepo.ensureIndexes();
     // Sep 16 2026 (Karo), operator-requested -- data collection only.
     const oiIndexesOk = await this.oiSecondObservationRepo.ensureIndexes();
-    if (oiIndexesOk) log.info(`[TTL] oi_second_observations timestamp = ${OI_SECOND_OBSERVATION_TTL_SECONDS}s (${OI_SECOND_OBSERVATION_TTL_SECONDS / 86400}d)`);
+    if (oiIndexesOk)
+      log.info(
+        `[TTL] oi_second_observations timestamp = ${OI_SECOND_OBSERVATION_TTL_SECONDS}s (${OI_SECOND_OBSERVATION_TTL_SECONDS / 86400}d)`,
+      );
   }
 
   async hydrateMainLocks(): Promise<void> {
@@ -422,7 +466,9 @@ export class MarketDataOrchestrator {
       // CLOSE-without-ENTER. Legacy (cascadeId===null) signals keep the
       // ORIGINAL, still-correct undefined-means-executed behavior.
       const isCascadeSignal = doc.cascadeId !== null;
-      const shouldSkip = isCascadeSignal ? doc.isMainExecuted !== true : doc.isMainExecuted === false;
+      const shouldSkip = isCascadeSignal
+        ? doc.isMainExecuted !== true
+        : doc.isMainExecuted === false;
       if (shouldSkip) {
         skippedComparisonOnly++;
         continue;
@@ -474,7 +520,12 @@ export class MarketDataOrchestrator {
     const activeCascades = await this.cascadeRepo.findActiveCascades();
     let restoredCandidates = 0;
     for (const doc of activeCascades) {
-      this.cascadeRegistry.restoreOwnership(doc.symbol, doc.cascadeId, doc.startedAt, doc.victimSide);
+      this.cascadeRegistry.restoreOwnership(
+        doc.symbol,
+        doc.cascadeId,
+        doc.startedAt,
+        doc.victimSide,
+      );
       for (const [timeframe, service] of [
         ["1m", this.cascadeCandidate1m],
         ["3m", this.cascadeCandidate3m],
@@ -572,24 +623,57 @@ export class MarketDataOrchestrator {
         // still constructed unconditionally, cheap, isolated).
         this.directionalAtr.onCandle(c);
         for (const victim of ["LONG", "SHORT"] as const) {
-          const currentP95 = this.liquidationStats.notionalPercentile(c.symbol, victim, 95);
+          const currentP95 = this.liquidationStats.notionalPercentile(
+            c.symbol,
+            victim,
+            95,
+          );
           // Sep 14 2026 (Karo), operator-approved -- ROTATION mode.
           // Only bother computing these when the watch is actually a
           // ROTATION watch (peekWatch is a cheap synchronous map read)
           // -- zero extra cost for WAVE-mode watches, which is the
           // overwhelming majority of traffic today.
           const existingWatch = this.candlePhysics.peekWatch(c.symbol, victim);
-          let rotDownAtr: number | null = null, rotUpAtr: number | null = null, rotDownSlope: number | null = null, rotUpSlope: number | null = null;
+          let rotDownAtr: number | null = null,
+            rotUpAtr: number | null = null,
+            rotDownSlope: number | null = null,
+            rotUpSlope: number | null = null;
           if (existingWatch?.mode === "ROTATION") {
             rotDownAtr = this.directionalAtr.getDownAtr(c.symbol);
             rotUpAtr = this.directionalAtr.getUpAtr(c.symbol);
-            if (existingWatch.preLiqDownAtr !== null) rotDownSlope = this.directionalAtr.getDownSlopeNormalized(c.symbol, 2, existingWatch.preLiqDownAtr);
-            if (existingWatch.preLiqUpAtr !== null) rotUpSlope = this.directionalAtr.getUpSlopeNormalized(c.symbol, 2, existingWatch.preLiqUpAtr);
+            if (existingWatch.preLiqDownAtr !== null)
+              rotDownSlope = this.directionalAtr.getDownSlopeNormalized(
+                c.symbol,
+                2,
+                existingWatch.preLiqDownAtr,
+              );
+            if (existingWatch.preLiqUpAtr !== null)
+              rotUpSlope = this.directionalAtr.getUpSlopeNormalized(
+                c.symbol,
+                2,
+                existingWatch.preLiqUpAtr,
+              );
           }
-          const result = this.candlePhysics.onClosedCandle(c.symbol, victim, c.openTime, c.open, c.high, c.low, c.close, currentP95, rotDownAtr, rotUpAtr, rotDownSlope, rotUpSlope);
-          if (result?.kind === "ENTRY") void this.handleCandlePhysicsEntry(result);
-          else if (result?.kind === "CANCEL") void this.handleCandlePhysicsCancel(result);
-          else if (result?.kind === "PRE_W1_DISCARD") this.handleCandlePhysicsPreW1Discard(result);
+          const result = this.candlePhysics.onClosedCandle(
+            c.symbol,
+            victim,
+            c.openTime,
+            c.open,
+            c.high,
+            c.low,
+            c.close,
+            currentP95,
+            rotDownAtr,
+            rotUpAtr,
+            rotDownSlope,
+            rotUpSlope,
+          );
+          if (result?.kind === "ENTRY")
+            void this.handleCandlePhysicsEntry(result);
+          else if (result?.kind === "CANCEL")
+            void this.handleCandlePhysicsCancel(result);
+          else if (result?.kind === "PRE_W1_DISCARD")
+            this.handleCandlePhysicsPreW1Discard(result);
         }
       }
     });
@@ -611,21 +695,44 @@ export class MarketDataOrchestrator {
       try {
         marketSnapshot = buildMarketSnapshot(
           {
-            aggressiveFlow: this.aggressiveFlow, oiTracker: this.oiTracker, orderbookStore: this.orderbookStore,
-            wallTracker: this.wallTracker, candleStore: this.candleStore, liquidationStore: this.liquidationStore,
-            atrTracker: this.atrTracker, directionalAtr1m: this.directionalAtr, directionalAtr3m: this.directionalAtr3m, directionalAtr5m: this.directionalAtr5m,
-            fundingStats: this.fundingStats, fundingRate: this.fundingRate,
+            aggressiveFlow: this.aggressiveFlow,
+            oiTracker: this.oiTracker,
+            orderbookStore: this.orderbookStore,
+            wallTracker: this.wallTracker,
+            candleStore: this.candleStore,
+            liquidationStore: this.liquidationStore,
+            atrTracker: this.atrTracker,
+            directionalAtr1m: this.directionalAtr,
+            directionalAtr3m: this.directionalAtr3m,
+            directionalAtr5m: this.directionalAtr5m,
+            fundingStats: this.fundingStats,
+            fundingRate: this.fundingRate,
           },
-          l, l.timestamp,
+          l,
+          l.timestamp,
         );
-        const ms = marketSnapshot as { openInterest: { oiAgeMs: number | null }; positioning: { positioningAgeMs: number | null }; funding: { fundingAgeMs: number | null } };
+        const ms = marketSnapshot as {
+          openInterest: { oiAgeMs: number | null };
+          positioning: { positioningAgeMs: number | null };
+          funding: { fundingAgeMs: number | null };
+        };
         log.debug(
-          { symbol: l.symbol, victim: l.side === "SELL" ? "LONG" : "SHORT", quoteQty: l.quoteQty, oiAgeMs: ms.openInterest.oiAgeMs, positioningAgeMs: ms.positioning.positioningAgeMs, fundingAgeMs: ms.funding.fundingAgeMs },
+          {
+            symbol: l.symbol,
+            victim: l.side === "SELL" ? "LONG" : "SHORT",
+            quoteQty: l.quoteQty,
+            oiAgeMs: ms.openInterest.oiAgeMs,
+            positioningAgeMs: ms.positioning.positioningAgeMs,
+            fundingAgeMs: ms.funding.fundingAgeMs,
+          },
           "[market-snapshot] enriched liquidation event saved",
         );
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.error({ err: msg, symbol: l.symbol }, "[MARKET_SNAPSHOT_BUILD_FAILED] -- base liquidation write proceeds without enrichment");
+        log.error(
+          { err: msg, symbol: l.symbol },
+          "[MARKET_SNAPSHOT_BUILD_FAILED] -- base liquidation write proceeds without enrichment",
+        );
         marketSnapshot = undefined;
       }
       void this.rawLiquidationEventRepo.insert({
@@ -648,8 +755,16 @@ export class MarketDataOrchestrator {
       if (this.liquidationOiOrchestrator !== null) {
         const oiSnap = this.oiTracker.getCachedOI(l.symbol);
         this.liquidationOiOrchestrator.onLiquidationEvent(
-          { symbol: l.symbol, victim: victimForShadow, timestamp: l.timestamp, price: l.price, quoteQty: l.quoteQty },
-          oiSnap !== null ? { quantity: oiSnap.contracts, timestamp: oiSnap.ts } : null,
+          {
+            symbol: l.symbol,
+            victim: victimForShadow,
+            timestamp: l.timestamp,
+            price: l.price,
+            quoteQty: l.quoteQty,
+          },
+          oiSnap !== null
+            ? { quantity: oiSnap.contracts, timestamp: oiSnap.ts }
+            : null,
         );
       }
       // Sep 11 2026 (Karo), operator-requested -- THE production wave
@@ -658,7 +773,13 @@ export class MarketDataOrchestrator {
       // convention). Fed regardless of mainSymbolLocks, same
       // convention as before -- willExecuteAsMain is decided inside
       // handleCandlePhysicsEntry() at the moment of entry, not here.
-      const unit1m = this.commonHorizonAtrReady(l.symbol) ? this.atrTracker.getWilderATR(l.symbol, "1m", COMMON_HORIZON_PERIODS.atr1m) : null;
+      const unit1m = this.commonHorizonAtrReady(l.symbol)
+        ? this.atrTracker.getWilderATR(
+            l.symbol,
+            "1m",
+            COMMON_HORIZON_PERIODS.atr1m,
+          )
+        : null;
       if (unit1m !== null && unit1m > 0) {
         // Sep 14 2026 (Karo), operator-approved -- ROTATION mode.
         // Mode is read fresh here but only matters for a NEW watch
@@ -667,10 +788,28 @@ export class MarketDataOrchestrator {
         // read/used when this liquidation is about to open a brand
         // new watch in ROTATION mode; harmless (and unread) otherwise.
         const entryMode = v5EntryMode();
-        const preLiqDownAtr = entryMode === "ROTATION" ? this.directionalAtr.getDownAtr(l.symbol) : null;
-        const preLiqUpAtr = entryMode === "ROTATION" ? this.directionalAtr.getUpAtr(l.symbol) : null;
-        const isNewWatch = entryMode === "ROTATION" && this.candlePhysics.peekWatch(l.symbol, victimForShadow) === null;
-        this.candlePhysics.onLiquidation(l.symbol, victimForShadow, l, unit1m, l.price, l.timestamp, entryMode, preLiqDownAtr, preLiqUpAtr);
+        const preLiqDownAtr =
+          entryMode === "ROTATION"
+            ? this.directionalAtr.getDownAtr(l.symbol)
+            : null;
+        const preLiqUpAtr =
+          entryMode === "ROTATION"
+            ? this.directionalAtr.getUpAtr(l.symbol)
+            : null;
+        const isNewWatch =
+          entryMode === "ROTATION" &&
+          this.candlePhysics.peekWatch(l.symbol, victimForShadow) === null;
+        this.candlePhysics.onLiquidation(
+          l.symbol,
+          victimForShadow,
+          l,
+          unit1m,
+          l.price,
+          l.timestamp,
+          entryMode,
+          preLiqDownAtr,
+          preLiqUpAtr,
+        );
         // Sep 14 2026 (Karo), operator-approved -- ROTATION mode.
         // Fire-and-forget causal P95 lookup, kicked off exactly once
         // per new watch (checked BEFORE onLiquidation() creates it,
@@ -680,10 +819,20 @@ export class MarketDataOrchestrator {
         // synchronous; this never blocks either.
         if (isNewWatch) {
           this.getRotationCausalP95(l.symbol, victimForShadow, l.timestamp)
-            .then((res) => this.candlePhysics.setRotationCausalP95(l.symbol, victimForShadow, res.p95, res.sampleCount))
+            .then((res) =>
+              this.candlePhysics.setRotationCausalP95(
+                l.symbol,
+                victimForShadow,
+                res.p95,
+                res.sampleCount,
+              ),
+            )
             .catch((err) => {
               const msg = err instanceof Error ? err.message : String(err);
-              log.error({ symbol: l.symbol, victim: victimForShadow, err: msg }, "[ROTATION_P95_LOOKUP_FAILED]");
+              log.error(
+                { symbol: l.symbol, victim: victimForShadow, err: msg },
+                "[ROTATION_P95_LOOKUP_FAILED]",
+              );
             });
         }
       }
@@ -770,7 +919,12 @@ export class MarketDataOrchestrator {
       // bootstrapped at startup, unchanged). No-op entirely when
       // liquidationOiOrchestrator is null (default) or its own
       // observationEnabled is false.
-      if (this.liquidationOiOrchestrator !== null && this.liquidationOiOrchestrator.getWatchManager().getLifecycle(b.symbol) !== null) {
+      if (
+        this.liquidationOiOrchestrator !== null &&
+        this.liquidationOiOrchestrator
+          .getWatchManager()
+          .getLifecycle(b.symbol) !== null
+      ) {
         if (this.loxTickInFlight.has(b.symbol)) {
           // A previous tick for this symbol is still being processed --
           // drop this one rather than queue it (queueing would only
@@ -779,20 +933,76 @@ export class MarketDataOrchestrator {
           // will carry a price at least as fresh as this dropped one.
         } else {
           const lastClosed3m = this.candleStore.lastClosed(b.symbol, "3m");
-          const atr3m = this.atrTracker.getWilderATRAtOrBefore(b.symbol, "3m", 14, b.timestamp);
-          const atr3mAgeMs = lastClosed3m !== null ? b.timestamp - lastClosed3m.closeTime : null;
-          const oiHistory = this.oiTracker.getOiHistory(b.symbol).map((s) => ({ contracts: s.contracts, fetchedAt: s.fetchedAt }));
-          const lifecycle = this.liquidationOiOrchestrator.getWatchManager().getLifecycle(b.symbol)!;
-          const thresholds = this.episodePercentileServiceForLox?.getThresholds(b.symbol) ?? null;
-          const dir = lifecycle.episode.victim === "LONG" ? thresholds?.long : thresholds?.short;
-          const percentileContext = buildPercentileContext(dir?.sampleCount ?? null, dir?.p90 ?? null, dir?.p95 ?? null, dir?.p99 ?? null, lifecycle.episode.sameDirectionLiqUsd);
+          const atr3m = this.atrTracker.getWilderATRAtOrBefore(
+            b.symbol,
+            "3m",
+            14,
+            b.timestamp,
+          );
+          const atr3mAgeMs =
+            lastClosed3m !== null ? b.timestamp - lastClosed3m.closeTime : null;
+          const oiHistory = this.oiTracker
+            .getOiHistory(b.symbol)
+            .map((s) => ({ contracts: s.contracts, fetchedAt: s.fetchedAt }));
+          const lifecycle = this.liquidationOiOrchestrator
+            .getWatchManager()
+            .getLifecycle(b.symbol)!;
+          const thresholds =
+            this.episodePercentileServiceForLox?.getThresholds(b.symbol) ??
+            null;
+          const dir =
+            lifecycle.episode.victim === "LONG"
+              ? thresholds?.long
+              : thresholds?.short;
+          const percentileContext = buildPercentileContext(
+            dir?.sampleCount ?? null,
+            dir?.p90 ?? null,
+            dir?.p95 ?? null,
+            dir?.p99 ?? null,
+            lifecycle.episode.sameDirectionLiqUsd,
+          );
           this.loxTickInFlight.add(b.symbol);
-          this.liquidationOiOrchestrator.onTick(b.symbol, percentileContext, oiHistory, mid, atr3m, atr3mAgeMs, b.timestamp, b.bid, b.ask, this.wallTracker,
-            this.candleStore.closedAfter(b.symbol, "1m", lifecycle.episodeEndDetection?.lastProcessed1mCloseTime ?? lifecycle.episode.firstLiqTs),
-            this.candleStore.getClosed(b.symbol, "3m"),
-            { get: (interval, atMs) => this.atrTracker.getWilderATRAtOrBefore(b.symbol, interval, 14, atMs) })
-            .catch((err) => { log.error({ symbol: b.symbol, err: err instanceof Error ? err.message : String(err) }, "[LOX_ON_TICK_UNEXPECTED_ERROR]"); })
-            .finally(() => { this.loxTickInFlight.delete(b.symbol); });
+          this.liquidationOiOrchestrator
+            .onTick(
+              b.symbol,
+              percentileContext,
+              oiHistory,
+              mid,
+              atr3m,
+              atr3mAgeMs,
+              b.timestamp,
+              b.bid,
+              b.ask,
+              this.wallTracker,
+              this.candleStore.closedAfter(
+                b.symbol,
+                "1m",
+                lifecycle.episodeEndDetection?.lastProcessed1mCloseTime ??
+                  lifecycle.episode.firstLiqTs,
+              ),
+              this.candleStore.getClosed(b.symbol, "3m"),
+              {
+                get: (interval, atMs) =>
+                  this.atrTracker.getWilderATRAtOrBefore(
+                    b.symbol,
+                    interval,
+                    14,
+                    atMs,
+                  ),
+              },
+            )
+            .catch((err) => {
+              log.error(
+                {
+                  symbol: b.symbol,
+                  err: err instanceof Error ? err.message : String(err),
+                },
+                "[LOX_ON_TICK_UNEXPECTED_ERROR]",
+              );
+            })
+            .finally(() => {
+              this.loxTickInFlight.delete(b.symbol);
+            });
         }
       }
       // Sep 10 2026 (Karo), operator-requested: DISCONNECTED, same
@@ -907,7 +1117,13 @@ export class MarketDataOrchestrator {
    *  own candidate sub-field on it. Combined with the new unique index
    *  on cascadeId (see CascadeRepository.ensureIndexes()) as a second,
    *  data-layer defense. */
-  private async persistActiveCandidateSnapshot(symbol: string, victim: Side, candidate: CascadeCandidateService, timeframe: "1m" | "3m" | "5m", now: number): Promise<void> {
+  private async persistActiveCandidateSnapshot(
+    symbol: string,
+    victim: Side,
+    candidate: CascadeCandidateService,
+    timeframe: "1m" | "3m" | "5m",
+    now: number,
+  ): Promise<void> {
     const state = candidate.exportState(symbol, victim);
     if (!state) return;
     const currentWave = state.waves[state.waves.length - 1];
@@ -928,7 +1144,14 @@ export class MarketDataOrchestrator {
       terminalAt: null,
       lastUpdatedTs: now,
     };
-    await this.cascadeRepo.upsertCandidateState(state.cascadeId, symbol, victim, state.createdAt, doc, now);
+    await this.cascadeRepo.upsertCandidateState(
+      state.cascadeId,
+      symbol,
+      victim,
+      state.createdAt,
+      doc,
+      now,
+    );
   }
 
   /** Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- now async;
@@ -942,13 +1165,24 @@ export class MarketDataOrchestrator {
    *  own established convention for Mongo-write-triggering handlers),
    *  but internally fully sequential. */
   private async feedCascade(l: Liquidation, victim: Side): Promise<void> {
-    const resolved = this.cascadeRegistry.resolve(l.symbol, victim, l.timestamp, randomUUID);
+    const resolved = this.cascadeRegistry.resolve(
+      l.symbol,
+      victim,
+      l.timestamp,
+      randomUUID,
+    );
 
     if (resolved.action === "ignore") return;
 
     if (resolved.action === "route") {
       this.cascadeCandidate1m.onLiquidation(l, victim);
-      await this.persistActiveCandidateSnapshot(l.symbol, victim, this.cascadeCandidate1m, "1m", l.timestamp);
+      await this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate1m,
+        "1m",
+        l.timestamp,
+      );
       return;
     }
 
@@ -962,10 +1196,30 @@ export class MarketDataOrchestrator {
     // onLiquidation()/onTick() calls anymore, so they stay permanently
     // empty and inert).
     if (!this.commonHorizonAtrReady(l.symbol)) return;
-    const unit1m = this.atrTracker.getWilderATR(l.symbol, "1m", COMMON_HORIZON_PERIODS.atr1m);
+    const unit1m = this.atrTracker.getWilderATR(
+      l.symbol,
+      "1m",
+      COMMON_HORIZON_PERIODS.atr1m,
+    );
     if (unit1m !== null && unit1m > 0) {
-      this.cascadeCandidate1m.startCascade(l.symbol, victim, resolved.cascadeId, "1m", unit1m, l.price, resolved.cascadeStartTs, l.quoteQty, resolved.cascadeStartTs);
-      await this.persistActiveCandidateSnapshot(l.symbol, victim, this.cascadeCandidate1m, "1m", l.timestamp);
+      this.cascadeCandidate1m.startCascade(
+        l.symbol,
+        victim,
+        resolved.cascadeId,
+        "1m",
+        unit1m,
+        l.price,
+        resolved.cascadeStartTs,
+        l.quoteQty,
+        resolved.cascadeStartTs,
+      );
+      await this.persistActiveCandidateSnapshot(
+        l.symbol,
+        victim,
+        this.cascadeCandidate1m,
+        "1m",
+        l.timestamp,
+      );
     }
   }
 
@@ -978,7 +1232,14 @@ export class MarketDataOrchestrator {
    *  diagnostic-only (logged, no further action). */
   private tickCascade(symbol: string, mid: number, ts: number): void {
     for (const victim of ["LONG", "SHORT"] as const) {
-      this.handleCascadeTick("1m", this.cascadeCandidate1m, symbol, victim, mid, ts);
+      this.handleCascadeTick(
+        "1m",
+        this.cascadeCandidate1m,
+        symbol,
+        victim,
+        mid,
+        ts,
+      );
     }
   }
 
@@ -988,9 +1249,19 @@ export class MarketDataOrchestrator {
    *  (a real Mongo write) when something meaningful has changed since
    *  the last tick -- avoids writing on every single bookTicker tick
    *  for a symbol with an active cascade. */
-  private readonly cascadeLastPersistedSnapshot = new Map<string, { waveCount: number; extremePrice: number }>();
+  private readonly cascadeLastPersistedSnapshot = new Map<
+    string,
+    { waveCount: number; extremePrice: number }
+  >();
 
-  private handleCascadeTick(timeframe: "1m" | "3m" | "5m", candidate: CascadeCandidateService, symbol: string, victim: Side, mid: number, ts: number): void {
+  private handleCascadeTick(
+    timeframe: "1m" | "3m" | "5m",
+    candidate: CascadeCandidateService,
+    symbol: string,
+    victim: Side,
+    mid: number,
+    ts: number,
+  ): void {
     const result = candidate.onTick(symbol, victim, mid, ts);
     if (!result) {
       const state = candidate.exportState(symbol, victim);
@@ -998,9 +1269,22 @@ export class MarketDataOrchestrator {
         const currentWave = state.waves[state.waves.length - 1]!;
         const snapKey = `${state.cascadeId}:${timeframe}`;
         const last = this.cascadeLastPersistedSnapshot.get(snapKey);
-        if (!last || last.waveCount !== state.waves.length || last.extremePrice !== currentWave.extremePrice) {
-          this.cascadeLastPersistedSnapshot.set(snapKey, { waveCount: state.waves.length, extremePrice: currentWave.extremePrice });
-          this.persistActiveCandidateSnapshot(symbol, victim, candidate, timeframe, ts);
+        if (
+          !last ||
+          last.waveCount !== state.waves.length ||
+          last.extremePrice !== currentWave.extremePrice
+        ) {
+          this.cascadeLastPersistedSnapshot.set(snapKey, {
+            waveCount: state.waves.length,
+            extremePrice: currentWave.extremePrice,
+          });
+          this.persistActiveCandidateSnapshot(
+            symbol,
+            victim,
+            candidate,
+            timeframe,
+            ts,
+          );
         }
       }
       return;
@@ -1010,7 +1294,10 @@ export class MarketDataOrchestrator {
     } else {
       const cancel = result as CascadeCancelEvent;
       const finalWave = cancel.waveHistory[cancel.waveHistory.length - 1];
-      const reasonText = terminalReasonText(cancel.reason, cancel.recoveryUnits);
+      const reasonText = terminalReasonText(
+        cancel.reason,
+        cancel.recoveryUnits,
+      );
       log.info(
         `[CASCADE_CANDIDATE_CANCEL] ${cancel.symbol} ${cancel.victim} timeframe=${cancel.timeframe} cascadeId=${cancel.cascadeId} waves=${cancel.waveHistory.length} reason=${cancel.reason} (${reasonText}) waveExtreme=${cancel.waveExtreme} cancelPrice=${cancel.cancelPrice} recoveryUnits=${cancel.recoveryUnits.toFixed(3)}`,
       );
@@ -1018,12 +1305,16 @@ export class MarketDataOrchestrator {
         timeframe: cancel.timeframe,
         phase: "TERMINAL_CANCEL",
         frozenUnitAbs: cancel.frozenUnitAbs,
-        currentWaveNumber: finalWave?.waveNumber ?? cancel.lastCompletedWaveNumber,
+        currentWaveNumber:
+          finalWave?.waveNumber ?? cancel.lastCompletedWaveNumber,
         // Every wave in a terminal event's own waveHistory has, by
         // construction, already completed (the terminal condition
         // itself is only ever evaluated once the final wave has
         // reached COMPLETED) -- safe to map unconditionally.
-        waveHistory: cancel.waveHistory.map((w) => ({ ...w, state: "COMPLETED" as const })),
+        waveHistory: cancel.waveHistory.map((w) => ({
+          ...w,
+          state: "COMPLETED" as const,
+        })),
         currentExtreme: cancel.waveExtreme,
         terminalStatus: "CANCEL",
         terminalReason: cancel.reason,
@@ -1035,7 +1326,14 @@ export class MarketDataOrchestrator {
         terminalAt: cancel.cancelTs,
         lastUpdatedTs: ts,
       };
-      void this.cascadeRepo.markCandidateTerminal(cancel.cascadeId, cancel.symbol, cancel.victim, cancel.cascadeStartTs, doc, ts);
+      void this.cascadeRepo.markCandidateTerminal(
+        cancel.cascadeId,
+        cancel.symbol,
+        cancel.victim,
+        cancel.cascadeStartTs,
+        doc,
+        ts,
+      );
     }
   }
 
@@ -1095,11 +1393,20 @@ export class MarketDataOrchestrator {
    *  extremePrice, reclaimPrice, liqNotionalUsd, and, for the entry
    *  wave specifically, selectedRecoveryPct/extremeDistanceAtr), so
    *  this is a type-compatibility requirement, never a display fake. */
-  private cascadeWavesToV5Waves(waves: readonly WaveSummary[], unitAbs: number, victim: Side, atr15mAbs: number): V5Wave[] {
+  private cascadeWavesToV5Waves(
+    waves: readonly WaveSummary[],
+    unitAbs: number,
+    victim: Side,
+    atr15mAbs: number,
+  ): V5Wave[] {
     return waves.map((w, i): V5Wave => {
       const isLast = i === waves.length - 1;
       const isCompleted = !isLast; // every wave before the last one has, by construction, already completed (the next wave only ever starts after the previous one reached COMPLETED)
-      const reclaimPrice = isCompleted ? (victim === "LONG" ? w.extremePrice + unitAbs : w.extremePrice - unitAbs) : null;
+      const reclaimPrice = isCompleted
+        ? victim === "LONG"
+          ? w.extremePrice + unitAbs
+          : w.extremePrice - unitAbs
+        : null;
       return {
         waveNumber: w.waveNumber,
         state: isCompleted ? "COMPLETED" : "ACTIVE",
@@ -1118,7 +1425,10 @@ export class MarketDataOrchestrator {
         priceEfficiency: null,
         liquidationRatioVsDominant: null,
         priceEfficiencyRatioVsDominant: null,
-        extremeDistanceAtr: atr15mAbs > 0 ? Math.abs(w.anchorPrice - w.extremePrice) / atr15mAbs : 0,
+        extremeDistanceAtr:
+          atr15mAbs > 0
+            ? Math.abs(w.anchorPrice - w.extremePrice) / atr15mAbs
+            : 0,
         isMeaningful: true,
         selectedRecoveryPct: null,
         recoveryTargetPrice: null,
@@ -1149,13 +1459,26 @@ export class MarketDataOrchestrator {
    *  rather than a literal anchor price -- a reasonable, documented
    *  approximation for DISPLAY purposes only; it never feeds back into
    *  SL/TP (last-two-wave-trade-plan.ts uses extreme values directly). */
-  private candlePhysicsWavesToV5Waves(waves: readonly CompletedWaveSummary[], unitAbs: number, victim: Side, atr15mAbs: number): V5Wave[] {
+  private candlePhysicsWavesToV5Waves(
+    waves: readonly CompletedWaveSummary[],
+    unitAbs: number,
+    victim: Side,
+    atr15mAbs: number,
+  ): V5Wave[] {
     return waves.map((w, i): V5Wave => {
       const isLast = i === waves.length - 1;
       const isCompleted = !isLast;
-      const anchorPrice = victim === "LONG" ? w.extreme + w.totalExtensionUnits * unitAbs : w.extreme - w.totalExtensionUnits * unitAbs;
-      const reclaimPrice = isCompleted ? (victim === "LONG" ? w.extreme + unitAbs : w.extreme - unitAbs) : null;
-      const extremeDistanceAtr = atr15mAbs > 0 ? Math.abs(anchorPrice - w.extreme) / atr15mAbs : 0;
+      const anchorPrice =
+        victim === "LONG"
+          ? w.extreme + w.totalExtensionUnits * unitAbs
+          : w.extreme - w.totalExtensionUnits * unitAbs;
+      const reclaimPrice = isCompleted
+        ? victim === "LONG"
+          ? w.extreme + unitAbs
+          : w.extreme - unitAbs
+        : null;
+      const extremeDistanceAtr =
+        atr15mAbs > 0 ? Math.abs(anchorPrice - w.extreme) / atr15mAbs : 0;
       const durationMin = (w.endTime - w.startTime) / 60000;
       return {
         waveNumber: w.waveNumber,
@@ -1190,7 +1513,8 @@ export class MarketDataOrchestrator {
         oiDeltaPct: null,
         liqRateUsdPerMin: durationMin > 0 ? w.totalLiqUsd / durationMin : null,
         eventRatePerMin: durationMin > 0 ? w.totalEvents / durationMin : null,
-        priceSpeedAtrPerMin: durationMin > 0 ? extremeDistanceAtr / durationMin : null,
+        priceSpeedAtrPerMin:
+          durationMin > 0 ? extremeDistanceAtr / durationMin : null,
       };
     });
   }
@@ -1200,7 +1524,9 @@ export class MarketDataOrchestrator {
    *  handleCascadeSignalReady()'s own structure/persistence/
    *  distribution pattern exactly, substituting the NEW last-two-wave
    *  SL/TP formula and the NEW engine's own wave shape. */
-  private async handleCandlePhysicsEntry(event: import("../domain/cascade/candle-physics-engine").CandlePhysicsEntryEvent): Promise<void> {
+  private async handleCandlePhysicsEntry(
+    event: import("../domain/cascade/candle-physics-engine").CandlePhysicsEntryEvent,
+  ): Promise<void> {
     try {
       // Sep 11 2026 (Karo), operator-requested -- the OLD final-entry
       // P95 gate (which compared event.maxIndividualEventUsd against a
@@ -1225,7 +1551,10 @@ export class MarketDataOrchestrator {
           p95AtW1Qualification: event.p95AtW1Qualification,
           maxIndividualEventUsdAtW1: event.maxIndividualEventUsdAtW1,
           w1QualificationTs: event.w1QualificationTs,
-          episodeTotalLiqUsd: event.allWaves.reduce((s, w) => s + w.totalLiqUsd, 0),
+          episodeTotalLiqUsd: event.allWaves.reduce(
+            (s, w) => s + w.totalLiqUsd,
+            0,
+          ),
           waveCount: event.allWaves.length,
           eventCount: event.allWaves.reduce((s, w) => s + w.totalEvents, 0),
         },
@@ -1233,7 +1562,11 @@ export class MarketDataOrchestrator {
       );
 
       const atr15mAbs = this.atrTracker.getATR(event.symbol, "15m") ?? 0;
-      const baseline = this.liquidationStats.rollingMedianLiqNotionalPerMin(event.symbol, 60) ?? 0;
+      const baseline =
+        this.liquidationStats.rollingMedianLiqNotionalPerMin(
+          event.symbol,
+          60,
+        ) ?? 0;
 
       // Sep 11 2026 (Karo), operator-requested simplification -- the
       // last-two-wave structural SL is kept ONLY as a diagnostic
@@ -1279,23 +1612,54 @@ export class MarketDataOrchestrator {
       const isRotation = event.rotationDiagnostics !== null;
       const entry = event.entryPrice;
       const FIXED_SL_PCT = isRotation ? v5RotationSlPct() : 0.003;
-      const sl = event.victim === "LONG" ? entry * (1 - FIXED_SL_PCT) : entry * (1 + FIXED_SL_PCT);
+      const sl =
+        event.victim === "LONG"
+          ? entry * (1 - FIXED_SL_PCT)
+          : entry * (1 + FIXED_SL_PCT);
       const riskDistance = Math.abs(entry - sl);
       // ROTATION: TP is the DIRECT percentage from config (matching
       // entry*(1+tpPct)/entry*(1-tpPct) exactly). WAVE: unchanged,
       // still RR-derived from riskDistance*2.2.
-      const REWARD_RISK_RATIO = isRotation ? v5RotationTpPct() / FIXED_SL_PCT : 2.2;
-      const rewardDistance = isRotation ? entry * v5RotationTpPct() : riskDistance * REWARD_RISK_RATIO;
-      const tp = event.victim === "LONG" ? entry + rewardDistance : entry - rewardDistance;
-      const plan = { ok: true as const, entry, sl, tp, slPct: FIXED_SL_PCT, tpPct: entry > 0 ? rewardDistance / entry : 0, rr: REWARD_RISK_RATIO };
+      const REWARD_RISK_RATIO = isRotation
+        ? v5RotationTpPct() / FIXED_SL_PCT
+        : 2.2;
+      const rewardDistance = isRotation
+        ? entry * v5RotationTpPct()
+        : riskDistance * REWARD_RISK_RATIO;
+      const tp =
+        event.victim === "LONG"
+          ? entry + rewardDistance
+          : entry - rewardDistance;
+      const plan = {
+        ok: true as const,
+        entry,
+        sl,
+        tp,
+        slPct: FIXED_SL_PCT,
+        tpPct: entry > 0 ? rewardDistance / entry : 0,
+        rr: REWARD_RISK_RATIO,
+      };
 
       log.info(
-        { symbol: event.symbol, direction: event.victim, entryPrice: entry, stopLoss: sl, riskDistance, rewardDistance, takeProfit: tp, rewardRiskRatio: REWARD_RISK_RATIO, entryMode: isRotation ? "ROTATION" : "WAVE" },
+        {
+          symbol: event.symbol,
+          direction: event.victim,
+          entryPrice: entry,
+          stopLoss: sl,
+          riskDistance,
+          rewardDistance,
+          takeProfit: tp,
+          rewardRiskRatio: REWARD_RISK_RATIO,
+          entryMode: isRotation ? "ROTATION" : "WAVE",
+        },
         "[FIXED_RISK_TRADE_PLAN]",
       );
 
       const signalId = randomUUID();
-      const totalLiq = event.allWaves.reduce((sum, w) => sum + w.totalLiqUsd, 0);
+      const totalLiq = event.allWaves.reduce(
+        (sum, w) => sum + w.totalLiqUsd,
+        0,
+      );
 
       // Sep 11 2026 (Karo), operator-reported CRITICAL FIX -- the
       // candle-physics engine's own entry point never evaluated the
@@ -1318,7 +1682,12 @@ export class MarketDataOrchestrator {
       // be implemented). Reverted back to the ORIGINAL, pre-BTC_BLOCK-
       // work state so this file matches what is ACTUALLY deployed.
       const willExecuteAsMain = !this.mainSymbolLocks.has(event.symbol);
-      const v5Waves = this.candlePhysicsWavesToV5Waves(event.allWaves, event.unitAbs, event.victim, atr15mAbs);
+      const v5Waves = this.candlePhysicsWavesToV5Waves(
+        event.allWaves,
+        event.unitAbs,
+        event.victim,
+        atr15mAbs,
+      );
 
       // Sep 12 2026 (Karo), operator-requested research-persistence
       // audit -- REAL, live, ENTRY-TIME-ONLY snapshots from the
@@ -1327,7 +1696,11 @@ export class MarketDataOrchestrator {
       // elsewhere in this class -- see this.aggressiveFlow,
       // this.oiTracker, this.candleStore). Purely observational reads;
       // never influences any wave/entry/execution decision above.
-      const flowSnap = this.aggressiveFlow.getRecentFlow(event.symbol, 30_000, event.entryTs);
+      const flowSnap = this.aggressiveFlow.getRecentFlow(
+        event.symbol,
+        30_000,
+        event.entryTs,
+      );
       const oiSnap = this.oiTracker.getCachedOI(event.symbol);
       const btcCandle = this.candleStore.lastClosed("BTCUSDT", "1m");
       const btcOiSnap = this.oiTracker.getCachedOI("BTCUSDT");
@@ -1345,10 +1718,27 @@ export class MarketDataOrchestrator {
       // recomputed here) AND in a still-unresolved phase (ACTIVE/
       // EXHAUSTING/WAIT_NEXT_PRESSURE). N/A_BTC for BTC's own signal
       // (self-comparison is meaningless); CLEAN when no side matches.
-      const btcLongCtx = event.symbol !== "BTCUSDT" ? this.candlePhysics.getSeriousEpisodeContext("BTCUSDT", "LONG") : null;
-      const btcShortCtx = event.symbol !== "BTCUSDT" ? this.candlePhysics.getSeriousEpisodeContext("BTCUSDT", "SHORT") : null;
-      function isBlocking(ctx: import("../domain/cascade/candle-physics-engine").SeriousEpisodeContext | null): boolean {
-        return ctx !== null && ctx.active && ctx.serious && (["ACTIVE", "EXHAUSTING", "WAIT_NEXT_PRESSURE"] as const).includes(ctx.phase as "ACTIVE" | "EXHAUSTING" | "WAIT_NEXT_PRESSURE");
+      const btcLongCtx =
+        event.symbol !== "BTCUSDT"
+          ? this.candlePhysics.getSeriousEpisodeContext("BTCUSDT", "LONG")
+          : null;
+      const btcShortCtx =
+        event.symbol !== "BTCUSDT"
+          ? this.candlePhysics.getSeriousEpisodeContext("BTCUSDT", "SHORT")
+          : null;
+      function isBlocking(
+        ctx:
+          | import("../domain/cascade/candle-physics-engine").SeriousEpisodeContext
+          | null,
+      ): boolean {
+        return (
+          ctx !== null &&
+          ctx.active &&
+          ctx.serious &&
+          (["ACTIVE", "EXHAUSTING", "WAIT_NEXT_PRESSURE"] as const).includes(
+            ctx.phase as "ACTIVE" | "EXHAUSTING" | "WAIT_NEXT_PRESSURE",
+          )
+        );
       }
       const btcLongBlocking = isBlocking(btcLongCtx);
       const btcShortBlocking = isBlocking(btcShortCtx);
@@ -1357,21 +1747,30 @@ export class MarketDataOrchestrator {
       // takes precedence for the block decision -- an ALT can only
       // ever be blocked by the SAME-side BTC episode, never both at
       // once from this field's own single-side perspective.
-      let btcIntendedSideAtSignalTime: import("../shared/common.types").Side | null = null;
+      let btcIntendedSideAtSignalTime:
+        | import("../shared/common.types").Side
+        | null = null;
       if (event.symbol !== "BTCUSDT") {
-        if (event.victim === "LONG" && btcLongBlocking) btcIntendedSideAtSignalTime = "LONG";
-        else if (event.victim === "SHORT" && btcShortBlocking) btcIntendedSideAtSignalTime = "SHORT";
+        if (event.victim === "LONG" && btcLongBlocking)
+          btcIntendedSideAtSignalTime = "LONG";
+        else if (event.victim === "SHORT" && btcShortBlocking)
+          btcIntendedSideAtSignalTime = "SHORT";
         else if (btcLongBlocking) btcIntendedSideAtSignalTime = "LONG";
         else if (btcShortBlocking) btcIntendedSideAtSignalTime = "SHORT";
       }
       const btcSafetyStatus: "CLEAN" | "WOULD_BLOCK" | "UNKNOWN" | "N/A_BTC" =
-        event.symbol === "BTCUSDT" ? "N/A_BTC" : btcIntendedSideAtSignalTime === event.victim ? "WOULD_BLOCK" : "CLEAN";
+        event.symbol === "BTCUSDT"
+          ? "N/A_BTC"
+          : btcIntendedSideAtSignalTime === event.victim
+            ? "WOULD_BLOCK"
+            : "CLEAN";
       // The SAME-side-as-this-ALT context is what's persisted for
       // research reconstruction (see GlobalSignalDoc.btcContext's own
       // doc comment) -- whichever BTC side matches this ALT's own
       // side, regardless of whether it ended up blocking or not.
       const sameSideCtx = event.victim === "LONG" ? btcLongCtx : btcShortCtx;
-      const btcActiveCascadeSide: import("../shared/common.types").Side | null = btcLongBlocking ? "LONG" : btcShortBlocking ? "SHORT" : null;
+      const btcActiveCascadeSide: import("../shared/common.types").Side | null =
+        btcLongBlocking ? "LONG" : btcShortBlocking ? "SHORT" : null;
 
       const globalSignal: GlobalSignalDoc = {
         signalId,
@@ -1390,12 +1789,20 @@ export class MarketDataOrchestrator {
         exhaustionLayerLiqUsd: event.signalWave.totalLiqUsd,
         exhaustionLayerWaveNumber: event.signalWave.waveNumber,
         unitAtStart: event.unitAbs,
-        p95AtEntry: this.liquidationStats.notionalPercentile(event.symbol, event.victim, 95),
+        p95AtEntry: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
         dailyLiqPerMinBaselineAtEntry: baseline,
         atr15mAtEntry: atr15mAbs,
         qualifyingEventUsd: event.allWaves[0]?.totalLiqUsd ?? 0,
         qualifyingEventTs: event.allWaves[0]?.startTime ?? event.episodeStartTs,
-        p95AtQualification: this.liquidationStats.notionalPercentile(event.symbol, event.victim, 95),
+        p95AtQualification: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
         physics: {
           cumLiqUsd: totalLiq,
           atrPct: atr15mAbs,
@@ -1418,7 +1825,10 @@ export class MarketDataOrchestrator {
           liquidityStrengthP95: 0,
           liquidityStrength24h: 0,
           liquidityStrength: 0,
-          w2ToW1Ratio: event.dominantWave.totalLiqUsd > 0 ? event.signalWave.totalLiqUsd / event.dominantWave.totalLiqUsd : 0,
+          w2ToW1Ratio:
+            event.dominantWave.totalLiqUsd > 0
+              ? event.signalWave.totalLiqUsd / event.dominantWave.totalLiqUsd
+              : 0,
           exhaustionScore: 0,
           w1DisplacementAtr: 0,
           absorptionRaw: 0,
@@ -1432,18 +1842,27 @@ export class MarketDataOrchestrator {
           priceAtSignal: btcCandle?.close ?? null,
           oiAtSignal: btcOiSnap?.contracts ?? null,
           btcSeriousEpisodePhase: sameSideCtx?.phase ?? null,
-          btcSeriousEpisodeP95AtQualification: sameSideCtx?.p95AtQualification ?? null,
-          btcSeriousEpisodeMaxIndividualEventUsd: sameSideCtx?.maxIndividualEventUsd ?? null,
-          btcSeriousEpisodeQualificationTs: sameSideCtx?.w1QualificationTs ?? null,
+          btcSeriousEpisodeP95AtQualification:
+            sameSideCtx?.p95AtQualification ?? null,
+          btcSeriousEpisodeMaxIndividualEventUsd:
+            sameSideCtx?.maxIndividualEventUsd ?? null,
+          btcSeriousEpisodeQualificationTs:
+            sameSideCtx?.w1QualificationTs ?? null,
           btcActiveCascadeSide,
         },
         marketContextAtEntry: {
           takerFlowLast30sBuyUsd: flowSnap?.buyUsd ?? null,
           takerFlowLast30sSellUsd: flowSnap?.sellUsd ?? null,
-          takerFlowLast30sImbalance: flowSnap && flowSnap.buyUsd + flowSnap.sellUsd > 0 ? (flowSnap.buyUsd - flowSnap.sellUsd) / (flowSnap.buyUsd + flowSnap.sellUsd) : null,
-          takerVolumeRollingMedianPerMinUsd: this.aggressiveFlow.getRollingMedianTakerVolume(event.symbol, 60),
+          takerFlowLast30sImbalance:
+            flowSnap && flowSnap.buyUsd + flowSnap.sellUsd > 0
+              ? (flowSnap.buyUsd - flowSnap.sellUsd) /
+                (flowSnap.buyUsd + flowSnap.sellUsd)
+              : null,
+          takerVolumeRollingMedianPerMinUsd:
+            this.aggressiveFlow.getRollingMedianTakerVolume(event.symbol, 60),
           oiCurrentContracts: oiSnap?.contracts ?? null,
-          oiRollingMedianChangeContracts: this.oiTracker.getRollingMedianOiChange(event.symbol),
+          oiRollingMedianChangeContracts:
+            this.oiTracker.getRollingMedianOiChange(event.symbol),
         },
         liq24hContext: null,
         wallContext: null,
@@ -1484,11 +1903,27 @@ export class MarketDataOrchestrator {
       this.candlePhysics.clearTerminal(event.symbol, event.victim);
 
       if (!willExecuteAsMain) return;
-      const { mainTelegramSent } = await this.distributor.distribute(globalSignal, this.mongo);
-      if (!mainTelegramSent) {
-        log.error(`[CANDLE_PHYSICS_MAIN_ENTRY_TELEGRAM_MISSING] ${event.symbol} ${event.victim} signalId=${signalId} -- MAIN's own ENTRY notification FAILED to send, but this trade IS still being installed into active TP/SL tracking`);
+      // Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- this
+      // CANDLE_PHYSICS entry path is a SEPARATE strategy engine from
+      // the wave-based V5 path already gated below (~line 3004), but
+      // renders through the SAME formatV5EntryMessage() (hardcoded
+      // "V5 ENTRY" text regardless of source engine) and was NEVER
+      // gated by productionSignalsEnabled -- confirmed live: this was
+      // the actual source of the BNBUSDT/LINKUSDT "V5 ENTRY" messages
+      // and REAL Binance orders that continued appearing after the
+      // wave-path fix was deployed.
+      if (this.productionSignalsEnabled) {
+        const { mainTelegramSent } = await this.distributor.distribute(
+          globalSignal,
+          this.mongo,
+        );
+        if (!mainTelegramSent) {
+          log.error(
+            `[CANDLE_PHYSICS_MAIN_ENTRY_TELEGRAM_MISSING] ${event.symbol} ${event.victim} signalId=${signalId} -- MAIN's own ENTRY notification FAILED to send, but this trade IS still being installed into active TP/SL tracking`,
+          );
+        }
+        this.mainSymbolLocks.add(event.symbol);
       }
-      this.mainSymbolLocks.add(event.symbol);
       this.v5.hydrateActiveTrade({
         signalId,
         symbol: event.symbol,
@@ -1512,10 +1947,20 @@ export class MarketDataOrchestrator {
 
       const denom = Math.abs(plan.entry - plan.sl);
       const dirMul = event.victim === "LONG" ? 1 : -1;
-      this.researchCheckpoints.registerWatch(signalId, event.symbol, "SIGNAL", event.entryTs, plan.entry, { kind: "R", dirMul, denom });
+      this.researchCheckpoints.registerWatch(
+        signalId,
+        event.symbol,
+        "SIGNAL",
+        event.entryTs,
+        plan.entry,
+        { kind: "R", dirMul, denom },
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error({ err: msg, symbol: event.symbol, victim: event.victim }, "[CANDLE_PHYSICS_ENTRY_UNHANDLED_ERROR]");
+      log.error(
+        { err: msg, symbol: event.symbol, victim: event.victim },
+        "[CANDLE_PHYSICS_ENTRY_UNHANDLED_ERROR]",
+      );
     }
   }
 
@@ -1536,7 +1981,9 @@ export class MarketDataOrchestrator {
    *  P95 history. peekWatch() is called BEFORE clearTerminal() below
    *  (which deletes the watch), so the watch's own final state is
    *  still readable here. */
-  private async handleCandlePhysicsCancel(event: import("../domain/cascade/candle-physics-engine").CandlePhysicsCancelEvent): Promise<void> {
+  private async handleCandlePhysicsCancel(
+    event: import("../domain/cascade/candle-physics-engine").CandlePhysicsCancelEvent,
+  ): Promise<void> {
     log.info(
       `[CANDLE_PHYSICS_CANCEL] ${event.symbol} ${event.victim} reason=${event.reason} episodeStartTs=${event.episodeStartTs} cancelTs=${event.cancelTs} completedWaves=${event.allWaves.length}`,
     );
@@ -1581,9 +2028,11 @@ export class MarketDataOrchestrator {
             shockAtr: null,
             adverseExtremePrice: watch.episodeExtreme,
             adverseExtremeTs: watch.adverseExtremeTs,
-            timeFromExtremeMin: (event.cancelTs - watch.adverseExtremeTs) / 60000,
+            timeFromExtremeMin:
+              (event.cancelTs - watch.adverseExtremeTs) / 60000,
             lastSameSideLiquidationTs: watch.lastSameSideLiquidationTs,
-            secondsSinceLastSameSideLiq: (event.cancelTs - watch.lastSameSideLiquidationTs) / 1000,
+            secondsSinceLastSameSideLiq:
+              (event.cancelTs - watch.lastSameSideLiquidationTs) / 1000,
             watchCreatedAt: watch.episodeStartTs,
           },
           totalEpisodePressure: watch.cumulativeSameSideLiqUsd,
@@ -1626,7 +2075,10 @@ export class MarketDataOrchestrator {
         await this.globalSignalRepo.insert(doc);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        log.error({ symbol: event.symbol, victim: event.victim, err: msg }, "[ROTATION_CANCEL_PERSIST_FAILED]");
+        log.error(
+          { symbol: event.symbol, victim: event.victim, err: msg },
+          "[ROTATION_CANCEL_PERSIST_FAILED]",
+        );
       }
     }
 
@@ -1641,7 +2093,9 @@ export class MarketDataOrchestrator {
    *  purely so the operator's own explicit per-candidate diagnostic
    *  requirement (symbol, victim, start/end, eventCount, totalLiqUsd,
    *  maxIndividualEventUsd, current P95, result) is visible in logs. */
-  private handleCandlePhysicsPreW1Discard(event: import("../domain/cascade/candle-physics-engine").CandlePhysicsPreW1DiscardEvent): void {
+  private handleCandlePhysicsPreW1Discard(
+    event: import("../domain/cascade/candle-physics-engine").CandlePhysicsPreW1DiscardEvent,
+  ): void {
     log.info(
       {
         symbol: event.symbol,
@@ -1658,7 +2112,9 @@ export class MarketDataOrchestrator {
     );
   }
 
-  private async handleCascadeSignalReady(event: CascadeSignalReadyEvent): Promise<void> {
+  private async handleCascadeSignalReady(
+    event: CascadeSignalReadyEvent,
+  ): Promise<void> {
     try {
       // Sep 10 2026 (Karo), operator-corrected mapping -- the TWO waves
       // that actually caused THIS signal decision (previous completed
@@ -1673,8 +2129,15 @@ export class MarketDataOrchestrator {
       const previousWave = event.waveHistory[event.waveHistory.length - 2]!;
       const firstWave = event.waveHistory[0]!; // the TRUE episode-start wave -- used ONLY for qualifyingEvent* below
       const atr15mAbs = this.atrTracker.getATR(event.symbol, "15m") ?? 0;
-      const baseline = this.liquidationStats.rollingMedianLiqNotionalPerMin(event.symbol, 60) ?? 0;
-      const dominantWave = event.waveHistory.reduce((best, w) => (w.liqUsd > best.liqUsd ? w : best), event.waveHistory[0]!);
+      const baseline =
+        this.liquidationStats.rollingMedianLiqNotionalPerMin(
+          event.symbol,
+          60,
+        ) ?? 0;
+      const dominantWave = event.waveHistory.reduce(
+        (best, w) => (w.liqUsd > best.liqUsd ? w : best),
+        event.waveHistory[0]!,
+      );
 
       // Sep 11 2026 (Karo), operator-requested -- REPLACES the constant
       // SL=0.30%/TP=0.70% observation-phase values with the
@@ -1693,7 +2156,10 @@ export class MarketDataOrchestrator {
       // the HIGHEST for a SHORT-victim episode.
       const firstAnchorPrice = event.waveHistory[0]!.anchorPrice;
       const finalExtremePrice = event.waveHistory.reduce(
-        (best, w) => (event.side === "LONG" ? Math.min(best, w.extremePrice) : Math.max(best, w.extremePrice)),
+        (best, w) =>
+          event.side === "LONG"
+            ? Math.min(best, w.extremePrice)
+            : Math.max(best, w.extremePrice),
         event.waveHistory[0]!.extremePrice,
       );
       const episodePlanCalc = deriveEpisodeDisplacementTradePlan({
@@ -1750,7 +2216,12 @@ export class MarketDataOrchestrator {
       // never influencing wave lifecycle, entry decisions, UNIT, or
       // SL/TP. triggerWave IS the signal-triggering wave here (see this
       // method's own earlier comment on triggerWave/previousWave).
-      const waveEfficiencyAnalysis = computeWaveEfficiencyAnalysis(event.waveHistory, triggerWave.waveNumber, event.unitAbs, event.victim);
+      const waveEfficiencyAnalysis = computeWaveEfficiencyAnalysis(
+        event.waveHistory,
+        triggerWave.waveNumber,
+        event.unitAbs,
+        event.victim,
+      );
       if (waveEfficiencyAnalysis) {
         log.info(
           {
@@ -1758,23 +2229,29 @@ export class MarketDataOrchestrator {
             symbol: event.symbol,
             dominantWaveNumber: waveEfficiencyAnalysis.dominant.waveNumber,
             dominantWaveLiqUsd: waveEfficiencyAnalysis.dominant.liqUsd,
-            dominantWaveAnchorPrice: waveEfficiencyAnalysis.dominant.anchorPrice,
-            dominantWaveExtremePrice: waveEfficiencyAnalysis.dominant.extremePrice,
-            dominantWaveProgressUnits: waveEfficiencyAnalysis.dominant.progressUnits,
+            dominantWaveAnchorPrice:
+              waveEfficiencyAnalysis.dominant.anchorPrice,
+            dominantWaveExtremePrice:
+              waveEfficiencyAnalysis.dominant.extremePrice,
+            dominantWaveProgressUnits:
+              waveEfficiencyAnalysis.dominant.progressUnits,
             dominantWaveEfficiency: waveEfficiencyAnalysis.dominant.efficiency,
             signalWaveNumber: waveEfficiencyAnalysis.signal.waveNumber,
             signalWaveLiqUsd: waveEfficiencyAnalysis.signal.liqUsd,
             signalWaveAnchorPrice: waveEfficiencyAnalysis.signal.anchorPrice,
             signalWaveExtremePrice: waveEfficiencyAnalysis.signal.extremePrice,
-            signalWaveProgressUnits: waveEfficiencyAnalysis.signal.progressUnits,
+            signalWaveProgressUnits:
+              waveEfficiencyAnalysis.signal.progressUnits,
             signalWaveEfficiency: waveEfficiencyAnalysis.signal.efficiency,
             liqRatio: waveEfficiencyAnalysis.liqRatio,
             efficiencyRatio: waveEfficiencyAnalysis.efficiencyRatio,
             exhaustion: waveEfficiencyAnalysis.exhaustion,
             exhaustionPct: waveEfficiencyAnalysis.exhaustionPct,
-            previousEpisodeExtreme: waveEfficiencyAnalysis.previousEpisodeExtreme,
+            previousEpisodeExtreme:
+              waveEfficiencyAnalysis.previousEpisodeExtreme,
             newExtremeExtension: waveEfficiencyAnalysis.newExtremeExtension,
-            newExtremeExtensionUnits: waveEfficiencyAnalysis.newExtremeExtensionUnits,
+            newExtremeExtensionUnits:
+              waveEfficiencyAnalysis.newExtremeExtensionUnits,
             unitAbs: waveEfficiencyAnalysis.unitAbs,
           },
           "[WAVE_EFFICIENCY_ANALYSIS]",
@@ -1800,7 +2277,12 @@ export class MarketDataOrchestrator {
         signalTs: event.entryTs,
         entryPrice: event.entryPrice,
         entryWaveNumber: triggerWave.waveNumber,
-        waveHistory: this.cascadeWavesToV5Waves(event.waveHistory, event.unitAbs, event.victim, atr15mAbs),
+        waveHistory: this.cascadeWavesToV5Waves(
+          event.waveHistory,
+          event.unitAbs,
+          event.victim,
+          atr15mAbs,
+        ),
         w1Diagnostics: null,
         totalEpisodePressure: totalLiq,
         dominantLayerLiqUsd: dominantWave.liqUsd,
@@ -1808,12 +2290,20 @@ export class MarketDataOrchestrator {
         exhaustionLayerLiqUsd: triggerWave.liqUsd,
         exhaustionLayerWaveNumber: triggerWave.waveNumber,
         unitAtStart: event.unitAbs,
-        p95AtEntry: this.liquidationStats.notionalPercentile(event.symbol, event.victim, 95),
+        p95AtEntry: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
         dailyLiqPerMinBaselineAtEntry: baseline,
         atr15mAtEntry: atr15mAbs,
         qualifyingEventUsd: firstWave.liqUsd,
         qualifyingEventTs: firstWave.anchorTs,
-        p95AtQualification: this.liquidationStats.notionalPercentile(event.symbol, event.victim, 95),
+        p95AtQualification: this.liquidationStats.notionalPercentile(
+          event.symbol,
+          event.victim,
+          95,
+        ),
         physics: {
           // Sep 10 2026 (Karo), operator-requested production
           // stabilization -- constant-TP/SL phase. Only the fields
@@ -1849,7 +2339,10 @@ export class MarketDataOrchestrator {
           liquidityStrengthP95: 0,
           liquidityStrength24h: 0,
           liquidityStrength: 0,
-          w2ToW1Ratio: previousWave.liqUsd > 0 ? triggerWave.liqUsd / previousWave.liqUsd : 0,
+          w2ToW1Ratio:
+            previousWave.liqUsd > 0
+              ? triggerWave.liqUsd / previousWave.liqUsd
+              : 0,
           exhaustionScore: 0,
           w1DisplacementAtr: 0,
           absorptionRaw: 0,
@@ -1902,7 +2395,10 @@ export class MarketDataOrchestrator {
         phase: "TERMINAL_SIGNAL",
         frozenUnitAbs: event.unitAbs,
         currentWaveNumber: triggerWave.waveNumber,
-        waveHistory: event.waveHistory.map((w) => ({ ...w, state: "COMPLETED" as const })),
+        waveHistory: event.waveHistory.map((w) => ({
+          ...w,
+          state: "COMPLETED" as const,
+        })),
         currentExtreme: triggerWave.extremePrice,
         terminalStatus: "SIGNAL",
         terminalReason: null,
@@ -1914,7 +2410,14 @@ export class MarketDataOrchestrator {
         terminalAt: event.entryTs,
         lastUpdatedTs: event.entryTs,
       };
-      void this.cascadeRepo.markCandidateTerminal(event.cascadeId, event.symbol, event.victim, event.cascadeStartTs, terminalDoc, event.entryTs);
+      void this.cascadeRepo.markCandidateTerminal(
+        event.cascadeId,
+        event.symbol,
+        event.victim,
+        event.cascadeStartTs,
+        terminalDoc,
+        event.entryTs,
+      );
 
       // Sep 10 2026 (Karo), operator-requested production lifecycle
       // stabilization. mainSymbolLocks continues to gate the ENTIRE
@@ -1939,24 +2442,24 @@ export class MarketDataOrchestrator {
       // hydration already uses -- is reused here to install it live,
       // the moment it becomes MAIN's own real, executed position.
       if (!willExecuteAsMain) return;
-      // Sep 10 2026 (Karo), operator-reported CRITICAL FIX -- mainTelegramSent
-      // is now checked and PROMINENTLY logged if false, so a silent MAIN
-      // ENTRY-Telegram failure (network blip, Telegram API outage) is
-      // never invisible again -- this is exactly the second, previously-
-      // undetected source of the "CLOSE exists but ENTER was never seen"
-      // class of bug (the first, restart-hydration-filter source, was
-      // already fixed separately -- see hydrateMainLocks() above). The
-      // trade is STILL installed/tracked below regardless (a real,
-      // executing position must never go untracked just because its own
-      // notification failed) -- this fix restores VISIBILITY, it does
-      // not change execution behavior.
-      const { mainTelegramSent } = await this.distributor.distribute(globalSignal, this.mongo);
-      if (!mainTelegramSent) {
-        log.error(
-          `[CASCADE_MAIN_ENTRY_TELEGRAM_MISSING] ${event.symbol} ${event.side} timeframe=${event.timeframe} cascadeId=${event.cascadeId} signalId=${signalId} -- MAIN's own ENTRY notification FAILED to send, but this trade IS still being installed into active TP/SL tracking below and WILL eventually produce a CLOSE notification -- manual awareness needed for this signalId`,
+      // Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- this
+      // CASCADE entry path is ALSO a separate strategy engine from
+      // the wave-based V5 path, ALSO renders as "V5 ENTRY" via the
+      // same shared formatter, and was ALSO never gated by
+      // productionSignalsEnabled. See the identical fix just above
+      // (CANDLE_PHYSICS_ENTRY) for the full finding.
+      if (this.productionSignalsEnabled) {
+        const { mainTelegramSent } = await this.distributor.distribute(
+          globalSignal,
+          this.mongo,
         );
+        if (!mainTelegramSent) {
+          log.error(
+            `[CASCADE_MAIN_ENTRY_TELEGRAM_MISSING] ${event.symbol} ${event.side} timeframe=${event.timeframe} cascadeId=${event.cascadeId} signalId=${signalId} -- MAIN's own ENTRY notification FAILED to send, but this trade IS still being installed into active TP/SL tracking below and WILL eventually produce a CLOSE notification -- manual awareness needed for this signalId`,
+          );
+        }
+        this.mainSymbolLocks.add(event.symbol);
       }
-      this.mainSymbolLocks.add(event.symbol);
       this.v5.hydrateActiveTrade({
         signalId,
         symbol: event.symbol,
@@ -1980,10 +2483,20 @@ export class MarketDataOrchestrator {
 
       const denom = Math.abs(plan.entry - plan.sl);
       const dirMul = event.side === "LONG" ? 1 : -1;
-      this.researchCheckpoints.registerWatch(signalId, event.symbol, "SIGNAL", event.entryTs, plan.entry, { kind: "R", dirMul, denom });
+      this.researchCheckpoints.registerWatch(
+        signalId,
+        event.symbol,
+        "SIGNAL",
+        event.entryTs,
+        plan.entry,
+        { kind: "R", dirMul, denom },
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error({ err: msg, cascadeId: event.cascadeId, timeframe: event.timeframe }, "[CASCADE_SIGNAL_READY_UNHANDLED_ERROR]");
+      log.error(
+        { err: msg, cascadeId: event.cascadeId, timeframe: event.timeframe },
+        "[CASCADE_SIGNAL_READY_UNHANDLED_ERROR]",
+      );
     }
   }
 
@@ -2788,16 +3301,34 @@ export class MarketDataOrchestrator {
    *  once the backfill exists -- combining them is what lets a new
    *  live watch see the FULL causal population (backfilled +
    *  previously-live) immediately, with no 20-live-episode warmup. */
-  async getRotationCausalP95(symbol: string, victim: "LONG" | "SHORT", beforeTs: number): Promise<{ p95: number | null; sampleCount: number }> {
+  async getRotationCausalP95(
+    symbol: string,
+    victim: "LONG" | "SHORT",
+    beforeTs: number,
+  ): Promise<{ p95: number | null; sampleCount: number }> {
     const [liveRows, historyRows] = await Promise.all([
-      this.globalSignalRepo.findCompletedRotationEpisodeTotals(symbol, victim, beforeTs),
-      this.rotationEpisodeHistoryRepo.findCausalPriorEpisodes(symbol, victim, beforeTs),
+      this.globalSignalRepo.findCompletedRotationEpisodeTotals(
+        symbol,
+        victim,
+        beforeTs,
+      ),
+      this.rotationEpisodeHistoryRepo.findCausalPriorEpisodes(
+        symbol,
+        victim,
+        beforeTs,
+      ),
     ]);
-    const sorted = [...liveRows, ...historyRows].map((r) => r.totalUsd).sort((a, b) => a - b);
+    const sorted = [...liveRows, ...historyRows]
+      .map((r) => r.totalUsd)
+      .sort((a, b) => a - b);
     if (sorted.length === 0) return { p95: null, sampleCount: 0 };
     const idx = 0.95 * (sorted.length - 1);
-    const lo = Math.floor(idx), hi = Math.ceil(idx);
-    const p95 = lo === hi ? sorted[lo]! : sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (idx - lo);
+    const lo = Math.floor(idx),
+      hi = Math.ceil(idx);
+    const p95 =
+      lo === hi
+        ? sorted[lo]!
+        : sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (idx - lo);
     return { p95, sampleCount: sorted.length };
   }
 
@@ -2975,7 +3506,16 @@ export class MarketDataOrchestrator {
               slDeterminedBy: event.plan.slDeterminedBy,
             }
           : null,
-        btcContext: event.btcContext ? { ...event.btcContext, btcSeriousEpisodePhase: null, btcSeriousEpisodeP95AtQualification: null, btcSeriousEpisodeMaxIndividualEventUsd: null, btcSeriousEpisodeQualificationTs: null, btcActiveCascadeSide: null } : null,
+        btcContext: event.btcContext
+          ? {
+              ...event.btcContext,
+              btcSeriousEpisodePhase: null,
+              btcSeriousEpisodeP95AtQualification: null,
+              btcSeriousEpisodeMaxIndividualEventUsd: null,
+              btcSeriousEpisodeQualificationTs: null,
+              btcActiveCascadeSide: null,
+            }
+          : null,
         marketContextAtEntry: null,
         liq24hContext: event.liq24hContext,
         wallContext: event.wallContext,
