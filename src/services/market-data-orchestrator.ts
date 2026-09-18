@@ -1895,7 +1895,17 @@ export class MarketDataOrchestrator {
         createdAt: Date.now(),
       };
 
-      await this.globalSignalRepo.insert(globalSignal);
+      // Sep 18 2026 (Karo), operator-requested CRITICAL FIX -- this
+      // Mongo insert into the OLD v5_global_signals collection was
+      // UNCONDITIONAL, regardless of productionSignalsEnabled -- the
+      // user explicitly wants the old system COMPLETELY disabled, not
+      // merely its Telegram/execution silenced while it keeps writing
+      // candidate-signal records. Gated; log.info() below stays
+      // unconditional (diagnostic visibility only, no DB write, no
+      // money/notification risk).
+      if (this.productionSignalsEnabled) {
+        await this.globalSignalRepo.insert(globalSignal);
+      }
       log.info(
         `[CANDLE_PHYSICS_ENTRY] ${event.symbol} ${event.victim} signalId=${signalId} waves=${event.allWaves.length} entry=${plan.entry} sl=${plan.sl} tp=${plan.tp} rr=${plan.rr.toFixed(2)} willExecuteAsMain=${willExecuteAsMain}`,
       );
@@ -1923,27 +1933,40 @@ export class MarketDataOrchestrator {
           );
         }
         this.mainSymbolLocks.add(event.symbol);
+        // Sep 18 2026 (Karo), operator-requested CRITICAL FIX -- this
+        // was previously called UNCONDITIONALLY (outside this gate),
+        // meaning V5's internal activeTrades tracking kept a PHANTOM
+        // (isLive:false, no real Binance order IDs) trade alive even
+        // while disabled, which its own close-detection later matured
+        // into a full, misleading "V5 CLOSE ... SL" Telegram message
+        // reporting a loss that was never real and was never even
+        // preceded by a visible ENTRY (since distribute() itself was
+        // correctly gated). Confirmed live: SOLUSDT CLOSE message with
+        // no matching visible ENTRY. Moved inside the gate -- no real
+        // Binance position is affected either way (isLive was always
+        // false here), this only stops the phantom-tracking/phantom-
+        // CLOSE-notification side effect.
+        this.v5.hydrateActiveTrade({
+          signalId,
+          symbol: event.symbol,
+          victim: event.victim,
+          side: event.victim,
+          entry: plan.entry,
+          tp: plan.tp,
+          sl: plan.sl,
+          openedAt: event.entryTs,
+          bestPrice: plan.entry,
+          worstPrice: plan.entry,
+          entryWaveNumber: event.signalWave.waveNumber,
+          isLive: false,
+          binanceSlOrderId: null,
+          binanceTpOrderId: null,
+          positionQty: null,
+          notional: null,
+          riskUsd: null,
+          timeframe: "1m",
+        });
       }
-      this.v5.hydrateActiveTrade({
-        signalId,
-        symbol: event.symbol,
-        victim: event.victim,
-        side: event.victim,
-        entry: plan.entry,
-        tp: plan.tp,
-        sl: plan.sl,
-        openedAt: event.entryTs,
-        bestPrice: plan.entry,
-        worstPrice: plan.entry,
-        entryWaveNumber: event.signalWave.waveNumber,
-        isLive: false,
-        binanceSlOrderId: null,
-        binanceTpOrderId: null,
-        positionQty: null,
-        notional: null,
-        riskUsd: null,
-        timeframe: "1m",
-      });
 
       const denom = Math.abs(plan.entry - plan.sl);
       const dirMul = event.victim === "LONG" ? 1 : -1;
@@ -2072,7 +2095,13 @@ export class MarketDataOrchestrator {
           commonHorizonResearch: null,
           createdAt: Date.now(),
         };
-        await this.globalSignalRepo.insert(doc);
+        // Sep 18 2026 (Karo), operator-requested CRITICAL FIX -- same
+        // as CANDLE_PHYSICS_ENTRY's insert() above: gated, so the old
+        // system stops writing to Mongo entirely while disabled, not
+        // just its Telegram/execution.
+        if (this.productionSignalsEnabled) {
+          await this.globalSignalRepo.insert(doc);
+        }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         log.error(
@@ -2385,7 +2414,12 @@ export class MarketDataOrchestrator {
         createdAt: Date.now(),
       };
 
-      await this.globalSignalRepo.insert(globalSignal);
+      // Sep 18 2026 (Karo), operator-requested CRITICAL FIX -- same
+      // as CANDLE_PHYSICS_ENTRY's insert() -- gated so the old system
+      // stops writing to Mongo entirely while disabled.
+      if (this.productionSignalsEnabled) {
+        await this.globalSignalRepo.insert(globalSignal);
+      }
       log.info(
         `[CASCADE_CANDIDATE_SIGNAL] ${event.symbol} ${event.side} timeframe=${event.timeframe} cascadeId=${event.cascadeId} signalId=${signalId} waves=${event.waveHistory.length} entry=${plan.entry} sl=${plan.sl} tp=${plan.tp} rr=${plan.rr.toFixed(2)} willExecuteAsMain=${willExecuteAsMain}`,
       );
@@ -2459,27 +2493,32 @@ export class MarketDataOrchestrator {
           );
         }
         this.mainSymbolLocks.add(event.symbol);
+        // Sep 18 2026 (Karo), operator-requested CRITICAL FIX -- see
+        // the identical fix in the CANDLE_PHYSICS block above for the
+        // full finding (phantom activeTrades tracking producing
+        // misleading CLOSE notifications for trades that were never
+        // real -- isLive was always false here too).
+        this.v5.hydrateActiveTrade({
+          signalId,
+          symbol: event.symbol,
+          victim: event.victim,
+          side: event.side,
+          entry: plan.entry,
+          tp: plan.tp,
+          sl: plan.sl,
+          openedAt: event.entryTs,
+          bestPrice: plan.entry,
+          worstPrice: plan.entry,
+          entryWaveNumber: triggerWave.waveNumber,
+          isLive: false,
+          binanceSlOrderId: null,
+          binanceTpOrderId: null,
+          positionQty: null,
+          notional: null,
+          riskUsd: null,
+          timeframe: event.timeframe,
+        });
       }
-      this.v5.hydrateActiveTrade({
-        signalId,
-        symbol: event.symbol,
-        victim: event.victim,
-        side: event.side,
-        entry: plan.entry,
-        tp: plan.tp,
-        sl: plan.sl,
-        openedAt: event.entryTs,
-        bestPrice: plan.entry,
-        worstPrice: plan.entry,
-        entryWaveNumber: triggerWave.waveNumber,
-        isLive: false,
-        binanceSlOrderId: null,
-        binanceTpOrderId: null,
-        positionQty: null,
-        notional: null,
-        riskUsd: null,
-        timeframe: event.timeframe,
-      });
 
       const denom = Math.abs(plan.entry - plan.sl);
       const dirMul = event.side === "LONG" ? 1 : -1;
@@ -3662,7 +3701,12 @@ export class MarketDataOrchestrator {
       commonHorizonResearch: null,
       createdAt: Date.now(),
     };
-    await this.globalSignalRepo.insert(doc);
+    // Sep 18 2026 (Karo), operator-requested CRITICAL FIX -- same as
+    // CANDLE_PHYSICS_ENTRY's insert() -- gated so the old system stops
+    // writing to Mongo entirely while disabled.
+    if (this.productionSignalsEnabled) {
+      await this.globalSignalRepo.insert(doc);
+    }
 
     const waves = doc.waveHistory as V5Wave[];
     const lastWave = waves.length > 0 ? waves[waves.length - 1] : null;
