@@ -213,6 +213,7 @@ interface EpisodeListRow {
   cancelTs: number | null;
   cancelReason: string | null;
   cancelDetail: string | null;
+  wasReopened: boolean;
 }
 
 function runList(symbolFilter: string | null): void {
@@ -235,10 +236,32 @@ function runList(symbolFilter: string | null): void {
         e.type === "STATE_TRANSITION" &&
         e.to === "WAIT_FOR_POST_EPISODE_OI_CREATION",
     );
+    const reachedEntry = evs.find((e) => e.type === "ENTRY_READY");
     const terminal = evs.find((e) => e.type === "EPISODE_TERMINAL");
-    // Only list episodes that reached WAIT and were then cancelled --
-    // exactly what the operator asked for.
-    if (!reachedWait || !terminal) continue;
+    // Sep 18 2026 (Karo), operator-reported fix -- EPISODE_TERMINAL is
+    // emitted by BOTH cancel() (pre-entry, e.g. ENTRY_WINDOW_MISSED,
+    // WAIT_FOR_POST_EPISODE_OI_CREATION_TIMEOUT) AND closeActive()
+    // (a NORMAL close AFTER a successful entry, e.g.
+    // ALL_USERS_TERMINAL_AND_CLEAN) -- the two look identical by type,
+    // distinguished only by whether ENTRY_READY ever fired in between.
+    // Must exclude the latter here: this list is specifically "reached
+    // WAIT and was CANCELLED without ever entering", not "reached WAIT,
+    // entered, and later closed normally".
+    if (!reachedWait || !terminal || reachedEntry) continue;
+    // Sep 18 2026 (Karo) -- distinguishes "timed out INSIDE WAIT
+    // itself" from "reached WAIT once, got provisionally reopened
+    // back to EXHAUSTION_CANDIDATE by a fresh same-direction
+    // liquidation, and THEN timed out there instead" -- the terminal
+    // reasonCode alone (e.g. ENTRY_WINDOW_MISSED vs
+    // WAIT_FOR_POST_EPISODE_OI_CREATION_TIMEOUT) already tells you
+    // which state it died in, but this flag makes the reopen itself
+    // visible at a glance.
+    const wasReopened = evs.some(
+      (e) =>
+        e.type === "STATE_TRANSITION" &&
+        e.from === "WAIT_FOR_POST_EPISODE_OI_CREATION" &&
+        e.to === "EXHAUSTION_CANDIDATE",
+    );
     rows.push({
       episodeId,
       symbol: (start?.symbol ?? evs[0]?.symbol ?? "?") as string,
@@ -247,6 +270,7 @@ function runList(symbolFilter: string | null): void {
       cancelTs: (terminal.ts as number) ?? null,
       cancelReason: (terminal.reason as string) ?? null,
       cancelDetail: (terminal.detail as string) ?? null,
+      wasReopened,
     });
   }
 
@@ -260,12 +284,12 @@ function runList(symbolFilter: string | null): void {
   }
 
   console.log(
-    `${"episodeId".padEnd(28)}${"symbol".padEnd(10)}${"episode start".padEnd(24)}${"cancel (UTC)".padEnd(24)}${"reason"}`,
+    `${"episodeId".padEnd(28)}${"symbol".padEnd(10)}${"episode start".padEnd(24)}${"cancel (UTC)".padEnd(24)}${"reopened?".padEnd(11)}${"reason"}`,
   );
-  console.log("-".repeat(110));
+  console.log("-".repeat(120));
   for (const r of rows) {
     console.log(
-      `${r.episodeId.padEnd(28)}${r.symbol.padEnd(10)}${fmtTimeShort(r.startTs ?? undefined).padEnd(24)}${fmtTimeShort(r.cancelTs ?? undefined).padEnd(24)}${r.cancelReason ?? "?"}`,
+      `${r.episodeId.padEnd(28)}${r.symbol.padEnd(10)}${fmtTimeShort(r.startTs ?? undefined).padEnd(24)}${fmtTimeShort(r.cancelTs ?? undefined).padEnd(24)}${(r.wasReopened ? "\u0561\u0575\u0578" : "\u0578\u0579").padEnd(11)}${r.cancelReason ?? "?"}`,
     );
   }
   console.log(`\n${rows.length} episode(ներ). Մանրամասն timeline-ի համար.`);
