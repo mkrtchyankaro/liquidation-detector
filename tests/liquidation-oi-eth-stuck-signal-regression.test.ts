@@ -102,10 +102,10 @@ async function driveLongEpisodeToActive(orch: LiquidationOiRuntimeOrchestrator, 
   const c2 = candle(now0 + 120_000, 100.9, 101.1, 100.7, 101.0);
   const c3 = candle(now0 + 180_000, 101.0, 101.3, 100.8, 101.2);
   const c3m = candle(now0 + 180_000, 100, 101.3, 100, 101.2);
-  const historyAtEpisodeEnd = [{ contracts: 6000, fetchedAt: now0 }, { contracts: 5500, fetchedAt: now0 + 15_000 }, { contracts: 5480, fetchedAt: now0 + 25_000 }, { contracts: 5480, fetchedAt: now0 + 180_000 }];
+  const historyAtEpisodeEnd = [{ contracts: 6000, fetchedAt: now0 }, { contracts: 5500, fetchedAt: now0 + 15_000 }, { contracts: 5480, fetchedAt: now0 + 25_000 }, { contracts: 5650, fetchedAt: now0 + 180_000 }];
   await orch.onTick(symbol, PCTX, historyAtEpisodeEnd, 101.2, 1.0, 1000, now0 + 185_000, null, null, null, [c2, c3], [c3m], FLAT_ATR);
 
-  const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 5560, fetchedAt: now0 + 200_000 }];
+  const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 5800, fetchedAt: now0 + 200_000 }];
   await orch.onTick(symbol, PCTX, historyWithCreation, 101.3, 1.0, 1000, now0 + 200_000, null, null, null, [], [], FLAT_ATR, { capacityAtr: 2.5, candidateTpPrice: 103.8, candidateSlPrice: 99.9, netRR: 2.5 });
   return {
     tick: async (price: number, tMs: number) => {
@@ -208,9 +208,9 @@ async function main(): Promise<void> {
     const c2 = candle(4_120_000, 102.1, 102.3, 101.9, 102.0);
     const c3 = candle(4_180_000, 102.0, 102.2, 101.7, 101.8);
     const c3m = candle(4_180_000, 103, 103, 101.7, 101.8);
-    const historyAtEpisodeEnd = [{ contracts: 6000, fetchedAt: 4_000_000 }, { contracts: 5500, fetchedAt: 4_015_000 }, { contracts: 5480, fetchedAt: 4_025_000 }, { contracts: 5480, fetchedAt: 4_180_000 }];
+    const historyAtEpisodeEnd = [{ contracts: 6000, fetchedAt: 4_000_000 }, { contracts: 5500, fetchedAt: 4_015_000 }, { contracts: 5480, fetchedAt: 4_025_000 }, { contracts: 5650, fetchedAt: 4_180_000 }];
     await orch.onTick("ETHUSDT", PCTX, historyAtEpisodeEnd, 101.8, 1.0, 1000, 4_185_000, null, null, null, [c2, c3], [c3m], FLAT_ATR);
-    const history = [...historyAtEpisodeEnd, { contracts: 5540, fetchedAt: 4_200_000 }];
+    const history = [...historyAtEpisodeEnd, { contracts: 5800, fetchedAt: 4_200_000 }];
     await orch.onTick("ETHUSDT", PCTX, history, 101.7, 1.0, 1000, 4_200_000, null, null, null, [], [], FLAT_ATR, { capacityAtr: 2.5, candidateTpPrice: 99.2, candidateSlPrice: 103.1, netRR: 2.5 });
     const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
     assert.strictEqual(signal.candidateSide, "SHORT");

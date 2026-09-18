@@ -314,12 +314,12 @@ function main(): void {
     const c3m = candle(now0 + 180_000, 31, 31, 29.7, 29.8);
     const historyAtEpisodeEnd = [
       { contracts: 5000, fetchedAt: now0 }, { contracts: 4600, fetchedAt: now0 + 20_000 },
-      { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4590, fetchedAt: now0 + 180_000 },
+      { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4750, fetchedAt: now0 + 180_000 },
     ];
     mgr.onTick("AVAXUSDT", { historicalSampleCount: 15, historicalP90: 200000, historicalP95: 400000, historicalP99: 700000, percentileRank: 96 }, historyAtEpisodeEnd, 29.8, 1.0, 1000, now0 + 185_000, [c2, c3], [c3m], flatAtr);
     assert.strictEqual(mgr.getLifecycle("AVAXUSDT")!.globalState, "WAIT_FOR_POST_EPISODE_OI_CREATION", "episode end must be confirmed before entry, never OI-driven");
 
-    const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 4640, fetchedAt: now0 + 200_000 }];
+    const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 4900, fetchedAt: now0 + 200_000 }];
     // Sep 17 2026 (Karo), operator-requested test separation -- this
     // is a LIFECYCLE MECHANICS test (does the state machine correctly
     // reach ENTRY_READY once economics pass?), not a capacity-model
@@ -352,14 +352,14 @@ function main(): void {
     const c2 = candle(now0 + 120_000, 30.1, 30.3, 29.7, 29.8);
     const c3 = candle(now0 + 180_000, 29.8, 29.9, 29.4, 29.5);
     const c3m = candle(now0 + 180_000, 31, 31, 29.4, 29.5);
-    const history = [{ contracts: 5000, fetchedAt: now0 }, { contracts: 4600, fetchedAt: now0 + 20_000 }, { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4590, fetchedAt: now0 + 180_000 }];
+    const history = [{ contracts: 5000, fetchedAt: now0 }, { contracts: 4600, fetchedAt: now0 + 20_000 }, { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4750, fetchedAt: now0 + 180_000 }];
     mgr.onTick("SOLUSDT", { historicalSampleCount: 15, historicalP90: 200000, historicalP95: 400000, historicalP99: 700000, percentileRank: 96 }, history, 29.5, 1.0, 1000, now0 + 185_000, [c2, c3], [c3m], flatAtr);
     assert.strictEqual(mgr.getLifecycle("SOLUSDT")!.globalState, "WAIT_FOR_POST_EPISODE_OI_CREATION");
 
     // Even with a generous stubbed economics override (netRR well above minimum) AND genuine
     // positive OI creation AND favorable price movement, entry must still be blocked --
     // distanceFromExtremeAtr (31-29.3=1.7) exceeds the REAL default of 1.0.
-    const historyWithCreation = [...history, { contracts: 4650, fetchedAt: now0 + 200_000 }];
+    const historyWithCreation = [...history, { contracts: 4900, fetchedAt: now0 + 200_000 }];
     mgr.onTick("SOLUSDT", { historicalSampleCount: 15, historicalP90: 200000, historicalP95: 400000, historicalP99: 700000, percentileRank: 96 }, historyWithCreation, 29.3, 1.0, 1000, now0 + 200_000, [], [], flatAtr, { capacityAtr: 5.0, candidateTpPrice: 24.3, candidateSlPrice: 31.1, netRR: 10.0 });
     assert.strictEqual(mgr.getLifecycle("SOLUSDT")!.globalState, "WAIT_FOR_POST_EPISODE_OI_CREATION", "must remain WAIT -- economics alone cannot override the distance-from-extreme safety bound");
     const reasons = mgr.getNoSignalLog();

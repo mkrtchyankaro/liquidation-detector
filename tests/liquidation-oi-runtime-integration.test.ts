@@ -128,11 +128,11 @@ async function driveToEntryReady(orch: LiquidationOiRuntimeOrchestrator, symbol:
   const c3m = candle(now0 + 180_000, 103, 103, 101.7, 101.8);
   const historyAtEpisodeEnd = [
     { contracts: 5000, fetchedAt: now0 }, { contracts: 4600, fetchedAt: now0 + 15_000 },
-    { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4590, fetchedAt: now0 + 180_000 },
+    { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4750, fetchedAt: now0 + 180_000 },
   ];
   await orch.onTick(symbol, percentile, historyAtEpisodeEnd, 101.8, 1.0, 1000, now0 + 185_000, null, null, null, [c2, c3], [c3m], FLAT_ATR);
 
-  const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 4650, fetchedAt: now0 + 200_000 }];
+  const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 4900, fetchedAt: now0 + 200_000 }];
   // Sep 17 2026 (Karo), operator-requested test separation -- stub
   // sufficient economics via testEconomicsOverride (undefined on
   // every real production call path) rather than forcing the real

@@ -112,10 +112,10 @@ async function driveToActive(orch: LiquidationOiRuntimeOrchestrator, symbol: str
   const c2 = candle(now0 + 120_000, 102.1, 102.3, 101.9, 102.0);
   const c3 = candle(now0 + 180_000, 102.0, 102.2, 101.7, 101.8);
   const c3m = candle(now0 + 180_000, 103, 103, 101.7, 101.8);
-  const historyAtEpisodeEnd = [{ contracts: 5000, fetchedAt: now0 }, { contracts: 4600, fetchedAt: now0 + 15_000 }, { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4590, fetchedAt: now0 + 180_000 }];
+  const historyAtEpisodeEnd = [{ contracts: 5000, fetchedAt: now0 }, { contracts: 4600, fetchedAt: now0 + 15_000 }, { contracts: 4590, fetchedAt: now0 + 25_000 }, { contracts: 4750, fetchedAt: now0 + 180_000 }];
   await orch.onTick(symbol, PCTX, historyAtEpisodeEnd, 101.8, 1.0, 1000, now0 + 185_000, null, null, null, [c2, c3], [c3m], FLAT_ATR);
 
-  const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 4650, fetchedAt: now0 + 200_000 }];
+  const historyWithCreation = [...historyAtEpisodeEnd, { contracts: 4900, fetchedAt: now0 + 200_000 }];
   await orch.onTick(symbol, PCTX, historyWithCreation, 101.7, 1.0, 1000, now0 + 200_000, null, null, null, [], [], FLAT_ATR, { capacityAtr: 0.3, candidateTpPrice: 101.4, candidateSlPrice: 103.1, netRR: 2.5 });
 }
 

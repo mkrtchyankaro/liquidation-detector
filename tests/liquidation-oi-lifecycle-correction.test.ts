@@ -560,6 +560,213 @@ function main(): void {
     },
   );
 
+  scenario(
+    "G. REGRESSION (Sep 18 2026, live production bug): provisional-end reopen must reset entryWindowTimeoutMs's clock, not inherit the original entry time -- confirmed live: BTCUSDT reopened and was cancelled 14 SECONDS later because the old clock (from before WAIT) had nearly expired",
+    () => {
+      const mgr = new LiquidationOiWatchManager(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+      );
+      const now0 = 1_000_000;
+      const flatAtr = { get: (_i: string, _t: number) => 1.0 };
+      const c = (
+        closeTime: number,
+        open: number,
+        high: number,
+        low: number,
+        close: number,
+      ) =>
+        ({
+          symbol: "REOPENUSDT",
+          interval: "1m",
+          openTime: closeTime - 60_000,
+          closeTime,
+          open,
+          high,
+          low,
+          close,
+          volume: 0,
+          isClosed: true,
+        }) as any;
+      const pctx = {
+        historicalSampleCount: 15,
+        historicalP90: 200000,
+        historicalP95: 400000,
+        historicalP99: 700000,
+        percentileRank: 96,
+      };
+
+      mgr.onLiquidationEvent(
+        {
+          symbol: "REOPENUSDT",
+          victim: "SHORT",
+          timestamp: now0,
+          price: 100,
+          quoteQty: 500000,
+        },
+        { quantity: 5000, timestamp: now0 },
+      );
+      mgr.onLiquidationEvent(
+        {
+          symbol: "REOPENUSDT",
+          victim: "SHORT",
+          timestamp: now0 + 10_000,
+          price: 103,
+          quoteQty: 300000,
+        },
+        { quantity: 4700, timestamp: now0 + 10_000 },
+      );
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        [],
+        103,
+        1.0,
+        1000,
+        now0 + 11_000,
+        [],
+        [],
+        flatAtr,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("REOPENUSDT")!.globalState,
+        "EXHAUSTION_CANDIDATE",
+      );
+      const enteredExhaustionAt = now0 + 11_000; // this is the "old clock" start
+
+      const c1 = c(now0 + 60_000, 103, 103, 102.1, 102.1);
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        [],
+        102.1,
+        1.0,
+        1000,
+        now0 + 65_000,
+        [c1],
+        [],
+        flatAtr,
+      );
+      const c2 = c(now0 + 120_000, 102.1, 102.3, 101.9, 102.0);
+      const c3 = c(now0 + 180_000, 102.0, 102.2, 101.7, 101.8);
+      const c3m = c(now0 + 180_000, 103, 103, 101.7, 101.8);
+      const history = [
+        { contracts: 5000, fetchedAt: now0 },
+        { contracts: 4600, fetchedAt: now0 + 15_000 },
+        { contracts: 4590, fetchedAt: now0 + 25_000 },
+        { contracts: 4590, fetchedAt: now0 + 180_000 },
+      ];
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        history,
+        101.8,
+        1.0,
+        1000,
+        now0 + 185_000,
+        [c2, c3],
+        [c3m],
+        flatAtr,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("REOPENUSDT")!.globalState,
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+      );
+
+      // Reopen happens close to (but under) the ORIGINAL 20min entryWindowTimeoutMs boundary
+      // -- e.g. 19 minutes after first entering EXHAUSTION_CANDIDATE -- exactly the live BTCUSDT scenario.
+      // Bridging ticks (<=8min apart) keep lastTickAt fresh so the UNRELATED
+      // marketDataStaleTimeoutMs=10min check never trips while we wait out this gap.
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        history,
+        101.8,
+        1.0,
+        1000,
+        now0 + 185_000 + 8 * 60_000,
+        [],
+        [],
+        flatAtr,
+      );
+      const reopenAt = enteredExhaustionAt + 19 * 60_000;
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        history,
+        101.8,
+        1.0,
+        1000,
+        reopenAt - 1000,
+        [],
+        [],
+        flatAtr,
+      );
+      mgr.onLiquidationEvent(
+        {
+          symbol: "REOPENUSDT",
+          victim: "SHORT",
+          timestamp: reopenAt,
+          price: 102,
+          quoteQty: 50000,
+        },
+        null,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("REOPENUSDT")!.globalState,
+        "EXHAUSTION_CANDIDATE",
+        "reopen must have occurred",
+      );
+      // onLiquidationEvent does not update lastTickAt -- feed a tick right after reopen so the
+      // NEXT jump forward is measured against a fresh lastTickAt, not the stale pre-WAIT one
+      // (avoids tripping the UNRELATED marketDataStaleTimeoutMs check, which is not what this test is about).
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        [],
+        102,
+        1.0,
+        1000,
+        reopenAt + 1000,
+        [],
+        [],
+        flatAtr,
+      );
+
+      // 15 more minutes pass (well within a FRESH 20min window from the reopen, but would have been
+      // 34min from the ORIGINAL entry -- past the old, un-reset clock). Fed via intermediate ticks
+      // (<=8min apart) so the UNRELATED marketDataStaleTimeoutMs=10min check never trips either.
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        [],
+        102,
+        1.0,
+        1000,
+        reopenAt + 8 * 60_000,
+        [],
+        [],
+        flatAtr,
+      );
+      mgr.onTick(
+        "REOPENUSDT",
+        pctx,
+        [],
+        102,
+        1.0,
+        1000,
+        reopenAt + 15 * 60_000,
+        [],
+        [],
+        flatAtr,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("REOPENUSDT")!.globalState,
+        "EXHAUSTION_CANDIDATE",
+        "must NOT be cancelled -- the reopen must have reset the entryWindowTimeoutMs clock to give a genuine fresh 20-minute window",
+      );
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 }
