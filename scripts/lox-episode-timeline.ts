@@ -1,6 +1,8 @@
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import "dotenv/config";
+import { MongoClient } from "mongodb";
 
 /**
  * Sep 18 2026 (Karo), operator-requested diagnostic tool.
@@ -296,6 +298,82 @@ function runList(symbolFilter: string | null): void {
   console.log(`  npx tsx scripts/lox-episode-timeline.ts <symbol> <episodeId>`);
 }
 
+/** Sep 18 2026 (Karo), operator-requested -- looks up a real
+ *  globalSignalId (e.g. lox-sig-...) in Mongo's
+ *  liquidation_oi_global_signals collection, extracts its symbol and
+ *  entry time (createdAt -- set via $setOnInsert at the exact moment
+ *  of ENTRY_READY, so it's the causal entry timestamp), then finds
+ *  the matching episode in the forensic logs by symbol + closest
+ *  ENTRY_READY event timestamp, and prints its full timeline. Read
+ *  only -- no writes to Mongo, ever. */
+async function runSignalLookup(signalId: string): Promise<void> {
+  const uri = process.env.MONGO_URI;
+  if (!uri) {
+    console.error(
+      "MONGO_URI not found in environment/.env -- cannot look up a signalId without it. Use the plain SYMBOLUSDT [episodeId] mode instead.",
+    );
+    process.exit(1);
+  }
+  const client = new MongoClient(uri);
+  await client.connect();
+  const dbName = process.env.MONGO_OWN_DB ?? "liquidation_detector";
+  const db = client.db(dbName);
+  const doc = await db
+    .collection("liquidation_oi_global_signals")
+    .findOne({ globalSignalId: signalId });
+  await client.close();
+
+  if (!doc) {
+    console.log(
+      `Signal ${signalId} not found in liquidation_oi_global_signals.`,
+    );
+    return;
+  }
+  const symbol = doc.symbol as string;
+  const entryTs = (doc.createdAt as Date).getTime();
+  console.log(
+    `Գտնվեց՝ ${symbol}, entry \u2248 ${new Date(entryTs).toISOString()}. Փնտրում ենք համապատասխան episode...\n`,
+  );
+
+  const all = readAllForensicLines().filter((e) => e.symbol === symbol);
+  const byEpisode = new Map<string, ForensicLine[]>();
+  for (const e of all) {
+    const key = e.episodeId ?? "(unknown)";
+    if (!byEpisode.has(key)) byEpisode.set(key, []);
+    byEpisode.get(key)!.push(e);
+  }
+
+  // Best match: the episode whose own ENTRY_READY event timestamp is
+  // closest to the signal's createdAt (should be near-exact, within
+  // a second or two of tick latency).
+  let bestEpisodeId: string | null = null;
+  let bestDelta = Infinity;
+  for (const [episodeId, evs] of byEpisode) {
+    const entryReady = evs.find((e) => e.type === "ENTRY_READY");
+    if (!entryReady || entryReady.ts === undefined) continue;
+    const delta = Math.abs(entryReady.ts - entryTs);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      bestEpisodeId = episodeId;
+    }
+  }
+
+  if (bestEpisodeId === null) {
+    console.log(
+      `Ոչ մի ENTRY_READY event չգտնվեց ${symbol}-ի log-երում, որ համապատասխանի այս signal-ին (հնարավոր է log-երը rotate են եղել): Փորձիր` +
+        ` npm run lox:timeline -- ${symbol}` +
+        ` և ձեռքով գտիր ճիշտ episodeId-ը ժամանակով:`,
+    );
+    return;
+  }
+  if (bestDelta > 60_000) {
+    console.log(
+      `\u26A0 Ամենամոտ ENTRY_READY-ն ${(bestDelta / 1000).toFixed(0)} վայրկյան հեռու է signal-ի entry-ից. հնարավոր է սխալ episode է (կամ log-երը rotate են եղել): Ցույց տալիս ենք ամեն դեպքում.\n`,
+    );
+  }
+  runTimeline(symbol, bestEpisodeId);
+}
+
 function main(): void {
   const args = process.argv.slice(2);
   if (args.length === 0) {
@@ -306,10 +384,23 @@ function main(): void {
     console.error(
       "  npx tsx scripts/lox-episode-timeline.ts --list [SYMBOLUSDT]",
     );
+    console.error(
+      "  npx tsx scripts/lox-episode-timeline.ts --signal <globalSignalId>",
+    );
     process.exit(1);
   }
   if (args[0] === "--list") {
     runList(args[1] ?? null);
+    return;
+  }
+  if (args[0] === "--signal") {
+    if (!args[1]) {
+      console.error(
+        "Օգտագործում. npx tsx scripts/lox-episode-timeline.ts --signal <globalSignalId>",
+      );
+      process.exit(1);
+    }
+    void runSignalLookup(args[1]);
     return;
   }
   runTimeline(args[0]!, args[1] ?? null);
