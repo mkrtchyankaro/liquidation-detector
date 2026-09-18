@@ -57,6 +57,23 @@ export interface LiquidationOiStrategyConfig {
    *  through ENTRY_READY-awaiting-resolution), measured from the
    *  episode's own first liquidation event. */
   preEntryFailsafeMaxLifetimeMs: number;
+  /** Sep 18 2026 (Karo), operator-requested (real production log
+   *  evidence -- LINKUSDT sat in WAIT for 35+ minutes with price
+   *  consistently moving AGAINST the thesis, strongly suggesting the
+   *  market context had already moved on). Dedicated, SHORTER timeout
+   *  for WAIT_FOR_POST_EPISODE_OI_CREATION specifically -- separate
+   *  from preEntryFailsafeMaxLifetimeMs (4h, a generic safety net for
+   *  every pre-ACTIVE state, not a WAIT-specific strategy parameter).
+   *  If neither positive OI creation nor favorable price has
+   *  developed within this window, the setup is cancelled and the
+   *  symbol freed for a fresher, more relevant episode. UNTUNED --
+   *  30 minutes chosen as a reasonable starting point, not validated
+   *  against real outcome data. Deliberately does NOT eliminate the
+   *  XRP-type delayed-OI-creation case entirely -- 30 minutes is
+   *  still ample time for most legitimate reversals; only setups that
+   *  are still moving adverse to the thesis after this long are cut
+   *  loose. */
+  waitForPostEpisodeOiCreationTimeoutMs: number;
 
   /** Sep 17 2026 (Karo), operator-requested SEPARATION of strategy
    *  invalidation from emergency hard stop -- source-audit found these
@@ -125,66 +142,71 @@ export interface LiquidationOiStrategyConfig {
  * defensible starting points, each logged on every entry decision so
  * live tiny-risk trades can inform later tuning.
  */
-export const DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG: LiquidationOiStrategyConfig = {
-  minPercentileRankForWatch: 90,
-  minHistoricalSampleCountForWatch: 5,
-  minDisplacementAtrForWatch: 0.5,
-  clearingLookbackWindowsSec: [5, 10, 15, 30],
-  stabilizationSlopeFractionOfPeak: 0.15,
-  minConsecutiveWindowsForClearingEnd: 2,
-  minCounterMoveAtrForEntry: 0.15,
-  maxDistanceFromExtremeAtrForEntry: 1.0,
-  maxOiSampleAgeMsForEntry: 5_000,
-  maxAtrAgeMsForEntry: 240_000,
+export const DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG: LiquidationOiStrategyConfig =
+  {
+    minPercentileRankForWatch: 90,
+    minHistoricalSampleCountForWatch: 5,
+    minDisplacementAtrForWatch: 0.5,
+    clearingLookbackWindowsSec: [5, 10, 15, 30],
+    stabilizationSlopeFractionOfPeak: 0.15,
+    minConsecutiveWindowsForClearingEnd: 2,
+    minCounterMoveAtrForEntry: 0.15,
+    maxDistanceFromExtremeAtrForEntry: 1.0,
+    maxOiSampleAgeMsForEntry: 5_000,
+    maxAtrAgeMsForEntry: 240_000,
 
-  // Lifecycle-death parameters -- all UNTUNED starting points.
-  // noProgressTimeoutMs (default 30min): in EPISODE_TRACKING, if
-  // neither a new same-direction liquidation nor a new adverse
-  // extreme has occurred for this long, the flow is considered dead.
-  noProgressTimeoutMs: 30 * 60_000,
-  // entryWindowTimeoutMs (default 20min): in EXHAUSTION_CANDIDATE
-  // (clearing being awaited), if ENTRY_READY has not been reached
-  // within this long of entering the state, the window is missed.
-  entryWindowTimeoutMs: 20 * 60_000,
-  // thesisInvalidationAtrMultiple (default 0.5 ATR3m): in
-  // EXHAUSTION_CANDIDATE, if price moves back past the episode's own
-  // startPrice by more than this many ATR in the adverse direction,
-  // the "capitulation" premise itself has failed.
-  thesisInvalidationAtrMultiple: 0.5,
-  // marketDataStaleTimeoutMs (default 10min): if the gap between two
-  // consecutive onTick calls for a symbol exceeds this, the market
-  // data feed itself is considered to have gone stale.
-  marketDataStaleTimeoutMs: 10 * 60_000,
-  // preEntryFailsafeMaxLifetimeMs (default 4h): FAILSAFE ONLY -- see
-  // the field's own doc comment above.
-  preEntryFailsafeMaxLifetimeMs: 4 * 3_600_000,
+    // Lifecycle-death parameters -- all UNTUNED starting points.
+    // noProgressTimeoutMs (default 30min): in EPISODE_TRACKING, if
+    // neither a new same-direction liquidation nor a new adverse
+    // extreme has occurred for this long, the flow is considered dead.
+    noProgressTimeoutMs: 30 * 60_000,
+    // entryWindowTimeoutMs (default 20min): in EXHAUSTION_CANDIDATE
+    // (clearing being awaited), if ENTRY_READY has not been reached
+    // within this long of entering the state, the window is missed.
+    entryWindowTimeoutMs: 20 * 60_000,
+    // thesisInvalidationAtrMultiple (default 0.5 ATR3m): in
+    // EXHAUSTION_CANDIDATE, if price moves back past the episode's own
+    // startPrice by more than this many ATR in the adverse direction,
+    // the "capitulation" premise itself has failed.
+    thesisInvalidationAtrMultiple: 0.5,
+    // marketDataStaleTimeoutMs (default 10min): if the gap between two
+    // consecutive onTick calls for a symbol exceeds this, the market
+    // data feed itself is considered to have gone stale.
+    marketDataStaleTimeoutMs: 10 * 60_000,
+    // preEntryFailsafeMaxLifetimeMs (default 4h): FAILSAFE ONLY -- see
+    // the field's own doc comment above.
+    preEntryFailsafeMaxLifetimeMs: 4 * 3_600_000,
+    // waitForPostEpisodeOiCreationTimeoutMs (default 30min): see the
+    // field's own doc comment above -- operator-requested, real
+    // production evidence-driven, UNTUNED.
+    waitForPostEpisodeOiCreationTimeoutMs: 30 * 60_000,
 
-  // "Meaningful progress" thresholds -- all UNTUNED, all RELATIVE/
-  // self-scaling (see the field's own doc comment above for why).
-  // minMeaningfulLiqProgressFraction (default 0.05 = 5%): an
-  // additional same-direction liquidation event counts as progress
-  // only if it grows the episode's own accumulated USD by at least
-  // this fraction versus the last progress checkpoint -- a $76 print
-  // on a $500,000 episode does not reset the clock.
-  minMeaningfulLiqProgressFraction: 0.05,
-  // minMeaningfulExtremeProgressAtr (default 0.05 ATR3m): a new
-  // adverse extreme counts as progress only if it extends beyond the
-  // last progress checkpoint's extreme by at least this many ATR --
-  // a $0.01 marginal new high does not reset the clock.
-  minMeaningfulExtremeProgressAtr: 0.05,
-  // minMeaningfulOiProgressFraction (default 0.02 = 2% of starting
-  // OI): continuing OI destruction counts as progress only if the
-  // episode's own minimum OI drops by at least this much (as a
-  // fraction of its own starting OI) versus the last checkpoint.
-  minMeaningfulOiProgressFraction: 0.02,
+    // "Meaningful progress" thresholds -- all UNTUNED, all RELATIVE/
+    // self-scaling (see the field's own doc comment above for why).
+    // minMeaningfulLiqProgressFraction (default 0.05 = 5%): an
+    // additional same-direction liquidation event counts as progress
+    // only if it grows the episode's own accumulated USD by at least
+    // this fraction versus the last progress checkpoint -- a $76 print
+    // on a $500,000 episode does not reset the clock.
+    minMeaningfulLiqProgressFraction: 0.05,
+    // minMeaningfulExtremeProgressAtr (default 0.05 ATR3m): a new
+    // adverse extreme counts as progress only if it extends beyond the
+    // last progress checkpoint's extreme by at least this many ATR --
+    // a $0.01 marginal new high does not reset the clock.
+    minMeaningfulExtremeProgressAtr: 0.05,
+    // minMeaningfulOiProgressFraction (default 0.02 = 2% of starting
+    // OI): continuing OI destruction counts as progress only if the
+    // episode's own minimum OI drops by at least this much (as a
+    // fraction of its own starting OI) versus the last checkpoint.
+    minMeaningfulOiProgressFraction: 0.02,
 
-  // emergencyHardStopBufferAtrMultiple (default 0.4 ATR): the emergency
-  // hard-stop physical Binance order sits this many ADDITIONAL ATR
-  // beyond strategyInvalidationPrice -- UNTUNED, no previously-approved
-  // value exists.
-  emergencyHardStopBufferAtrMultiple: 0.4,
-  // maxEmergencyLossMultipleOfRiskUsd (default 3.0x): if the emergency
-  // stop's own implied worst-case loss exceeds this multiple of the
-  // user's own riskUsd, execution is skipped for that user. UNTUNED.
-  maxEmergencyLossMultipleOfRiskUsd: 3.0,
-};
+    // emergencyHardStopBufferAtrMultiple (default 0.4 ATR): the emergency
+    // hard-stop physical Binance order sits this many ADDITIONAL ATR
+    // beyond strategyInvalidationPrice -- UNTUNED, no previously-approved
+    // value exists.
+    emergencyHardStopBufferAtrMultiple: 0.4,
+    // maxEmergencyLossMultipleOfRiskUsd (default 3.0x): if the emergency
+    // stop's own implied worst-case loss exceeds this multiple of the
+    // user's own riskUsd, execution is skipped for that user. UNTUNED.
+    maxEmergencyLossMultipleOfRiskUsd: 3.0,
+  };
