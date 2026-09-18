@@ -1,20 +1,58 @@
 import type { Side, Candle } from "../../shared/common.types";
 import { SymbolOwnershipRegistry } from "./symbol-ownership";
-import { startEpisode, foldLiquidationIntoEpisode, updateEpisodeOi, oiDestructionFraction, type LiquidationOiEpisodeState, type LiquidationOiEventInput } from "./episode-tracker";
-import { qualifyWatch, type EpisodePercentileContext, type WatchQualificationResult } from "./watch-qualification";
+import {
+  startEpisode,
+  foldLiquidationIntoEpisode,
+  updateEpisodeOi,
+  oiDestructionFraction,
+  type LiquidationOiEpisodeState,
+  type LiquidationOiEventInput,
+} from "./episode-tracker";
+import {
+  qualifyWatch,
+  type EpisodePercentileContext,
+  type WatchQualificationResult,
+} from "./watch-qualification";
 import type { EntryGateResult } from "./entry-gate-pipeline";
-import { advanceEpisodeEndDetection, initEpisodeEndDetectionState, passesRecoveryFractionGate, type EpisodeEndDetectionState, type AtrLookup } from "./episode-end-detector";
+import {
+  advanceEpisodeEndDetection,
+  initEpisodeEndDetectionState,
+  passesRecoveryFractionGate,
+  type EpisodeEndDetectionState,
+  type AtrLookup,
+} from "./episode-end-detector";
 // Sep 17 2026 (Karo), operator-approved final capacity architecture --
 // post-episode-oi-creation.ts's temporary thresholds are RETIRED from
 // the live path (see the new WAIT_FOR_POST_EPISODE_OI_CREATION block
 // below, which uses capacity-model.ts + trade-economics.ts instead).
 // The file itself is kept, not deleted, per the operator's own
 // instruction not to delete useful observational/research code.
-import { deriveOiPhysics, deriveOiPhysicsNotional, type OiPhysicsState } from "./oi-physics";
-import { computeCapacity, computeRemainingCapacity, projectTpFromEntry, computeStructuralInvalidationPrice, DEFAULT_CAPACITY_MODEL_COEFFICIENTS_2, type CapacityModelResult2, type RemainingCapacityResult } from "./capacity-model";
-import { evaluateTradeEconomics, LOX_MIN_NET_RR, LOX_MIN_FEE_COVERAGE_MULTIPLE, type TradeEconomicsResult } from "./trade-economics";
+import {
+  deriveOiPhysics,
+  deriveOiPhysicsNotional,
+  type OiPhysicsState,
+} from "./oi-physics";
+import {
+  computeCapacity,
+  computeRemainingCapacity,
+  projectTpFromEntry,
+  computeStructuralInvalidationPrice,
+  DEFAULT_CAPACITY_MODEL_COEFFICIENTS_2,
+  type CapacityModelResult2,
+  type RemainingCapacityResult,
+} from "./capacity-model";
+import {
+  evaluateTradeEconomics,
+  LOX_MIN_NET_RR,
+  LOX_MIN_FEE_COVERAGE_MULTIPLE,
+  type TradeEconomicsResult,
+} from "./trade-economics";
 import type { OiHistorySample } from "./oi-clearing-detector";
-import { isValidGlobalTransition, candidateTradeSideForVictim, type GlobalLifecycleState } from "./lifecycle.types";
+import {
+  isValidGlobalTransition,
+  candidateTradeSideForVictim,
+  type GlobalLifecycleState,
+} from "./lifecycle.types";
 import type { LiquidationOiStrategyConfig } from "./config";
 import { DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG } from "./config";
 import type { ForensicEvent } from "./forensic-events";
@@ -86,7 +124,9 @@ class BoundedLog<T> {
     this.items.push(item);
     if (this.items.length > this.maxSize) this.items.shift();
   }
-  toArray(): readonly T[] { return this.items; }
+  toArray(): readonly T[] {
+    return this.items;
+  }
 }
 
 interface SymbolLifecycle {
@@ -161,23 +201,54 @@ export interface OppositeEventIgnoredEvent {
 export class LiquidationOiWatchManager {
   private readonly ownership = new SymbolOwnershipRegistry();
   private readonly symbols = new Map<string, SymbolLifecycle>();
-  private readonly noSignalLog = new BoundedLog<NoSignalEvent>(DIAGNOSTIC_LOG_MAX_SIZE);
-  private readonly oppositeEventIgnoredLog = new BoundedLog<OppositeEventIgnoredEvent>(DIAGNOSTIC_LOG_MAX_SIZE);
+  private readonly noSignalLog = new BoundedLog<NoSignalEvent>(
+    DIAGNOSTIC_LOG_MAX_SIZE,
+  );
+  private readonly oppositeEventIgnoredLog =
+    new BoundedLog<OppositeEventIgnoredEvent>(DIAGNOSTIC_LOG_MAX_SIZE);
 
   constructor(
     private readonly config: LiquidationOiStrategyConfig = DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
-    private readonly makeOwnershipId: () => string = () => `lox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    private readonly makeEpisodeId: () => string = () => `ep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    private readonly makeOwnershipId: () => string = () =>
+      `lox-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    private readonly makeEpisodeId: () => string = () =>
+      `ep-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     private readonly forensic: (event: ForensicEvent) => void = () => {},
   ) {}
 
-  getLifecycle(symbol: string): Readonly<SymbolLifecycle> | null { return this.symbols.get(symbol) ?? null; }
-  isSymbolOwned(symbol: string): boolean { return this.ownership.isOwned(symbol); }
-  getNoSignalLog(): readonly NoSignalEvent[] { return this.noSignalLog.toArray(); }
-  getOppositeEventIgnoredLog(): readonly OppositeEventIgnoredEvent[] { return this.oppositeEventIgnoredLog.toArray(); }
+  getLifecycle(symbol: string): Readonly<SymbolLifecycle> | null {
+    return this.symbols.get(symbol) ?? null;
+  }
+  isSymbolOwned(symbol: string): boolean {
+    return this.ownership.isOwned(symbol);
+  }
+  getNoSignalLog(): readonly NoSignalEvent[] {
+    return this.noSignalLog.toArray();
+  }
+  getOppositeEventIgnoredLog(): readonly OppositeEventIgnoredEvent[] {
+    return this.oppositeEventIgnoredLog.toArray();
+  }
 
-  private base(lifecycle: SymbolLifecycle, symbol: string, nowMs: number): { ts: number; symbol: string; episodeId: string; victim: Side; state: string; episodeAgeSec: number } {
-    return { ts: nowMs, symbol, episodeId: lifecycle.episodeId, victim: lifecycle.episode.victim, state: lifecycle.globalState, episodeAgeSec: (nowMs - lifecycle.episode.firstLiqTs) / 1000 };
+  private base(
+    lifecycle: SymbolLifecycle,
+    symbol: string,
+    nowMs: number,
+  ): {
+    ts: number;
+    symbol: string;
+    episodeId: string;
+    victim: Side;
+    state: string;
+    episodeAgeSec: number;
+  } {
+    return {
+      ts: nowMs,
+      symbol,
+      episodeId: lifecycle.episodeId,
+      victim: lifecycle.episode.victim,
+      state: lifecycle.globalState,
+      episodeAgeSec: (nowMs - lifecycle.episode.firstLiqTs) / 1000,
+    };
   }
 
   /** Called for every liquidation event on a symbol.
@@ -190,32 +261,56 @@ export class LiquidationOiWatchManager {
    *  current lifecycle legitimately terminates, the VERY NEXT
    *  liquidation event, same or opposite direction, starts a
    *  genuinely fresh episode with a fresh episodeId. */
-  onLiquidationEvent(event: LiquidationOiEventInput, oiAtEvent: { quantity: number; timestamp: number } | null): void {
+  onLiquidationEvent(
+    event: LiquidationOiEventInput,
+    oiAtEvent: { quantity: number; timestamp: number } | null,
+  ): void {
     const existing = this.symbols.get(event.symbol);
 
     if (existing === undefined) {
       const episode = startEpisode(event, oiAtEvent);
       const episodeId = this.makeEpisodeId();
       const lifecycle: SymbolLifecycle = {
-        episodeId, ownershipId: "", globalSignalId: null, globalState: "EPISODE_TRACKING", episode,
-        watchResult: null, entryResult: null,
-        enteredExhaustionCandidateAt: null, lastTickAt: null,
+        episodeId,
+        ownershipId: "",
+        globalSignalId: null,
+        globalState: "EPISODE_TRACKING",
+        episode,
+        watchResult: null,
+        entryResult: null,
+        enteredExhaustionCandidateAt: null,
+        lastTickAt: null,
         lastMeaningfulProgressAt: event.timestamp,
         liqUsdAtLastMeaningfulProgress: episode.sameDirectionLiqUsd,
         extremeAtLastMeaningfulProgress: episode.extremePrice,
         minOiAtLastMeaningfulProgress: episode.minOiQuantity,
-        lastLoggedWatchReasonCode: null, lastLoggedEntryReasonCode: null, lastLoggedClearingResult: null,
-        episodeEndDetection: null, episodeEndOiQuantity: null, episodeEndPrice: null, episodeEndTime: null,
+        lastLoggedWatchReasonCode: null,
+        lastLoggedEntryReasonCode: null,
+        lastLoggedClearingResult: null,
+        episodeEndDetection: null,
+        episodeEndOiQuantity: null,
+        episodeEndPrice: null,
+        episodeEndTime: null,
       };
       this.symbols.set(event.symbol, lifecycle);
-      this.forensic({ ...this.base(lifecycle, event.symbol, event.timestamp), type: "EPISODE_START", triggerUsd: event.quoteQty, triggerPrice: event.price, startPrice: episode.startPrice, startingOi: episode.startOiQuantity });
+      this.forensic({
+        ...this.base(lifecycle, event.symbol, event.timestamp),
+        type: "EPISODE_START",
+        triggerUsd: event.quoteQty,
+        triggerPrice: event.price,
+        startPrice: episode.startPrice,
+        startingOi: episode.startOiQuantity,
+      });
       return;
     }
 
     if (existing.episode.victim !== event.victim) {
       this.oppositeEventIgnoredLog.push({
-        symbol: event.symbol, trackedVictim: existing.episode.victim, ignoredVictim: event.victim,
-        ignoredQuoteQty: event.quoteQty, timestamp: event.timestamp,
+        symbol: event.symbol,
+        trackedVictim: existing.episode.victim,
+        ignoredVictim: event.victim,
+        ignoredQuoteQty: event.quoteQty,
+        timestamp: event.timestamp,
       });
       return;
     }
@@ -224,7 +319,10 @@ export class LiquidationOiWatchManager {
     const previousExtreme = existing.episode.extremePrice;
     const previousMinOi = existing.episode.minOiQuantity;
     const foldedEpisode = foldLiquidationIntoEpisode(existing.episode, event);
-    const withOi = oiAtEvent !== null ? updateEpisodeOi(foldedEpisode, oiAtEvent) : foldedEpisode;
+    const withOi =
+      oiAtEvent !== null
+        ? updateEpisodeOi(foldedEpisode, oiAtEvent)
+        : foldedEpisode;
 
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
     // Section 7 -- PROVISIONAL episode end. A candle-confirmed END is
@@ -236,9 +334,15 @@ export class LiquidationOiWatchManager {
     // STATE consequence differs when currently WAITING.
     let updated: SymbolLifecycle;
     if (existing.globalState === "WAIT_FOR_POST_EPISODE_OI_CREATION") {
-      this.assertTransition("WAIT_FOR_POST_EPISODE_OI_CREATION", "EXHAUSTION_CANDIDATE", event.symbol);
+      this.assertTransition(
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        "EXHAUSTION_CANDIDATE",
+        event.symbol,
+      );
       updated = {
-        ...existing, episode: withOi, globalState: "EXHAUSTION_CANDIDATE",
+        ...existing,
+        episode: withOi,
+        globalState: "EXHAUSTION_CANDIDATE",
         // Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- this
         // was NOT reset on reopen, so entryWindowTimeoutMs's 20min
         // clock kept counting from the ORIGINAL first entry into
@@ -252,11 +356,22 @@ export class LiquidationOiWatchManager {
         // reset to event.timestamp so it actually gets the full
         // window again.
         enteredExhaustionCandidateAt: event.timestamp,
-        episodeEndDetection: initEpisodeEndDetectionState(withOi.extremePrice, event.timestamp),
-        episodeEndOiQuantity: null, episodeEndPrice: null, episodeEndTime: null,
+        episodeEndDetection: initEpisodeEndDetectionState(
+          withOi.extremePrice,
+          event.timestamp,
+        ),
+        episodeEndOiQuantity: null,
+        episodeEndPrice: null,
+        episodeEndTime: null,
       };
       this.symbols.set(event.symbol, updated);
-      this.forensic({ ...this.base(updated, event.symbol, event.timestamp), type: "STATE_TRANSITION", from: "WAIT_FOR_POST_EPISODE_OI_CREATION", to: "EXHAUSTION_CANDIDATE", reason: `provisional episode end invalidated by continuation liquidation (eventUsd=${event.quoteQty}) -- old OI_END/price/time baseline cleared, episode-end detection restarted causally` });
+      this.forensic({
+        ...this.base(updated, event.symbol, event.timestamp),
+        type: "STATE_TRANSITION",
+        from: "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        to: "EXHAUSTION_CANDIDATE",
+        reason: `provisional episode end invalidated by continuation liquidation (eventUsd=${event.quoteQty}) -- old OI_END/price/time baseline cleared, episode-end detection restarted causally`,
+      });
     } else {
       updated = { ...existing, episode: withOi };
       this.symbols.set(event.symbol, updated);
@@ -268,14 +383,40 @@ export class LiquidationOiWatchManager {
     // still only happens in onTick()'s recomputeMeaningfulProgressCheckpoint,
     // unchanged. This is per-event telemetry, not a second source of truth.
     const liqBase = existing.liqUsdAtLastMeaningfulProgress;
-    const liqProgressFraction = liqBase > 0 ? (withOi.sameDirectionLiqUsd - liqBase) / liqBase : 0;
-    this.forensic({ ...this.base(updated, event.symbol, event.timestamp), type: "LIQ_ACCUMULATED", eventUsd: event.quoteQty, previousTotal, newTotal: withOi.sameDirectionLiqUsd, meaningfulLiqProgress: liqProgressFraction >= this.config.minMeaningfulLiqProgressFraction });
+    const liqProgressFraction =
+      liqBase > 0 ? (withOi.sameDirectionLiqUsd - liqBase) / liqBase : 0;
+    this.forensic({
+      ...this.base(updated, event.symbol, event.timestamp),
+      type: "LIQ_ACCUMULATED",
+      eventUsd: event.quoteQty,
+      previousTotal,
+      newTotal: withOi.sameDirectionLiqUsd,
+      meaningfulLiqProgress:
+        liqProgressFraction >= this.config.minMeaningfulLiqProgressFraction,
+    });
 
     if (withOi.extremePrice !== previousExtreme) {
-      this.forensic({ ...this.base(updated, event.symbol, event.timestamp), type: "EXTREME_UPDATE", previousExtreme, newExtreme: withOi.extremePrice, extensionPrice: Math.abs(withOi.extremePrice - previousExtreme), extensionAtr: null, meaningfulExtremeProgress: false });
+      this.forensic({
+        ...this.base(updated, event.symbol, event.timestamp),
+        type: "EXTREME_UPDATE",
+        previousExtreme,
+        newExtreme: withOi.extremePrice,
+        extensionPrice: Math.abs(withOi.extremePrice - previousExtreme),
+        extensionAtr: null,
+        meaningfulExtremeProgress: false,
+      });
     }
     if (oiAtEvent !== null && withOi.minOiQuantity !== previousMinOi) {
-      this.forensic({ ...this.base(updated, event.symbol, event.timestamp), type: "OI_PROGRESS", startingOi: withOi.startOiQuantity, currentOi: withOi.currentOiQuantity, minOi: withOi.minOiQuantity, destructionFraction: oiDestructionFraction(withOi), previousCheckpointDestructionFraction: null, meaningfulOiProgress: false });
+      this.forensic({
+        ...this.base(updated, event.symbol, event.timestamp),
+        type: "OI_PROGRESS",
+        startingOi: withOi.startOiQuantity,
+        currentOi: withOi.currentOiQuantity,
+        minOi: withOi.minOiQuantity,
+        destructionFraction: oiDestructionFraction(withOi),
+        previousCheckpointDestructionFraction: null,
+        meaningfulOiProgress: false,
+      });
     }
   }
 
@@ -287,68 +428,166 @@ export class LiquidationOiWatchManager {
    *  INVARIANT: once ACTIVE (or CLOSING), none of this applies --
    *  returns immediately. A real managed position is NEVER touched by
    *  pre-entry staleness/no-progress logic. */
-  onTick(symbol: string, percentile: EpisodePercentileContext, oiHistory: readonly OiHistorySample[], currentPrice: number, atr3m: number | null, atr3mAgeMs: number | null, nowMs: number, new1mCandles: readonly Candle[] = [], all3mCandlesSorted: readonly Candle[] = [], atrLookup: AtrLookup | null = null, testEconomicsOverride?: { capacityAtr: number; candidateTpPrice: number; candidateSlPrice: number; netRR: number; passesEconomicViability?: boolean } | null): void {
+  onTick(
+    symbol: string,
+    percentile: EpisodePercentileContext,
+    oiHistory: readonly OiHistorySample[],
+    currentPrice: number,
+    atr3m: number | null,
+    atr3mAgeMs: number | null,
+    nowMs: number,
+    new1mCandles: readonly Candle[] = [],
+    all3mCandlesSorted: readonly Candle[] = [],
+    atrLookup: AtrLookup | null = null,
+    testEconomicsOverride?: {
+      capacityAtr: number;
+      candidateTpPrice: number;
+      candidateSlPrice: number;
+      netRR: number;
+      passesEconomicViability?: boolean;
+    } | null,
+  ): void {
     let lifecycle = this.symbols.get(symbol);
     if (lifecycle === undefined) return;
-    if (lifecycle.globalState === "ACTIVE" || lifecycle.globalState === "CLOSING" || lifecycle.globalState === "CLOSED") return;
+    if (
+      lifecycle.globalState === "ACTIVE" ||
+      lifecycle.globalState === "CLOSING" ||
+      lifecycle.globalState === "CLOSED"
+    )
+      return;
 
     if (lifecycle.lastTickAt !== null) {
       const gapMs = nowMs - lifecycle.lastTickAt;
       if (gapMs > this.config.marketDataStaleTimeoutMs) {
-        this.cancel(symbol, "MARKET_DATA_STALE_TIMEOUT", `gap of ${gapMs}ms since the last tick exceeds marketDataStaleTimeoutMs=${this.config.marketDataStaleTimeoutMs}ms`, nowMs);
+        this.cancel(
+          symbol,
+          "MARKET_DATA_STALE_TIMEOUT",
+          `gap of ${gapMs}ms since the last tick exceeds marketDataStaleTimeoutMs=${this.config.marketDataStaleTimeoutMs}ms`,
+          nowMs,
+        );
         return;
       }
     }
 
     const totalLifetimeMs = nowMs - lifecycle.episode.firstLiqTs;
     if (totalLifetimeMs > this.config.preEntryFailsafeMaxLifetimeMs) {
-      this.cancel(symbol, "PRE_ENTRY_FAILSAFE_MAX_LIFETIME", `FAILSAFE: total pre-ACTIVE lifetime ${totalLifetimeMs}ms exceeds preEntryFailsafeMaxLifetimeMs=${this.config.preEntryFailsafeMaxLifetimeMs}ms -- this indicates the primary death checks failed to fire and is a safety net, not the intended normal path`, nowMs);
+      this.cancel(
+        symbol,
+        "PRE_ENTRY_FAILSAFE_MAX_LIFETIME",
+        `FAILSAFE: total pre-ACTIVE lifetime ${totalLifetimeMs}ms exceeds preEntryFailsafeMaxLifetimeMs=${this.config.preEntryFailsafeMaxLifetimeMs}ms -- this indicates the primary death checks failed to fire and is a safety net, not the intended normal path`,
+        nowMs,
+      );
       return;
     }
 
     if (lifecycle.globalState === "EPISODE_TRACKING") {
       const before = lifecycle;
-      const checkpoint = this.recomputeMeaningfulProgressCheckpoint(lifecycle, atr3m, nowMs);
-      if (checkpoint.lastMeaningfulProgressAt !== before.lastMeaningfulProgressAt) {
+      const checkpoint = this.recomputeMeaningfulProgressCheckpoint(
+        lifecycle,
+        atr3m,
+        nowMs,
+      );
+      if (
+        checkpoint.lastMeaningfulProgressAt !== before.lastMeaningfulProgressAt
+      ) {
         const trigger: "LIQ" | "EXTREME" | "OI" =
-          checkpoint.liqUsdAtLastMeaningfulProgress !== before.liqUsdAtLastMeaningfulProgress ? "LIQ"
-          : checkpoint.extremeAtLastMeaningfulProgress !== before.extremeAtLastMeaningfulProgress ? "EXTREME" : "OI";
-        const thresholdCrossed = trigger === "LIQ" ? `liq >= minMeaningfulLiqProgressFraction=${this.config.minMeaningfulLiqProgressFraction}`
-          : trigger === "EXTREME" ? `extreme >= minMeaningfulExtremeProgressAtr=${this.config.minMeaningfulExtremeProgressAtr} ATR`
-          : `OI destruction >= minMeaningfulOiProgressFraction=${this.config.minMeaningfulOiProgressFraction}`;
+          checkpoint.liqUsdAtLastMeaningfulProgress !==
+          before.liqUsdAtLastMeaningfulProgress
+            ? "LIQ"
+            : checkpoint.extremeAtLastMeaningfulProgress !==
+                before.extremeAtLastMeaningfulProgress
+              ? "EXTREME"
+              : "OI";
+        const thresholdCrossed =
+          trigger === "LIQ"
+            ? `liq >= minMeaningfulLiqProgressFraction=${this.config.minMeaningfulLiqProgressFraction}`
+            : trigger === "EXTREME"
+              ? `extreme >= minMeaningfulExtremeProgressAtr=${this.config.minMeaningfulExtremeProgressAtr} ATR`
+              : `OI destruction >= minMeaningfulOiProgressFraction=${this.config.minMeaningfulOiProgressFraction}`;
         this.forensic({
-          ...this.base(before, symbol, nowMs), type: "MEANINGFUL_PROGRESS_REFRESH",
-          oldTimestamp: before.lastMeaningfulProgressAt, newTimestamp: checkpoint.lastMeaningfulProgressAt, trigger,
-          oldCheckpoint: { liqUsd: before.liqUsdAtLastMeaningfulProgress, extreme: before.extremeAtLastMeaningfulProgress, minOi: before.minOiAtLastMeaningfulProgress },
-          newCheckpoint: { liqUsd: checkpoint.liqUsdAtLastMeaningfulProgress, extreme: checkpoint.extremeAtLastMeaningfulProgress, minOi: checkpoint.minOiAtLastMeaningfulProgress },
+          ...this.base(before, symbol, nowMs),
+          type: "MEANINGFUL_PROGRESS_REFRESH",
+          oldTimestamp: before.lastMeaningfulProgressAt,
+          newTimestamp: checkpoint.lastMeaningfulProgressAt,
+          trigger,
+          oldCheckpoint: {
+            liqUsd: before.liqUsdAtLastMeaningfulProgress,
+            extreme: before.extremeAtLastMeaningfulProgress,
+            minOi: before.minOiAtLastMeaningfulProgress,
+          },
+          newCheckpoint: {
+            liqUsd: checkpoint.liqUsdAtLastMeaningfulProgress,
+            extreme: checkpoint.extremeAtLastMeaningfulProgress,
+            minOi: checkpoint.minOiAtLastMeaningfulProgress,
+          },
           thresholdCrossed,
         });
       }
 
-      const sinceLastMeaningfulProgress = nowMs - checkpoint.lastMeaningfulProgressAt;
+      const sinceLastMeaningfulProgress =
+        nowMs - checkpoint.lastMeaningfulProgressAt;
       if (sinceLastMeaningfulProgress > this.config.noProgressTimeoutMs) {
-        this.cancel(symbol, "EPISODE_NO_PROGRESS", `no MEANINGFUL liquidation/extreme/OI progress for ${sinceLastMeaningfulProgress}ms, exceeds noProgressTimeoutMs=${this.config.noProgressTimeoutMs}ms (raw activity may have continued -- see minMeaningfulLiqProgressFraction/minMeaningfulExtremeProgressAtr/minMeaningfulOiProgressFraction)`, nowMs);
+        this.cancel(
+          symbol,
+          "EPISODE_NO_PROGRESS",
+          `no MEANINGFUL liquidation/extreme/OI progress for ${sinceLastMeaningfulProgress}ms, exceeds noProgressTimeoutMs=${this.config.noProgressTimeoutMs}ms (raw activity may have continued -- see minMeaningfulLiqProgressFraction/minMeaningfulExtremeProgressAtr/minMeaningfulOiProgressFraction)`,
+          nowMs,
+        );
         return;
       }
       lifecycle = { ...lifecycle, ...checkpoint };
 
-      const result = qualifyWatch(lifecycle.episode, percentile, atr3m, this.config);
-      const watchReasonCode = result.qualifies ? "QUALIFIED" : result.reasonCode;
+      const result = qualifyWatch(
+        lifecycle.episode,
+        percentile,
+        atr3m,
+        this.config,
+      );
+      const watchReasonCode = result.qualifies
+        ? "QUALIFIED"
+        : result.reasonCode;
       if (watchReasonCode !== lifecycle.lastLoggedWatchReasonCode) {
-        const displacementAtr = atr3m !== null && atr3m > 0 ? Math.abs(lifecycle.episode.extremePrice - lifecycle.episode.startPrice) / atr3m : null;
+        const displacementAtr =
+          atr3m !== null && atr3m > 0
+            ? Math.abs(
+                lifecycle.episode.extremePrice - lifecycle.episode.startPrice,
+              ) / atr3m
+            : null;
         this.forensic({
-          ...this.base(lifecycle, symbol, nowMs), type: "WATCH_EVALUATION",
-          totalLiqUsd: lifecycle.episode.sameDirectionLiqUsd, percentileRank: percentile.percentileRank, requiredPercentile: this.config.minPercentileRankForWatch,
-          displacementAtr, requiredDisplacement: this.config.minDisplacementAtrForWatch,
-          result: result.qualifies ? "PASS" : "FAIL", reasonCode: watchReasonCode, detail: result.qualifies ? "qualified" : result.detail,
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "WATCH_EVALUATION",
+          totalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
+          percentileRank: percentile.percentileRank,
+          requiredPercentile: this.config.minPercentileRankForWatch,
+          displacementAtr,
+          requiredDisplacement: this.config.minDisplacementAtrForWatch,
+          result: result.qualifies ? "PASS" : "FAIL",
+          reasonCode: watchReasonCode,
+          detail: result.qualifies ? "qualified" : result.detail,
         });
       }
       if (!result.qualifies) {
-        this.noSignalLog.push({ symbol, victim: lifecycle.episode.victim, atStage: "WATCH", reasonCode: result.reasonCode, detail: result.detail, timestamp: nowMs });
-        this.symbols.set(symbol, { ...lifecycle, watchResult: result, lastTickAt: nowMs, lastLoggedWatchReasonCode: watchReasonCode });
+        this.noSignalLog.push({
+          symbol,
+          victim: lifecycle.episode.victim,
+          atStage: "WATCH",
+          reasonCode: result.reasonCode,
+          detail: result.detail,
+          timestamp: nowMs,
+        });
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          watchResult: result,
+          lastTickAt: nowMs,
+          lastLoggedWatchReasonCode: watchReasonCode,
+        });
         return;
       }
-      const resolution = this.ownership.resolve(symbol, lifecycle.episode.victim, this.makeOwnershipId);
+      const resolution = this.ownership.resolve(
+        symbol,
+        lifecycle.episode.victim,
+        this.makeOwnershipId,
+      );
       if (resolution.action === "ignore") {
         // Sep 17 2026 (Karo), operator-requested fix -- NO lifecycle may
         // disappear silently. Previously this branch deleted the map
@@ -373,35 +612,91 @@ export class LiquidationOiWatchManager {
         // defensively anyway, in case a future change reintroduces
         // reachability -- this must never again be a silent path.
         const reasonCode = "GLOBAL_OWNERSHIP_CONTENTION";
-        const detail = "SymbolOwnershipRegistry.resolve() returned action=ignore -- another victim direction already holds global ownership for this symbol (should be structurally unreachable under direction-sticky internal ownership; hardened defensively). This episode's own attempted ownership is discarded WITHOUT releasing the other, legitimately-owned episode.";
-        this.noSignalLog.push({ symbol, victim: lifecycle.episode.victim, atStage: "WATCH", reasonCode, detail, timestamp: nowMs });
-        this.forensic({ ...this.base(lifecycle, symbol, nowMs), type: "EPISODE_TERMINAL", reason: reasonCode, detail, lifetimeMs: nowMs - lifecycle.episode.firstLiqTs, finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd, finalPercentileRank: lifecycle.watchResult?.qualifies ? lifecycle.watchResult.episodePercentileRank : null, finalExtreme: lifecycle.episode.extremePrice, lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt, symbolReleased: false });
+        const detail =
+          "SymbolOwnershipRegistry.resolve() returned action=ignore -- another victim direction already holds global ownership for this symbol (should be structurally unreachable under direction-sticky internal ownership; hardened defensively). This episode's own attempted ownership is discarded WITHOUT releasing the other, legitimately-owned episode.";
+        this.noSignalLog.push({
+          symbol,
+          victim: lifecycle.episode.victim,
+          atStage: "WATCH",
+          reasonCode,
+          detail,
+          timestamp: nowMs,
+        });
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "EPISODE_TERMINAL",
+          reason: reasonCode,
+          detail,
+          lifetimeMs: nowMs - lifecycle.episode.firstLiqTs,
+          finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
+          finalPercentileRank: lifecycle.watchResult?.qualifies
+            ? lifecycle.watchResult.episodePercentileRank
+            : null,
+          finalExtreme: lifecycle.episode.extremePrice,
+          lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+          symbolReleased: false,
+        });
         this.symbols.delete(symbol);
         return;
       }
       const ownershipId = resolution.ownershipId;
       this.assertTransition(lifecycle.globalState, "WATCH_QUALIFIED", symbol);
       this.assertTransition("WATCH_QUALIFIED", "EXHAUSTION_CANDIDATE", symbol);
-      const next: SymbolLifecycle = { ...lifecycle, ownershipId, globalState: "EXHAUSTION_CANDIDATE", watchResult: result, entryResult: null, enteredExhaustionCandidateAt: nowMs, lastTickAt: nowMs, lastLoggedWatchReasonCode: watchReasonCode, episodeEndDetection: initEpisodeEndDetectionState(lifecycle.episode.extremePrice, nowMs) };
+      const next: SymbolLifecycle = {
+        ...lifecycle,
+        ownershipId,
+        globalState: "EXHAUSTION_CANDIDATE",
+        watchResult: result,
+        entryResult: null,
+        enteredExhaustionCandidateAt: nowMs,
+        lastTickAt: nowMs,
+        lastLoggedWatchReasonCode: watchReasonCode,
+        episodeEndDetection: initEpisodeEndDetectionState(
+          lifecycle.episode.extremePrice,
+          nowMs,
+        ),
+      };
       this.symbols.set(symbol, next);
-      this.forensic({ ...this.base(next, symbol, nowMs), type: "STATE_TRANSITION", from: "EPISODE_TRACKING", to: "EXHAUSTION_CANDIDATE", reason: "WATCH qualified" });
+      this.forensic({
+        ...this.base(next, symbol, nowMs),
+        type: "STATE_TRANSITION",
+        from: "EPISODE_TRACKING",
+        to: "EXHAUSTION_CANDIDATE",
+        reason: "WATCH qualified",
+      });
       return;
     }
 
     if (lifecycle.globalState === "EXHAUSTION_CANDIDATE") {
-      const sinceEnteredExhaustion = lifecycle.enteredExhaustionCandidateAt !== null ? nowMs - lifecycle.enteredExhaustionCandidateAt : 0;
+      const sinceEnteredExhaustion =
+        lifecycle.enteredExhaustionCandidateAt !== null
+          ? nowMs - lifecycle.enteredExhaustionCandidateAt
+          : 0;
       if (sinceEnteredExhaustion > this.config.entryWindowTimeoutMs) {
-        this.cancel(symbol, "ENTRY_WINDOW_MISSED", `${sinceEnteredExhaustion}ms in EXHAUSTION_CANDIDATE (episode-end detection) without reaching EPISODE_END_CONFIRMED, exceeds entryWindowTimeoutMs=${this.config.entryWindowTimeoutMs}ms`, nowMs);
+        this.cancel(
+          symbol,
+          "ENTRY_WINDOW_MISSED",
+          `${sinceEnteredExhaustion}ms in EXHAUSTION_CANDIDATE (episode-end detection) without reaching EPISODE_END_CONFIRMED, exceeds entryWindowTimeoutMs=${this.config.entryWindowTimeoutMs}ms`,
+          nowMs,
+        );
         return;
       }
       if (atr3m !== null) {
-        const candidateSide = candidateTradeSideForVictim(lifecycle.episode.victim);
+        const candidateSide = candidateTradeSideForVictim(
+          lifecycle.episode.victim,
+        );
         const buffer = atr3m * this.config.thesisInvalidationAtrMultiple;
-        const invalidated = candidateSide === "LONG"
-          ? currentPrice > lifecycle.episode.startPrice + buffer
-          : currentPrice < lifecycle.episode.startPrice - buffer;
+        const invalidated =
+          candidateSide === "LONG"
+            ? currentPrice > lifecycle.episode.startPrice + buffer
+            : currentPrice < lifecycle.episode.startPrice - buffer;
         if (invalidated) {
-          this.cancel(symbol, "PRE_ENTRY_THESIS_INVALIDATED", `price ${currentPrice} already fully reverted past the episode's own startPrice ${lifecycle.episode.startPrice} (favorable direction) by more than thesisInvalidationAtrMultiple=${this.config.thesisInvalidationAtrMultiple} ATR (${buffer}) before entry ever triggered -- the move already played out`, nowMs);
+          this.cancel(
+            symbol,
+            "PRE_ENTRY_THESIS_INVALIDATED",
+            `price ${currentPrice} already fully reverted past the episode's own startPrice ${lifecycle.episode.startPrice} (favorable direction) by more than thesisInvalidationAtrMultiple=${this.config.thesisInvalidationAtrMultiple} ATR (${buffer}) before entry ever triggered -- the move already played out`,
+            nowMs,
+          );
           return;
         }
       }
@@ -418,77 +713,115 @@ export class LiquidationOiWatchManager {
         this.symbols.set(symbol, { ...lifecycle, lastTickAt: nowMs });
         return;
       }
-      const advance = advanceEpisodeEndDetection(lifecycle.episodeEndDetection, lifecycle.episode.victim, new1mCandles, all3mCandlesSorted, atrLookup);
+      const advance = advanceEpisodeEndDetection(
+        lifecycle.episodeEndDetection,
+        lifecycle.episode.victim,
+        new1mCandles,
+        all3mCandlesSorted,
+        atrLookup,
+      );
 
       if (advance.extremeUpdated) {
-        this.forensic({ ...this.base(lifecycle, symbol, nowMs), type: "EXTREME_UPDATE", previousExtreme: lifecycle.episodeEndDetection.extreme, newExtreme: advance.state.extreme, extensionPrice: Math.abs(advance.state.extreme - lifecycle.episodeEndDetection.extreme), extensionAtr: atr3m !== null && atr3m > 0 ? Math.abs(advance.state.extreme - lifecycle.episodeEndDetection.extreme) / atr3m : null, meaningfulExtremeProgress: true } as unknown as ForensicEvent);
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "EXTREME_UPDATE",
+          previousExtreme: lifecycle.episodeEndDetection.extreme,
+          newExtreme: advance.state.extreme,
+          extensionPrice: Math.abs(
+            advance.state.extreme - lifecycle.episodeEndDetection.extreme,
+          ),
+          extensionAtr:
+            atr3m !== null && atr3m > 0
+              ? Math.abs(
+                  advance.state.extreme - lifecycle.episodeEndDetection.extreme,
+                ) / atr3m
+              : null,
+          meaningfulExtremeProgress: true,
+        } as unknown as ForensicEvent);
       }
       if (advance.candidateStarted) {
-        this.forensic({ ...this.base(lifecycle, symbol, nowMs), type: "STATE_TRANSITION", from: "EXHAUSTION_CANDIDATE", to: "EXHAUSTION_CANDIDATE", reason: `1M_RECOVERY_CANDIDATE at ${advance.state.candidateTime}` } as unknown as ForensicEvent);
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "STATE_TRANSITION",
+          from: "EXHAUSTION_CANDIDATE",
+          to: "EXHAUSTION_CANDIDATE",
+          reason: `1M_RECOVERY_CANDIDATE at ${advance.state.candidateTime}`,
+        } as unknown as ForensicEvent);
       }
       if (advance.candidateInvalidated && !advance.confirmed) {
-        this.forensic({ ...this.base(lifecycle, symbol, nowMs), type: "STATE_TRANSITION", from: "EXHAUSTION_CANDIDATE", to: "EXHAUSTION_CANDIDATE", reason: "RECOVERY_INVALIDATED -- new adverse extreme or 3m confirmation failed, still watching for episode end" } as unknown as ForensicEvent);
+        this.forensic({
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "STATE_TRANSITION",
+          from: "EXHAUSTION_CANDIDATE",
+          to: "EXHAUSTION_CANDIDATE",
+          reason:
+            "RECOVERY_INVALIDATED -- new adverse extreme or 3m confirmation failed, still watching for episode end",
+        } as unknown as ForensicEvent);
       }
 
       if (!advance.confirmed) {
-        this.symbols.set(symbol, { ...lifecycle, episodeEndDetection: advance.state, lastTickAt: nowMs });
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          episodeEndDetection: advance.state,
+          lastTickAt: nowMs,
+        });
         return;
       }
 
       const atr3mAtConfirm = atrLookup.get("3m", advance.confirmedAtCloseTime!);
-      const fractionOk = passesRecoveryFractionGate(lifecycle.episode.victim, lifecycle.episode.startPrice, advance.state.extreme, advance.confirmedPrice!, atr3mAtConfirm);
+      const fractionOk = passesRecoveryFractionGate(
+        lifecycle.episode.victim,
+        lifecycle.episode.startPrice,
+        advance.state.extreme,
+        advance.confirmedPrice!,
+        atr3mAtConfirm,
+      );
       if (!fractionOk) {
         // 3m ATR condition passed but the recovery-fraction gate
         // (30% of episode displacement, active only once displacement
         // >= 1.0x ATR3m) did not -- treat exactly like any other
         // RECOVERY_INVALIDATED: clear the candidate, keep watching.
-        this.symbols.set(symbol, { ...lifecycle, episodeEndDetection: { ...advance.state, candidateTime: null } });
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          episodeEndDetection: { ...advance.state, candidateTime: null },
+        });
         return;
       }
 
       // EPISODE_END_CONFIRMED. Freeze the causal OI baseline (most
       // recent OI sample available at this exact moment -- never a
       // future sample).
-      const mostRecentOi = oiHistory.length > 0 ? oiHistory.reduce((a, b) => (a.fetchedAt > b.fetchedAt ? a : b)) : null;
-
-      // Sep 18 2026 (Karo), operator-requested -- IMMEDIATE cancel at
-      // the exact moment of episode-end confirmation if OI has
-      // already moved AGAINST reversal (delta <= 0) between the
-      // episode's own LAST liquidation event and this confirmation
-      // moment. episode.currentOiQuantity is updated ONLY by
-      // liquidation events carrying OI data (updateEpisodeOi(), never
-      // called from anywhere else) -- it IS "OI at the last
-      // liquidation", causally, by construction. Rationale: the
-      // candle-confirmed episode end is itself necessarily a few
-      // minutes "late" (needs a full 1m+3m close) -- if OI has
-      // already gone the wrong way by the time we even confirm the
-      // end, the market has already moved on; no reason to enter
-      // WAIT and consume the operator's fee-coverage/economic checks
-      // on a setup that is already stale at its very first evaluation.
-      // Only gates on a PROVABLE non-positive delta -- if either OI
-      // reading is unavailable, this check is skipped (never blocks
-      // on missing data), and the normal WAIT flow (which re-evaluates
-      // OI continuously, with no timeout pressure) still applies.
-      if (mostRecentOi !== null && lifecycle.episode.currentOiQuantity !== null) {
-        const oiDeltaSinceLastLiquidation = mostRecentOi.contracts - lifecycle.episode.currentOiQuantity;
-        if (oiDeltaSinceLastLiquidation <= 0) {
-          this.cancel(symbol, "OI_ALREADY_ADVERSE_AT_EPISODE_END", `oiDeltaSinceLastLiquidation=${oiDeltaSinceLastLiquidation.toFixed(2)} <= 0 (OI at episode end=${mostRecentOi.contracts}, OI at last liquidation=${lifecycle.episode.currentOiQuantity}) -- OI already moved adverse/flat by the time episode end was confirmed, market has already moved on`, nowMs);
-          return;
-        }
-      }
+      const mostRecentOi =
+        oiHistory.length > 0
+          ? oiHistory.reduce((a, b) => (a.fetchedAt > b.fetchedAt ? a : b))
+          : null;
 
       // Transition to WAIT_FOR_POST_EPISODE_OI_CREATION. Per the
       // operator's own explicit requirement: this is NOT entry, and
       // there is deliberately NO timeout applied to the new state
       // (beyond the WAIT-specific timeout added separately).
-      this.assertTransition("EXHAUSTION_CANDIDATE", "WAIT_FOR_POST_EPISODE_OI_CREATION", symbol);
+      this.assertTransition(
+        "EXHAUSTION_CANDIDATE",
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        symbol,
+      );
       const next: SymbolLifecycle = {
-        ...lifecycle, globalState: "WAIT_FOR_POST_EPISODE_OI_CREATION", episodeEndDetection: advance.state,
-        episodeEndOiQuantity: mostRecentOi?.contracts ?? null, episodeEndPrice: advance.confirmedPrice!, episodeEndTime: advance.confirmedAtCloseTime!,
+        ...lifecycle,
+        globalState: "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        episodeEndDetection: advance.state,
+        episodeEndOiQuantity: mostRecentOi?.contracts ?? null,
+        episodeEndPrice: advance.confirmedPrice!,
+        episodeEndTime: advance.confirmedAtCloseTime!,
         lastTickAt: nowMs,
       };
       this.symbols.set(symbol, next);
-      this.forensic({ ...this.base(next, symbol, nowMs), type: "STATE_TRANSITION", from: "EXHAUSTION_CANDIDATE", to: "WAIT_FOR_POST_EPISODE_OI_CREATION", reason: `EPISODE_END_CONFIRMED at ${advance.confirmedAtCloseTime}, price=${advance.confirmedPrice}, episodeEndOiQuantity=${mostRecentOi?.contracts ?? "null"}` });
+      this.forensic({
+        ...this.base(next, symbol, nowMs),
+        type: "STATE_TRANSITION",
+        from: "EXHAUSTION_CANDIDATE",
+        to: "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        reason: `EPISODE_END_CONFIRMED at ${advance.confirmedAtCloseTime}, price=${advance.confirmedPrice}, episodeEndOiQuantity=${mostRecentOi?.contracts ?? "null"}`,
+      });
       return;
     }
 
@@ -501,9 +834,19 @@ export class LiquidationOiWatchManager {
       // with price consistently moving AGAINST the thesis). See
       // config.ts's own doc comment on waitForPostEpisodeOiCreationTimeoutMs
       // for the full reasoning -- UNTUNED, 30 minutes by default.
-      const sinceEnteredWait = lifecycle.episodeEndTime !== null ? nowMs - lifecycle.episodeEndTime : 0;
-      if (sinceEnteredWait > this.config.waitForPostEpisodeOiCreationTimeoutMs) {
-        this.cancel(symbol, "WAIT_FOR_POST_EPISODE_OI_CREATION_TIMEOUT", `${sinceEnteredWait}ms in WAIT_FOR_POST_EPISODE_OI_CREATION without a qualifying entry, exceeds waitForPostEpisodeOiCreationTimeoutMs=${this.config.waitForPostEpisodeOiCreationTimeoutMs}ms -- the setup is being released rather than held indefinitely`, nowMs);
+      const sinceEnteredWait =
+        lifecycle.episodeEndTime !== null
+          ? nowMs - lifecycle.episodeEndTime
+          : 0;
+      if (
+        sinceEnteredWait > this.config.waitForPostEpisodeOiCreationTimeoutMs
+      ) {
+        this.cancel(
+          symbol,
+          "WAIT_FOR_POST_EPISODE_OI_CREATION_TIMEOUT",
+          `${sinceEnteredWait}ms in WAIT_FOR_POST_EPISODE_OI_CREATION without a qualifying entry, exceeds waitForPostEpisodeOiCreationTimeoutMs=${this.config.waitForPostEpisodeOiCreationTimeoutMs}ms -- the setup is being released rather than held indefinitely`,
+          nowMs,
+        );
         return;
       }
 
@@ -529,8 +872,13 @@ export class LiquidationOiWatchManager {
       // profit both scale linearly with quantity, so the ratio does
       // not) -- verified algebraically, so quantity=1 is used here
       // without needing any specific user's own riskUsd.
-      const candidateSide = candidateTradeSideForVictim(lifecycle.episode.victim);
-      const mostRecentOi = oiHistory.length > 0 ? oiHistory.reduce((a, b) => (a.fetchedAt > b.fetchedAt ? a : b)) : null;
+      const candidateSide = candidateTradeSideForVictim(
+        lifecycle.episode.victim,
+      );
+      const mostRecentOi =
+        oiHistory.length > 0
+          ? oiHistory.reduce((a, b) => (a.fetchedAt > b.fetchedAt ? a : b))
+          : null;
 
       if (atr3m === null || atr3m <= 0) {
         this.symbols.set(symbol, { ...lifecycle, lastTickAt: nowMs });
@@ -538,25 +886,37 @@ export class LiquidationOiWatchManager {
       }
 
       const oiPhysicsState: OiPhysicsState = {
-        oiStartQuantity: lifecycle.episode.startOiQuantity, oiMinQuantity: lifecycle.episode.minOiQuantity,
-        oiEndQuantity: lifecycle.episodeEndOiQuantity, oiNowQuantity: mostRecentOi?.contracts ?? null,
+        oiStartQuantity: lifecycle.episode.startOiQuantity,
+        oiMinQuantity: lifecycle.episode.minOiQuantity,
+        oiEndQuantity: lifecycle.episodeEndOiQuantity,
+        oiNowQuantity: mostRecentOi?.contracts ?? null,
       };
       const derived = deriveOiPhysics(oiPhysicsState);
-      const notional = deriveOiPhysicsNotional(derived, lifecycle.episode.extremePrice, lifecycle.episodeEndPrice);
+      const notional = deriveOiPhysicsNotional(
+        derived,
+        lifecycle.episode.extremePrice,
+        lifecycle.episodeEndPrice,
+      );
 
       let reasonCode: string | null = null;
       let detail = "";
 
       if (derived.postEndOiCreationQty === null) {
-        reasonCode = "OI_BASELINE_UNAVAILABLE"; detail = "no episode-end OI baseline or no current OI sample yet";
+        reasonCode = "OI_BASELINE_UNAVAILABLE";
+        detail = "no episode-end OI baseline or no current OI sample yet";
       } else if (derived.postEndOiCreationQty <= 0) {
-        reasonCode = "NO_POSITIVE_OI_CREATION"; detail = `postEndOiCreationQty=${derived.postEndOiCreationQty.toFixed(2)} <= 0`;
+        reasonCode = "NO_POSITIVE_OI_CREATION";
+        detail = `postEndOiCreationQty=${derived.postEndOiCreationQty.toFixed(2)} <= 0`;
       }
 
-      const favorableMove = candidateSide === "LONG" ? currentPrice - lifecycle.episodeEndPrice! : lifecycle.episodeEndPrice! - currentPrice;
+      const favorableMove =
+        candidateSide === "LONG"
+          ? currentPrice - lifecycle.episodeEndPrice!
+          : lifecycle.episodeEndPrice! - currentPrice;
       const favorablePriceMoveAtr = favorableMove / atr3m;
       if (reasonCode === null && favorablePriceMoveAtr <= 0) {
-        reasonCode = "NO_FAVORABLE_PRICE_MOVE"; detail = `favorablePriceMoveAtr=${favorablePriceMoveAtr.toFixed(3)} <= 0 -- OI creation alone is never sufficient, direction is required`;
+        reasonCode = "NO_FAVORABLE_PRICE_MOVE";
+        detail = `favorablePriceMoveAtr=${favorablePriceMoveAtr.toFixed(3)} <= 0 -- OI creation alone is never sufficient, direction is required`;
       }
 
       let capacityResult: CapacityModelResult2 | null = null;
@@ -567,12 +927,16 @@ export class LiquidationOiWatchManager {
       let distanceFromExtremeAtr = 0;
 
       if (reasonCode === null) {
-        distanceFromExtremeAtr = candidateSide === "LONG"
-          ? (currentPrice - lifecycle.episode.extremePrice) / atr3m
-          : (lifecycle.episode.extremePrice - currentPrice) / atr3m;
+        distanceFromExtremeAtr =
+          candidateSide === "LONG"
+            ? (currentPrice - lifecycle.episode.extremePrice) / atr3m
+            : (lifecycle.episode.extremePrice - currentPrice) / atr3m;
 
-        if (distanceFromExtremeAtr > this.config.maxDistanceFromExtremeAtrForEntry) {
-          reasonCode = "TOO_FAR_FROM_EXTREME"; detail = `distanceFromExtremeAtr=${distanceFromExtremeAtr.toFixed(3)} > maxDistanceFromExtremeAtrForEntry=${this.config.maxDistanceFromExtremeAtrForEntry}`;
+        if (
+          distanceFromExtremeAtr > this.config.maxDistanceFromExtremeAtrForEntry
+        ) {
+          reasonCode = "TOO_FAR_FROM_EXTREME";
+          detail = `distanceFromExtremeAtr=${distanceFromExtremeAtr.toFixed(3)} > maxDistanceFromExtremeAtrForEntry=${this.config.maxDistanceFromExtremeAtrForEntry}`;
         } else if (testEconomicsOverride) {
           // Sep 17 2026 (Karo), operator-requested test separation --
           // lifecycle-mechanics tests (does the state machine correctly
@@ -584,9 +948,21 @@ export class LiquidationOiWatchManager {
           // call path (market-data-orchestrator.ts never supplies it).
           candidateTpPrice = testEconomicsOverride.candidateTpPrice;
           candidateSlPrice = testEconomicsOverride.candidateSlPrice;
-          economics = { grossTpProfitUsd: 0, grossSlLossUsd: 0, expectedTpFeesUsd: 0, expectedSlFeesUsd: 0, netTpProfitUsd: 0, netSlLossUsd: 0, netRR: testEconomicsOverride.netRR, passesMinNetRR: testEconomicsOverride.netRR >= LOX_MIN_NET_RR, passesEconomicViability: testEconomicsOverride.passesEconomicViability ?? true };
+          economics = {
+            grossTpProfitUsd: 0,
+            grossSlLossUsd: 0,
+            expectedTpFeesUsd: 0,
+            expectedSlFeesUsd: 0,
+            netTpProfitUsd: 0,
+            netSlLossUsd: 0,
+            netRR: testEconomicsOverride.netRR,
+            passesMinNetRR: testEconomicsOverride.netRR >= LOX_MIN_NET_RR,
+            passesEconomicViability:
+              testEconomicsOverride.passesEconomicViability ?? true,
+          };
           if (!economics.passesEconomicViability) {
-            reasonCode = "ECONOMICALLY_NOT_VIABLE"; detail = `(test override) economics forced non-viable`;
+            reasonCode = "ECONOMICALLY_NOT_VIABLE";
+            detail = `(test override) economics forced non-viable`;
           }
         } else {
           // Sep 17 2026 (Karo), operator-identified DOUBLE-COUNT FIX --
@@ -597,17 +973,47 @@ export class LiquidationOiWatchManager {
           // different reference points, kept mathematically distinct:
           // observed post-end market response (evidence) vs. distance
           // already travelled (consumed), never conflated.
-          capacityResult = computeCapacity({ episodeLiqUsd: lifecycle.episode.sameDirectionLiqUsd, oiPhysics: notional, favorablePriceMoveAtrSinceEnd: favorablePriceMoveAtr }, DEFAULT_CAPACITY_MODEL_COEFFICIENTS_2);
-          remaining = computeRemainingCapacity(capacityResult.predictedTotalCapacityAtr, candidateSide, currentPrice, lifecycle.episode.extremePrice, atr3m);
-          candidateTpPrice = projectTpFromEntry(currentPrice, atr3m, candidateSide, remaining.predictedRemainingCapacityAtr);
-          candidateSlPrice = computeStructuralInvalidationPrice(lifecycle.episode.extremePrice, atr3m, candidateSide);
+          capacityResult = computeCapacity(
+            {
+              episodeLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
+              oiPhysics: notional,
+              favorablePriceMoveAtrSinceEnd: favorablePriceMoveAtr,
+            },
+            DEFAULT_CAPACITY_MODEL_COEFFICIENTS_2,
+          );
+          remaining = computeRemainingCapacity(
+            capacityResult.predictedTotalCapacityAtr,
+            candidateSide,
+            currentPrice,
+            lifecycle.episode.extremePrice,
+            atr3m,
+          );
+          candidateTpPrice = projectTpFromEntry(
+            currentPrice,
+            atr3m,
+            candidateSide,
+            remaining.predictedRemainingCapacityAtr,
+          );
+          candidateSlPrice = computeStructuralInvalidationPrice(
+            lifecycle.episode.extremePrice,
+            atr3m,
+            candidateSide,
+          );
 
           if (remaining.predictedRemainingCapacityAtr <= 0) {
-            reasonCode = "NO_REMAINING_CAPACITY"; detail = `predictedTotalCapacityAtr=${capacityResult.predictedTotalCapacityAtr.toFixed(3)} already fully consumed by alreadyConsumedCapacityAtr=${remaining.alreadyConsumedCapacityAtr.toFixed(3)} -- economically useless at this entry point, continue waiting for stronger evidence`;
+            reasonCode = "NO_REMAINING_CAPACITY";
+            detail = `predictedTotalCapacityAtr=${capacityResult.predictedTotalCapacityAtr.toFixed(3)} already fully consumed by alreadyConsumedCapacityAtr=${remaining.alreadyConsumedCapacityAtr.toFixed(3)} -- economically useless at this entry point, continue waiting for stronger evidence`;
           } else {
-            economics = evaluateTradeEconomics({ candidateSide, entryPrice: currentPrice, tpPrice: candidateTpPrice, slPrice: candidateSlPrice, quantity: 1 });
+            economics = evaluateTradeEconomics({
+              candidateSide,
+              entryPrice: currentPrice,
+              tpPrice: candidateTpPrice,
+              slPrice: candidateSlPrice,
+              quantity: 1,
+            });
             if (!economics.passesEconomicViability) {
-              reasonCode = "ECONOMICALLY_NOT_VIABLE"; detail = `netTpProfitUsd=${economics.netTpProfitUsd.toFixed(4)} does not clear LOX_MIN_FEE_COVERAGE_MULTIPLE=${LOX_MIN_FEE_COVERAGE_MULTIPLE}x expectedTpFeesUsd=${economics.expectedTpFeesUsd.toFixed(4)} (netRR=${economics.netRR !== null ? economics.netRR.toFixed(3) : "n/a"}, calculated/reported only -- NOT the LOX entry gate; predictedTotalCapacityAtr=${capacityResult.predictedTotalCapacityAtr.toFixed(3)}, alreadyConsumedCapacityAtr=${remaining.alreadyConsumedCapacityAtr.toFixed(3)}, predictedRemainingCapacityAtr=${remaining.predictedRemainingCapacityAtr.toFixed(3)}, oiToLiqRatio=${capacityResult.oiToLiqRatio !== null ? capacityResult.oiToLiqRatio.toFixed(3) : "n/a"})`;
+              reasonCode = "ECONOMICALLY_NOT_VIABLE";
+              detail = `netTpProfitUsd=${economics.netTpProfitUsd.toFixed(4)} does not clear LOX_MIN_FEE_COVERAGE_MULTIPLE=${LOX_MIN_FEE_COVERAGE_MULTIPLE}x expectedTpFeesUsd=${economics.expectedTpFeesUsd.toFixed(4)} (netRR=${economics.netRR !== null ? economics.netRR.toFixed(3) : "n/a"}, calculated/reported only -- NOT the LOX entry gate; predictedTotalCapacityAtr=${capacityResult.predictedTotalCapacityAtr.toFixed(3)}, alreadyConsumedCapacityAtr=${remaining.alreadyConsumedCapacityAtr.toFixed(3)}, predictedRemainingCapacityAtr=${remaining.predictedRemainingCapacityAtr.toFixed(3)}, oiToLiqRatio=${capacityResult.oiToLiqRatio !== null ? capacityResult.oiToLiqRatio.toFixed(3) : "n/a"})`;
             }
           }
         }
@@ -615,19 +1021,44 @@ export class LiquidationOiWatchManager {
 
       if (reasonCode !== lifecycle.lastLoggedEntryReasonCode) {
         this.forensic({
-          ...this.base(lifecycle, symbol, nowMs), type: "ENTRY_GATE_EVALUATION",
+          ...this.base(lifecycle, symbol, nowMs),
+          type: "ENTRY_GATE_EVALUATION",
           atrReady: { pass: true, detail: `atr3m=${atr3m}` },
-          oiFresh: { pass: mostRecentOi !== null, detail: mostRecentOi !== null ? `age=${nowMs - mostRecentOi.fetchedAt}ms` : "no OI sample" },
-          clearing: { pass: true, detail: "N/A -- OI clearing is not part of the entry gate anymore" },
+          oiFresh: {
+            pass: mostRecentOi !== null,
+            detail:
+              mostRecentOi !== null
+                ? `age=${nowMs - mostRecentOi.fetchedAt}ms`
+                : "no OI sample",
+          },
+          clearing: {
+            pass: true,
+            detail: "N/A -- OI clearing is not part of the entry gate anymore",
+          },
           counterMove: { pass: reasonCode === null, detail },
-          distanceFromExtreme: { pass: reasonCode !== "TOO_FAR_FROM_EXTREME", detail: `distanceFromExtremeAtr=${distanceFromExtremeAtr.toFixed(3)}` },
-          final: reasonCode === null ? "ENTRY_READY" : "NO_ENTRY", blockedBy: reasonCode === null ? [] : [reasonCode],
+          distanceFromExtreme: {
+            pass: reasonCode !== "TOO_FAR_FROM_EXTREME",
+            detail: `distanceFromExtremeAtr=${distanceFromExtremeAtr.toFixed(3)}`,
+          },
+          final: reasonCode === null ? "ENTRY_READY" : "NO_ENTRY",
+          blockedBy: reasonCode === null ? [] : [reasonCode],
         } as unknown as ForensicEvent);
       }
 
       if (reasonCode !== null) {
-        this.noSignalLog.push({ symbol, victim: lifecycle.episode.victim, atStage: "ENTRY", reasonCode, detail, timestamp: nowMs });
-        this.symbols.set(symbol, { ...lifecycle, lastTickAt: nowMs, lastLoggedEntryReasonCode: reasonCode });
+        this.noSignalLog.push({
+          symbol,
+          victim: lifecycle.episode.victim,
+          atStage: "ENTRY",
+          reasonCode,
+          detail,
+          timestamp: nowMs,
+        });
+        this.symbols.set(symbol, {
+          ...lifecycle,
+          lastTickAt: nowMs,
+          lastLoggedEntryReasonCode: reasonCode,
+        });
         return;
       }
 
@@ -637,20 +1068,62 @@ export class LiquidationOiWatchManager {
       // just validated against, never recomputing a second, possibly
       // different figure.
       const entryResult: EntryGateResult = {
-        entryReady: true, candidateSide, clearingState: { windows: [], peakDestructionSlopeContractsPerSec: null, isDecelerating: null, isStabilizing: null, hasEarlyRebuildSign: null, windowsShowingClearing: 0, mostRecentSampleAgeMs: mostRecentOi !== null ? nowMs - mostRecentOi.fetchedAt : null },
-        counterMoveAtr: favorablePriceMoveAtr, distanceFromExtremeAtr,
-        capacityAtr: testEconomicsOverride ? testEconomicsOverride.capacityAtr : remaining!.predictedRemainingCapacityAtr, predictedTotalCapacityAtr: capacityResult?.predictedTotalCapacityAtr, alreadyConsumedCapacityAtr: remaining?.alreadyConsumedCapacityAtr, candidateTpPrice: candidateTpPrice!, candidateSlPrice: candidateSlPrice!,
-        netRR: economics!.netRR, postEndOiCreationUsd: notional.postEndOiCreationUsd, oiToLiqRatio: capacityResult?.oiToLiqRatio,
+        entryReady: true,
+        candidateSide,
+        clearingState: {
+          windows: [],
+          peakDestructionSlopeContractsPerSec: null,
+          isDecelerating: null,
+          isStabilizing: null,
+          hasEarlyRebuildSign: null,
+          windowsShowingClearing: 0,
+          mostRecentSampleAgeMs:
+            mostRecentOi !== null ? nowMs - mostRecentOi.fetchedAt : null,
+        },
+        counterMoveAtr: favorablePriceMoveAtr,
+        distanceFromExtremeAtr,
+        capacityAtr: testEconomicsOverride
+          ? testEconomicsOverride.capacityAtr
+          : remaining!.predictedRemainingCapacityAtr,
+        predictedTotalCapacityAtr: capacityResult?.predictedTotalCapacityAtr,
+        alreadyConsumedCapacityAtr: remaining?.alreadyConsumedCapacityAtr,
+        candidateTpPrice: candidateTpPrice!,
+        candidateSlPrice: candidateSlPrice!,
+        netRR: economics!.netRR,
+        postEndOiCreationUsd: notional.postEndOiCreationUsd,
+        oiToLiqRatio: capacityResult?.oiToLiqRatio,
       };
-      this.assertTransition("WAIT_FOR_POST_EPISODE_OI_CREATION", "ENTRY_READY", symbol);
-      const next: SymbolLifecycle = { ...lifecycle, globalState: "ENTRY_READY", entryResult, lastTickAt: nowMs, lastLoggedEntryReasonCode: null };
+      this.assertTransition(
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        "ENTRY_READY",
+        symbol,
+      );
+      const next: SymbolLifecycle = {
+        ...lifecycle,
+        globalState: "ENTRY_READY",
+        entryResult,
+        lastTickAt: nowMs,
+        lastLoggedEntryReasonCode: null,
+      };
       this.symbols.set(symbol, next);
-      this.forensic({ ...this.base(next, symbol, nowMs), type: "STATE_TRANSITION", from: "WAIT_FOR_POST_EPISODE_OI_CREATION", to: "ENTRY_READY", reason: `POST_EPISODE_CAPACITY_VALID: netRR=${economics!.netRR !== null ? economics!.netRR!.toFixed(3) : "n/a"}` });
       this.forensic({
-        ...this.base(next, symbol, nowMs), type: "ENTRY_READY",
-        entryReferencePrice: currentPrice, extreme: next.episode.extremePrice, totalLiqUsd: next.episode.sameDirectionLiqUsd,
-        percentileRank: next.watchResult?.qualifies ? next.watchResult.episodePercentileRank : 0,
-        counterMoveAtr: entryResult.counterMoveAtr, distanceFromExtremeAtr: entryResult.distanceFromExtremeAtr,
+        ...this.base(next, symbol, nowMs),
+        type: "STATE_TRANSITION",
+        from: "WAIT_FOR_POST_EPISODE_OI_CREATION",
+        to: "ENTRY_READY",
+        reason: `POST_EPISODE_CAPACITY_VALID: netRR=${economics!.netRR !== null ? economics!.netRR!.toFixed(3) : "n/a"}`,
+      });
+      this.forensic({
+        ...this.base(next, symbol, nowMs),
+        type: "ENTRY_READY",
+        entryReferencePrice: currentPrice,
+        extreme: next.episode.extremePrice,
+        totalLiqUsd: next.episode.sameDirectionLiqUsd,
+        percentileRank: next.watchResult?.qualifies
+          ? next.watchResult.episodePercentileRank
+          : 0,
+        counterMoveAtr: entryResult.counterMoveAtr,
+        distanceFromExtremeAtr: entryResult.distanceFromExtremeAtr,
       });
       return;
     }
@@ -661,32 +1134,67 @@ export class LiquidationOiWatchManager {
    *  globalSignalId explicitly and stores it on the lifecycle (see
    *  SymbolLifecycle's own doc comment on this field for the full
    *  root-cause story). */
-  confirmActivePosition(symbol: string, globalSignalId: string, nowMs: number): void {
+  confirmActivePosition(
+    symbol: string,
+    globalSignalId: string,
+    nowMs: number,
+  ): void {
     const lifecycle = this.symbols.get(symbol);
     if (lifecycle === undefined) return;
     this.assertTransition(lifecycle.globalState, "ACTIVE", symbol);
-    const next = { ...lifecycle, globalSignalId, globalState: "ACTIVE" as const, lastTickAt: nowMs };
+    const next = {
+      ...lifecycle,
+      globalSignalId,
+      globalState: "ACTIVE" as const,
+      lastTickAt: nowMs,
+    };
     this.symbols.set(symbol, next);
-    this.forensic({ ...this.base(next, symbol, nowMs), type: "STATE_TRANSITION", from: lifecycle.globalState, to: "ACTIVE", reason: "real user position confirmed" });
+    this.forensic({
+      ...this.base(next, symbol, nowMs),
+      type: "STATE_TRANSITION",
+      from: lifecycle.globalState,
+      to: "ACTIVE",
+      reason: "real user position confirmed",
+    });
   }
 
   /** Explicit CANCEL, callable from EPISODE_TRACKING through
    *  ENTRY_READY. Also the resolution path for ENTRY_READY-with-no-
    *  real-position (observational-only, all users disabled, all
    *  executions failed). */
-  cancel(symbol: string, reasonCode: string, detail: string, nowMs: number): void {
+  cancel(
+    symbol: string,
+    reasonCode: string,
+    detail: string,
+    nowMs: number,
+  ): void {
     const lifecycle = this.symbols.get(symbol);
     if (lifecycle === undefined) return;
-    if (lifecycle.globalState !== "EPISODE_TRACKING") this.assertTransition(lifecycle.globalState, "CANCELLED", symbol);
-    this.noSignalLog.push({ symbol, victim: lifecycle.episode.victim, atStage: lifecycle.globalState === "EPISODE_TRACKING" ? "WATCH" : "ENTRY", reasonCode, detail, timestamp: nowMs });
+    if (lifecycle.globalState !== "EPISODE_TRACKING")
+      this.assertTransition(lifecycle.globalState, "CANCELLED", symbol);
+    this.noSignalLog.push({
+      symbol,
+      victim: lifecycle.episode.victim,
+      atStage: lifecycle.globalState === "EPISODE_TRACKING" ? "WATCH" : "ENTRY",
+      reasonCode,
+      detail,
+      timestamp: nowMs,
+    });
     const wasOwned = this.ownership.isOwned(symbol);
     if (wasOwned) this.ownership.release(symbol);
     this.symbols.delete(symbol);
     this.forensic({
-      ...this.base(lifecycle, symbol, nowMs), type: "EPISODE_TERMINAL", reason: reasonCode, detail,
-      lifetimeMs: nowMs - lifecycle.episode.firstLiqTs, finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
-      finalPercentileRank: lifecycle.watchResult?.qualifies ? lifecycle.watchResult.episodePercentileRank : null,
-      finalExtreme: lifecycle.episode.extremePrice, lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+      ...this.base(lifecycle, symbol, nowMs),
+      type: "EPISODE_TERMINAL",
+      reason: reasonCode,
+      detail,
+      lifetimeMs: nowMs - lifecycle.episode.firstLiqTs,
+      finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
+      finalPercentileRank: lifecycle.watchResult?.qualifies
+        ? lifecycle.watchResult.episodePercentileRank
+        : null,
+      finalExtreme: lifecycle.episode.extremePrice,
+      lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
       symbolReleased: wasOwned || lifecycle.globalState === "EPISODE_TRACKING",
     });
   }
@@ -714,10 +1222,17 @@ export class LiquidationOiWatchManager {
     const wasOwned = this.ownership.isOwned(symbol);
     if (wasOwned) this.ownership.release(symbol);
     this.forensic({
-      ...this.base(lifecycle, symbol, nowMs), type: "EPISODE_TERMINAL", reason, detail: `global lifecycle closed: ${reason}`,
-      lifetimeMs: nowMs - lifecycle.episode.firstLiqTs, finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
-      finalPercentileRank: lifecycle.watchResult?.qualifies ? lifecycle.watchResult.episodePercentileRank : null,
-      finalExtreme: lifecycle.episode.extremePrice, lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+      ...this.base(lifecycle, symbol, nowMs),
+      type: "EPISODE_TERMINAL",
+      reason,
+      detail: `global lifecycle closed: ${reason}`,
+      lifetimeMs: nowMs - lifecycle.episode.firstLiqTs,
+      finalTotalLiqUsd: lifecycle.episode.sameDirectionLiqUsd,
+      finalPercentileRank: lifecycle.watchResult?.qualifies
+        ? lifecycle.watchResult.episodePercentileRank
+        : null,
+      finalExtreme: lifecycle.episode.extremePrice,
+      lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
       symbolReleased: wasOwned,
     });
     this.symbols.delete(symbol);
@@ -744,23 +1259,62 @@ export class LiquidationOiWatchManager {
    *  (isSymbolOwned() / onLiquidationEvent's own existing-lifecycle
    *  branch) and a valid forensic base for any FUTURE closeActive()
    *  call -- not historical fidelity. */
-  restoreActiveLifecycle(symbol: string, globalSignalId: string, ownershipId: string, victim: Side, sameDirectionLiqUsd: number, extremePrice: number, nowMs: number): void {
+  restoreActiveLifecycle(
+    symbol: string,
+    globalSignalId: string,
+    ownershipId: string,
+    victim: Side,
+    sameDirectionLiqUsd: number,
+    extremePrice: number,
+    nowMs: number,
+  ): void {
     if (this.symbols.has(symbol)) return; // never overwrite a genuinely live in-memory lifecycle
     const episode: LiquidationOiEpisodeState = {
-      symbol, victim, firstLiqTs: nowMs, latestLiqTs: nowMs, eventCount: 1, sameDirectionLiqUsd,
-      startPrice: extremePrice, extremePrice, extremeTs: nowMs,
-      startOiQuantity: null, currentOiQuantity: null, currentOiTs: null, minOiQuantity: null, minOiTs: null,
+      symbol,
+      victim,
+      firstLiqTs: nowMs,
+      latestLiqTs: nowMs,
+      eventCount: 1,
+      sameDirectionLiqUsd,
+      startPrice: extremePrice,
+      extremePrice,
+      extremeTs: nowMs,
+      startOiQuantity: null,
+      currentOiQuantity: null,
+      currentOiTs: null,
+      minOiQuantity: null,
+      minOiTs: null,
     };
     const lifecycle: SymbolLifecycle = {
-      episodeId: globalSignalId, ownershipId, globalSignalId, globalState: "ACTIVE", episode, watchResult: null, entryResult: null,
-      enteredExhaustionCandidateAt: null, lastTickAt: nowMs, lastMeaningfulProgressAt: nowMs,
-      liqUsdAtLastMeaningfulProgress: sameDirectionLiqUsd, extremeAtLastMeaningfulProgress: extremePrice, minOiAtLastMeaningfulProgress: null,
-      lastLoggedWatchReasonCode: null, lastLoggedEntryReasonCode: null, lastLoggedClearingResult: null,
-      episodeEndDetection: null, episodeEndOiQuantity: null, episodeEndPrice: null, episodeEndTime: null,
+      episodeId: globalSignalId,
+      ownershipId,
+      globalSignalId,
+      globalState: "ACTIVE",
+      episode,
+      watchResult: null,
+      entryResult: null,
+      enteredExhaustionCandidateAt: null,
+      lastTickAt: nowMs,
+      lastMeaningfulProgressAt: nowMs,
+      liqUsdAtLastMeaningfulProgress: sameDirectionLiqUsd,
+      extremeAtLastMeaningfulProgress: extremePrice,
+      minOiAtLastMeaningfulProgress: null,
+      lastLoggedWatchReasonCode: null,
+      lastLoggedEntryReasonCode: null,
+      lastLoggedClearingResult: null,
+      episodeEndDetection: null,
+      episodeEndOiQuantity: null,
+      episodeEndPrice: null,
+      episodeEndTime: null,
     };
     this.symbols.set(symbol, lifecycle);
     this.ownership.hydrate(symbol, ownershipId, victim);
-    this.forensic({ ...this.base(lifecycle, symbol, nowMs), type: "RESTART_RECONCILIATION", outcome: "ACTIVE_LIFECYCLE_RESTORED", detail: `symbol locked in-memory after restart, ownershipId=${ownershipId}` } as unknown as ForensicEvent);
+    this.forensic({
+      ...this.base(lifecycle, symbol, nowMs),
+      type: "RESTART_RECONCILIATION",
+      outcome: "ACTIVE_LIFECYCLE_RESTORED",
+      detail: `symbol locked in-memory after restart, ownershipId=${ownershipId}`,
+    } as unknown as ForensicEvent);
   }
 
   /** Sep 17 2026 (Karo), operator-approved final capacity architecture,
@@ -775,34 +1329,86 @@ export class LiquidationOiWatchManager {
    *  cursor) -- irrelevant for continuing to wait, and only matters if
    *  a provisional-end reopen sends this symbol back to
    *  EXHAUSTION_CANDIDATE, which causally restarts detection anyway. */
-  restoreWaitLifecycle(params: {
-    symbol: string; ownershipId: string; episodeId: string; victim: Side;
-    firstLiqTs: number; latestLiqTs: number; eventCount: number; sameDirectionLiqUsd: number;
-    startPrice: number; extremePrice: number; extremeTs: number;
-    startOiQuantity: number | null; currentOiQuantity: number | null; currentOiTs: number | null;
-    minOiQuantity: number | null; minOiTs: number | null;
-    episodeEndOiQuantity: number | null; episodeEndPrice: number | null; episodeEndTime: number | null;
-  }, nowMs: number): void {
+  restoreWaitLifecycle(
+    params: {
+      symbol: string;
+      ownershipId: string;
+      episodeId: string;
+      victim: Side;
+      firstLiqTs: number;
+      latestLiqTs: number;
+      eventCount: number;
+      sameDirectionLiqUsd: number;
+      startPrice: number;
+      extremePrice: number;
+      extremeTs: number;
+      startOiQuantity: number | null;
+      currentOiQuantity: number | null;
+      currentOiTs: number | null;
+      minOiQuantity: number | null;
+      minOiTs: number | null;
+      episodeEndOiQuantity: number | null;
+      episodeEndPrice: number | null;
+      episodeEndTime: number | null;
+    },
+    nowMs: number,
+  ): void {
     if (this.symbols.has(params.symbol)) return; // never overwrite a genuinely live in-memory lifecycle
     const episode: LiquidationOiEpisodeState = {
-      symbol: params.symbol, victim: params.victim, firstLiqTs: params.firstLiqTs, latestLiqTs: params.latestLiqTs,
-      eventCount: params.eventCount, sameDirectionLiqUsd: params.sameDirectionLiqUsd,
-      startPrice: params.startPrice, extremePrice: params.extremePrice, extremeTs: params.extremeTs,
-      startOiQuantity: params.startOiQuantity, currentOiQuantity: params.currentOiQuantity, currentOiTs: params.currentOiTs,
-      minOiQuantity: params.minOiQuantity, minOiTs: params.minOiTs,
+      symbol: params.symbol,
+      victim: params.victim,
+      firstLiqTs: params.firstLiqTs,
+      latestLiqTs: params.latestLiqTs,
+      eventCount: params.eventCount,
+      sameDirectionLiqUsd: params.sameDirectionLiqUsd,
+      startPrice: params.startPrice,
+      extremePrice: params.extremePrice,
+      extremeTs: params.extremeTs,
+      startOiQuantity: params.startOiQuantity,
+      currentOiQuantity: params.currentOiQuantity,
+      currentOiTs: params.currentOiTs,
+      minOiQuantity: params.minOiQuantity,
+      minOiTs: params.minOiTs,
     };
     const lifecycle: SymbolLifecycle = {
-      episodeId: params.episodeId, ownershipId: params.ownershipId, globalSignalId: null, globalState: "WAIT_FOR_POST_EPISODE_OI_CREATION",
-      episode, watchResult: { qualifies: true, episodePercentileRank: 0, oiDestructionFractionAtQualification: null, displacementAtr: 0, liquidationToOiRatio: null } as unknown as WatchQualificationResult,
-      entryResult: null, enteredExhaustionCandidateAt: null, lastTickAt: nowMs, lastMeaningfulProgressAt: nowMs,
-      liqUsdAtLastMeaningfulProgress: params.sameDirectionLiqUsd, extremeAtLastMeaningfulProgress: params.extremePrice, minOiAtLastMeaningfulProgress: params.minOiQuantity,
-      lastLoggedWatchReasonCode: null, lastLoggedEntryReasonCode: null, lastLoggedClearingResult: null,
-      episodeEndDetection: initEpisodeEndDetectionState(params.extremePrice, params.episodeEndTime ?? nowMs),
-      episodeEndOiQuantity: params.episodeEndOiQuantity, episodeEndPrice: params.episodeEndPrice, episodeEndTime: params.episodeEndTime,
+      episodeId: params.episodeId,
+      ownershipId: params.ownershipId,
+      globalSignalId: null,
+      globalState: "WAIT_FOR_POST_EPISODE_OI_CREATION",
+      episode,
+      watchResult: {
+        qualifies: true,
+        episodePercentileRank: 0,
+        oiDestructionFractionAtQualification: null,
+        displacementAtr: 0,
+        liquidationToOiRatio: null,
+      } as unknown as WatchQualificationResult,
+      entryResult: null,
+      enteredExhaustionCandidateAt: null,
+      lastTickAt: nowMs,
+      lastMeaningfulProgressAt: nowMs,
+      liqUsdAtLastMeaningfulProgress: params.sameDirectionLiqUsd,
+      extremeAtLastMeaningfulProgress: params.extremePrice,
+      minOiAtLastMeaningfulProgress: params.minOiQuantity,
+      lastLoggedWatchReasonCode: null,
+      lastLoggedEntryReasonCode: null,
+      lastLoggedClearingResult: null,
+      episodeEndDetection: initEpisodeEndDetectionState(
+        params.extremePrice,
+        params.episodeEndTime ?? nowMs,
+      ),
+      episodeEndOiQuantity: params.episodeEndOiQuantity,
+      episodeEndPrice: params.episodeEndPrice,
+      episodeEndTime: params.episodeEndTime,
     };
     this.symbols.set(params.symbol, lifecycle);
     this.ownership.hydrate(params.symbol, params.ownershipId, params.victim);
-    this.forensic({ ...this.base(lifecycle, params.symbol, nowMs), type: "RESTART_RECONCILIATION", outcome: "WAIT_LIFECYCLE_RESTORED", detail: `symbol locked in-memory after restart, ownershipId=${params.ownershipId}, continuing causal capacity evaluation` } as unknown as ForensicEvent);
+    this.forensic({
+      ...this.base(lifecycle, params.symbol, nowMs),
+      type: "RESTART_RECONCILIATION",
+      outcome: "WAIT_LIFECYCLE_RESTORED",
+      detail: `symbol locked in-memory after restart, ownershipId=${params.ownershipId}, continuing causal capacity evaluation`,
+    } as unknown as ForensicEvent);
   }
 
   /** Returns the persistence-ready shape of a symbol currently in
@@ -810,45 +1416,112 @@ export class LiquidationOiWatchManager {
    *  (the caller uses null to mean "delete the persisted doc, if
    *  any"). Pure read, no side effects. */
   getWaitStateForPersistence(symbol: string): {
-    symbol: string; ownershipId: string; episodeId: string; victim: Side;
-    firstLiqTs: number; latestLiqTs: number; eventCount: number; sameDirectionLiqUsd: number;
-    startPrice: number; extremePrice: number; extremeTs: number;
-    startOiQuantity: number | null; currentOiQuantity: number | null; currentOiTs: number | null;
-    minOiQuantity: number | null; minOiTs: number | null;
-    episodeEndOiQuantity: number | null; episodeEndPrice: number | null; episodeEndTime: number | null;
+    symbol: string;
+    ownershipId: string;
+    episodeId: string;
+    victim: Side;
+    firstLiqTs: number;
+    latestLiqTs: number;
+    eventCount: number;
+    sameDirectionLiqUsd: number;
+    startPrice: number;
+    extremePrice: number;
+    extremeTs: number;
+    startOiQuantity: number | null;
+    currentOiQuantity: number | null;
+    currentOiTs: number | null;
+    minOiQuantity: number | null;
+    minOiTs: number | null;
+    episodeEndOiQuantity: number | null;
+    episodeEndPrice: number | null;
+    episodeEndTime: number | null;
   } | null {
     const lc = this.symbols.get(symbol);
-    if (lc === undefined || lc.globalState !== "WAIT_FOR_POST_EPISODE_OI_CREATION") return null;
+    if (
+      lc === undefined ||
+      lc.globalState !== "WAIT_FOR_POST_EPISODE_OI_CREATION"
+    )
+      return null;
     return {
-      symbol, ownershipId: lc.ownershipId, episodeId: lc.episodeId, victim: lc.episode.victim,
-      firstLiqTs: lc.episode.firstLiqTs, latestLiqTs: lc.episode.latestLiqTs, eventCount: lc.episode.eventCount, sameDirectionLiqUsd: lc.episode.sameDirectionLiqUsd,
-      startPrice: lc.episode.startPrice, extremePrice: lc.episode.extremePrice, extremeTs: lc.episode.extremeTs,
-      startOiQuantity: lc.episode.startOiQuantity, currentOiQuantity: lc.episode.currentOiQuantity, currentOiTs: lc.episode.currentOiTs,
-      minOiQuantity: lc.episode.minOiQuantity, minOiTs: lc.episode.minOiTs,
-      episodeEndOiQuantity: lc.episodeEndOiQuantity, episodeEndPrice: lc.episodeEndPrice, episodeEndTime: lc.episodeEndTime,
+      symbol,
+      ownershipId: lc.ownershipId,
+      episodeId: lc.episodeId,
+      victim: lc.episode.victim,
+      firstLiqTs: lc.episode.firstLiqTs,
+      latestLiqTs: lc.episode.latestLiqTs,
+      eventCount: lc.episode.eventCount,
+      sameDirectionLiqUsd: lc.episode.sameDirectionLiqUsd,
+      startPrice: lc.episode.startPrice,
+      extremePrice: lc.episode.extremePrice,
+      extremeTs: lc.episode.extremeTs,
+      startOiQuantity: lc.episode.startOiQuantity,
+      currentOiQuantity: lc.episode.currentOiQuantity,
+      currentOiTs: lc.episode.currentOiTs,
+      minOiQuantity: lc.episode.minOiQuantity,
+      minOiTs: lc.episode.minOiTs,
+      episodeEndOiQuantity: lc.episodeEndOiQuantity,
+      episodeEndPrice: lc.episodeEndPrice,
+      episodeEndTime: lc.episodeEndTime,
     };
   }
 
-  private recomputeMeaningfulProgressCheckpoint(lifecycle: SymbolLifecycle, atr3m: number | null, nowMs: number): Pick<SymbolLifecycle, "lastMeaningfulProgressAt" | "liqUsdAtLastMeaningfulProgress" | "extremeAtLastMeaningfulProgress" | "minOiAtLastMeaningfulProgress"> {
+  private recomputeMeaningfulProgressCheckpoint(
+    lifecycle: SymbolLifecycle,
+    atr3m: number | null,
+    nowMs: number,
+  ): Pick<
+    SymbolLifecycle,
+    | "lastMeaningfulProgressAt"
+    | "liqUsdAtLastMeaningfulProgress"
+    | "extremeAtLastMeaningfulProgress"
+    | "minOiAtLastMeaningfulProgress"
+  > {
     let progressed = false;
 
     const liqBase = lifecycle.liqUsdAtLastMeaningfulProgress;
-    const liqProgressFraction = liqBase > 0 ? (lifecycle.episode.sameDirectionLiqUsd - liqBase) / liqBase : 0;
-    if (liqProgressFraction >= this.config.minMeaningfulLiqProgressFraction) progressed = true;
+    const liqProgressFraction =
+      liqBase > 0
+        ? (lifecycle.episode.sameDirectionLiqUsd - liqBase) / liqBase
+        : 0;
+    if (liqProgressFraction >= this.config.minMeaningfulLiqProgressFraction)
+      progressed = true;
 
     if (atr3m !== null && atr3m > 0) {
-      const extremeProgressAtr = Math.abs(lifecycle.episode.extremePrice - lifecycle.extremeAtLastMeaningfulProgress) / atr3m;
-      if (extremeProgressAtr >= this.config.minMeaningfulExtremeProgressAtr) progressed = true;
+      const extremeProgressAtr =
+        Math.abs(
+          lifecycle.episode.extremePrice -
+            lifecycle.extremeAtLastMeaningfulProgress,
+        ) / atr3m;
+      if (extremeProgressAtr >= this.config.minMeaningfulExtremeProgressAtr)
+        progressed = true;
     }
 
     const startOi = lifecycle.episode.startOiQuantity;
     const currentMinOi = lifecycle.episode.minOiQuantity;
-    if (startOi !== null && startOi > 0 && currentMinOi !== null && lifecycle.minOiAtLastMeaningfulProgress !== null) {
-      const additionalDestructionFraction = (lifecycle.minOiAtLastMeaningfulProgress - currentMinOi) / startOi;
-      if (additionalDestructionFraction >= this.config.minMeaningfulOiProgressFraction) progressed = true;
+    if (
+      startOi !== null &&
+      startOi > 0 &&
+      currentMinOi !== null &&
+      lifecycle.minOiAtLastMeaningfulProgress !== null
+    ) {
+      const additionalDestructionFraction =
+        (lifecycle.minOiAtLastMeaningfulProgress - currentMinOi) / startOi;
+      if (
+        additionalDestructionFraction >=
+        this.config.minMeaningfulOiProgressFraction
+      )
+        progressed = true;
     }
 
-    if (!progressed) return { lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt, liqUsdAtLastMeaningfulProgress: lifecycle.liqUsdAtLastMeaningfulProgress, extremeAtLastMeaningfulProgress: lifecycle.extremeAtLastMeaningfulProgress, minOiAtLastMeaningfulProgress: lifecycle.minOiAtLastMeaningfulProgress };
+    if (!progressed)
+      return {
+        lastMeaningfulProgressAt: lifecycle.lastMeaningfulProgressAt,
+        liqUsdAtLastMeaningfulProgress:
+          lifecycle.liqUsdAtLastMeaningfulProgress,
+        extremeAtLastMeaningfulProgress:
+          lifecycle.extremeAtLastMeaningfulProgress,
+        minOiAtLastMeaningfulProgress: lifecycle.minOiAtLastMeaningfulProgress,
+      };
     return {
       lastMeaningfulProgressAt: nowMs,
       liqUsdAtLastMeaningfulProgress: lifecycle.episode.sameDirectionLiqUsd,
@@ -857,7 +1530,14 @@ export class LiquidationOiWatchManager {
     };
   }
 
-  private assertTransition(from: GlobalLifecycleState, to: GlobalLifecycleState, symbol: string): void {
-    if (!isValidGlobalTransition(from, to)) throw new Error(`Invalid global lifecycle transition for ${symbol}: ${from} -> ${to}`);
+  private assertTransition(
+    from: GlobalLifecycleState,
+    to: GlobalLifecycleState,
+    symbol: string,
+  ): void {
+    if (!isValidGlobalTransition(from, to))
+      throw new Error(
+        `Invalid global lifecycle transition for ${symbol}: ${from} -> ${to}`,
+      );
   }
 }
