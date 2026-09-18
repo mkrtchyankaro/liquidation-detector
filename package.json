@@ -106,7 +106,9 @@
     "test:mongo-ttl-helper": "tsx tests/mongo-ttl-helper.test.ts",
     "test:liquidation-oi-concurrent-tick-race": "tsx tests/liquidation-oi-concurrent-tick-race.test.ts",
     "test:liquidation-oi-lifecycle-correction": "tsx tests/liquidation-oi-lifecycle-correction.test.ts",
-    "test:liquidation-oi-wait-restart-persistence": "tsx tests/liquidation-oi-wait-restart-persistence.test.ts"
+    "test:liquidation-oi-wait-restart-persistence": "tsx tests/liquidation-oi-wait-restart-persistence.test.ts",
+    "lox:timeline": "tsx scripts/lox-episode-timeline.ts",
+    "lox:episodes": "tsx scripts/lox-episode-timeline.ts --list"
   },
   "engines": {
     "node": ">=18.17"
