@@ -222,6 +222,16 @@ export class MongoClientWrapper {
     return dbs ? dbs.own.collection<LiquidationOiWaitStateDoc>("liquidation_oi_wait_states") : null;
   }
 
+  /** Sep 19 2026 (Karo), operator-requested Episode Research capture --
+   *  ONE doc per finished liquidation episode (entry or no-entry
+   *  alike), full event chain + Flush/Recovery flow + basis. Purely
+   *  observational/research storage -- read by nothing in the live
+   *  strategy. */
+  async liquidationOiEpisodeResearch(): Promise<Collection<import("../../domain/liquidation-oi-strategy/episode-research-recorder").EpisodeResearchRecord & { _persistedAt: Date }> | null> {
+    const dbs = await this.ensure();
+    return dbs ? dbs.own.collection("liquidation_oi_episode_research") : null;
+  }
+
   /** Sep 14 2026 (Karo), operator-requested -- historical ROTATION
    *  episode backfill. GLOBAL, own database. See
    *  rotation-episode-history.model.ts's own doc comment for the full

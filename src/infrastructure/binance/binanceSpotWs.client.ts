@@ -1,6 +1,6 @@
 import WebSocket from "ws";
 import { EventEmitter } from "events";
-import type { Trade } from "../../shared/common.types";
+import type { Trade, BookTicker } from "../../shared/common.types";
 import { childLogger } from "../logging/logger";
 
 const log = childLogger({ mod: "binance-spot-ws" });
@@ -8,14 +8,19 @@ const log = childLogger({ mod: "binance-spot-ws" });
 /**
  * Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
  * observation.
+ * Sep 19 2026 (Karo), operator-requested EXTENSION -- Episode Research
+ * capture (episode-research-recorder.ts) needs Spot bid/ask/mid at
+ * arbitrary moments (episode start, every liquidation event, every
+ * new extreme, episode end, entry) for basis (futuresMid - spotMid)
+ * tracking. Extended to ALSO subscribe to @bookTicker, alongside the
+ * existing @aggTrade -- still ONE client, ONE connection, per symbol
+ * set (Binance's combined-stream endpoint accepts a mixed stream
+ * list).
  *
  * Deliberately a SEPARATE, minimal client from BinanceWsClient
  * (binanceWs.client.ts) -- that one is production-critical Futures
- * infrastructure (kline/bookTicker/depth/forceOrder/aggTrade across
- * two routed endpoints) and is NOT modified here. Binance Spot is a
- * genuinely different base URL, a different combined-stream endpoint
- * shape, and this client only ever needs ONE stream type (aggTrade)
- * -- a second full-featured client would be needless surface area.
+ * infrastructure and is NOT modified here. Binance Spot is a
+ * genuinely different base URL and endpoint shape.
  *
  * The reconnect/backoff pattern below (exponential, capped at 30s,
  * ping/pong, resubscribe on reconnect via the same combined-stream
@@ -24,9 +29,9 @@ const log = childLogger({ mod: "binance-spot-ws" });
  * reconnection patterns" instruction -- not literally shared code
  * (that class is private/unexported there), but the same behavior.
  *
- * Purely observational: this client's only consumer is
- * OrderFlowEpisodeTracker (order-flow-episode-tracker.ts). No trading
- * decision anywhere reads from it directly.
+ * Purely observational: consumers are RecoveryFlowTracker (aggTrade)
+ * and MarketSnapshotCache + EpisodeResearchRecorder (aggTrade +
+ * bookTicker). No trading decision anywhere reads from this directly.
  */
 
 interface BinanceSpotAggTradeEvent {
@@ -42,6 +47,15 @@ interface BinanceSpotAggTradeEvent {
   m: boolean;
 }
 
+interface BinanceSpotBookTickerEvent {
+  u: number;
+  s: string;
+  b: string;
+  B: string;
+  a: string;
+  A: string;
+}
+
 interface SpotCombinedStreamEvent {
   stream?: string;
   data?: unknown;
@@ -49,6 +63,7 @@ interface SpotCombinedStreamEvent {
 
 export interface BinanceSpotWsEvents {
   aggTrade: (t: Trade) => void;
+  bookTicker: (b: BookTicker) => void;
   open: () => void;
   close: (code: number) => void;
   error: (err: Error) => void;
@@ -71,7 +86,7 @@ export class BinanceSpotWsClient extends EventEmitter {
     symbols: string[],
   ) {
     super();
-    this.streams = symbols.map((s) => `${s.toLowerCase()}@aggTrade`);
+    this.streams = symbols.flatMap((s) => [`${s.toLowerCase()}@aggTrade`, `${s.toLowerCase()}@bookTicker`]);
   }
 
   start(): void {
@@ -153,22 +168,43 @@ export class BinanceSpotWsClient extends EventEmitter {
     }
     const stream = msg.stream ?? "";
     const data = msg.data as Record<string, unknown> | undefined;
-    if (!data || !stream.includes("@aggTrade")) return;
+    if (!data) return;
 
-    const ev = data as unknown as BinanceSpotAggTradeEvent;
-    const price = Number(ev.p);
-    const qty = Number(ev.q);
-    if (!(price > 0) || !(qty > 0)) return; // defensive -- never happens on a real feed
-    const trade: Trade = {
-      symbol: ev.s,
-      timestamp: ev.T,
-      price,
-      quantity: qty,
-      quoteQty: price * qty,
-      isBuyerMaker: ev.m,
-      aggressor: ev.m ? "SELL" : "BUY",
-      aggTradeId: ev.a,
-    };
-    this.emit("aggTrade", trade);
+    if (stream.includes("@aggTrade")) {
+      const ev = data as unknown as BinanceSpotAggTradeEvent;
+      const price = Number(ev.p);
+      const qty = Number(ev.q);
+      if (!(price > 0) || !(qty > 0)) return; // defensive -- never happens on a real feed
+      const trade: Trade = {
+        symbol: ev.s,
+        timestamp: ev.T,
+        price,
+        quantity: qty,
+        quoteQty: price * qty,
+        isBuyerMaker: ev.m,
+        aggressor: ev.m ? "SELL" : "BUY",
+        aggTradeId: ev.a,
+      };
+      this.emit("aggTrade", trade);
+    } else if (stream.includes("@bookTicker")) {
+      const ev = data as unknown as BinanceSpotBookTickerEvent;
+      const bid = Number(ev.b);
+      const ask = Number(ev.a);
+      if (!(bid > 0) || !(ask > 0)) return;
+      const bt: BookTicker = {
+        symbol: ev.s,
+        bid,
+        bidQty: Number(ev.B),
+        ask,
+        askQty: Number(ev.A),
+        // Sep 19 2026 (Karo) -- Binance's SPOT bookTicker payload
+        // carries no exchange timestamp field (unlike Futures' own T);
+        // local receipt time is used, and MarketSnapshotCache's own
+        // "data age" tracking already accounts for this by comparing
+        // against wall-clock at read time regardless of source.
+        timestamp: Date.now(),
+      };
+      this.emit("bookTicker", bt);
+    }
   }
 }

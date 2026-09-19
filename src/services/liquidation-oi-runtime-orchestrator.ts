@@ -12,6 +12,8 @@ import type { LiquidationOiStrategyConfig } from "../domain/liquidation-oi-strat
 import type { CapacityModelCoefficients } from "../domain/liquidation-oi-strategy/initial-capacity-model";
 import type { LiquidationOiWaitStateRepository } from "../infrastructure/mongo/liquidation-oi-wait-state.repository";
 import { RecoveryFlowTracker, type RecoveryLifecycleSnapshot } from "../domain/liquidation-oi-strategy/recovery-flow-tracker";
+import { EpisodeResearchRecorder, type ResearchLifecycleSnapshot } from "../domain/liquidation-oi-strategy/episode-research-recorder";
+import type { EpisodeResearchRepository } from "../infrastructure/mongo/episode-research.repository";
 import { computePositionSizing } from "../domain/liquidation-oi-strategy/sizing-adapter";
 import { candidateTradeSideForVictim } from "../domain/liquidation-oi-strategy/lifecycle.types";
 import { newPendingUserExecution, type LiquidationOiUserExecutionState } from "../domain/liquidation-oi-strategy/user-execution.types";
@@ -21,6 +23,7 @@ import { StrategyOrderRepository } from "../infrastructure/mongo/strategy-order.
 import { captureOrderBookObservation, type OrderBookObservation, type WallLookup } from "../domain/liquidation-oi-strategy/order-book-observation";
 import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG, type LiquidationOiActiveLifecycleConfig } from "../domain/liquidation-oi-strategy/active-lifecycle-config";
 import { formatEntryMessage, formatRecoveryFlowLine } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { formatEpisodeResearchSummary } from "../domain/liquidation-oi-strategy/episode-research-summary-formatter";
 import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
 import { displayNameFromUserId, formatCompactUsd } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import { resolveUserExecutionMode } from "../domain/liquidation-oi-strategy/user-execution-mode";
@@ -127,6 +130,13 @@ export class LiquidationOiRuntimeOrchestrator {
      *  waitStateRepo above). Purely observational -- read at
      *  ENTRY_READY construction time only, never gates anything. */
     private readonly recoveryFlowTracker: RecoveryFlowTracker | null = null,
+    /** Sep 19 2026 (Karo), operator-requested Episode Research capture
+     *  -- full event-chain + Flush/Recovery flow + basis, persisted
+     *  for EVERY episode (entry or no-entry alike). Optional, default
+     *  null (no-op) for every existing call site/test. Purely
+     *  observational/research -- never gates anything. */
+    private readonly episodeResearchRecorder: EpisodeResearchRecorder | null = null,
+    private readonly episodeResearchRepo: EpisodeResearchRepository | null = null,
   ) {
     this.watchManager = new LiquidationOiWatchManager(strategyConfig, undefined, undefined, forensic);
     log.info(`[LOX_RUNTIME] constructed observationEnabled=${observationEnabled} executionEnabled=${executionEnabled}`);
@@ -137,12 +147,14 @@ export class LiquidationOiRuntimeOrchestrator {
   /** Sep 19 2026 (Karo), operator-requested Recovery Flow -- narrows a
    *  full SymbolLifecycle down to the small structural shape
    *  RecoveryFlowTracker actually needs. */
-  private toLifecycleSnapshot(lc: ReturnType<LiquidationOiWatchManager["getLifecycle"]>): RecoveryLifecycleSnapshot | null {
+  private toLifecycleSnapshot(lc: ReturnType<LiquidationOiWatchManager["getLifecycle"]>): (RecoveryLifecycleSnapshot & ResearchLifecycleSnapshot) | null {
     if (lc === null) return null;
     return {
       episodeId: lc.episodeId, globalState: lc.globalState, victim: lc.episode.victim,
       episodeMaxAdverseExtreme: lc.episodeMaxAdverseExtreme,
       episodeEndPrice: lc.episodeEndPrice, episodeEndTime: lc.episodeEndTime,
+      episodeStartPrice: lc.episode.startPrice, episodeStartOiQuantity: lc.episode.startOiQuantity,
+      sameDirectionLiqUsd: lc.episode.sameDirectionLiqUsd,
     };
   }
 
@@ -194,7 +206,7 @@ export class LiquidationOiRuntimeOrchestrator {
     // longer reflects reality, not a write something else depends on
     // being durable before the next tick.
     const before = this.waitStateRepo !== null ? this.watchManager.getLifecycle(event.symbol)?.globalState : undefined;
-    const beforeFull = this.recoveryFlowTracker !== null ? this.watchManager.getLifecycle(event.symbol) : null;
+    const beforeFull = (this.recoveryFlowTracker !== null || this.episodeResearchRecorder !== null) ? this.watchManager.getLifecycle(event.symbol) : null;
     this.watchManager.onLiquidationEvent(event, oiAtEvent);
     if (this.waitStateRepo !== null && before === "WAIT_FOR_POST_EPISODE_OI_CREATION") {
       const after = this.watchManager.getLifecycle(event.symbol)?.globalState;
@@ -202,9 +214,20 @@ export class LiquidationOiRuntimeOrchestrator {
         void this.waitStateRepo.delete(event.symbol);
       }
     }
+    const afterFull = (this.recoveryFlowTracker !== null || this.episodeResearchRecorder !== null) ? this.watchManager.getLifecycle(event.symbol) : null;
     if (this.recoveryFlowTracker !== null) {
-      const afterFull = this.watchManager.getLifecycle(event.symbol);
       this.recoveryFlowTracker.onLifecycleTransition(event.symbol, this.toLifecycleSnapshot(beforeFull), this.toLifecycleSnapshot(afterFull), event.timestamp);
+    }
+    if (this.episodeResearchRecorder !== null) {
+      this.episodeResearchRecorder.onLifecycleTransition(event.symbol, this.toLifecycleSnapshot(beforeFull), this.toLifecycleSnapshot(afterFull), event.timestamp);
+      // isNewExtreme: THIS specific liquidation event is what pushed
+      // episodeMaxAdverseExtreme further -- derived by comparing the
+      // before/after snapshots taken around THIS exact call, so it is
+      // never conflated with a candle-based extreme update (those are
+      // detected separately, inside onTick's own hook below).
+      const isNewExtreme = beforeFull !== null && afterFull !== null && beforeFull.episodeMaxAdverseExtreme !== afterFull.episodeMaxAdverseExtreme;
+      const cumulativeLiqUsd = afterFull?.episode.sameDirectionLiqUsd ?? event.quoteQty;
+      this.episodeResearchRecorder.onLiquidationEvent(event.symbol, event.timestamp, event.victim, event.quoteQty / event.price, event.quoteQty, event.price, cumulativeLiqUsd, isNewExtreme);
     }
   }
 
@@ -252,6 +275,10 @@ export class LiquidationOiRuntimeOrchestrator {
     if (this.recoveryFlowTracker !== null) {
       this.recoveryFlowTracker.onLifecycleTransition(symbol, this.toLifecycleSnapshot(before), this.toLifecycleSnapshot(after), nowMs);
       this.recoveryFlowTracker.ingestOiSamples(symbol, oiHistory, nowMs);
+    }
+    if (this.episodeResearchRecorder !== null) {
+      this.episodeResearchRecorder.onLifecycleTransition(symbol, this.toLifecycleSnapshot(before), this.toLifecycleSnapshot(after), nowMs);
+      this.episodeResearchRecorder.ingestOiSamples(symbol, oiHistory, nowMs);
     }
 
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
@@ -376,6 +403,22 @@ export class LiquidationOiRuntimeOrchestrator {
       recoveryMoveAtr: atr3mAtEntry !== null && atr3mAtEntry > 0 ? (recoveryStatsRaw.recoveryConfirmationPrice - recoveryStatsRaw.recoveryExtremePrice) / atr3mAtEntry : null,
     } : null;
     const flowLine = recoveryStats !== null ? formatRecoveryFlowLine(recoveryStats) : null;
+
+    // Sep 19 2026 (Karo), operator-requested Episode Research capture
+    // -- finalizes and persists the FULL research record for this
+    // episode now that it has reached ENTRY_READY. Fire-and-forget on
+    // the Mongo write (best-effort research storage, never something
+    // entry itself waits on) -- the record is already fully computed
+    // synchronously by onEntry() before this.
+    if (this.episodeResearchRecorder !== null) {
+      this.episodeResearchRecorder.onEntry(symbol, nowMs, entryPrice, `netRR=${netRR !== null ? netRR.toFixed(3) : "n/a"}`);
+      const episodeIdNow = this.watchManager.getLifecycle(symbol)?.episodeId ?? null;
+      const finalRecord = episodeIdNow !== null ? this.episodeResearchRecorder.getRecord(symbol, episodeIdNow) : null;
+      if (finalRecord !== null && this.episodeResearchRepo !== null) {
+        void this.episodeResearchRepo.insert(finalRecord);
+        log.info(`[EPISODE_RESEARCH_SUMMARY]\n${formatEpisodeResearchSummary(finalRecord)}`);
+      }
+    }
 
     // Sep 16 2026 (Karo), operator-requested lifecycle fix: the
     // persisted signal starts at ENTRY_READY, NOT ACTIVE -- ACTIVE is

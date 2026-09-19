@@ -40,6 +40,10 @@ import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG } from "./domain/liquidation-oi-strateg
 import { BinanceSpotWsClient } from "./infrastructure/binance/binanceSpotWs.client";
 import { loadBinanceSpotWsConfig } from "./infrastructure/config/binance.config";
 import { RecoveryFlowTracker } from "./domain/liquidation-oi-strategy/recovery-flow-tracker";
+import { MarketSnapshotCache } from "./domain/liquidation-oi-strategy/market-snapshot-cache";
+import { EpisodeResearchRecorder } from "./domain/liquidation-oi-strategy/episode-research-recorder";
+import { EpisodeResearchRepository } from "./infrastructure/mongo/episode-research.repository";
+import { formatEpisodeResearchSummary } from "./domain/liquidation-oi-strategy/episode-research-summary-formatter";
 
 const log = childLogger({ mod: "main" });
 
@@ -191,7 +195,30 @@ async function main(): Promise<void> {
     log.info("LOX Mongo indexes ensured");
   }
   const liquidationOiForensicLogger = childLogger({ mod: "lox-forensic" });
-  const liquidationOiForensicSink = (event: import("./domain/liquidation-oi-strategy/forensic-events").ForensicEvent): void => liquidationOiForensicLogger.info({ ...event }, `[LOX_FORENSIC_${event.type}]`);
+  // Sep 19 2026 (Karo), operator-requested Episode Research capture --
+  // constructed here (before the sink below, which needs to reference
+  // it) so EVERY episode termination (entry or no-entry alike) can be
+  // finalized and persisted the moment its own EPISODE_TERMINAL
+  // forensic event fires -- the cleanest available hook, since that
+  // event already carries symbol/episodeId/ts/reason exactly as
+  // needed, with zero changes to watch-manager.ts's own pure logic.
+  const marketSnapshotCache = new MarketSnapshotCache();
+  const episodeResearchRecorder = new EpisodeResearchRecorder(marketSnapshotCache);
+  const episodeResearchRepo = new EpisodeResearchRepository(mongo);
+  if (mongoCfg.enabled) {
+    await episodeResearchRepo.ensureIndexes();
+  }
+  const liquidationOiForensicSink = (event: import("./domain/liquidation-oi-strategy/forensic-events").ForensicEvent): void => {
+    liquidationOiForensicLogger.info({ ...event }, `[LOX_FORENSIC_${event.type}]`);
+    if (event.type === "EPISODE_TERMINAL") {
+      const finalRecord = episodeResearchRecorder.onEpisodeTerminal(event.symbol, event.ts, event.reason);
+      if (finalRecord !== null) {
+        void episodeResearchRepo.insert(finalRecord);
+        liquidationOiForensicLogger.info(`[EPISODE_RESEARCH_SUMMARY]\n${formatEpisodeResearchSummary(finalRecord)}`);
+      }
+      episodeResearchRecorder.clear(event.symbol);
+    }
+  };
   // Sep 17 2026 (Karo), operator-approved final capacity architecture,
   // Section 31 -- restart-safe WAIT persistence.
   const liquidationOiWaitStateRepo = new LiquidationOiWaitStateRepository(mongo);
@@ -223,6 +250,8 @@ async function main(): Promise<void> {
     undefined, // activeLifecycleConfig -- default (DEFAULT_ACTIVE_LIFECYCLE_CONFIG)
     liquidationOiWaitStateRepo,
     recoveryFlowTracker,
+    episodeResearchRecorder,
+    episodeResearchRepo,
   );
   // Sep 17 2026 (Karo), operator-requested production-completion pass --
   // Sections L/M/O (termination detection, mandatory cleanup, multi-user
@@ -252,14 +281,31 @@ async function main(): Promise<void> {
   // ws.on("aggTrade", ...) handler is untouched; EventEmitter supports
   // multiple independent listeners on the same event). No new Futures
   // subscription.
-  ws.on("aggTrade", (t) => recoveryFlowTracker.ingestFuturesTrade(t));
+  ws.on("aggTrade", (t) => {
+    recoveryFlowTracker.ingestFuturesTrade(t);
+    episodeResearchRecorder.ingestFuturesTrade(t);
+  });
+  // Sep 19 2026 (Karo), operator-requested Episode Research capture --
+  // ANOTHER additional listener on the SAME already-subscribed Futures
+  // bookTicker stream (market-data-orchestrator.ts's own bookTicker
+  // handling, which drives onTick(), is completely untouched -- this
+  // is purely an extra observer). Feeds MarketSnapshotCache's
+  // "latest Futures bid/ask" side, read by EpisodeResearchRecorder at
+  // arbitrary moments (episode start, each liquidation event, each
+  // new extreme, episode end, entry).
+  ws.on("bookTicker", (bt) => marketSnapshotCache.ingestFuturesBookTicker(bt));
   // Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
   // observation -- a genuinely SEPARATE WebSocket connection (Binance
   // Spot's own base URL), since no Spot market-data infrastructure
-  // existed in this project before this feature. Purely observational
-  // -- its only consumer is recoveryFlowTracker.
+  // existed in this project before this feature. Consumers:
+  // recoveryFlowTracker (aggTrade only) and episodeResearchRecorder +
+  // marketSnapshotCache (aggTrade + bookTicker).
   const spotWs = new BinanceSpotWsClient(loadBinanceSpotWsConfig().wsBaseUrl, symbols);
-  spotWs.on("aggTrade", (t) => recoveryFlowTracker.ingestSpotTrade(t));
+  spotWs.on("aggTrade", (t) => {
+    recoveryFlowTracker.ingestSpotTrade(t);
+    episodeResearchRecorder.ingestSpotTrade(t);
+  });
+  spotWs.on("bookTicker", (bt) => marketSnapshotCache.ingestSpotBookTicker(bt));
   spotWs.on("error", (err) => log.warn(`[SPOT_WS_ERROR] ${err.message} -- order-flow observation only, never affects trading`));
   // Sep 8 2026 (Karo) -- CRITICAL FIX: broadcasts system-wide alerts
   // (currently: liq-feed-dead) to EVERY enabled-telegram user, since
