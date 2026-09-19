@@ -26,10 +26,19 @@ module.exports = {
       // ever change again, update BOTH this and max_memory_restart
       // below together, and confirm with `free -h` first rather than
       // trusting a hostname or an old comment.
-      node_args: "--max-old-space-size=2048",
+      // Sep 19 2026 (Karo), operator-reported CRITICAL FIX -- pm2 3.0.0
+      // on this server confirmed NOT applying node_args to the actual
+      // spawned process (pm2 describe showed it correctly, but
+      // /proc/<pid>/cmdline never had it -- confirmed live, twice,
+      // even after a full `pm2 kill` + fresh daemon). Switched to
+      // NODE_OPTIONS in env below instead: Node itself reads this
+      // environment variable directly at startup, independent of how
+      // pm2 constructs its spawn argv, so it cannot be silently
+      // dropped the way node_args was.
       max_memory_restart: "2400M",
       env: {
         NODE_ENV: "production",
+        NODE_OPTIONS: "--max-old-space-size=2048",
       },
     },
   ],
