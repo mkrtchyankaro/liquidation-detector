@@ -11,7 +11,7 @@ import type { AtrLookup } from "../domain/liquidation-oi-strategy/episode-end-de
 import type { LiquidationOiStrategyConfig } from "../domain/liquidation-oi-strategy/config";
 import type { CapacityModelCoefficients } from "../domain/liquidation-oi-strategy/initial-capacity-model";
 import type { LiquidationOiWaitStateRepository } from "../infrastructure/mongo/liquidation-oi-wait-state.repository";
-import { OrderFlowEpisodeTracker, type LifecycleSnapshot } from "../domain/liquidation-oi-strategy/order-flow-episode-tracker";
+import { RecoveryFlowTracker, type RecoveryLifecycleSnapshot } from "../domain/liquidation-oi-strategy/recovery-flow-tracker";
 import { computePositionSizing } from "../domain/liquidation-oi-strategy/sizing-adapter";
 import { candidateTradeSideForVictim } from "../domain/liquidation-oi-strategy/lifecycle.types";
 import { newPendingUserExecution, type LiquidationOiUserExecutionState } from "../domain/liquidation-oi-strategy/user-execution.types";
@@ -20,7 +20,7 @@ import { LiquidationOiGlobalSignalRepository } from "../infrastructure/mongo/liq
 import { StrategyOrderRepository } from "../infrastructure/mongo/strategy-order.repository";
 import { captureOrderBookObservation, type OrderBookObservation, type WallLookup } from "../domain/liquidation-oi-strategy/order-book-observation";
 import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG, type LiquidationOiActiveLifecycleConfig } from "../domain/liquidation-oi-strategy/active-lifecycle-config";
-import { formatEntryMessage, formatFlowLine } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { formatEntryMessage, formatRecoveryFlowLine } from "../domain/liquidation-oi-strategy/telegram-formatter";
 import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
 import { displayNameFromUserId, formatCompactUsd } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import { resolveUserExecutionMode } from "../domain/liquidation-oi-strategy/user-execution-mode";
@@ -118,15 +118,15 @@ export class LiquidationOiRuntimeOrchestrator {
      *  supplied, WAIT_FOR_POST_EPISODE_OI_CREATION state is persisted/
      *  cleared after every tick so it survives restart. */
     private readonly waitStateRepo: LiquidationOiWaitStateRepository | null = null,
-    /** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
-     *  observation -- optional, default null (no-op) for every existing
-     *  call site/test that predates this. When supplied, fed a
-     *  LifecycleSnapshot before/after every onTick()/onLiquidationEvent()
-     *  call (same before/after pattern as waitStateRepo above) so it can
-     *  observe episode start/freeze/resume/stop without any change to
-     *  the pure watch-manager itself. Purely observational -- read at
+    /** Sep 19 2026 (Karo), operator-requested Recovery Flow (final
+     *  extreme -> confirmed entry window) -- SUPERSEDES the earlier
+     *  Episode Flow feature. Optional, default null (no-op) for every
+     *  existing call site/test that predates this. Fed a
+     *  RecoveryLifecycleSnapshot before/after every onTick()/
+     *  onLiquidationEvent() call (same before/after pattern as
+     *  waitStateRepo above). Purely observational -- read at
      *  ENTRY_READY construction time only, never gates anything. */
-    private readonly orderFlowTracker: OrderFlowEpisodeTracker | null = null,
+    private readonly recoveryFlowTracker: RecoveryFlowTracker | null = null,
   ) {
     this.watchManager = new LiquidationOiWatchManager(strategyConfig, undefined, undefined, forensic);
     log.info(`[LOX_RUNTIME] constructed observationEnabled=${observationEnabled} executionEnabled=${executionEnabled}`);
@@ -134,15 +134,15 @@ export class LiquidationOiRuntimeOrchestrator {
 
   getWatchManager(): LiquidationOiWatchManager { return this.watchManager; }
 
-  /** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
-   *  observation -- narrows a full SymbolLifecycle down to the small
-   *  structural shape OrderFlowEpisodeTracker actually needs. */
-  private toLifecycleSnapshot(lc: ReturnType<LiquidationOiWatchManager["getLifecycle"]>): LifecycleSnapshot | null {
+  /** Sep 19 2026 (Karo), operator-requested Recovery Flow -- narrows a
+   *  full SymbolLifecycle down to the small structural shape
+   *  RecoveryFlowTracker actually needs. */
+  private toLifecycleSnapshot(lc: ReturnType<LiquidationOiWatchManager["getLifecycle"]>): RecoveryLifecycleSnapshot | null {
     if (lc === null) return null;
     return {
       episodeId: lc.episodeId, globalState: lc.globalState, victim: lc.episode.victim,
-      startPrice: lc.episode.startPrice, startOiQuantity: lc.episode.startOiQuantity, sameDirectionLiqUsd: lc.episode.sameDirectionLiqUsd,
-      episodeEndPrice: lc.episodeEndPrice, episodeEndOiQuantity: lc.episodeEndOiQuantity,
+      episodeMaxAdverseExtreme: lc.episodeMaxAdverseExtreme,
+      episodeEndPrice: lc.episodeEndPrice, episodeEndTime: lc.episodeEndTime,
     };
   }
 
@@ -194,7 +194,7 @@ export class LiquidationOiRuntimeOrchestrator {
     // longer reflects reality, not a write something else depends on
     // being durable before the next tick.
     const before = this.waitStateRepo !== null ? this.watchManager.getLifecycle(event.symbol)?.globalState : undefined;
-    const beforeFull = this.orderFlowTracker !== null ? this.watchManager.getLifecycle(event.symbol) : null;
+    const beforeFull = this.recoveryFlowTracker !== null ? this.watchManager.getLifecycle(event.symbol) : null;
     this.watchManager.onLiquidationEvent(event, oiAtEvent);
     if (this.waitStateRepo !== null && before === "WAIT_FOR_POST_EPISODE_OI_CREATION") {
       const after = this.watchManager.getLifecycle(event.symbol)?.globalState;
@@ -202,9 +202,9 @@ export class LiquidationOiRuntimeOrchestrator {
         void this.waitStateRepo.delete(event.symbol);
       }
     }
-    if (this.orderFlowTracker !== null) {
+    if (this.recoveryFlowTracker !== null) {
       const afterFull = this.watchManager.getLifecycle(event.symbol);
-      this.orderFlowTracker.onLifecycleTransition(event.symbol, this.toLifecycleSnapshot(beforeFull), this.toLifecycleSnapshot(afterFull), event.timestamp);
+      this.recoveryFlowTracker.onLifecycleTransition(event.symbol, this.toLifecycleSnapshot(beforeFull), this.toLifecycleSnapshot(afterFull), event.timestamp);
     }
   }
 
@@ -249,8 +249,9 @@ export class LiquidationOiRuntimeOrchestrator {
     this.watchManager.onTick(symbol, percentile, oiHistory, currentPrice, atr3m, atr3mAgeMs, nowMs, new1mCandles, all3mCandlesSorted, atrLookup, testEconomicsOverride);
     const after = this.watchManager.getLifecycle(symbol);
 
-    if (this.orderFlowTracker !== null) {
-      this.orderFlowTracker.onLifecycleTransition(symbol, this.toLifecycleSnapshot(before), this.toLifecycleSnapshot(after), nowMs);
+    if (this.recoveryFlowTracker !== null) {
+      this.recoveryFlowTracker.onLifecycleTransition(symbol, this.toLifecycleSnapshot(before), this.toLifecycleSnapshot(after), nowMs);
+      this.recoveryFlowTracker.ingestOiSamples(symbol, oiHistory, nowMs);
     }
 
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
@@ -358,13 +359,23 @@ export class LiquidationOiRuntimeOrchestrator {
 
     log.info(`[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} strategyInvalidation=${strategyInvalidationPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} atr3mAtEntry=${atr3mAtEntry} netRR=${netRR !== null ? netRR.toFixed(3) : "n/a"} oiToLiqRatio=${oiToLiqRatio !== null ? oiToLiqRatio.toFixed(3) : "n/a"} postEndOiCreationUsd=${postEndOiCreationUsd !== null ? postEndOiCreationUsd.toFixed(0) : "n/a"}`);
 
-    // Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
-    // observation -- purely observational, read once here and passed
-    // through to the Telegram formatter below. Never affects entry,
-    // sizing, SL, or TP in any way.
-    const orderFlowEpisodeId = this.watchManager.getLifecycle(symbol)?.episodeId ?? null;
-    const orderFlowStats = this.orderFlowTracker !== null && orderFlowEpisodeId !== null ? this.orderFlowTracker.getFrozenStats(symbol, orderFlowEpisodeId) : null;
-    const flowLine = orderFlowStats !== null ? formatFlowLine(orderFlowStats) : null;
+    // Sep 19 2026 (Karo), operator-requested Recovery Flow (final
+    // extreme -> confirmed entry window) -- purely observational, read
+    // once here and passed through to the Telegram formatter below.
+    // Never affects entry, sizing, SL, or TP in any way.
+    const recoveryEpisodeId = this.watchManager.getLifecycle(symbol)?.episodeId ?? null;
+    const recoveryStatsRaw = this.recoveryFlowTracker !== null && recoveryEpisodeId !== null ? this.recoveryFlowTracker.getFrozenStats(symbol, recoveryEpisodeId) : null;
+    const recoveryStats = recoveryStatsRaw !== null ? {
+      ...recoveryStatsRaw,
+      // Sep 19 2026 (Karo) -- raw (confirmation - extreme) / atr, NO
+      // side-based sign flip: naturally positive for LONG (extreme was
+      // the low, confirmation is higher) and naturally negative for
+      // SHORT (extreme was the high, confirmation is lower) -- matches
+      // the operator's own example messages exactly ("+1.08 ATR" for
+      // LONG, "-1.03 ATR" for SHORT).
+      recoveryMoveAtr: atr3mAtEntry !== null && atr3mAtEntry > 0 ? (recoveryStatsRaw.recoveryConfirmationPrice - recoveryStatsRaw.recoveryExtremePrice) / atr3mAtEntry : null,
+    } : null;
+    const flowLine = recoveryStats !== null ? formatRecoveryFlowLine(recoveryStats) : null;
 
     // Sep 16 2026 (Karo), operator-requested lifecycle fix: the
     // persisted signal starts at ENTRY_READY, NOT ACTIVE -- ACTIVE is

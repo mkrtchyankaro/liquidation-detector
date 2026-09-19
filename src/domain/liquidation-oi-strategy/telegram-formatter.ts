@@ -1,6 +1,6 @@
 import type { Side } from "../../shared/common.types";
 import type { OrderBookObservation } from "./order-book-observation";
-import type { OrderFlowFrozenStats } from "./order-flow-episode-tracker";
+import type { RecoveryFlowFrozenStats } from "./recovery-flow-tracker";
 import { pctMoveFromEntry } from "./pnl-calculator";
 import { formatPrice, formatSignedUsd, formatCompactUsd, formatPct, formatUtcTime, formatDuration } from "./telegram-display-format";
 
@@ -41,30 +41,51 @@ export interface EntryMessageInput {
    *  available (should not happen for a real ENTRY_READY signal). */
   netRR: number | null;
   capacityAtr: number | null;
-  /** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
-   *  observation -- a pre-formatted, multi-line block (see
-   *  formatFlowLine below), or null if no order-flow tracker is wired
-   *  up. Purely observational -- never affects any price/size above. */
+  /** Sep 19 2026 (Karo), operator-requested Recovery Flow (final
+   *  extreme -> confirmed entry window) -- a pre-formatted, multi-line
+   *  block (see formatRecoveryFlowLine below), or null if no recovery
+   *  flow tracker is wired up. Purely observational -- never affects
+   *  any price/size above. */
   flowLine: string | null;
 }
 
-/** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
- *  observation. Pure formatter -- takes the already-frozen,
- *  already-classified stats and produces the exact concise block the
- *  operator specified. Handles the "Spot data unavailable" case by
- *  printing SPOT: N/A rather than fabricating zeros. */
-export function formatFlowLine(stats: OrderFlowFrozenStats): string {
+/** Sep 19 2026 (Karo), operator-requested Recovery Flow (final extreme
+ *  -> confirmed entry window). SUPERSEDES the earlier Episode Flow
+ *  formatter -- pure formatter, takes the already-frozen, already-
+ *  classified stats and produces the exact concise block the operator
+ *  specified. Handles "Spot/OI data unavailable" by printing N/A
+ *  rather than fabricating zeros. */
+const OI_MOVE_SHORT_LABEL: Record<string, string> = {
+  SHORT_COVERING_OR_DELEVERAGING: "SHORT COVERING",
+  LONG_CLOSING_OR_DELEVERAGING: "LONG CLOSING",
+  POSITION_TRANSFER_OR_MIXED: "POSITION TRANSFER",
+  NEW_FUTURES_POSITIONING: "NEW POSITIONING",
+};
+
+function formatCompactDuration(ms: number): string {
+  // Sep 19 2026 (Karo), operator-requested -- always plain seconds
+  // (never "Xm Ys"), matching the operator's own exact examples
+  // ("Duration: 74s", "Duration: 68s") -- recovery windows are
+  // inherently short (bounded by 1m/3m candle confirmation timing),
+  // so this stays readable without a minutes breakdown.
+  const totalSec = Math.max(0, Math.round(ms / 1000));
+  return `${totalSec}s`;
+}
+
+export function formatRecoveryFlowLine(stats: RecoveryFlowFrozenStats): string {
   const spot = stats.spotDataAvailable
-    ? `SPOT: Buy ${formatCompactUsd(stats.spotTakerBuyUsd)} | Sell ${formatCompactUsd(stats.spotTakerSellUsd)} | Imb ${formatPct(stats.spotImbalancePct)}`
+    ? `SPOT: Buy ${formatCompactUsd(stats.recoverySpotTakerBuyUsd)} | Sell ${formatCompactUsd(stats.recoverySpotTakerSellUsd)} | Imb ${formatPct(stats.recoverySpotImbalancePct)}`
     : "SPOT: N/A";
-  const oiPart = stats.oiDeltaPct !== null ? formatPct(stats.oiDeltaPct) : "n/a";
-  const spotLabel = stats.spotConfirmationLabel.replace("SPOT_", "");
-  const movePart = stats.futuresOiMoveLabel ?? "N/A";
+  const oiPart = stats.oiDataAvailable && stats.recoveryOiDeltaPct !== null ? formatPct(stats.recoveryOiDeltaPct) : "N/A";
+  const moveLabel = stats.recoveryOiMoveLabel !== null ? (OI_MOVE_SHORT_LABEL[stats.recoveryOiMoveLabel] ?? stats.recoveryOiMoveLabel) : "N/A";
+  const spotLabel = stats.spotConfirmationLabel === "SPOT_NA" ? "SPOT N/A" : `SPOT ${stats.spotConfirmationLabel.replace("SPOT_", "")}`;
+  const movePart = stats.recoveryMoveAtr !== null ? `${stats.recoveryMoveAtr >= 0 ? "+" : ""}${stats.recoveryMoveAtr.toFixed(2)} ATR` : "N/A ATR";
   return [
-    "Flow (episode)",
-    `FUT: Buy ${formatCompactUsd(stats.futuresTakerBuyUsd)} | Sell ${formatCompactUsd(stats.futuresTakerSellUsd)} | Imb ${formatPct(stats.futuresImbalancePct)}`,
+    "Recovery Flow: Extreme \u2192 Entry",
+    `FUT: Buy ${formatCompactUsd(stats.recoveryFuturesTakerBuyUsd)} | Sell ${formatCompactUsd(stats.recoveryFuturesTakerSellUsd)} | Imb ${formatPct(stats.recoveryFuturesImbalancePct)}`,
     spot,
-    `OI: ${oiPart} | Spot: ${spotLabel} | Move: ${movePart}`,
+    `OI: ${oiPart} | ${moveLabel} | ${spotLabel}`,
+    `Move: ${movePart} | Duration: ${formatCompactDuration(stats.recoveryDurationMs)}`,
   ].join("\n");
 }
 

@@ -43,21 +43,15 @@ interface ForensicLine {
   [key: string]: unknown;
 }
 
-const LOG_DIR =
-  process.env.PM2_LOG_DIR ?? path.join(os.homedir(), ".pm2", "logs");
+const LOG_DIR = process.env.PM2_LOG_DIR ?? path.join(os.homedir(), ".pm2", "logs");
 
 function readAllForensicLines(): ForensicLine[] {
   if (!fs.existsSync(LOG_DIR)) {
-    console.error(
-      `Log directory not found: ${LOG_DIR} (set PM2_LOG_DIR if pm2 logs live elsewhere)`,
-    );
+    console.error(`Log directory not found: ${LOG_DIR} (set PM2_LOG_DIR if pm2 logs live elsewhere)`);
     process.exit(1);
   }
-  const files = fs
-    .readdirSync(LOG_DIR)
-    .filter(
-      (f) => f.startsWith("liquidation-detector-out") && f.endsWith(".log"),
-    )
+  const files = fs.readdirSync(LOG_DIR)
+    .filter((f) => f.startsWith("liquidation-detector-out") && f.endsWith(".log"))
     .map((f) => path.join(LOG_DIR, f));
   if (files.length === 0) {
     console.error(`No liquidation-detector-out*.log files found in ${LOG_DIR}`);
@@ -69,30 +63,21 @@ function readAllForensicLines(): ForensicLine[] {
     const raw = fs.readFileSync(file, "utf8").split("\n");
     for (const line of raw) {
       // Sep 19 2026 (Karo), operator-requested -- also pick up
-      // order-flow-episode-tracker.ts's own [ORDER_FLOW_FROZEN] log
-      // line (mod:"order-flow"), a SEPARATE mod tag from the LOX
-      // strategy's own forensic events.
-      if (!line.includes("lox-forensic") && !line.includes("order-flow"))
-        continue;
+      // recovery-flow-tracker.ts's own [RECOVERY_FLOW_FROZEN] log line
+      // (mod:"recovery-flow", supersedes the retired order-flow mod), a
+      // SEPARATE mod tag from the LOX strategy's own forensic events.
+      if (!line.includes("lox-forensic") && !line.includes("recovery-flow")) continue;
       const jsonStart = line.indexOf("{");
       if (jsonStart === -1) continue;
       try {
         const parsed = JSON.parse(line.slice(jsonStart)) as ForensicLine;
         if (parsed.mod === "lox-forensic") {
           out.push(parsed);
-        } else if (
-          parsed.mod === "order-flow" &&
-          typeof parsed.msg === "string" &&
-          parsed.msg.includes("[ORDER_FLOW_FROZEN]")
-        ) {
-          // order-flow's own log has no `ts`/`type` fields (unlike LOX
-          // forensic events) -- normalize onto the same shape so it
+        } else if (parsed.mod === "recovery-flow" && typeof parsed.msg === "string" && parsed.msg.includes("[RECOVERY_FLOW_FROZEN]")) {
+          // recovery-flow's own log has no `ts`/`type` fields (unlike
+          // LOX forensic events) -- normalize onto the same shape so it
           // sorts and groups by episodeId identically to everything else.
-          out.push({
-            ...parsed,
-            type: "ORDER_FLOW_FROZEN",
-            ts: parsed.frozenAtMs as number | undefined,
-          });
+          out.push({ ...parsed, type: "RECOVERY_FLOW_FROZEN", ts: parsed.frozenAtMs as number | undefined });
         }
       } catch {
         // partial/truncated JSON line -- skip
@@ -127,10 +112,8 @@ function fmtCompactUsd(n: unknown): string {
   if (!Number.isFinite(v)) return "n/a";
   const abs = Math.abs(v);
   const sign = v < 0 ? "-" : "";
-  if (abs >= 1_000_000)
-    return `${sign}$${(abs / 1_000_000).toFixed(abs >= 10_000_000 ? 1 : 2)}M`;
-  if (abs >= 1_000)
-    return `${sign}$${(abs / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}K`;
+  if (abs >= 1_000_000) return `${sign}$${(abs / 1_000_000).toFixed(abs >= 10_000_000 ? 1 : 2)}M`;
+  if (abs >= 1_000) return `${sign}$${(abs / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}K`;
   return `${sign}$${abs.toFixed(0)}`;
 }
 
@@ -141,9 +124,7 @@ function runTimeline(symbol: string, episodeIdFilter: string | null): void {
     .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
 
   if (events.length === 0) {
-    console.log(
-      `Ոչինչ չգտնվեց ${symbol}-ի համար${episodeIdFilter ? ` (episodeId=${episodeIdFilter})` : ""}: հնարավոր է log-երը rotate են եղել։`,
-    );
+    console.log(`Ոչինչ չգտնվեց ${symbol}-ի համար${episodeIdFilter ? ` (episodeId=${episodeIdFilter})` : ""}: հնարավոր է log-երը rotate են եղել։`);
     return;
   }
 
@@ -166,95 +147,63 @@ function runTimeline(symbol: string, episodeIdFilter: string | null): void {
       const t = fmtTime(e.ts);
       switch (e.type) {
         case "EPISODE_START":
-          console.log(
-            `[${t}] \u{1F7E2} EPISODE_START  victim=${e.victim}  startPrice=${e.startPrice}  startingOi=${e.startingOi}`,
-          );
+          console.log(`[${t}] \u{1F7E2} EPISODE_START  victim=${e.victim}  startPrice=${e.startPrice}  startingOi=${e.startingOi}`);
           break;
         case "LIQ_ACCUMULATED":
           liqCount++;
           lastLiqTotal = e.newTotal;
           if (liqCount % 5 === 1) {
-            console.log(
-              `[${t}]   \u21B3 LIQ_ACCUMULATED  total=${fmtUsd(e.newTotal)}  (+${fmtUsd(e.eventUsd)})`,
-            );
+            console.log(`[${t}]   \u21B3 LIQ_ACCUMULATED  total=${fmtUsd(e.newTotal)}  (+${fmtUsd(e.eventUsd)})`);
           }
           break;
         case "EXTREME_UPDATE":
           if (e.meaningfulExtremeProgress) {
-            console.log(
-              `[${t}]   \u21B3 EXTREME_UPDATE  ${e.previousExtreme} \u2192 ${e.newExtreme}`,
-            );
+            console.log(`[${t}]   \u21B3 EXTREME_UPDATE  ${e.previousExtreme} \u2192 ${e.newExtreme}`);
           }
           break;
         case "WATCH_EVALUATION":
-          console.log(
-            `[${t}] \u{1F441} WATCH_EVALUATION  result=${e.result}${e.reasonCode ? `  reason=${e.reasonCode}` : ""}  percentileRank=${Number(e.percentileRank).toFixed(1)} (\u057A\u0561\u0570\u0561\u0576\u057B\u057E\u0578\u0582\u0574 \u0567 ${e.requiredPercentile})`,
-          );
+          console.log(`[${t}] \u{1F441} WATCH_EVALUATION  result=${e.result}${e.reasonCode ? `  reason=${e.reasonCode}` : ""}  percentileRank=${Number(e.percentileRank).toFixed(1)} (\u057A\u0561\u0570\u0561\u0576\u057B\u057E\u0578\u0582\u0574 \u0567 ${e.requiredPercentile})`);
           break;
         case "STATE_TRANSITION":
-          console.log(
-            `[${t}] \u{1F500} STATE_TRANSITION  ${e.from} \u2192 ${e.to}${e.reason ? `   (${e.reason})` : ""}`,
-          );
+          console.log(`[${t}] \u{1F500} STATE_TRANSITION  ${e.from} \u2192 ${e.to}${e.reason ? `   (${e.reason})` : ""}`);
           break;
         case "ENTRY_GATE_EVALUATION": {
-          const blockedBy = Array.isArray(e.blockedBy)
-            ? (e.blockedBy as string[]).join(", ")
-            : "\u2014";
-          console.log(
-            `[${t}] \u{1F6AA} ENTRY_GATE_EVALUATION  final=${e.final}  blockedBy=[${blockedBy}]`,
-          );
+          const blockedBy = Array.isArray(e.blockedBy) ? (e.blockedBy as string[]).join(", ") : "\u2014";
+          console.log(`[${t}] \u{1F6AA} ENTRY_GATE_EVALUATION  final=${e.final}  blockedBy=[${blockedBy}]`);
           const counterMove = e.counterMove as { detail?: string } | undefined;
-          if (counterMove?.detail)
-            console.log(`             detail: ${counterMove.detail}`);
+          if (counterMove?.detail) console.log(`             detail: ${counterMove.detail}`);
           break;
         }
         case "ENTRY_READY":
-          console.log(
-            `[${t}] \u2705 ENTRY_READY  entryPrice=${e.entryReferencePrice}  extreme=${e.extreme}  counterMoveAtr=${e.counterMoveAtr}`,
-          );
+          console.log(`[${t}] \u2705 ENTRY_READY  entryPrice=${e.entryReferencePrice}  extreme=${e.extreme}  counterMoveAtr=${e.counterMoveAtr}`);
           break;
         case "EPISODE_TERMINAL":
-          console.log(
-            `[${t}] \u26D4 EPISODE_TERMINAL (cancel)  reason=${e.reason}`,
-          );
+          console.log(`[${t}] \u26D4 EPISODE_TERMINAL (cancel)  reason=${e.reason}`);
           console.log(`             detail: ${e.detail}`);
-          console.log(
-            `             lifetimeMs=${e.lifetimeMs}  finalTotalLiqUsd=${fmtUsd(e.finalTotalLiqUsd)}  symbolReleased=${e.symbolReleased}`,
-          );
+          console.log(`             lifetimeMs=${e.lifetimeMs}  finalTotalLiqUsd=${fmtUsd(e.finalTotalLiqUsd)}  symbolReleased=${e.symbolReleased}`);
           break;
         case "RESTART_RECONCILIATION":
-          console.log(
-            `[${t}] \u{1F504} RESTART_RECONCILIATION  outcome=${e.outcome}  ${e.detail ?? ""}`,
-          );
+          console.log(`[${t}] \u{1F504} RESTART_RECONCILIATION  outcome=${e.outcome}  ${e.detail ?? ""}`);
           break;
-        case "ORDER_FLOW_FROZEN": {
+        case "RECOVERY_FLOW_FROZEN": {
           const spotAvail = e.spotDataAvailable === true;
-          console.log(`[${t}] \u{1F30A} ORDER_FLOW_FROZEN`);
-          console.log(
-            `             FUT:  Buy ${fmtCompactUsd(e.futuresTakerBuyUsd)}  Sell ${fmtCompactUsd(e.futuresTakerSellUsd)}  Imb ${Number(e.futuresImbalancePct).toFixed(2)}%`,
-          );
-          console.log(
-            `             SPOT: ${spotAvail ? `Buy ${fmtCompactUsd(e.spotTakerBuyUsd)}  Sell ${fmtCompactUsd(e.spotTakerSellUsd)}  Imb ${Number(e.spotImbalancePct).toFixed(2)}%` : "N/A"}`,
-          );
-          console.log(
-            `             OI: ${e.oiDeltaPct !== null && e.oiDeltaPct !== undefined ? `${Number(e.oiDeltaPct).toFixed(2)}%` : "n/a"}  |  Spot: ${e.spotConfirmationLabel}  |  Move: ${e.futuresOiMoveLabel ?? "N/A"}`,
-          );
+          const oiAvail = e.oiDataAvailable === true;
+          console.log(`[${t}] \u{1F30A} RECOVERY_FLOW_FROZEN  (extreme \u2192 entry, ${e.recoveryDurationMs}ms)`);
+          console.log(`             extreme=${e.recoveryExtremePrice}  confirm=${e.recoveryConfirmationPrice}`);
+          console.log(`             FUT:  Buy ${fmtCompactUsd(e.recoveryFuturesTakerBuyUsd)}  Sell ${fmtCompactUsd(e.recoveryFuturesTakerSellUsd)}  Imb ${Number(e.recoveryFuturesImbalancePct).toFixed(2)}%`);
+          console.log(`             SPOT: ${spotAvail ? `Buy ${fmtCompactUsd(e.recoverySpotTakerBuyUsd)}  Sell ${fmtCompactUsd(e.recoverySpotTakerSellUsd)}  Imb ${Number(e.recoverySpotImbalancePct).toFixed(2)}%` : "N/A"}`);
+          console.log(`             OI: ${oiAvail && e.recoveryOiDeltaPct !== null ? `${Number(e.recoveryOiDeltaPct).toFixed(2)}%` : "N/A"}  |  Move: ${e.recoveryOiMoveLabel ?? "N/A"}  |  Spot: ${e.spotConfirmationLabel}`);
           break;
         }
         default:
           console.log(`[${t}] (${e.type})`);
       }
     }
-    if (liqCount > 0)
-      console.log(
-        `   ... \u0568\u0576\u0564\u0561\u0574\u0565\u0576\u0568 ${liqCount} liquidation event, \u057E\u0565\u0580\u057B\u0576\u0561\u056F\u0561\u0576 total=${fmtUsd(lastLiqTotal)}`,
-      );
+    if (liqCount > 0) console.log(`   ... \u0568\u0576\u0564\u0561\u0574\u0565\u0576\u0568 ${liqCount} liquidation event, \u057E\u0565\u0580\u057B\u0576\u0561\u056F\u0561\u0576 total=${fmtUsd(lastLiqTotal)}`);
   }
 
   console.log(`\n${"=".repeat(72)}`);
-  console.log(
-    `\u0538\u0576\u0564\u0561\u0574\u0565\u0576\u0568 ${events.length} forensic event, ${byEpisode.size} episode(\u0576\u0565\u0580) \u0563\u057F\u0576\u057E\u0565\u0581 ${symbol}-\u056B \u0570\u0561\u0574\u0561\u0580.`,
-  );
+  console.log(`\u0538\u0576\u0564\u0561\u0574\u0565\u0576\u0568 ${events.length} forensic event, ${byEpisode.size} episode(\u0576\u0565\u0580) \u0563\u057F\u0576\u057E\u0565\u0581 ${symbol}-\u056B \u0570\u0561\u0574\u0561\u0580.`);
 }
 
 interface EpisodeListRow {
@@ -269,9 +218,7 @@ interface EpisodeListRow {
 }
 
 function runList(symbolFilter: string | null): void {
-  const all = readAllForensicLines().filter(
-    (e) => symbolFilter === null || e.symbol === symbolFilter,
-  );
+  const all = readAllForensicLines().filter((e) => symbolFilter === null || e.symbol === symbolFilter);
   const byEpisode = new Map<string, ForensicLine[]>();
   for (const e of all) {
     const key = e.episodeId ?? "(unknown)";
@@ -283,11 +230,7 @@ function runList(symbolFilter: string | null): void {
   for (const [episodeId, evs] of byEpisode) {
     evs.sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
     const start = evs.find((e) => e.type === "EPISODE_START");
-    const reachedWait = evs.find(
-      (e) =>
-        e.type === "STATE_TRANSITION" &&
-        e.to === "WAIT_FOR_POST_EPISODE_OI_CREATION",
-    );
+    const reachedWait = evs.find((e) => e.type === "STATE_TRANSITION" && e.to === "WAIT_FOR_POST_EPISODE_OI_CREATION");
     const reachedEntry = evs.find((e) => e.type === "ENTRY_READY");
     const terminal = evs.find((e) => e.type === "EPISODE_TERMINAL");
     // Sep 18 2026 (Karo), operator-reported fix -- EPISODE_TERMINAL is
@@ -308,12 +251,7 @@ function runList(symbolFilter: string | null): void {
     // WAIT_FOR_POST_EPISODE_OI_CREATION_TIMEOUT) already tells you
     // which state it died in, but this flag makes the reopen itself
     // visible at a glance.
-    const wasReopened = evs.some(
-      (e) =>
-        e.type === "STATE_TRANSITION" &&
-        e.from === "WAIT_FOR_POST_EPISODE_OI_CREATION" &&
-        e.to === "EXHAUSTION_CANDIDATE",
-    );
+    const wasReopened = evs.some((e) => e.type === "STATE_TRANSITION" && e.from === "WAIT_FOR_POST_EPISODE_OI_CREATION" && e.to === "EXHAUSTION_CANDIDATE");
     rows.push({
       episodeId,
       symbol: (start?.symbol ?? evs[0]?.symbol ?? "?") as string,
@@ -329,15 +267,11 @@ function runList(symbolFilter: string | null): void {
   rows.sort((a, b) => (a.cancelTs ?? 0) - (b.cancelTs ?? 0));
 
   if (rows.length === 0) {
-    console.log(
-      `Ոչ մի episode, որ WAIT-ի հասած ու հետո cancel եղած լինի, չգտնվեց${symbolFilter ? ` ${symbolFilter}-ի համար` : ""}։`,
-    );
+    console.log(`Ոչ մի episode, որ WAIT-ի հասած ու հետո cancel եղած լինի, չգտնվեց${symbolFilter ? ` ${symbolFilter}-ի համար` : ""}։`);
     return;
   }
 
-  console.log(
-    `${"episodeId".padEnd(28)}${"symbol".padEnd(10)}${"episode start".padEnd(24)}${"cancel (UTC)".padEnd(24)}${"reopened?".padEnd(11)}${"reason"}`,
-  );
+  console.log(`${"episodeId".padEnd(28)}${"symbol".padEnd(10)}${"episode start".padEnd(24)}${"cancel (UTC)".padEnd(24)}${"reopened?".padEnd(11)}${"reason"}`);
   console.log("-".repeat(120));
   for (const r of rows) {
     console.log(
@@ -359,31 +293,23 @@ function runList(symbolFilter: string | null): void {
 async function runSignalLookup(signalId: string): Promise<void> {
   const uri = process.env.MONGO_URI;
   if (!uri) {
-    console.error(
-      "MONGO_URI not found in environment/.env -- cannot look up a signalId without it. Use the plain SYMBOLUSDT [episodeId] mode instead.",
-    );
+    console.error("MONGO_URI not found in environment/.env -- cannot look up a signalId without it. Use the plain SYMBOLUSDT [episodeId] mode instead.");
     process.exit(1);
   }
   const client = new MongoClient(uri);
   await client.connect();
   const dbName = process.env.MONGO_OWN_DB ?? "liquidation_detector";
   const db = client.db(dbName);
-  const doc = await db
-    .collection("liquidation_oi_global_signals")
-    .findOne({ globalSignalId: signalId });
+  const doc = await db.collection("liquidation_oi_global_signals").findOne({ globalSignalId: signalId });
   await client.close();
 
   if (!doc) {
-    console.log(
-      `Signal ${signalId} not found in liquidation_oi_global_signals.`,
-    );
+    console.log(`Signal ${signalId} not found in liquidation_oi_global_signals.`);
     return;
   }
   const symbol = doc.symbol as string;
   const entryTs = (doc.createdAt as Date).getTime();
-  console.log(
-    `Գտնվեց՝ ${symbol}, entry \u2248 ${new Date(entryTs).toISOString()}. Փնտրում ենք համապատասխան episode...\n`,
-  );
+  console.log(`Գտնվեց՝ ${symbol}, entry \u2248 ${new Date(entryTs).toISOString()}. Փնտրում ենք համապատասխան episode...\n`);
 
   const all = readAllForensicLines().filter((e) => e.symbol === symbol);
   const byEpisode = new Map<string, ForensicLine[]>();
@@ -402,24 +328,15 @@ async function runSignalLookup(signalId: string): Promise<void> {
     const entryReady = evs.find((e) => e.type === "ENTRY_READY");
     if (!entryReady || entryReady.ts === undefined) continue;
     const delta = Math.abs(entryReady.ts - entryTs);
-    if (delta < bestDelta) {
-      bestDelta = delta;
-      bestEpisodeId = episodeId;
-    }
+    if (delta < bestDelta) { bestDelta = delta; bestEpisodeId = episodeId; }
   }
 
   if (bestEpisodeId === null) {
-    console.log(
-      `Ոչ մի ENTRY_READY event չգտնվեց ${symbol}-ի log-երում, որ համապատասխանի այս signal-ին (հնարավոր է log-երը rotate են եղել): Փորձիր` +
-        ` npm run lox:timeline -- ${symbol}` +
-        ` և ձեռքով գտիր ճիշտ episodeId-ը ժամանակով:`,
-    );
+    console.log(`Ոչ մի ENTRY_READY event չգտնվեց ${symbol}-ի log-երում, որ համապատասխանի այս signal-ին (հնարավոր է log-երը rotate են եղել): Փորձիր` + ` npm run lox:timeline -- ${symbol}` + ` և ձեռքով գտիր ճիշտ episodeId-ը ժամանակով:`);
     return;
   }
   if (bestDelta > 60_000) {
-    console.log(
-      `\u26A0 Ամենամոտ ENTRY_READY-ն ${(bestDelta / 1000).toFixed(0)} վայրկյան հեռու է signal-ի entry-ից. հնարավոր է սխալ episode է (կամ log-երը rotate են եղել): Ցույց տալիս ենք ամեն դեպքում.\n`,
-    );
+    console.log(`\u26A0 Ամենամոտ ENTRY_READY-ն ${(bestDelta / 1000).toFixed(0)} վայրկյան հեռու է signal-ի entry-ից. հնարավոր է սխալ episode է (կամ log-երը rotate են եղել): Ցույց տալիս ենք ամեն դեպքում.\n`);
   }
   runTimeline(symbol, bestEpisodeId);
 }
@@ -428,15 +345,9 @@ function main(): void {
   const args = process.argv.slice(2);
   if (args.length === 0) {
     console.error("Oգտագործում:");
-    console.error(
-      "  npx tsx scripts/lox-episode-timeline.ts SYMBOLUSDT [episodeId]",
-    );
-    console.error(
-      "  npx tsx scripts/lox-episode-timeline.ts --list [SYMBOLUSDT]",
-    );
-    console.error(
-      "  npx tsx scripts/lox-episode-timeline.ts --signal <globalSignalId>",
-    );
+    console.error("  npx tsx scripts/lox-episode-timeline.ts SYMBOLUSDT [episodeId]");
+    console.error("  npx tsx scripts/lox-episode-timeline.ts --list [SYMBOLUSDT]");
+    console.error("  npx tsx scripts/lox-episode-timeline.ts --signal <globalSignalId>");
     process.exit(1);
   }
   if (args[0] === "--list") {
@@ -445,9 +356,7 @@ function main(): void {
   }
   if (args[0] === "--signal") {
     if (!args[1]) {
-      console.error(
-        "Օգտագործում. npx tsx scripts/lox-episode-timeline.ts --signal <globalSignalId>",
-      );
+      console.error("Օգտագործում. npx tsx scripts/lox-episode-timeline.ts --signal <globalSignalId>");
       process.exit(1);
     }
     void runSignalLookup(args[1]);

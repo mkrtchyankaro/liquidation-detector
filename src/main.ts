@@ -5,10 +5,7 @@ import { loadBinanceConfig } from "./infrastructure/config/binance.config";
 import { loadSymbolsConfig } from "./infrastructure/config/symbols.config";
 import { loadObservabilityConfig } from "./infrastructure/config/observability.config";
 import { loadUsersConfig } from "./infrastructure/config/users.config.loader";
-import {
-  MongoClientWrapper,
-  type MongoDetectorConfig,
-} from "./infrastructure/mongo/mongo.client";
+import { MongoClientWrapper, type MongoDetectorConfig } from "./infrastructure/mongo/mongo.client";
 import { BinanceWsClient } from "./infrastructure/binance/binanceWs.client";
 import { BinanceRestClient } from "./infrastructure/binance/binanceRest.client";
 import { V5WaveService } from "./strategy/v5/v5-wave.service";
@@ -42,7 +39,7 @@ import { recoverLoxOnRestart } from "./services/liquidation-oi-restart-recovery"
 import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG } from "./domain/liquidation-oi-strategy/active-lifecycle-config";
 import { BinanceSpotWsClient } from "./infrastructure/binance/binanceSpotWs.client";
 import { loadBinanceSpotWsConfig } from "./infrastructure/config/binance.config";
-import { OrderFlowEpisodeTracker } from "./domain/liquidation-oi-strategy/order-flow-episode-tracker";
+import { RecoveryFlowTracker } from "./domain/liquidation-oi-strategy/recovery-flow-tracker";
 
 const log = childLogger({ mod: "main" });
 
@@ -67,14 +64,10 @@ async function main(): Promise<void> {
   };
   const mongo = new MongoClientWrapper(mongoCfg);
 
-  const usersConfigPath =
-    process.env.USERS_CONFIG_PATH ??
-    path.join(process.cwd(), "users.config.json");
+  const usersConfigPath = process.env.USERS_CONFIG_PATH ?? path.join(process.cwd(), "users.config.json");
   const users = loadUsersConfig(usersConfigPath);
 
-  const userRuntimes: UserRuntime[] = users.map((u) =>
-    buildUserRuntime(u, mongo),
-  );
+  const userRuntimes: UserRuntime[] = users.map((u) => buildUserRuntime(u, mongo));
   log.info(`built ${userRuntimes.length} user runtime(s)`);
 
   // Sep 8 2026 (Karo) -- startup-blocker index validation, same
@@ -88,35 +81,24 @@ async function main(): Promise<void> {
     await new GlobalSignalRepository(mongo).ensureIndexes();
     for (const runtime of userRuntimes) {
       if (!runtime.config.enabled) continue;
-      await new UserSignalRepository(
-        mongo,
-        runtime.config.userId,
-      ).ensureIndexes();
-      if (runtime.executionRecords)
-        await runtime.executionRecords.ensureIndexes();
-      if (runtime.executionClaims)
-        await runtime.executionClaims.ensureIndexes();
+      await new UserSignalRepository(mongo, runtime.config.userId).ensureIndexes();
+      if (runtime.executionRecords) await runtime.executionRecords.ensureIndexes();
+      if (runtime.executionClaims) await runtime.executionClaims.ensureIndexes();
     }
     log.info("all Mongo indexes ensured");
   } else {
-    log.warn(
-      "MONGO_URI not set -- skipping index validation, persistence disabled",
-    );
+    log.warn("MONGO_URI not set -- skipping index validation, persistence disabled");
   }
 
   // V5's own strategy engine -- SINGLE, global instance. Callback
   // wiring below is the SAME pattern app.ts used (ATR/OI/baseline/P95/
   // walls/flow all read from the SAME domain market-data stores this
   // orchestrator itself owns).
-  const orchestratorPlaceholder: { instance: MarketDataOrchestrator | null } = {
-    instance: null,
-  };
+  const orchestratorPlaceholder: { instance: MarketDataOrchestrator | null } = { instance: null };
 
   const v5 = new V5WaveService(
     (symbol, referencePrice) => {
-      const atrPct =
-        orchestratorPlaceholder.instance?.atrTracker.getATR(symbol, "15m") ??
-        null;
+      const atrPct = orchestratorPlaceholder.instance?.atrTracker.getATR(symbol, "15m") ?? null;
       return atrPct ? atrPct * referencePrice : 0;
     },
     // Sep 8 2026 (Karo), operator-designed minimal-cascade model --
@@ -125,13 +107,10 @@ async function main(): Promise<void> {
     // plan's own TP/SL). See V5WatchState.unitAtStart's own doc
     // comment.
     (symbol, referencePrice) => {
-      const atr1mPct =
-        orchestratorPlaceholder.instance?.atrTracker.getATR(symbol, "1m") ??
-        null;
+      const atr1mPct = orchestratorPlaceholder.instance?.atrTracker.getATR(symbol, "1m") ?? null;
       return atr1mPct ? atr1mPct * referencePrice : 0;
     },
-    (symbol) =>
-      orchestratorPlaceholder.instance?.oiTracker.getCachedOI(symbol) ?? null,
+    (symbol) => orchestratorPlaceholder.instance?.oiTracker.getCachedOI(symbol) ?? null,
     // Sep 9 2026 (Karo), operator-requested RESTORE -- REVERTS to the
     // ORIGINAL, production-proven combined LONG+SHORT rolling median
     // (bucketsLong[i]+bucketsShort[i], last 60 sealed activity
@@ -148,19 +127,8 @@ async function main(): Promise<void> {
     // (131x smaller) over the same 60 real buckets, purely because
     // LONG-side liquidations dominated that window -- a median over a
     // systematically rarer side is not a safe strategy input.
-    (symbol) =>
-      orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin(
-        symbol,
-        60,
-      ) ?? 0,
-    (symbol, victim) =>
-      orchestratorPlaceholder.instance
-        ? v5IndividualEventP95(
-            orchestratorPlaceholder.instance.liquidationStats,
-            symbol,
-            victim,
-          )
-        : 0,
+    (symbol) => orchestratorPlaceholder.instance?.liquidationStats.rollingMedianLiqNotionalPerMin(symbol, 60) ?? 0,
+    (symbol, victim) => (orchestratorPlaceholder.instance ? v5IndividualEventP95(orchestratorPlaceholder.instance.liquidationStats, symbol, victim) : 0),
     // Sep 8 2026 (Karo) -- CRITICAL FIX, found during a full manual
     // audit: this was `null`, meaning EVERY trade-plan was computed
     // with NO_WALLS (all zeros) -- the wall-cap-on-TP step in
@@ -180,11 +148,7 @@ async function main(): Promise<void> {
         topAskNotional: askWall?.currentNotional ?? 0,
         topBidPrice: bidWall?.representativePrice ?? 0,
         topAskPrice: askWall?.representativePrice ?? 0,
-        imbalance:
-          bidWall && askWall
-            ? (bidWall.currentNotional - askWall.currentNotional) /
-              (bidWall.currentNotional + askWall.currentNotional || 1)
-            : 0,
+        imbalance: bidWall && askWall ? (bidWall.currentNotional - askWall.currentNotional) / (bidWall.currentNotional + askWall.currentNotional || 1) : 0,
         topBidPersistent: bidWall?.isPersistent ?? false,
         topAskPersistent: askWall?.isPersistent ?? false,
       };
@@ -195,12 +159,7 @@ async function main(): Promise<void> {
     // forensic field was silently always null (AggressiveFlowService
     // itself was never even constructed anywhere -- fixed in
     // market-data-orchestrator.ts).
-    (symbol, lookbackMs, now) =>
-      orchestratorPlaceholder.instance?.aggressiveFlow.getRecentFlow(
-        symbol,
-        lookbackMs,
-        now,
-      ) ?? null,
+    (symbol, lookbackMs, now) => orchestratorPlaceholder.instance?.aggressiveFlow.getRecentFlow(symbol, lookbackMs, now) ?? null,
   );
 
   const distributor = new SignalDistributor(mongo, userRuntimes);
@@ -218,9 +177,7 @@ async function main(): Promise<void> {
   // that would need to change (to `true`) to allow real Binance orders
   // for this new strategy. No environment variable; this exact line is
   // the single source of truth.
-  const liquidationOiGlobalSignalRepo = new LiquidationOiGlobalSignalRepository(
-    mongo,
-  );
+  const liquidationOiGlobalSignalRepo = new LiquidationOiGlobalSignalRepository(mongo);
   const liquidationOiStrategyOrderRepo = new StrategyOrderRepository(mongo);
   // Sep 17 2026 (Karo), operator-requested fix -- these repositories' own
   // ensureIndexes() methods existed (uniqueness on globalSignalId, on
@@ -234,44 +191,27 @@ async function main(): Promise<void> {
     log.info("LOX Mongo indexes ensured");
   }
   const liquidationOiForensicLogger = childLogger({ mod: "lox-forensic" });
-  const liquidationOiForensicSink = (
-    event: import("./domain/liquidation-oi-strategy/forensic-events").ForensicEvent,
-  ): void =>
-    liquidationOiForensicLogger.info(
-      { ...event },
-      `[LOX_FORENSIC_${event.type}]`,
-    );
+  const liquidationOiForensicSink = (event: import("./domain/liquidation-oi-strategy/forensic-events").ForensicEvent): void => liquidationOiForensicLogger.info({ ...event }, `[LOX_FORENSIC_${event.type}]`);
   // Sep 17 2026 (Karo), operator-approved final capacity architecture,
   // Section 31 -- restart-safe WAIT persistence.
-  const liquidationOiWaitStateRepo = new LiquidationOiWaitStateRepository(
-    mongo,
-  );
+  const liquidationOiWaitStateRepo = new LiquidationOiWaitStateRepository(mongo);
   if (mongoCfg.enabled) {
     await liquidationOiWaitStateRepo.ensureIndexes();
   }
-  // Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
-  // observation -- OBSERVATIONAL ONLY, see order-flow-episode-tracker.ts's
-  // own doc comment. Constructed here (before the WS clients below) so
-  // it can be threaded into both the LOX orchestrator (for reading
-  // frozen stats at ENTRY_READY) and the Futures/Spot aggTrade
-  // listeners further down.
-  const orderFlowTracker = new OrderFlowEpisodeTracker();
+  // Sep 19 2026 (Karo), operator-requested Recovery Flow (final
+  // extreme -> confirmed entry window) -- OBSERVATIONAL ONLY, see
+  // recovery-flow-tracker.ts's own doc comment. Constructed here
+  // (before the WS clients below) so it can be threaded into both the
+  // LOX orchestrator (for reading frozen stats at ENTRY_READY) and the
+  // Futures/Spot aggTrade listeners further down.
+  const recoveryFlowTracker = new RecoveryFlowTracker();
   const liquidationOiOrchestrator = new LiquidationOiRuntimeOrchestrator(
     DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
     DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
     liquidationOiGlobalSignalRepo,
     liquidationOiStrategyOrderRepo,
-    () =>
-      userRuntimes
-        .filter((r) => r.config.enabled)
-        .map((r) => ({
-          userId: r.config.userId,
-          riskUsd: r.config.risk.riskUsd,
-          liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled,
-          binanceRest: r.binanceRest,
-          telegram: r.telegram,
-        })),
-    true, // observationEnabled
+    () => userRuntimes.filter((r) => r.config.enabled).map((r) => ({ userId: r.config.userId, riskUsd: r.config.risk.riskUsd, liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled, binanceRest: r.binanceRest, telegram: r.telegram })),
+    true,  // observationEnabled
     false, // executionEnabled -- MUST be explicitly changed to true here to allow real orders
     undefined,
     // Sep 16 2026 (Karo), operator-requested forensic observability --
@@ -282,63 +222,28 @@ async function main(): Promise<void> {
     undefined, // activeMainRuntime -- set late below via setActiveMainRuntime()
     undefined, // activeLifecycleConfig -- default (DEFAULT_ACTIVE_LIFECYCLE_CONFIG)
     liquidationOiWaitStateRepo,
-    orderFlowTracker,
+    recoveryFlowTracker,
   );
   // Sep 17 2026 (Karo), operator-requested production-completion pass --
   // Sections L/M/O (termination detection, mandatory cleanup, multi-user
   // global close) and J/K (ACTIVE MAIN monitoring, dynamic TP). Both reuse
   // the SAME userRuntimes accessor and the orchestrator's OWN watchManager
   // (late-bound below, breaking the circular construction dependency).
-  const liquidationOiPositionLifecycle =
-    new LiquidationOiPositionLifecycleService(
-      liquidationOiGlobalSignalRepo,
-      liquidationOiStrategyOrderRepo,
-      liquidationOiOrchestrator.getWatchManager(),
-      () =>
-        userRuntimes
-          .filter((r) => r.config.enabled)
-          .map((r) => ({
-            userId: r.config.userId,
-            riskUsd: r.config.risk.riskUsd,
-            liquidationOiExecutionEnabled:
-              r.config.liquidationOiExecutionEnabled,
-            binanceRest: r.binanceRest,
-            telegram: r.telegram,
-          })),
-      DEFAULT_ACTIVE_LIFECYCLE_CONFIG.positionReconciliationIntervalMs,
-      liquidationOiForensicSink,
-    );
-  const liquidationOiActiveMainRuntime = new LiquidationOiActiveMainRuntime(
-    liquidationOiGlobalSignalRepo,
-    liquidationOiStrategyOrderRepo,
-    liquidationOiPositionLifecycle,
-    () =>
-      userRuntimes
-        .filter((r) => r.config.enabled)
-        .map((r) => ({
-          userId: r.config.userId,
-          riskUsd: r.config.risk.riskUsd,
-          liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled,
-          binanceRest: r.binanceRest,
-          telegram: r.telegram,
-        })),
-    DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
+  const liquidationOiPositionLifecycle = new LiquidationOiPositionLifecycleService(
+    liquidationOiGlobalSignalRepo, liquidationOiStrategyOrderRepo, liquidationOiOrchestrator.getWatchManager(),
+    () => userRuntimes.filter((r) => r.config.enabled).map((r) => ({ userId: r.config.userId, riskUsd: r.config.risk.riskUsd, liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled, binanceRest: r.binanceRest, telegram: r.telegram })),
+    DEFAULT_ACTIVE_LIFECYCLE_CONFIG.positionReconciliationIntervalMs,
     liquidationOiForensicSink,
   );
-  liquidationOiOrchestrator.setActiveMainRuntime(
-    liquidationOiActiveMainRuntime,
+  const liquidationOiActiveMainRuntime = new LiquidationOiActiveMainRuntime(
+    liquidationOiGlobalSignalRepo, liquidationOiStrategyOrderRepo, liquidationOiPositionLifecycle,
+    () => userRuntimes.filter((r) => r.config.enabled).map((r) => ({ userId: r.config.userId, riskUsd: r.config.risk.riskUsd, liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled, binanceRest: r.binanceRest, telegram: r.telegram })),
+    DEFAULT_ACTIVE_LIFECYCLE_CONFIG, liquidationOiForensicSink,
   );
+  liquidationOiOrchestrator.setActiveMainRuntime(liquidationOiActiveMainRuntime);
   // Section C -- LOX-owned percentile refresh, independent of V3/V5 close events.
-  const loxPercentileRefreshLifecycle = new LoxPercentileRefreshLifecycle(
-    episodePercentileService,
-    symbols,
-    DEFAULT_ACTIVE_LIFECYCLE_CONFIG.percentileRefreshIntervalMs,
-  );
-  const reconciliation = new ReconciliationManager(
-    mongo,
-    userRuntimes,
-    episodePercentileService,
-  );
+  const loxPercentileRefreshLifecycle = new LoxPercentileRefreshLifecycle(episodePercentileService, symbols, DEFAULT_ACTIVE_LIFECYCLE_CONFIG.percentileRefreshIntervalMs);
+  const reconciliation = new ReconciliationManager(mongo, userRuntimes, episodePercentileService);
 
   const ws = new BinanceWsClient(binanceConfig);
   // Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
@@ -347,22 +252,15 @@ async function main(): Promise<void> {
   // ws.on("aggTrade", ...) handler is untouched; EventEmitter supports
   // multiple independent listeners on the same event). No new Futures
   // subscription.
-  ws.on("aggTrade", (t) => orderFlowTracker.ingestFuturesTrade(t));
+  ws.on("aggTrade", (t) => recoveryFlowTracker.ingestFuturesTrade(t));
   // Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
   // observation -- a genuinely SEPARATE WebSocket connection (Binance
   // Spot's own base URL), since no Spot market-data infrastructure
   // existed in this project before this feature. Purely observational
-  // -- its only consumer is orderFlowTracker.
-  const spotWs = new BinanceSpotWsClient(
-    loadBinanceSpotWsConfig().wsBaseUrl,
-    symbols,
-  );
-  spotWs.on("aggTrade", (t) => orderFlowTracker.ingestSpotTrade(t));
-  spotWs.on("error", (err) =>
-    log.warn(
-      `[SPOT_WS_ERROR] ${err.message} -- order-flow observation only, never affects trading`,
-    ),
-  );
+  // -- its only consumer is recoveryFlowTracker.
+  const spotWs = new BinanceSpotWsClient(loadBinanceSpotWsConfig().wsBaseUrl, symbols);
+  spotWs.on("aggTrade", (t) => recoveryFlowTracker.ingestSpotTrade(t));
+  spotWs.on("error", (err) => log.warn(`[SPOT_WS_ERROR] ${err.message} -- order-flow observation only, never affects trading`));
   // Sep 8 2026 (Karo) -- CRITICAL FIX: broadcasts system-wide alerts
   // (currently: liq-feed-dead) to EVERY enabled-telegram user, since
   // this affects everyone's own data equally, not any one user's own
@@ -377,10 +275,7 @@ async function main(): Promise<void> {
           await runtime.telegram.sendMessage(text);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          log.error(
-            { err: msg, userId: runtime.config.userId },
-            "[LIQ_FEED_ALERT_SEND_FAILED] -- isolated",
-          );
+          log.error({ err: msg, userId: runtime.config.userId }, "[LIQ_FEED_ALERT_SEND_FAILED] -- isolated");
         }
       }
     },
@@ -447,25 +342,7 @@ async function main(): Promise<void> {
   // pre-restart state exists. Only runs meaningfully when Mongo is enabled
   // (findOpenSignals() etc. are safe no-ops otherwise).
   if (mongoCfg.enabled) {
-    await recoverLoxOnRestart(
-      liquidationOiGlobalSignalRepo,
-      liquidationOiStrategyOrderRepo,
-      liquidationOiPositionLifecycle,
-      liquidationOiOrchestrator.getWatchManager(),
-      () =>
-        userRuntimes
-          .filter((r) => r.config.enabled)
-          .map((r) => ({
-            userId: r.config.userId,
-            riskUsd: r.config.risk.riskUsd,
-            liquidationOiExecutionEnabled:
-              r.config.liquidationOiExecutionEnabled,
-            binanceRest: r.binanceRest,
-            telegram: r.telegram,
-          })),
-      liquidationOiForensicSink,
-      Date.now(),
-    );
+    await recoverLoxOnRestart(liquidationOiGlobalSignalRepo, liquidationOiStrategyOrderRepo, liquidationOiPositionLifecycle, liquidationOiOrchestrator.getWatchManager(), () => userRuntimes.filter((r) => r.config.enabled).map((r) => ({ userId: r.config.userId, riskUsd: r.config.risk.riskUsd, liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled, binanceRest: r.binanceRest, telegram: r.telegram })), liquidationOiForensicSink, Date.now());
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
     // Section 31 -- restores pre-ENTRY_READY WAIT state. Runs AFTER
     // recoverLoxOnRestart() (which only restores ACTIVE) so the two
@@ -515,11 +392,7 @@ async function main(): Promise<void> {
   // fed into the separate research buffer.
   const bootstrapPairs = pairsFor(symbols, ["15m", "5m", "3m", "1m"], 100);
   const research1mBootstrapPairs = pairsFor(symbols, ["1m"], 250);
-  await bootstrapAtrFromRest(
-    new BinanceRestClient(binanceConfig),
-    orchestrator.atrTracker,
-    [...bootstrapPairs, ...research1mBootstrapPairs],
-  );
+  await bootstrapAtrFromRest(new BinanceRestClient(binanceConfig), orchestrator.atrTracker, [...bootstrapPairs, ...research1mBootstrapPairs]);
   // Sep 16 2026 (Karo), operator-approved -- restart/redeploy candle +
   // directional-ATR warmup. Standard ATR bootstrap above is UNCHANGED.
   // This closes the narrower gap it left: candleStore and
@@ -529,16 +402,7 @@ async function main(): Promise<void> {
   // (liquidation) events -- so no liquidation event can possibly
   // arrive before this completes. See candle-directional-atr-
   // bootstrap.ts's own header for the full sequencing rationale.
-  await bootstrapCandleAndDirectionalAtrFromRest(
-    new BinanceRestClient(binanceConfig),
-    {
-      candleStore: orchestrator.candleStore,
-      directionalAtr1m: orchestrator.directionalAtr,
-      directionalAtr3m: orchestrator.directionalAtr3m,
-      directionalAtr5m: orchestrator.directionalAtr5m,
-    },
-    symbols,
-  );
+  await bootstrapCandleAndDirectionalAtrFromRest(new BinanceRestClient(binanceConfig), { candleStore: orchestrator.candleStore, directionalAtr1m: orchestrator.directionalAtr, directionalAtr3m: orchestrator.directionalAtr3m, directionalAtr5m: orchestrator.directionalAtr5m }, symbols);
 
   // Sep 8 2026 (Karo) -- CRITICAL FIX, ported from liqwatch-bot's own
   // "Step E" LiqAggregateOrchestrator, found NEVER wired anywhere in
@@ -567,16 +431,9 @@ async function main(): Promise<void> {
   const liqAggregateIndexesOk = await liqAggregateRepo.ensureIndexes();
   if (liqAggregateIndexesOk) {
     const liqRetentionSeconds = persistenceConfig.retentionDays * 24 * 3600;
-    log.info(
-      `[TTL] liq_minute_aggregates createdAt = ${liqRetentionSeconds}s (${persistenceConfig.retentionDays}d)`,
-    );
+    log.info(`[TTL] liq_minute_aggregates createdAt = ${liqRetentionSeconds}s (${persistenceConfig.retentionDays}d)`);
   }
-  const liqAggregateOrchestrator = new LiqAggregateOrchestrator(
-    persistenceConfig,
-    liqAggregateRepo,
-    orchestrator.liquidationStats,
-    symbols,
-  );
+  const liqAggregateOrchestrator = new LiqAggregateOrchestrator(persistenceConfig, liqAggregateRepo, orchestrator.liquidationStats, symbols);
   await liqAggregateOrchestrator.warmup();
 
   // Sep 8 2026 (Karo) -- CRITICAL FIX, same class of gap as above --
@@ -585,16 +442,8 @@ async function main(): Promise<void> {
   // class's own doc comment), but the periodic flush to the SHARED
   // wall_minute_aggregates collection was equally silently missing.
   const wallPersistenceConfig = loadWallPersistenceConfig();
-  const wallAggregateRepo = new WallAggregateRepository(
-    mongo,
-    wallPersistenceConfig,
-  );
-  const wallAggregateOrchestrator = new WallAggregateOrchestrator(
-    wallPersistenceConfig,
-    wallAggregateRepo,
-    orchestrator.wallTracker,
-    symbols,
-  );
+  const wallAggregateRepo = new WallAggregateRepository(mongo, wallPersistenceConfig);
+  const wallAggregateOrchestrator = new WallAggregateOrchestrator(wallPersistenceConfig, wallAggregateRepo, orchestrator.wallTracker, symbols);
   await wallAggregateOrchestrator.ensureIndexes();
 
   // Sep 8 2026 (Karo) -- starts the reconciliation cache's own
@@ -619,17 +468,8 @@ async function main(): Promise<void> {
   // day -- found during a full manual audit (defined, never called).
   for (const runtime of userRuntimes) {
     if (!runtime.config.enabled) continue;
-    const userSignalRepo = new UserSignalRepository(
-      mongo,
-      runtime.config.userId,
-    );
-    await runtime.dailyLossLimit.initializeFromDb((startMs, endMs) =>
-      userSignalRepo.sumClosedNetPnlInRange(
-        runtime.config.userId,
-        startMs,
-        endMs,
-      ),
-    );
+    const userSignalRepo = new UserSignalRepository(mongo, runtime.config.userId);
+    await runtime.dailyLossLimit.initializeFromDb((startMs, endMs) => userSignalRepo.sumClosedNetPnlInRange(runtime.config.userId, startMs, endMs));
   }
 
   await reconciliation.start();
@@ -652,13 +492,7 @@ async function main(): Promise<void> {
   // market-data-orchestrator.ts's own bookTicker hook) DOES read from
   // this service's getThresholds() output -- that integration has been
   // live since the Phase 5-7 pass, not a future step.
-  void episodePercentileService
-    .warmupAll()
-    .catch((err) =>
-      log.error(
-        `[PERCENTILES] warmupAll failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`,
-      ),
-    );
+  void episodePercentileService.warmupAll().catch((err) => log.error(`[PERCENTILES] warmupAll failed unexpectedly: ${err instanceof Error ? err.message : String(err)}`));
   // Sep 17 2026 (Karo), operator-requested Section C -- LOX's OWN
   // low-frequency percentile refresh, independent of V3/V5 close events.
   loxPercentileRefreshLifecycle.start();
@@ -672,9 +506,7 @@ async function main(): Promise<void> {
   // live data flow is never blocked by Mongo index creation").
   liqAggregateOrchestrator.start();
   wallAggregateOrchestrator.start();
-  log.info(
-    `liquidation-detector started -- ${symbols.length} symbols, ${userRuntimes.filter((r) => r.config.enabled).length} enabled user(s)`,
-  );
+  log.info(`liquidation-detector started -- ${symbols.length} symbols, ${userRuntimes.filter((r) => r.config.enabled).length} enabled user(s)`);
 
   process.on("SIGINT", async () => {
     log.info("shutting down (SIGINT)");
@@ -703,9 +535,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-  log.error(
-    { err: err instanceof Error ? err.message : String(err) },
-    "[FATAL_STARTUP_ERROR]",
-  );
+  log.error({ err: err instanceof Error ? err.message : String(err) }, "[FATAL_STARTUP_ERROR]");
   process.exit(1);
 });

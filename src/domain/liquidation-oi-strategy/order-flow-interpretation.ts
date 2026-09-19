@@ -74,3 +74,22 @@ export function classifyFuturesOiMove(candidateSide: Side, futuresPriceDeltaPct:
   // OI down
   return candidateSide === "LONG" ? "SHORT_COVERING_OR_DELEVERAGING" : "LONG_LIQUIDATION_OR_DELEVERAGING";
 }
+
+export type RecoveryOiMoveLabel = "SHORT_COVERING_OR_DELEVERAGING" | "POSITION_TRANSFER_OR_MIXED" | "NEW_FUTURES_POSITIONING" | "LONG_CLOSING_OR_DELEVERAGING";
+
+/**
+ * Sep 19 2026 (Karo), operator-requested Recovery Flow (final extreme
+ * -> confirmed entry window) -- a DIFFERENT label set from
+ * classifyFuturesOiMove()'s own Episode Flow labels above
+ * (LONG_CLOSING_OR_DELEVERAGING here vs LONG_LIQUIDATION_OR_DELEVERAGING
+ * there -- the operator's own explicit wording for this narrower,
+ * confirmation-window feature). Otherwise identical logic/thresholds.
+ */
+export function classifyRecoveryOiMove(candidateSide: Side, oiDeltaPct: number | null, oiFlatBandPct: number): RecoveryOiMoveLabel | null {
+  if (oiDeltaPct === null) return null;
+  const oiFlat = Math.abs(oiDeltaPct) <= oiFlatBandPct;
+  const oiUp = oiDeltaPct > 0;
+  if (oiFlat) return "POSITION_TRANSFER_OR_MIXED";
+  if (oiUp) return "NEW_FUTURES_POSITIONING";
+  return candidateSide === "LONG" ? "SHORT_COVERING_OR_DELEVERAGING" : "LONG_CLOSING_OR_DELEVERAGING";
+}
