@@ -767,6 +767,143 @@ function main(): void {
     },
   );
 
+  scenario(
+    "H. REGRESSION (Sep 18 2026, operator-reported live bug): structural SL must use the TRUE max-adverse extreme (candle-based, never reset on reopen), not just the liquidation-event-only extreme -- confirmed live on LINKUSDT (episode.extremePrice stuck at 12.201 across 3 reopens while the candle-based extreme independently reached 12.231)",
+    () => {
+      const mgr = new LiquidationOiWatchManager(
+        DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG,
+      );
+      const now0 = 1_000_000;
+      const flatAtr = { get: (_i: string, _t: number) => 1.0 };
+      const c = (
+        closeTime: number,
+        open: number,
+        high: number,
+        low: number,
+        close: number,
+      ) =>
+        ({
+          symbol: "SLFIXUSDT",
+          interval: "1m",
+          openTime: closeTime - 60_000,
+          closeTime,
+          open,
+          high,
+          low,
+          close,
+          volume: 0,
+          isClosed: true,
+        }) as any;
+      const pctx = {
+        historicalSampleCount: 15,
+        historicalP90: 200000,
+        historicalP95: 400000,
+        historicalP99: 700000,
+        percentileRank: 96,
+      };
+
+      // Liquidation-event extreme reaches only 103 -- this is what the OLD
+      // (buggy) SL calculation would have used exclusively.
+      mgr.onLiquidationEvent(
+        {
+          symbol: "SLFIXUSDT",
+          victim: "SHORT",
+          timestamp: now0,
+          price: 100,
+          quoteQty: 500000,
+        },
+        { quantity: 5000, timestamp: now0 },
+      );
+      mgr.onLiquidationEvent(
+        {
+          symbol: "SLFIXUSDT",
+          victim: "SHORT",
+          timestamp: now0 + 10_000,
+          price: 103,
+          quoteQty: 300000,
+        },
+        { quantity: 4700, timestamp: now0 + 10_000 },
+      );
+      mgr.onTick(
+        "SLFIXUSDT",
+        pctx,
+        [],
+        103,
+        1.0,
+        1000,
+        now0 + 11_000,
+        [],
+        [],
+        flatAtr,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("SLFIXUSDT")!.episodeMaxAdverseExtreme,
+        103,
+      );
+
+      // A CANDLE (no liquidation event) pushes the true adverse extreme further, to 103.8 --
+      // episode.extremePrice itself never sees this (no liquidation event carries this price).
+      const c0 = c(now0 + 60_000, 103, 103.8, 103, 103.8);
+      mgr.onTick(
+        "SLFIXUSDT",
+        pctx,
+        [],
+        103.8,
+        1.0,
+        1000,
+        now0 + 65_000,
+        [c0],
+        [],
+        flatAtr,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("SLFIXUSDT")!.episode.extremePrice,
+        103,
+        "liquidation-event-only extreme must stay unchanged",
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("SLFIXUSDT")!.episodeMaxAdverseExtreme,
+        103.8,
+        "true max-adverse extreme must pick up the candle-based move",
+      );
+
+      // 1m recovery candidate from the NEW extreme (103.8), then 3m confirmation.
+      // Recovery-fraction gate check: displacement=|100-103.8|=3.8 (>=1.0 ATR, gate active),
+      // recovery=|102.5-103.8|=1.3, fraction=1.3/3.8=0.342 >= 0.30 required -- passes with margin.
+      const c1 = c(now0 + 120_000, 103.8, 103.8, 103.0, 103.0);
+      const c2 = c(now0 + 180_000, 103.0, 103.1, 102.5, 102.5);
+      const c3 = c(now0 + 200_000, 102.5, 102.6, 102.4, 102.5);
+      const c3m = c(now0 + 180_000, 103.8, 103.8, 102.5, 102.5);
+      const history = [
+        { contracts: 5000, fetchedAt: now0 },
+        { contracts: 4600, fetchedAt: now0 + 15_000 },
+        { contracts: 4590, fetchedAt: now0 + 25_000 },
+        { contracts: 4590, fetchedAt: now0 + 180_000 },
+      ];
+      mgr.onTick(
+        "SLFIXUSDT",
+        pctx,
+        history,
+        102.5,
+        1.0,
+        1000,
+        now0 + 205_000,
+        [c1, c2, c3],
+        [c3m],
+        flatAtr,
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("SLFIXUSDT")!.globalState,
+        "WAIT_FOR_POST_EPISODE_OI_CREATION",
+      );
+      assert.strictEqual(
+        mgr.getLifecycle("SLFIXUSDT")!.episodeMaxAdverseExtreme,
+        103.8,
+        "must survive into WAIT unchanged -- this is the exact value liquidation-oi-watch-manager.ts's WAIT block now passes into computeStructuralInvalidationPrice() for candidateSlPrice, confirmed by source read",
+      );
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   process.exit(failed > 0 ? 1 : 0);
 }

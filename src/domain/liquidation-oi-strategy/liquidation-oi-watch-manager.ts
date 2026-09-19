@@ -18,6 +18,7 @@ import {
   advanceEpisodeEndDetection,
   initEpisodeEndDetectionState,
   passesRecoveryFractionGate,
+  isMoreAdverse,
   type EpisodeEndDetectionState,
   type AtrLookup,
 } from "./episode-end-detector";
@@ -179,6 +180,25 @@ interface SymbolLifecycle {
   episodeEndOiQuantity: number | null;
   episodeEndPrice: number | null;
   episodeEndTime: number | null;
+  /** Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- the TRUE
+   *  worst (most adverse) price seen across the ENTIRE liquidation
+   *  episode, from every liquidation event AND every closed-candle
+   *  low/high, across ANY number of provisional-end reopens. NEVER
+   *  reset, NEVER decreases in adversity (only ever extends further
+   *  adverse). This is DELIBERATELY separate from BOTH
+   *  episode.extremePrice (updated ONLY by liquidation events' own
+   *  price, historically the sole SL reference -- confirmed live to
+   *  under-report the true worst price whenever the candle-based
+   *  episode-end detector's own extreme, episodeEndDetection.extreme,
+   *  moved further adverse than any single liquidation event's own
+   *  price) and episodeEndDetection.extreme (candle-based, but
+   *  DELIBERATELY reseeded/reset on every provisional-end reopen, per
+   *  episode-end-detector.ts's own design -- correct for restarting
+   *  causal recovery detection, wrong as a structural-SL reference,
+   *  which must reflect the worst price ever seen in the whole
+   *  episode, not just since the most recent reopen). Structural SL
+   *  is computed from THIS field. */
+  episodeMaxAdverseExtreme: number;
 }
 
 export interface NoSignalEvent {
@@ -291,6 +311,7 @@ export class LiquidationOiWatchManager {
         episodeEndOiQuantity: null,
         episodeEndPrice: null,
         episodeEndTime: null,
+        episodeMaxAdverseExtreme: episode.extremePrice,
       };
       this.symbols.set(event.symbol, lifecycle);
       this.forensic({
@@ -323,6 +344,19 @@ export class LiquidationOiWatchManager {
       oiAtEvent !== null
         ? updateEpisodeOi(foldedEpisode, oiAtEvent)
         : foldedEpisode;
+
+    // Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- update the
+    // TRUE, never-reset max-adverse-extreme from this liquidation
+    // event's own resulting extremePrice, if it's more adverse than
+    // anything seen so far (across any number of prior reopens). See
+    // SymbolLifecycle.episodeMaxAdverseExtreme's own doc comment.
+    const maxAdverseExtreme = isMoreAdverse(
+      withOi.victim,
+      withOi.extremePrice,
+      existing.episodeMaxAdverseExtreme,
+    )
+      ? withOi.extremePrice
+      : existing.episodeMaxAdverseExtreme;
 
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
     // Section 7 -- PROVISIONAL episode end. A candle-confirmed END is
@@ -363,6 +397,7 @@ export class LiquidationOiWatchManager {
         episodeEndOiQuantity: null,
         episodeEndPrice: null,
         episodeEndTime: null,
+        episodeMaxAdverseExtreme: maxAdverseExtreme,
       };
       this.symbols.set(event.symbol, updated);
       this.forensic({
@@ -373,7 +408,11 @@ export class LiquidationOiWatchManager {
         reason: `provisional episode end invalidated by continuation liquidation (eventUsd=${event.quoteQty}) -- old OI_END/price/time baseline cleared, episode-end detection restarted causally`,
       });
     } else {
-      updated = { ...existing, episode: withOi };
+      updated = {
+        ...existing,
+        episode: withOi,
+        episodeMaxAdverseExtreme: maxAdverseExtreme,
+      };
       this.symbols.set(event.symbol, updated);
     }
 
@@ -721,6 +760,21 @@ export class LiquidationOiWatchManager {
         atrLookup,
       );
 
+      // Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- update
+      // the TRUE, never-reset max-adverse-extreme from the CANDLE-based
+      // extreme too (episode-end-detector.ts's own advance.state.extreme,
+      // which tracks closed-candle low/high -- historically NEVER fed
+      // into the structural-SL reference at all, only liquidation-event
+      // prices were, which under-reported the true worst price whenever
+      // price moved further adverse between liquidation events).
+      const maxAdverseExtreme = isMoreAdverse(
+        lifecycle.episode.victim,
+        advance.state.extreme,
+        lifecycle.episodeMaxAdverseExtreme,
+      )
+        ? advance.state.extreme
+        : lifecycle.episodeMaxAdverseExtreme;
+
       if (advance.extremeUpdated) {
         this.forensic({
           ...this.base(lifecycle, symbol, nowMs),
@@ -764,6 +818,7 @@ export class LiquidationOiWatchManager {
           ...lifecycle,
           episodeEndDetection: advance.state,
           lastTickAt: nowMs,
+          episodeMaxAdverseExtreme: maxAdverseExtreme,
         });
         return;
       }
@@ -784,6 +839,7 @@ export class LiquidationOiWatchManager {
         this.symbols.set(symbol, {
           ...lifecycle,
           episodeEndDetection: { ...advance.state, candidateTime: null },
+          episodeMaxAdverseExtreme: maxAdverseExtreme,
         });
         return;
       }
@@ -813,6 +869,7 @@ export class LiquidationOiWatchManager {
         episodeEndPrice: advance.confirmedPrice!,
         episodeEndTime: advance.confirmedAtCloseTime!,
         lastTickAt: nowMs,
+        episodeMaxAdverseExtreme: maxAdverseExtreme,
       };
       this.symbols.set(symbol, next);
       this.forensic({
@@ -994,8 +1051,16 @@ export class LiquidationOiWatchManager {
             candidateSide,
             remaining.predictedRemainingCapacityAtr,
           );
+          // Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- SL
+          // is now computed from episodeMaxAdverseExtreme (the TRUE
+          // worst price across the whole episode, candles included,
+          // never reset on reopen), NOT lifecycle.episode.extremePrice
+          // (liquidation-event-price-only, confirmed live to under-
+          // report the true worst price -- LINKUSDT example:
+          // episode.extremePrice stayed 12.201 across 3 reopens while
+          // the candle-based extreme independently reached 12.231).
           candidateSlPrice = computeStructuralInvalidationPrice(
-            lifecycle.episode.extremePrice,
+            lifecycle.episodeMaxAdverseExtreme,
             atr3m,
             candidateSide,
           );
@@ -1306,6 +1371,7 @@ export class LiquidationOiWatchManager {
       episodeEndOiQuantity: null,
       episodeEndPrice: null,
       episodeEndTime: null,
+      episodeMaxAdverseExtreme: extremePrice,
     };
     this.symbols.set(symbol, lifecycle);
     this.ownership.hydrate(symbol, ownershipId, victim);
@@ -1400,6 +1466,14 @@ export class LiquidationOiWatchManager {
       episodeEndOiQuantity: params.episodeEndOiQuantity,
       episodeEndPrice: params.episodeEndPrice,
       episodeEndTime: params.episodeEndTime,
+      // Sep 18 2026 (Karo) -- best-effort on restart: the persisted
+      // WAIT doc does not yet carry the true historical max-adverse
+      // extreme separately, so this falls back to the episode's own
+      // extremePrice. Acceptable degradation -- restart is rare, and
+      // this only ever UNDER-estimates the true worst price in that
+      // edge case, never over-estimates it (SL would be slightly
+      // tighter than ideal, never looser/riskier).
+      episodeMaxAdverseExtreme: params.extremePrice,
     };
     this.symbols.set(params.symbol, lifecycle);
     this.ownership.hydrate(params.symbol, params.ownershipId, params.victim);
