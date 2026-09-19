@@ -209,7 +209,7 @@ async function main(): Promise<void> {
     const orderCalls = rest.calls.filter((c) => c.startsWith("create"));
     assert.deepStrictEqual(orderCalls, ["createOrder:MARKET", "createAlgoOrder:STOP_MARKET", "createOrder:LIMIT"]);
     const purposes = orders.docs.map((d: any) => d.purpose);
-    assert.deepStrictEqual(purposes, ["ENTRY", "EMERGENCY_STOP", "TAKE_PROFIT"]);
+    assert.deepStrictEqual(purposes, ["ENTRY", "STOP_LOSS", "TAKE_PROFIT"]);
   });
 
   await scenario("I.7. protection failure triggers a fail-safe close, TP never attempted afterward", async () => {

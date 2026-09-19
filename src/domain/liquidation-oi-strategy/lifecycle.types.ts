@@ -75,7 +75,7 @@ export type UserTerminalReason =
   | "STRATEGY_INVALIDATION"
   | "DYNAMIC_EXIT"
   | "MANUAL_CLOSE"
-  | "EMERGENCY_STOP"
+  | "SL_FILLED" // Sep 19 2026 (Karo) renamed from EMERGENCY_STOP -- the resting STOP_MARKET is now our own regular SL price itself, not a wide catastrophe-only buffer
   | "EXECUTION_FAILED"
   | "PROTECTION_FAILED"
   | "USER_STRATEGY_EXECUTION_DISABLED" // Sep 16 2026 (Karo), operator-requested -- this user's own liquidationOiExecutionEnabled=false, MAIN still observing globally, no order ever attempted for this user

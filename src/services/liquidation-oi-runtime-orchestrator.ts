@@ -1,10 +1,7 @@
 import type { Side, Candle } from "../shared/common.types";
 import { LiquidationOiWatchManager } from "../domain/liquidation-oi-strategy/liquidation-oi-watch-manager";
 import type { LiquidationOiEventInput } from "../domain/liquidation-oi-strategy/episode-tracker";
-import type {
-  EpisodePercentileContext,
-  WatchQualificationResult,
-} from "../domain/liquidation-oi-strategy/watch-qualification";
+import type { EpisodePercentileContext, WatchQualificationResult } from "../domain/liquidation-oi-strategy/watch-qualification";
 import type { OiHistorySample } from "../domain/liquidation-oi-strategy/oi-clearing-detector";
 import type { AtrLookup } from "../domain/liquidation-oi-strategy/episode-end-detector";
 // Sep 17 2026 (Karo) -- computeStructuralInvalidationPrice no longer
@@ -16,31 +13,15 @@ import type { CapacityModelCoefficients } from "../domain/liquidation-oi-strateg
 import type { LiquidationOiWaitStateRepository } from "../infrastructure/mongo/liquidation-oi-wait-state.repository";
 import { computePositionSizing } from "../domain/liquidation-oi-strategy/sizing-adapter";
 import { candidateTradeSideForVictim } from "../domain/liquidation-oi-strategy/lifecycle.types";
-import {
-  newPendingUserExecution,
-  type LiquidationOiUserExecutionState,
-} from "../domain/liquidation-oi-strategy/user-execution.types";
-import {
-  runEntrySequence,
-  type BinanceRestLike,
-} from "../infrastructure/binance/liquidation-oi-user-execution.service";
+import { newPendingUserExecution, type LiquidationOiUserExecutionState } from "../domain/liquidation-oi-strategy/user-execution.types";
+import { runEntrySequence, type BinanceRestLike } from "../infrastructure/binance/liquidation-oi-user-execution.service";
 import { LiquidationOiGlobalSignalRepository } from "../infrastructure/mongo/liquidation-oi-global-signal.repository";
 import { StrategyOrderRepository } from "../infrastructure/mongo/strategy-order.repository";
-import {
-  captureOrderBookObservation,
-  type OrderBookObservation,
-  type WallLookup,
-} from "../domain/liquidation-oi-strategy/order-book-observation";
-import {
-  DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
-  type LiquidationOiActiveLifecycleConfig,
-} from "../domain/liquidation-oi-strategy/active-lifecycle-config";
+import { captureOrderBookObservation, type OrderBookObservation, type WallLookup } from "../domain/liquidation-oi-strategy/order-book-observation";
+import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG, type LiquidationOiActiveLifecycleConfig } from "../domain/liquidation-oi-strategy/active-lifecycle-config";
 import { formatEntryMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
 import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
-import {
-  displayNameFromUserId,
-  formatCompactUsd,
-} from "../domain/liquidation-oi-strategy/telegram-display-format";
+import { displayNameFromUserId, formatCompactUsd } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import { resolveUserExecutionMode } from "../domain/liquidation-oi-strategy/user-execution-mode";
 import type { LiquidationOiActiveMainRuntime } from "./liquidation-oi-active-main-runtime.service";
 import { childLogger } from "../infrastructure/logging/logger";
@@ -89,13 +70,7 @@ export interface LiquidationOiUserRuntimeRef {
  *  FIX: PAPER_ACTIVE added and counted as manageable -- a market
  *  signal must not become CANCELLED merely because real execution was
  *  off; PAPER is a complete virtual lifecycle, not "nothing". */
-type UserFanOutOutcome =
-  | "ACTIVE"
-  | "PAPER_ACTIVE"
-  | "ALREADY_ACTIVE"
-  | "ALREADY_TERMINAL"
-  | "USER_DISABLED"
-  | "FAILED";
+type UserFanOutOutcome = "ACTIVE" | "PAPER_ACTIVE" | "ALREADY_ACTIVE" | "ALREADY_TERMINAL" | "USER_DISABLED" | "FAILED";
 
 // Sep 17 2026 (Karo) -- STRUCTURAL_INVALIDATION_BUFFER_ATR now lives in
 // capacity-model.ts (computeStructuralInvalidationPrice), shared with
@@ -120,16 +95,13 @@ export class LiquidationOiRuntimeOrchestrator {
     private readonly getUserRuntimes: () => readonly LiquidationOiUserRuntimeRef[],
     private readonly observationEnabled: boolean = true,
     private readonly executionEnabled: boolean = false,
-    private readonly makeGlobalSignalId: () => string = () =>
-      `lox-sig-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+    private readonly makeGlobalSignalId: () => string = () => `lox-sig-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     /** Sep 16 2026 (Karo), operator-requested forensic observability
      *  -- strictly additive, default no-op. Threaded into the watch
      *  manager (which owns most emissions) and used here only for
      *  ENTRY_READY_RESOLUTION, since the fan-out outcome data lives
      *  in this class, not the watch manager. */
-    private readonly forensic: (
-      event: import("../domain/liquidation-oi-strategy/forensic-events").ForensicEvent,
-    ) => void = () => {},
+    private readonly forensic: (event: import("../domain/liquidation-oi-strategy/forensic-events").ForensicEvent) => void = () => {},
     /** Sep 17 2026 (Karo), operator-requested production-completion
      *  pass -- optional, default no-op, settable late via
      *  setActiveMainRuntime() to break the circular dependency
@@ -146,20 +118,11 @@ export class LiquidationOiRuntimeOrchestrator {
      *  cleared after every tick so it survives restart. */
     private readonly waitStateRepo: LiquidationOiWaitStateRepository | null = null,
   ) {
-    this.watchManager = new LiquidationOiWatchManager(
-      strategyConfig,
-      undefined,
-      undefined,
-      forensic,
-    );
-    log.info(
-      `[LOX_RUNTIME] constructed observationEnabled=${observationEnabled} executionEnabled=${executionEnabled}`,
-    );
+    this.watchManager = new LiquidationOiWatchManager(strategyConfig, undefined, undefined, forensic);
+    log.info(`[LOX_RUNTIME] constructed observationEnabled=${observationEnabled} executionEnabled=${executionEnabled}`);
   }
 
-  getWatchManager(): LiquidationOiWatchManager {
-    return this.watchManager;
-  }
+  getWatchManager(): LiquidationOiWatchManager { return this.watchManager; }
 
   /** Sep 17 2026 (Karo), operator-approved final capacity architecture,
    *  Section 31/4 -- restores every persisted WAIT_FOR_POST_EPISODE_OI_CREATION
@@ -181,23 +144,16 @@ export class LiquidationOiRuntimeOrchestrator {
       this.watchManager.restoreWaitLifecycle(doc, nowMs);
       restored++;
     }
-    log.info(
-      `[LOX_WAIT_STATE_HYDRATED] ${restored} symbol(s) restored into WAIT_FOR_POST_EPISODE_OI_CREATION after restart`,
-    );
+    log.info(`[LOX_WAIT_STATE_HYDRATED] ${restored} symbol(s) restored into WAIT_FOR_POST_EPISODE_OI_CREATION after restart`);
     return restored;
   }
 
   /** Sep 17 2026 (Karo), operator-requested. Late-binds the ACTIVE
    *  MAIN runtime after construction -- see the constructor param's
    *  own doc comment for why this is necessary. */
-  setActiveMainRuntime(runtime: LiquidationOiActiveMainRuntime): void {
-    this.activeMainRuntime = runtime;
-  }
+  setActiveMainRuntime(runtime: LiquidationOiActiveMainRuntime): void { this.activeMainRuntime = runtime; }
 
-  onLiquidationEvent(
-    event: LiquidationOiEventInput,
-    oiAtEvent: { quantity: number; timestamp: number } | null,
-  ): void {
+  onLiquidationEvent(event: LiquidationOiEventInput, oiAtEvent: { quantity: number; timestamp: number } | null): void {
     if (!this.observationEnabled) return;
     // Sep 18 2026 (Karo), operator-reported CRITICAL FIX -- the
     // provisional-end reopen (WAIT_FOR_POST_EPISODE_OI_CREATION ->
@@ -215,15 +171,9 @@ export class LiquidationOiRuntimeOrchestrator {
     // awaited for durability) -- this is cleanup of a doc that no
     // longer reflects reality, not a write something else depends on
     // being durable before the next tick.
-    const before =
-      this.waitStateRepo !== null
-        ? this.watchManager.getLifecycle(event.symbol)?.globalState
-        : undefined;
+    const before = this.waitStateRepo !== null ? this.watchManager.getLifecycle(event.symbol)?.globalState : undefined;
     this.watchManager.onLiquidationEvent(event, oiAtEvent);
-    if (
-      this.waitStateRepo !== null &&
-      before === "WAIT_FOR_POST_EPISODE_OI_CREATION"
-    ) {
+    if (this.waitStateRepo !== null && before === "WAIT_FOR_POST_EPISODE_OI_CREATION") {
       const after = this.watchManager.getLifecycle(event.symbol)?.globalState;
       if (after !== "WAIT_FOR_POST_EPISODE_OI_CREATION") {
         void this.waitStateRepo.delete(event.symbol);
@@ -235,26 +185,10 @@ export class LiquidationOiRuntimeOrchestrator {
    *  never polls OI itself; the caller passes
    *  OiTrackerService.getOiHistory(symbol) directly. */
   async onTick(
-    symbol: string,
-    percentile: EpisodePercentileContext,
-    oiHistory: readonly OiHistorySample[],
-    currentPrice: number,
-    atr3m: number | null,
-    atr3mAgeMs: number | null,
-    nowMs: number,
-    bestBid: number | null = null,
-    bestAsk: number | null = null,
-    wallLookup: WallLookup | null = null,
-    new1mCandles: readonly Candle[] = [],
-    all3mCandlesSorted: readonly Candle[] = [],
-    atrLookup: AtrLookup | null = null,
-    testEconomicsOverride?: {
-      capacityAtr: number;
-      candidateTpPrice: number;
-      candidateSlPrice: number;
-      netRR: number;
-      passesEconomicViability?: boolean;
-    } | null,
+    symbol: string, percentile: EpisodePercentileContext, oiHistory: readonly OiHistorySample[], currentPrice: number, atr3m: number | null, atr3mAgeMs: number | null, nowMs: number,
+    bestBid: number | null = null, bestAsk: number | null = null, wallLookup: WallLookup | null = null,
+    new1mCandles: readonly Candle[] = [], all3mCandlesSorted: readonly Candle[] = [], atrLookup: AtrLookup | null = null,
+    testEconomicsOverride?: { capacityAtr: number; candidateTpPrice: number; candidateSlPrice: number; netRR: number; passesEconomicViability?: boolean } | null,
   ): Promise<void> {
     if (!this.observationEnabled) return;
     const before = this.watchManager.getLifecycle(symbol);
@@ -263,11 +197,7 @@ export class LiquidationOiRuntimeOrchestrator {
     // early-returns for them by design), but MAIN's own post-entry
     // monitoring must still run every qualifying tick -- delegated to the
     // SAME existing tick, never a separate stream.
-    if (
-      before !== null &&
-      before.globalState === "ACTIVE" &&
-      this.activeMainRuntime !== null
-    ) {
+    if (before !== null && before.globalState === "ACTIVE" && this.activeMainRuntime !== null) {
       // Sep 17 2026 (Karo), operator-reported CRITICAL LIVE BUG FIX --
       // this MUST be the real globalSignalId (the Mongo document id),
       // never ownershipId (a completely different id scheme from
@@ -281,41 +211,15 @@ export class LiquidationOiRuntimeOrchestrator {
       // ACTIVE, and both now set it), skip the tick rather than call
       // onActiveTick with a null id.
       if (before.globalSignalId === null) {
-        log.error(
-          `[LOX_ACTIVE_TICK_MISSING_SIGNAL_ID] symbol=${symbol} -- ACTIVE lifecycle with no globalSignalId, structurally unexpected; skipping this tick`,
-        );
+        log.error(`[LOX_ACTIVE_TICK_MISSING_SIGNAL_ID] symbol=${symbol} -- ACTIVE lifecycle with no globalSignalId, structurally unexpected; skipping this tick`);
         return;
       }
-      const oiQty =
-        oiHistory.length > 0
-          ? oiHistory[oiHistory.length - 1]!.contracts
-          : null;
-      await this.activeMainRuntime.onActiveTick(
-        symbol,
-        before.globalSignalId,
-        before.episodeId,
-        candidateTradeSideForVictim(before.episode.victim),
-        currentPrice,
-        oiQty,
-        atr3m,
-        nowMs,
-      );
+      const oiQty = oiHistory.length > 0 ? oiHistory[oiHistory.length - 1]!.contracts : null;
+      await this.activeMainRuntime.onActiveTick(symbol, before.globalSignalId, before.episodeId, candidateTradeSideForVictim(before.episode.victim), currentPrice, oiQty, atr3m, nowMs);
       return;
     }
 
-    this.watchManager.onTick(
-      symbol,
-      percentile,
-      oiHistory,
-      currentPrice,
-      atr3m,
-      atr3mAgeMs,
-      nowMs,
-      new1mCandles,
-      all3mCandlesSorted,
-      atrLookup,
-      testEconomicsOverride,
-    );
+    this.watchManager.onTick(symbol, percentile, oiHistory, currentPrice, atr3m, atr3mAgeMs, nowMs, new1mCandles, all3mCandlesSorted, atrLookup, testEconomicsOverride);
     const after = this.watchManager.getLifecycle(symbol);
 
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
@@ -328,10 +232,7 @@ export class LiquidationOiRuntimeOrchestrator {
       const waitState = this.watchManager.getWaitStateForPersistence(symbol);
       if (waitState !== null) {
         await this.waitStateRepo.upsert(waitState);
-      } else if (
-        before?.globalState === "WAIT_FOR_POST_EPISODE_OI_CREATION" &&
-        after?.globalState !== "WAIT_FOR_POST_EPISODE_OI_CREATION"
-      ) {
+      } else if (before?.globalState === "WAIT_FOR_POST_EPISODE_OI_CREATION" && after?.globalState !== "WAIT_FOR_POST_EPISODE_OI_CREATION") {
         await this.waitStateRepo.delete(symbol);
       }
     }
@@ -343,76 +244,14 @@ export class LiquidationOiRuntimeOrchestrator {
     // user-facing notification is suppressed. The first user-facing LOX
     // message is now ENTRY.
 
-    if (
-      before?.globalState !== "ENTRY_READY" &&
-      after !== null &&
-      after.globalState === "ENTRY_READY" &&
-      atr3m !== null
-    ) {
-      const orderBook = captureOrderBookObservation(
-        symbol,
-        currentPrice,
-        after.episode.extremePrice,
-        atr3m,
-        bestBid,
-        bestAsk,
-        wallLookup,
-        this.activeLifecycleConfig,
-        nowMs,
-      );
+    if (before?.globalState !== "ENTRY_READY" && after !== null && after.globalState === "ENTRY_READY" && atr3m !== null) {
+      const orderBook = captureOrderBookObservation(symbol, currentPrice, after.episode.extremePrice, atr3m, bestBid, bestAsk, wallLookup, this.activeLifecycleConfig, nowMs);
       const er = after.entryResult?.entryReady ? after.entryResult : null;
-      await this.handleEntryReady(
-        symbol,
-        after.ownershipId,
-        after.episode,
-        after.watchResult,
-        currentPrice,
-        atr3m,
-        nowMs,
-        orderBook,
-        er?.counterMoveAtr ?? 0,
-        er?.distanceFromExtremeAtr ?? 0,
-        after.episodeEndOiQuantity,
-        er?.capacityAtr ?? null,
-        er?.candidateTpPrice ?? null,
-        er?.candidateSlPrice ?? null,
-        er?.netRR ?? null,
-        er?.postEndOiCreationUsd ?? null,
-        er?.oiToLiqRatio ?? null,
-        after.episodeEndPrice,
-        after.episodeEndTime,
-      );
+      await this.handleEntryReady(symbol, after.ownershipId, after.episode, after.watchResult, currentPrice, atr3m, nowMs, orderBook, er?.counterMoveAtr ?? 0, er?.distanceFromExtremeAtr ?? 0, after.episodeEndOiQuantity, er?.capacityAtr ?? null, er?.candidateTpPrice ?? null, er?.candidateSlPrice ?? null, er?.netRR ?? null, er?.postEndOiCreationUsd ?? null, er?.oiToLiqRatio ?? null, after.episodeEndPrice, after.episodeEndTime);
     }
   }
 
-  private async handleEntryReady(
-    symbol: string,
-    ownershipId: string,
-    episode: {
-      victim: Side;
-      extremePrice: number;
-      sameDirectionLiqUsd: number;
-      startOiQuantity: number | null;
-      minOiQuantity: number | null;
-      currentOiQuantity: number | null;
-    },
-    watchResult: WatchQualificationResult | null,
-    entryPrice: number,
-    atr3m: number,
-    nowMs: number,
-    orderBook: OrderBookObservation | null,
-    counterMoveAtr: number,
-    distanceFromExtremeAtr: number,
-    episodeEndOiQuantity: number | null,
-    capacityAtr: number | null,
-    candidateTpPrice: number | null,
-    candidateSlPrice: number | null,
-    netRR: number | null,
-    postEndOiCreationUsd: number | null,
-    oiToLiqRatio: number | null,
-    episodeEndPrice: number | null,
-    episodeEndTime: number | null,
-  ): Promise<void> {
+  private async handleEntryReady(symbol: string, ownershipId: string, episode: { victim: Side; extremePrice: number; sameDirectionLiqUsd: number; startOiQuantity: number | null; minOiQuantity: number | null; currentOiQuantity: number | null }, watchResult: WatchQualificationResult | null, entryPrice: number, atr3m: number, nowMs: number, orderBook: OrderBookObservation | null, counterMoveAtr: number, distanceFromExtremeAtr: number, episodeEndOiQuantity: number | null, capacityAtr: number | null, candidateTpPrice: number | null, candidateSlPrice: number | null, netRR: number | null, postEndOiCreationUsd: number | null, oiToLiqRatio: number | null, episodeEndPrice: number | null, episodeEndTime: number | null): Promise<void> {
     if (watchResult === null || !watchResult.qualifies) return;
     // Sep 17 2026 (Karo), operator-approved final capacity architecture
     // -- these MUST have been produced by the NEW economic
@@ -422,29 +261,23 @@ export class LiquidationOiRuntimeOrchestrator {
     // structurally broken -- refuse rather than silently falling back
     // to a different, uncoordinated formula (Section 10's "ONE
     // capacity model", never a hidden fallback).
-    if (
-      capacityAtr === null ||
-      candidateTpPrice === null ||
-      candidateSlPrice === null
-    ) {
-      log.error(
-        `[LOX_ENTRY_READY_MISSING_CAPACITY] ${symbol} -- ENTRY_READY reached without a capacity/TP/SL result from the economic gate; refusing to fabricate one`,
-      );
+    if (capacityAtr === null || candidateTpPrice === null || candidateSlPrice === null) {
+      log.error(`[LOX_ENTRY_READY_MISSING_CAPACITY] ${symbol} -- ENTRY_READY reached without a capacity/TP/SL result from the economic gate; refusing to fabricate one`);
       return;
     }
     const globalSignalId = this.makeGlobalSignalId();
     const candidateSide = candidateTradeSideForVictim(episode.victim);
     // Sep 17 2026 (Karo) -- the SAME centralized formula the economic
-    // pre-validation gate already used to produce candidateSlPrice;
-    // recomputed here only for emergencyHardStopPrice's own buffer
-    // math, must always equal candidateSlPrice (same inputs).
+    // pre-validation gate already used to produce candidateSlPrice.
+    // Sep 19 2026 (Karo), operator-requested REVISION -- the separate,
+    // wider strategyInvalidationPrice buffer is REMOVED. strategyInvalidationPrice
+    // itself is now the price placed as the real resting Binance
+    // STOP_MARKET order for REAL users (see
+    // liquidation-oi-user-execution.service.ts's own doc comment for
+    // the full architecture). There is no longer a distinct emergency
+    // tier -- if we can place a real resting SL order at entry, that
+    // IS the protection.
     const strategyInvalidationPrice = candidateSlPrice;
-    const emergencyHardStopPrice =
-      candidateSide === "LONG"
-        ? strategyInvalidationPrice -
-          atr3m * this.strategyConfig.emergencyHardStopBufferAtrMultiple
-        : strategyInvalidationPrice +
-          atr3m * this.strategyConfig.emergencyHardStopBufferAtrMultiple;
 
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
     // Sections 10/19-21 -- initial-capacity-model.ts (the old
@@ -472,13 +305,8 @@ export class LiquidationOiRuntimeOrchestrator {
     // value already computed for WATCH qualification -- not recomputed
     // differently here.
     let oiMetricLine: string | null = null;
-    if (
-      episode.startOiQuantity !== null &&
-      episode.minOiQuantity !== null &&
-      watchResult.oiDestructionFractionAtQualification !== null
-    ) {
-      const destroyedUsd =
-        (episode.startOiQuantity - episode.minOiQuantity) * entryPrice;
+    if (episode.startOiQuantity !== null && episode.minOiQuantity !== null && watchResult.oiDestructionFractionAtQualification !== null) {
+      const destroyedUsd = (episode.startOiQuantity - episode.minOiQuantity) * entryPrice;
       if (destroyedUsd > 0) {
         oiMetricLine = `\ud83d\udcca OI Clear  -${formatCompactUsd(destroyedUsd)}  (-${(watchResult.oiDestructionFractionAtQualification * 100).toFixed(2)}%)`;
       }
@@ -493,16 +321,11 @@ export class LiquidationOiRuntimeOrchestrator {
       if (creationQty > 0) {
         const creationUsd = creationQty * entryPrice;
         const creationLine = `\ud83d\udcc8 OI Creation  +${formatCompactUsd(creationUsd)}`;
-        oiMetricLine =
-          oiMetricLine !== null
-            ? `${oiMetricLine}\n${creationLine}`
-            : creationLine;
+        oiMetricLine = oiMetricLine !== null ? `${oiMetricLine}\n${creationLine}` : creationLine;
       }
     }
 
-    log.info(
-      `[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} strategyInvalidation=${strategyInvalidationPrice} emergencyHardStop=${emergencyHardStopPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} atr3mAtEntry=${atr3mAtEntry} netRR=${netRR !== null ? netRR.toFixed(3) : "n/a"} oiToLiqRatio=${oiToLiqRatio !== null ? oiToLiqRatio.toFixed(3) : "n/a"} postEndOiCreationUsd=${postEndOiCreationUsd !== null ? postEndOiCreationUsd.toFixed(0) : "n/a"}`,
-    );
+    log.info(`[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} strategyInvalidation=${strategyInvalidationPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} atr3mAtEntry=${atr3mAtEntry} netRR=${netRR !== null ? netRR.toFixed(3) : "n/a"} oiToLiqRatio=${oiToLiqRatio !== null ? oiToLiqRatio.toFixed(3) : "n/a"} postEndOiCreationUsd=${postEndOiCreationUsd !== null ? postEndOiCreationUsd.toFixed(0) : "n/a"}`);
 
     // Sep 16 2026 (Karo), operator-requested lifecycle fix: the
     // persisted signal starts at ENTRY_READY, NOT ACTIVE -- ACTIVE is
@@ -512,28 +335,11 @@ export class LiquidationOiRuntimeOrchestrator {
     // by itself imply ACTIVE, for either the in-memory lifecycle or
     // its persisted record.
     await this.globalSignalRepo.upsertSignal({
-      globalSignalId,
-      symbol,
-      victim: episode.victim,
-      candidateSide,
-      state: "ENTRY_READY",
-      ownershipId,
-      episodePercentileRank: watchResult.episodePercentileRank,
-      sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
-      extremePrice: episode.extremePrice,
-      entryPrice,
-      strategyInvalidationPrice,
-      emergencyHardStopPrice,
-      initialCapacityAtr: capacity.initialCapacityAtr,
-      initialTpPrice: tpPrice,
-      tpRevision: 0,
-      currentTargetPrice: tpPrice,
-      orderBookAtEntryReady: orderBook,
-      atr3mAtEntry,
-      episodeEndOiQuantity,
-      episodeEndPrice,
-      episodeEndTime,
-      oiAtEntryQuantity: episode.currentOiQuantity,
+      globalSignalId, symbol, victim: episode.victim, candidateSide, state: "ENTRY_READY", ownershipId,
+      episodePercentileRank: watchResult.episodePercentileRank, sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
+      extremePrice: episode.extremePrice, entryPrice, strategyInvalidationPrice,
+      initialCapacityAtr: capacity.initialCapacityAtr, initialTpPrice: tpPrice, tpRevision: 0, currentTargetPrice: tpPrice, orderBookAtEntryReady: orderBook,
+      atr3mAtEntry, episodeEndOiQuantity, episodeEndPrice, episodeEndTime, oiAtEntryQuantity: episode.currentOiQuantity,
     });
 
     // Sep 17 2026 (Karo), operator-requested REMOVAL of the old
@@ -548,37 +354,10 @@ export class LiquidationOiRuntimeOrchestrator {
     const outcomes: UserFanOutOutcome[] = [];
     for (const runtime of this.getUserRuntimes()) {
       try {
-        outcomes.push(
-          await this.executeForUser(
-            runtime,
-            symbol,
-            globalSignalId,
-            candidateSide,
-            entryPrice,
-            strategyInvalidationPrice,
-            emergencyHardStopPrice,
-            tpPrice,
-            watchResult.episodePercentileRank,
-            episode.sameDirectionLiqUsd,
-            counterMoveAtr,
-            capacityAtr,
-            netRR,
-            orderBook,
-            oiMetricLine,
-            nowMs,
-          ),
-        );
+        outcomes.push(await this.executeForUser(runtime, symbol, globalSignalId, candidateSide, entryPrice, strategyInvalidationPrice, tpPrice, watchResult.episodePercentileRank, episode.sameDirectionLiqUsd, counterMoveAtr, capacityAtr, netRR, orderBook, oiMetricLine, nowMs));
       } catch (err) {
         outcomes.push("FAILED");
-        log.error(
-          {
-            userId: runtime.userId,
-            symbol,
-            globalSignalId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "[LOX_USER_EXECUTION_UNEXPECTED_ERROR] -- isolated, other users unaffected",
-        );
+        log.error({ userId: runtime.userId, symbol, globalSignalId, err: err instanceof Error ? err.message : String(err) }, "[LOX_USER_EXECUTION_UNEXPECTED_ERROR] -- isolated, other users unaffected");
       }
     }
 
@@ -587,112 +366,46 @@ export class LiquidationOiRuntimeOrchestrator {
     // complete virtual lifecycle) -- the global signal must NOT become
     // CANCELLED merely because real execution was off for every user.
     // MARKET SIGNAL and USER EXECUTION MODE are different concepts.
-    const hasManageableUser = outcomes.some(
-      (o) => o === "ACTIVE" || o === "ALREADY_ACTIVE" || o === "PAPER_ACTIVE",
-    );
-    const episodeIdForForensics =
-      this.watchManager.getLifecycle(symbol)?.episodeId ?? "unknown";
+    const hasManageableUser = outcomes.some((o) => o === "ACTIVE" || o === "ALREADY_ACTIVE" || o === "PAPER_ACTIVE");
+    const episodeIdForForensics = this.watchManager.getLifecycle(symbol)?.episodeId ?? "unknown";
     const enabledUsers = this.getUserRuntimes().length;
     if (hasManageableUser) {
       this.watchManager.confirmActivePosition(symbol, globalSignalId, nowMs);
       await this.globalSignalRepo.upsertSignal({
-        globalSignalId,
-        symbol,
-        victim: episode.victim,
-        candidateSide,
-        state: "ACTIVE",
-        ownershipId,
-        episodePercentileRank: watchResult.episodePercentileRank,
-        sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
-        extremePrice: episode.extremePrice,
-        entryPrice,
-        strategyInvalidationPrice,
-        emergencyHardStopPrice,
-        initialCapacityAtr: capacity.initialCapacityAtr,
-        initialTpPrice: tpPrice,
-        tpRevision: 0,
-        currentTargetPrice: tpPrice,
-        orderBookAtEntryReady: orderBook,
-        atr3mAtEntry,
-        episodeEndOiQuantity,
-        episodeEndPrice,
-        episodeEndTime,
-        oiAtEntryQuantity: episode.currentOiQuantity,
+        globalSignalId, symbol, victim: episode.victim, candidateSide, state: "ACTIVE", ownershipId,
+        episodePercentileRank: watchResult.episodePercentileRank, sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
+        extremePrice: episode.extremePrice, entryPrice, strategyInvalidationPrice,
+        initialCapacityAtr: capacity.initialCapacityAtr, initialTpPrice: tpPrice, tpRevision: 0, currentTargetPrice: tpPrice, orderBookAtEntryReady: orderBook,
+        atr3mAtEntry, episodeEndOiQuantity, episodeEndPrice, episodeEndTime, oiAtEntryQuantity: episode.currentOiQuantity,
       });
       this.forensic({
-        ts: nowMs,
-        symbol,
-        episodeId: episodeIdForForensics,
-        victim: episode.victim,
-        state: "ACTIVE",
-        episodeAgeSec: 0,
-        type: "ENTRY_READY_RESOLUTION",
-        observationEnabled: this.observationEnabled,
-        globalExecutionEnabled: this.executionEnabled,
-        eligibleUsers: outcomes.length,
-        enabledUsers,
-        attemptedUsers: outcomes.filter((o) => o !== "USER_DISABLED").length,
-        activeUsers: outcomes.filter(
-          (o) =>
-            o === "ACTIVE" || o === "ALREADY_ACTIVE" || o === "PAPER_ACTIVE",
-        ).length,
-        failedUsers: outcomes.filter((o) => o === "FAILED").length,
-        resolution: "ACTIVE",
-        terminalReason: null,
+        ts: nowMs, symbol, episodeId: episodeIdForForensics, victim: episode.victim, state: "ACTIVE", episodeAgeSec: 0,
+        type: "ENTRY_READY_RESOLUTION", observationEnabled: this.observationEnabled, globalExecutionEnabled: this.executionEnabled,
+        eligibleUsers: outcomes.length, enabledUsers, attemptedUsers: outcomes.filter((o) => o !== "USER_DISABLED").length,
+        activeUsers: outcomes.filter((o) => o === "ACTIVE" || o === "ALREADY_ACTIVE" || o === "PAPER_ACTIVE").length, failedUsers: outcomes.filter((o) => o === "FAILED").length,
+        resolution: "ACTIVE", terminalReason: null,
       });
-      log.info(
-        `[LOX_GLOBAL_ACTIVE] ${symbol} globalSignalId=${globalSignalId} -- at least one manageable user (real or paper) confirmed, symbol ownership retained`,
-      );
+      log.info(`[LOX_GLOBAL_ACTIVE] ${symbol} globalSignalId=${globalSignalId} -- at least one manageable user (real or paper) confirmed, symbol ownership retained`);
       return;
     }
 
     const { code, detail } = this.resolveNoPositionReason(outcomes);
     this.watchManager.cancel(symbol, code, detail, nowMs);
     await this.globalSignalRepo.upsertSignal({
-      globalSignalId,
-      symbol,
-      victim: episode.victim,
-      candidateSide,
-      state: "CANCELLED",
-      ownershipId,
-      episodePercentileRank: watchResult.episodePercentileRank,
-      sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
-      extremePrice: episode.extremePrice,
-      entryPrice,
-      strategyInvalidationPrice,
-      emergencyHardStopPrice,
-      initialCapacityAtr: capacity.initialCapacityAtr,
-      initialTpPrice: tpPrice,
-      tpRevision: 0,
-      currentTargetPrice: tpPrice,
-      orderBookAtEntryReady: orderBook,
-      atr3mAtEntry,
-      episodeEndOiQuantity,
-      episodeEndPrice,
-      episodeEndTime,
-      oiAtEntryQuantity: episode.currentOiQuantity,
+      globalSignalId, symbol, victim: episode.victim, candidateSide, state: "CANCELLED", ownershipId,
+      episodePercentileRank: watchResult.episodePercentileRank, sameDirectionLiqUsd: episode.sameDirectionLiqUsd,
+      extremePrice: episode.extremePrice, entryPrice, strategyInvalidationPrice,
+      initialCapacityAtr: capacity.initialCapacityAtr, initialTpPrice: tpPrice, tpRevision: 0, currentTargetPrice: tpPrice, orderBookAtEntryReady: orderBook,
+      atr3mAtEntry, episodeEndOiQuantity, episodeEndPrice, episodeEndTime, oiAtEntryQuantity: episode.currentOiQuantity,
     });
     this.forensic({
-      ts: nowMs,
-      symbol,
-      episodeId: episodeIdForForensics,
-      victim: episode.victim,
-      state: "CANCELLED",
-      episodeAgeSec: 0,
-      type: "ENTRY_READY_RESOLUTION",
-      observationEnabled: this.observationEnabled,
-      globalExecutionEnabled: this.executionEnabled,
-      eligibleUsers: outcomes.length,
-      enabledUsers,
-      attemptedUsers: outcomes.filter((o) => o !== "USER_DISABLED").length,
-      activeUsers: 0,
-      failedUsers: outcomes.filter((o) => o === "FAILED").length,
-      resolution: "CANCELLED",
-      terminalReason: code,
+      ts: nowMs, symbol, episodeId: episodeIdForForensics, victim: episode.victim, state: "CANCELLED", episodeAgeSec: 0,
+      type: "ENTRY_READY_RESOLUTION", observationEnabled: this.observationEnabled, globalExecutionEnabled: this.executionEnabled,
+      eligibleUsers: outcomes.length, enabledUsers, attemptedUsers: outcomes.filter((o) => o !== "USER_DISABLED").length,
+      activeUsers: 0, failedUsers: outcomes.filter((o) => o === "FAILED").length,
+      resolution: "CANCELLED", terminalReason: code,
     });
-    log.info(
-      `[LOX_GLOBAL_CANCELLED] ${symbol} globalSignalId=${globalSignalId} reason=${code} -- no manageable user resulted, symbol released for the next independent episode`,
-    );
+    log.info(`[LOX_GLOBAL_CANCELLED] ${symbol} globalSignalId=${globalSignalId} reason=${code} -- no manageable user resulted, symbol released for the next independent episode`);
   }
 
   /** Sep 17 2026 (Karo), operator-requested REWRITE for the PAPER/REAL
@@ -701,55 +414,18 @@ export class LiquidationOiRuntimeOrchestrator {
    *  their OWN enabled=false). It is no longer reachable merely
    *  because real execution was off, since that case now resolves to
    *  PAPER_ACTIVE instead. */
-  private resolveNoPositionReason(outcomes: readonly UserFanOutOutcome[]): {
-    code: string;
-    detail: string;
-  } {
-    if (outcomes.length === 0)
-      return {
-        code: "ENTRY_READY_NO_ELIGIBLE_USERS",
-        detail: "no users were configured for fan-out",
-      };
+  private resolveNoPositionReason(outcomes: readonly UserFanOutOutcome[]): { code: string; detail: string } {
+    if (outcomes.length === 0) return { code: "ENTRY_READY_NO_ELIGIBLE_USERS", detail: "no users were configured for fan-out" };
     const anyManageable = outcomes.some((o) => o !== "USER_DISABLED");
-    if (!anyManageable)
-      return {
-        code: "ENTRY_READY_ALL_USERS_DISABLED",
-        detail: "every configured user's own enabled=false",
-      };
-    return {
-      code: "ENTRY_READY_ALL_EXECUTIONS_FAILED",
-      detail: "at least one user was manageable but every attempt failed",
-    };
+    if (!anyManageable) return { code: "ENTRY_READY_ALL_USERS_DISABLED", detail: "every configured user's own enabled=false" };
+    return { code: "ENTRY_READY_ALL_EXECUTIONS_FAILED", detail: "at least one user was manageable but every attempt failed" };
   }
 
-  private async executeForUser(
-    runtime: LiquidationOiUserRuntimeRef,
-    symbol: string,
-    globalSignalId: string,
-    side: Side,
-    entryPrice: number,
-    strategyInvalidationPrice: number,
-    emergencyHardStopPrice: number,
-    tpPrice: number,
-    percentileRank: number,
-    sameDirectionLiqUsd: number,
-    counterMoveAtr: number,
-    capacityAtr: number | null,
-    netRR: number | null,
-    orderBook: OrderBookObservation | null,
-    oiMetricLine: string | null,
-    nowMs: number,
-  ): Promise<UserFanOutOutcome> {
-    const existing = await this.globalSignalRepo.findUserExecution(
-      runtime.userId,
-      globalSignalId,
-    );
+  private async executeForUser(runtime: LiquidationOiUserRuntimeRef, symbol: string, globalSignalId: string, side: Side, entryPrice: number, strategyInvalidationPrice: number, tpPrice: number, percentileRank: number, sameDirectionLiqUsd: number, counterMoveAtr: number, capacityAtr: number | null, netRR: number | null, orderBook: OrderBookObservation | null, oiMetricLine: string | null, nowMs: number): Promise<UserFanOutOutcome> {
+    const existing = await this.globalSignalRepo.findUserExecution(runtime.userId, globalSignalId);
     if (existing !== null) {
-      log.info(
-        `[LOX_USER_EXECUTION_ALREADY_EXISTS] userId=${runtime.userId} globalSignalId=${globalSignalId} state=${existing.state} -- skipping, idempotent`,
-      );
-      if (existing.state === "ACTIVE")
-        return existing.mode === "PAPER" ? "PAPER_ACTIVE" : "ALREADY_ACTIVE";
+      log.info(`[LOX_USER_EXECUTION_ALREADY_EXISTS] userId=${runtime.userId} globalSignalId=${globalSignalId} state=${existing.state} -- skipping, idempotent`);
+      if (existing.state === "ACTIVE") return existing.mode === "PAPER" ? "PAPER_ACTIVE" : "ALREADY_ACTIVE";
       return "ALREADY_TERMINAL";
     }
 
@@ -760,132 +436,60 @@ export class LiquidationOiRuntimeOrchestrator {
     // call sites in main.ts), so userConfigEnabled=true here always;
     // the two remaining gates (this user's own liquidationOiExecutionEnabled
     // and the GLOBAL executionEnabled master switch) decide PAPER vs REAL.
-    const mode = resolveUserExecutionMode(
-      true,
-      runtime.liquidationOiExecutionEnabled,
-      this.executionEnabled,
-    );
+    const mode = resolveUserExecutionMode(true, runtime.liquidationOiExecutionEnabled, this.executionEnabled);
     if (mode === "NONE") {
       // Structurally unreachable: getUserRuntimes() call sites already
       // filter to userConfig.enabled=true before this method is ever
       // called (see main.ts). Defensive only.
-      log.error(
-        `[LOX_UNEXPECTED_NONE_MODE] userId=${runtime.userId} symbol=${symbol} -- resolveUserExecutionMode returned NONE despite a runtime already being in the fan-out list; skipping defensively`,
-      );
+      log.error(`[LOX_UNEXPECTED_NONE_MODE] userId=${runtime.userId} symbol=${symbol} -- resolveUserExecutionMode returned NONE despite a runtime already being in the fan-out list; skipping defensively`);
       return "USER_DISABLED";
     }
 
     // Sizing STILL uses strategyInvalidationPrice, unchanged (Section H).
-    const sizing = computePositionSizing({
-      entry: entryPrice,
-      structuralInvalidationPrice: strategyInvalidationPrice,
-      riskUsd: runtime.riskUsd,
-    });
-    let userExec = newPendingUserExecution(
-      runtime.userId,
-      globalSignalId,
-      symbol,
-      side,
-      runtime.riskUsd,
-      nowMs,
-      mode,
-    );
+    const sizing = computePositionSizing({ entry: entryPrice, structuralInvalidationPrice: strategyInvalidationPrice, riskUsd: runtime.riskUsd });
+    let userExec = newPendingUserExecution(runtime.userId, globalSignalId, symbol, side, runtime.riskUsd, nowMs, mode);
     if (!sizing.valid) {
-      userExec = {
-        ...userExec,
-        state: "TERMINAL",
-        terminalReason: "EXECUTION_FAILED",
-        cleanupState: "COMPLETE",
-        updatedAt: nowMs,
-      };
+      userExec = { ...userExec, state: "TERMINAL", terminalReason: "EXECUTION_FAILED", cleanupState: "COMPLETE", updatedAt: nowMs };
       await this.globalSignalRepo.upsertUserExecution(userExec);
-      log.warn(
-        `[LOX_SIZING_FAILED] userId=${runtime.userId} symbol=${symbol} reason=${sizing.reason}`,
-      );
+      log.warn(`[LOX_SIZING_FAILED] userId=${runtime.userId} symbol=${symbol} reason=${sizing.reason}`);
       return "FAILED";
     }
 
     if (mode === "REAL") {
       // Sep 17 2026 (Karo), operator-requested safety constraint --
-      // "If emergency protection would violate an explicit risk/safety
-      // constraint, skip execution rather than silently taking larger
-      // risk." Only meaningful for REAL mode, since PAPER never places
-      // a real emergency stop and carries zero real capital risk.
-      const estimatedEmergencyMaxLossUsd =
-        Math.abs(entryPrice - emergencyHardStopPrice) * sizing.positionQty;
-      const emergencyLossMultiple =
-        estimatedEmergencyMaxLossUsd / runtime.riskUsd;
-      if (
-        emergencyLossMultiple >
-        this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd
-      ) {
-        userExec = {
-          ...userExec,
-          state: "TERMINAL",
-          terminalReason: "EXECUTION_FAILED",
-          cleanupState: "COMPLETE",
-          updatedAt: nowMs,
-        };
+      // "If the real SL's own implied worst-case loss would violate
+      // an explicit risk/safety constraint, skip execution rather
+      // than silently taking larger risk." Only meaningful for REAL
+      // mode, since PAPER never places a real SL and carries zero
+      // real capital risk.
+      const estimatedSlMaxLossUsd = Math.abs(entryPrice - strategyInvalidationPrice) * sizing.positionQty;
+      const slLossMultiple = estimatedSlMaxLossUsd / runtime.riskUsd;
+      if (slLossMultiple > this.strategyConfig.maxSlLossMultipleOfRiskUsd) {
+        userExec = { ...userExec, state: "TERMINAL", terminalReason: "EXECUTION_FAILED", cleanupState: "COMPLETE", updatedAt: nowMs };
         await this.globalSignalRepo.upsertUserExecution(userExec);
-        log.warn(
-          `[LOX_EMERGENCY_RISK_CONSTRAINT_VIOLATED] userId=${runtime.userId} symbol=${symbol} estimatedEmergencyMaxLossUsd=${estimatedEmergencyMaxLossUsd.toFixed(2)} riskUsd=${runtime.riskUsd} multiple=${emergencyLossMultiple.toFixed(2)}x exceeds maxEmergencyLossMultipleOfRiskUsd=${this.strategyConfig.maxEmergencyLossMultipleOfRiskUsd}x -- skipping rather than silently accepting larger risk`,
-        );
+        log.warn(`[LOX_SL_RISK_CONSTRAINT_VIOLATED] userId=${runtime.userId} symbol=${symbol} estimatedSlMaxLossUsd=${estimatedSlMaxLossUsd.toFixed(2)} riskUsd=${runtime.riskUsd} multiple=${slLossMultiple.toFixed(2)}x exceeds maxSlLossMultipleOfRiskUsd=${this.strategyConfig.maxSlLossMultipleOfRiskUsd}x -- skipping rather than silently accepting larger risk`);
         return "FAILED";
       }
-      userExec = {
-        ...userExec,
-        quantity: sizing.positionQty,
-        positionSizeUsdt: sizing.positionSizeUsdt,
-        estimatedStrategyLossUsd: runtime.riskUsd,
-        estimatedEmergencyMaxLossUsd,
-      };
+      userExec = { ...userExec, quantity: sizing.positionQty, positionSizeUsdt: sizing.positionSizeUsdt, estimatedStrategyLossUsd: runtime.riskUsd, estimatedSlMaxLossUsd };
       await this.globalSignalRepo.upsertUserExecution(userExec);
 
       if (runtime.binanceRest === null) {
-        userExec = {
-          ...userExec,
-          state: "TERMINAL",
-          terminalReason: "EXECUTION_FAILED",
-          cleanupState: "COMPLETE",
-          updatedAt: Date.now(),
-        };
+        userExec = { ...userExec, state: "TERMINAL", terminalReason: "EXECUTION_FAILED", cleanupState: "COMPLETE", updatedAt: Date.now() };
         await this.globalSignalRepo.upsertUserExecution(userExec);
-        log.warn(
-          `[LOX_NO_BINANCE_CLIENT] userId=${runtime.userId} symbol=${symbol} -- user has no configured Binance client`,
-        );
+        log.warn(`[LOX_NO_BINANCE_CLIENT] userId=${runtime.userId} symbol=${symbol} -- user has no configured Binance client`);
         return "FAILED";
       }
 
-      // Sep 17 2026 (Karo) -- the PHYSICAL Binance order is placed at
-      // emergencyHardStopPrice (the wider, catastrophe-only level),
-      // never at strategyInvalidationPrice.
+      // Sep 19 2026 (Karo), operator-requested REVISION -- the PHYSICAL
+      // Binance resting STOP_MARKET order is placed at
+      // strategyInvalidationPrice itself (no separate, wider emergency
+      // tier anymore -- see liquidation-oi-user-execution.service.ts's
+      // own doc comment for the full architecture).
       const outcome = await runEntrySequence(runtime.binanceRest, {
-        userId: runtime.userId,
-        globalSignalId,
-        symbol,
-        side,
-        quantity: sizing.positionQty,
-        entryPriceEstimate: entryPrice,
-        emergencyStopPrice: emergencyHardStopPrice,
-        initialTpPrice: tpPrice,
+        userId: runtime.userId, globalSignalId, symbol, side, quantity: sizing.positionQty,
+        entryPriceEstimate: entryPrice, slPrice: strategyInvalidationPrice, initialTpPrice: tpPrice,
       });
-      return await this.persistOutcome(
-        userExec,
-        outcome,
-        symbol,
-        side,
-        strategyInvalidationPrice,
-        emergencyHardStopPrice,
-        tpPrice,
-        percentileRank,
-        sameDirectionLiqUsd,
-        counterMoveAtr,
-        capacityAtr,
-        netRR,
-        orderBook,
-        oiMetricLine,
-        runtime,
-      );
+      return await this.persistOutcome(userExec, outcome, symbol, side, strategyInvalidationPrice, tpPrice, percentileRank, sameDirectionLiqUsd, counterMoveAtr, capacityAtr, netRR, orderBook, oiMetricLine, runtime);
     }
 
     // Sep 17 2026 (Karo), operator-requested Section 2/3 -- PAPER mode.
@@ -896,181 +500,57 @@ export class LiquidationOiRuntimeOrchestrator {
     // call -- confirmed structurally: this branch never references
     // runtime.binanceRest at all.
     userExec = {
-      ...userExec,
-      state: "ACTIVE",
-      quantity: sizing.positionQty,
-      positionSizeUsdt: sizing.positionSizeUsdt,
-      estimatedStrategyLossUsd: runtime.riskUsd,
-      entryPrice,
-      tpPrice,
-      appliedTpRevision: 0,
-      updatedAt: nowMs,
+      ...userExec, state: "ACTIVE", quantity: sizing.positionQty, positionSizeUsdt: sizing.positionSizeUsdt,
+      estimatedStrategyLossUsd: runtime.riskUsd, entryPrice, tpPrice, appliedTpRevision: 0, updatedAt: nowMs,
     };
     await this.globalSignalRepo.upsertUserExecution(userExec);
-    log.info(
-      `[LOX_PAPER_ENTRY] userId=${runtime.userId} symbol=${symbol} ${side} entry=${entryPrice} qty=${sizing.positionQty} tp=${tpPrice} sl=${strategyInvalidationPrice} -- PAPER, zero Binance calls`,
-    );
+    log.info(`[LOX_PAPER_ENTRY] userId=${runtime.userId} symbol=${symbol} ${side} entry=${entryPrice} qty=${sizing.positionQty} tp=${tpPrice} sl=${strategyInvalidationPrice} -- PAPER, zero Binance calls`);
     if (runtime.telegram !== null) {
       try {
         const text = formatEntryMessage({
-          symbol,
-          candidateSide: side,
-          mode: "PAPER",
-          globalSignalId,
-          entryTimestamp: userExec.createdAt,
-          entryPrice,
-          quantity: sizing.positionQty,
-          riskUsd: runtime.riskUsd,
-          tpPrice,
-          strategyInvalidationPrice,
-          emergencyHardStopPrice: null,
-          sameDirectionLiqUsd,
-          percentileRank,
-          oiMetricLine,
-          counterMoveAtr,
-          capacityAtr,
-          netRR,
-          orderBook,
-          protectionConfirmed: null,
-          displayName: displayNameFromUserId(runtime.userId),
+          symbol, candidateSide: side, mode: "PAPER", globalSignalId, entryTimestamp: userExec.createdAt,
+          entryPrice, quantity: sizing.positionQty, riskUsd: runtime.riskUsd, tpPrice, strategyInvalidationPrice,
+          sameDirectionLiqUsd, percentileRank, oiMetricLine, counterMoveAtr, capacityAtr, netRR, orderBook,
+          protectionConfirmed: null, displayName: displayNameFromUserId(runtime.userId),
         });
-        await sendTelegramWithRetry(
-          runtime.telegram,
-          text,
-          `PAPER_ENTRY userId=${runtime.userId} symbol=${symbol}`,
-        );
+        await sendTelegramWithRetry(runtime.telegram, text, `PAPER_ENTRY userId=${runtime.userId} symbol=${symbol}`);
       } catch (err) {
-        log.error(
-          {
-            userId: runtime.userId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "[LOX_TELEGRAM_PAPER_ENTRY_SEND_FAILED] -- isolated, paper position already persisted",
-        );
+        log.error({ userId: runtime.userId, err: err instanceof Error ? err.message : String(err) }, "[LOX_TELEGRAM_PAPER_ENTRY_SEND_FAILED] -- isolated, paper position already persisted");
       }
     }
     return "PAPER_ACTIVE";
   }
 
-  private async persistOutcome(
-    userExec: LiquidationOiUserExecutionState,
-    outcome: Awaited<ReturnType<typeof runEntrySequence>>,
-    symbol: string,
-    side: Side,
-    strategyInvalidationPrice: number,
-    emergencyHardStopPrice: number,
-    tpPrice: number,
-    percentileRank: number,
-    sameDirectionLiqUsd: number,
-    counterMoveAtr: number,
-    capacityAtr: number | null,
-    netRR: number | null,
-    orderBook: OrderBookObservation | null,
-    oiMetricLine: string | null,
-    runtime: LiquidationOiUserRuntimeRef,
-  ): Promise<UserFanOutOutcome> {
+  private async persistOutcome(userExec: LiquidationOiUserExecutionState, outcome: Awaited<ReturnType<typeof runEntrySequence>>, symbol: string, side: Side, strategyInvalidationPrice: number, tpPrice: number, percentileRank: number, sameDirectionLiqUsd: number, counterMoveAtr: number, capacityAtr: number | null, netRR: number | null, orderBook: OrderBookObservation | null, oiMetricLine: string | null, runtime: LiquidationOiUserRuntimeRef): Promise<UserFanOutOutcome> {
     const now = Date.now();
     if (outcome.outcome === "ENTRY_FAILED") {
-      await this.globalSignalRepo.upsertUserExecution({
-        ...userExec,
-        state: "TERMINAL",
-        terminalReason: "EXECUTION_FAILED",
-        cleanupState: "COMPLETE",
-        updatedAt: now,
-      });
-      log.warn(
-        `[LOX_ENTRY_FAILED] userId=${userExec.userId} symbol=${symbol} reason=${outcome.reason}`,
-      );
+      await this.globalSignalRepo.upsertUserExecution({ ...userExec, state: "TERMINAL", terminalReason: "EXECUTION_FAILED", cleanupState: "COMPLETE", updatedAt: now });
+      log.warn(`[LOX_ENTRY_FAILED] userId=${userExec.userId} symbol=${symbol} reason=${outcome.reason}`);
       return "FAILED";
     }
     if (outcome.outcome === "PROTECTION_FAILED_CLOSED") {
-      await this.strategyOrderRepo.upsert({
-        userId: userExec.userId,
-        globalSignalId: userExec.globalSignalId,
-        symbol,
-        purpose: "ENTRY",
-        revision: 0,
-        clientOrderId: outcome.entryClientOrderId,
-        clientAlgoId: null,
-        binanceOrderId: null,
-        binanceAlgoId: null,
-        state: "FILLED",
-      });
+      await this.strategyOrderRepo.upsert({ userId: userExec.userId, globalSignalId: userExec.globalSignalId, symbol, purpose: "ENTRY", revision: 0, clientOrderId: outcome.entryClientOrderId, clientAlgoId: null, binanceOrderId: null, binanceAlgoId: null, state: "FILLED" });
       await this.globalSignalRepo.upsertUserExecution({
-        ...userExec,
-        state: "TERMINAL",
-        terminalReason: "PROTECTION_FAILED",
-        cleanupState: "COMPLETE",
-        entryPrice: outcome.entryPrice,
-        quantity: outcome.quantity,
-        entryClientOrderId: outcome.entryClientOrderId,
-        updatedAt: now,
+        ...userExec, state: "TERMINAL", terminalReason: "PROTECTION_FAILED", cleanupState: "COMPLETE",
+        entryPrice: outcome.entryPrice, quantity: outcome.quantity, entryClientOrderId: outcome.entryClientOrderId, updatedAt: now,
       });
-      log.error(
-        `[LOX_PROTECTION_FAILED_CLOSED] userId=${userExec.userId} symbol=${symbol} -- position was opened and immediately fail-safe closed, reason=${outcome.reason}`,
-      );
+      log.error(`[LOX_PROTECTION_FAILED_CLOSED] userId=${userExec.userId} symbol=${symbol} -- position was opened and immediately fail-safe closed, reason=${outcome.reason}`);
       return "FAILED";
     }
 
-    await this.strategyOrderRepo.upsert({
-      userId: userExec.userId,
-      globalSignalId: userExec.globalSignalId,
-      symbol,
-      purpose: "ENTRY",
-      revision: 0,
-      clientOrderId: outcome.entryClientOrderId,
-      clientAlgoId: null,
-      binanceOrderId: null,
-      binanceAlgoId: null,
-      state: "FILLED",
-    });
-    await this.strategyOrderRepo.upsert({
-      userId: userExec.userId,
-      globalSignalId: userExec.globalSignalId,
-      symbol,
-      purpose: "EMERGENCY_STOP",
-      revision: 0,
-      clientOrderId: "",
-      clientAlgoId: outcome.emergencyStopClientAlgoId,
-      binanceOrderId: null,
-      binanceAlgoId: outcome.emergencyStopBinanceAlgoId,
-      state: "OPEN",
-    });
+    await this.strategyOrderRepo.upsert({ userId: userExec.userId, globalSignalId: userExec.globalSignalId, symbol, purpose: "ENTRY", revision: 0, clientOrderId: outcome.entryClientOrderId, clientAlgoId: null, binanceOrderId: null, binanceAlgoId: null, state: "FILLED" });
+    await this.strategyOrderRepo.upsert({ userId: userExec.userId, globalSignalId: userExec.globalSignalId, symbol, purpose: "STOP_LOSS", revision: 0, clientOrderId: "", clientAlgoId: outcome.slClientAlgoId, binanceOrderId: null, binanceAlgoId: outcome.slBinanceAlgoId, state: "OPEN" });
 
     let updated: LiquidationOiUserExecutionState = {
-      ...userExec,
-      state: "ACTIVE",
-      entryPrice: outcome.entryPrice,
-      quantity: outcome.quantity,
-      entryClientOrderId: outcome.entryClientOrderId,
-      emergencyStopClientAlgoId: outcome.emergencyStopClientAlgoId,
-      emergencyStopBinanceAlgoId: outcome.emergencyStopBinanceAlgoId,
-      emergencyStopPrice: emergencyHardStopPrice,
-      estimatedEmergencyMaxLossUsd:
-        Math.abs(outcome.entryPrice - emergencyHardStopPrice) *
-        outcome.quantity,
-      pnlSource: "ESTIMATED",
-      updatedAt: now,
+      ...userExec, state: "ACTIVE", entryPrice: outcome.entryPrice, quantity: outcome.quantity,
+      entryClientOrderId: outcome.entryClientOrderId, slClientAlgoId: outcome.slClientAlgoId,
+      slBinanceAlgoId: outcome.slBinanceAlgoId, slPrice: strategyInvalidationPrice,
+      estimatedSlMaxLossUsd: Math.abs(outcome.entryPrice - strategyInvalidationPrice) * outcome.quantity,
+      pnlSource: "ESTIMATED", updatedAt: now,
     };
     if (outcome.outcome === "ENTRY_ACTIVE_WITH_TP") {
-      await this.strategyOrderRepo.upsert({
-        userId: userExec.userId,
-        globalSignalId: userExec.globalSignalId,
-        symbol,
-        purpose: "TAKE_PROFIT",
-        revision: 0,
-        clientOrderId: outcome.tpClientOrderId,
-        clientAlgoId: null,
-        binanceOrderId: outcome.tpBinanceOrderId,
-        binanceAlgoId: null,
-        state: "OPEN",
-      });
-      updated = {
-        ...updated,
-        tpClientOrderId: outcome.tpClientOrderId,
-        tpBinanceOrderId: outcome.tpBinanceOrderId,
-        tpPrice,
-      };
+      await this.strategyOrderRepo.upsert({ userId: userExec.userId, globalSignalId: userExec.globalSignalId, symbol, purpose: "TAKE_PROFIT", revision: 0, clientOrderId: outcome.tpClientOrderId, clientAlgoId: null, binanceOrderId: outcome.tpBinanceOrderId, binanceAlgoId: null, state: "OPEN" });
+      updated = { ...updated, tpClientOrderId: outcome.tpClientOrderId, tpBinanceOrderId: outcome.tpBinanceOrderId, tpPrice };
     }
     await this.globalSignalRepo.upsertUserExecution(updated);
 
@@ -1080,42 +560,14 @@ export class LiquidationOiRuntimeOrchestrator {
     if (runtime.telegram !== null) {
       try {
         const text = formatEntryMessage({
-          symbol,
-          candidateSide: side,
-          mode: "REAL",
-          globalSignalId: userExec.globalSignalId,
-          entryTimestamp: updated.createdAt,
-          entryPrice: outcome.entryPrice,
-          quantity: outcome.quantity,
-          riskUsd: userExec.riskUsd,
-          tpPrice,
-          strategyInvalidationPrice,
-          emergencyHardStopPrice,
-          sameDirectionLiqUsd,
-          percentileRank,
-          oiMetricLine,
-          counterMoveAtr,
-          capacityAtr,
-          netRR,
-          orderBook,
-          protectionConfirmed:
-            outcome.outcome === "ENTRY_ACTIVE_WITH_TP" ||
-            outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP",
-          displayName: displayNameFromUserId(userExec.userId),
+          symbol, candidateSide: side, mode: "REAL", globalSignalId: userExec.globalSignalId, entryTimestamp: updated.createdAt,
+          entryPrice: outcome.entryPrice, quantity: outcome.quantity, riskUsd: userExec.riskUsd, tpPrice, strategyInvalidationPrice,
+          sameDirectionLiqUsd, percentileRank, oiMetricLine, counterMoveAtr, capacityAtr, netRR, orderBook,
+          protectionConfirmed: outcome.outcome === "ENTRY_ACTIVE_WITH_TP" || outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP", displayName: displayNameFromUserId(userExec.userId),
         });
-        await sendTelegramWithRetry(
-          runtime.telegram,
-          text,
-          `REAL_ENTRY userId=${userExec.userId} symbol=${symbol}`,
-        );
+        await sendTelegramWithRetry(runtime.telegram, text, `REAL_ENTRY userId=${userExec.userId} symbol=${symbol}`);
       } catch (err) {
-        log.error(
-          {
-            userId: userExec.userId,
-            err: err instanceof Error ? err.message : String(err),
-          },
-          "[LOX_TELEGRAM_ENTRY_SEND_FAILED] -- isolated, execution state already persisted and unaffected",
-        );
+        log.error({ userId: userExec.userId, err: err instanceof Error ? err.message : String(err) }, "[LOX_TELEGRAM_ENTRY_SEND_FAILED] -- isolated, execution state already persisted and unaffected");
       }
     }
     return "ACTIVE";

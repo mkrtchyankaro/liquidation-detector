@@ -130,11 +130,11 @@ function main(): void {
     const base = strategyClientOrderId("karo", "sig-abc-123", "TAKE_PROFIT", 1);
     assert.notStrictEqual(base, strategyClientOrderId("artak", "sig-abc-123", "TAKE_PROFIT", 1), "different user must differ");
     assert.notStrictEqual(base, strategyClientOrderId("karo", "sig-xyz-999", "TAKE_PROFIT", 1), "different signal must differ");
-    assert.notStrictEqual(base, strategyClientOrderId("karo", "sig-abc-123", "EMERGENCY_STOP", 1), "different purpose must differ");
+    assert.notStrictEqual(base, strategyClientOrderId("karo", "sig-abc-123", "STOP_LOSS", 1), "different purpose must differ");
   });
 
   scenario("17. every generated id stays within Binance's 36-character clientOrderId limit", () => {
-    const id = strategyClientOrderId("some-very-long-user-identifier-example", "an-extremely-long-global-signal-id-value-here", "EMERGENCY_STOP", 999999);
+    const id = strategyClientOrderId("some-very-long-user-identifier-example", "an-extremely-long-global-signal-id-value-here", "STOP_LOSS", 999999);
     assert.ok(id.length <= 36, `id "${id}" is ${id.length} chars, exceeds Binance's 36-char limit`);
   });
 

@@ -158,7 +158,7 @@ async function main(): Promise<void> {
     rest.stopStatus = "FILLED";
     await positionLifecycle.reconcileAll(2_100_000);
     const karo = userExecs.docs.find((d: any) => d.userId === "karo");
-    assert.strictEqual(karo.terminalReason, "EMERGENCY_STOP");
+    assert.strictEqual(karo.terminalReason, "SL_FILLED");
     assert.strictEqual(karo.cleanupState, "COMPLETE");
   });
 
@@ -219,18 +219,32 @@ async function main(): Promise<void> {
     assert.strictEqual(orch.getWatchManager().getLifecycle("SOLUSDT"), null, "symbol must be available for a fresh episode");
   });
 
-  await scenario("J.1. strategy invalidation breach fans out a reduce-only MARKET close to every ACTIVE user, isolated", async () => {
+  await scenario("J.1. REVISED Sep 19 2026 -- for REAL users, strategy invalidation (price crossing our own SL) is now Binance's own job (the resting SL order placed at entry), NOT MAIN's -- MAIN's in-process trigger for this ONE reason must be a no-op for REAL, leaving state untouched", async () => {
     const karoRest = mockRest();
     const artakRest = mockRest();
     const { orch, activeMain, signals, userExecs } = buildStack(runtimes([{ userId: "karo", riskUsd: 1, rest: karoRest }, { userId: "artak", riskUsd: 5, rest: artakRest }]));
     await driveToActive(orch, "SOLUSDT", 6_000_000);
     const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
     assert.ok(signal);
+    const karoCallsBefore = karoRest.calls.length;
+    const artakCallsBefore = artakRest.calls.length;
     await activeMain.onActiveTick("SOLUSDT", signal.globalSignalId, "ep-test", "SHORT", signal.strategyInvalidationPrice + 1, 4590, 1.0, 6_100_000);
-    assert.ok(karoRest.calls.some((c) => c.startsWith("createOrder:MARKET")), "Karo must receive a reduce-only MARKET close");
-    assert.ok(artakRest.calls.some((c) => c.startsWith("createOrder:MARKET")), "Artak must receive a reduce-only MARKET close");
+    assert.ok(!karoRest.calls.slice(karoCallsBefore).some((c) => c.startsWith("createOrder:MARKET")), "Karo (REAL) must NOT receive a MARKET close from MAIN for STRATEGY_INVALIDATION -- Binance's own resting SL order is now the sole mechanism");
+    assert.ok(!artakRest.calls.slice(artakCallsBefore).some((c) => c.startsWith("createOrder:MARKET")), "Artak (REAL) must NOT receive a MARKET close from MAIN for STRATEGY_INVALIDATION either");
     const karo = userExecs.docs.find((d: any) => d.userId === "karo");
-    assert.strictEqual(karo.terminalReason, "STRATEGY_INVALIDATION");
+    assert.strictEqual(karo.state, "ACTIVE", "state must remain untouched by MAIN -- actual closure now comes from reconciliation detecting the Binance-side SL fill, a separate mechanism");
+  });
+
+  await scenario("J.1b. PAPER users are UNAFFECTED by the REAL-only no-op above -- still actively closed in-process by MAIN on strategy invalidation, since no real resting order exists for them", async () => {
+    const rest = mockRest();
+    const { orch, activeMain, signals, userExecs } = buildStack(runtimes([{ userId: "karo", riskUsd: 1, rest, enabled: false }]));
+    await driveToActive(orch, "SOLUSDT", 6_500_000);
+    const signal = signals.docs.find((d: any) => d.state === "ACTIVE");
+    assert.ok(signal);
+    await activeMain.onActiveTick("SOLUSDT", signal.globalSignalId, "ep-test", "SHORT", signal.strategyInvalidationPrice + 1, 4590, 1.0, 6_600_000);
+    const karo = userExecs.docs.find((d: any) => d.userId === "karo");
+    assert.strictEqual(karo.mode, "PAPER", "sanity: this user must actually be PAPER");
+    assert.strictEqual(karo.terminalReason, "STRATEGY_INVALIDATION", "PAPER users must still be virtually closed in-process by MAIN, unaffected by the REAL-only change");
   });
 
   await scenario("D.1. a single noisy adverse OI/price tick does NOT trigger MARKET_EXIT -- confirmation requires consecutive evidence", async () => {
@@ -294,7 +308,7 @@ async function main(): Promise<void> {
 
   await scenario("N.2. restart with a stuck ENTRY_READY is conservatively CANCELLED, never assumed ACTIVE", async () => {
     const { globalSignalRepo, strategyOrderRepo, positionLifecycle, orch, signals } = buildStack(runtimes([]));
-    await globalSignalRepo.upsertSignal({ globalSignalId: "stuck-1", symbol: "ETHUSDT", victim: "LONG", candidateSide: "LONG", state: "ENTRY_READY", ownershipId: "own-1", episodePercentileRank: 95, sameDirectionLiqUsd: 100000, extremePrice: 2400, entryPrice: 2405, strategyInvalidationPrice: 2390, emergencyHardStopPrice: 2385, initialCapacityAtr: 1, initialTpPrice: 2420, tpRevision: 0, currentTargetPrice: 2420, orderBookAtEntryReady: null } as any);
+    await globalSignalRepo.upsertSignal({ globalSignalId: "stuck-1", symbol: "ETHUSDT", victim: "LONG", candidateSide: "LONG", state: "ENTRY_READY", ownershipId: "own-1", episodePercentileRank: 95, sameDirectionLiqUsd: 100000, extremePrice: 2400, entryPrice: 2405, strategyInvalidationPrice: 2390, initialCapacityAtr: 1, initialTpPrice: 2420, tpRevision: 0, currentTargetPrice: 2420, orderBookAtEntryReady: null } as any);
     await recoverLoxOnRestart(globalSignalRepo, strategyOrderRepo, positionLifecycle, orch.getWatchManager(), runtimes([]), () => {}, 11_000_000);
     const stuck = signals.docs.find((d: any) => d.globalSignalId === "stuck-1");
     assert.strictEqual(stuck.state, "CANCELLED");

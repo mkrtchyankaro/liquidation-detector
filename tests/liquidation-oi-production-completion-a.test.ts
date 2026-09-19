@@ -141,44 +141,42 @@ async function main(): Promise<void> {
     assert.strictEqual(orch.getWatchManager().isSymbolOwned("SOLUSDT"), true, "ownership must remain held for the real ACTIVE episode");
   });
 
-  await scenario("G.1. strategyInvalidationPrice and emergencyHardStopPrice are genuinely different prices, and the emergency stop is placed FURTHER from entry", async () => {
+  await scenario("G.1. REAL SL is placed at exactly strategyInvalidationPrice (Sep 19 2026 REVISION -- no more separate, wider emergency buffer)", async () => {
     const { mongo, signals } = fakeMongo();
     const rest = mockRestSuccess();
     const orch = new LiquidationOiRuntimeOrchestrator(TEST_STRATEGY_CONFIG, DEFAULT_CAPACITY_MODEL_COEFFICIENTS, new LiquidationOiGlobalSignalRepository(mongo), new StrategyOrderRepository(mongo), () => [{ userId: "karo", riskUsd: 1, liquidationOiExecutionEnabled: true, binanceRest: rest, telegram: null }], true, true);
     await driveToEntryReady(orch, "SOLUSDT", 2_000_000);
     const doc = signals.docs.find((d: any) => d.state === "ACTIVE");
     assert.ok(doc, "sanity: must have an ACTIVE signal doc");
-    assert.notStrictEqual(doc.strategyInvalidationPrice, doc.emergencyHardStopPrice, "the two prices must be genuinely different");
-    // candidateSide=SHORT (victim SHORT -> candidate SHORT): strategy invalidation is ABOVE entry (extreme+buffer),
-    // emergency hard stop must be FURTHER above -- i.e. even higher than strategyInvalidationPrice.
-    assert.ok(doc.emergencyHardStopPrice > doc.strategyInvalidationPrice, `emergency stop (${doc.emergencyHardStopPrice}) must sit further from entry than strategy invalidation (${doc.strategyInvalidationPrice}) for a SHORT candidate`);
-    // Confirm the REAL placed Binance order used the emergency price, not the strategy-invalidation price.
+    // Confirm the REAL placed Binance STOP_MARKET order's trigger price is exactly strategyInvalidationPrice.
     const stopCall = rest.calls.find((c) => c.startsWith("createAlgoOrder:STOP_MARKET"));
     assert.ok(stopCall, "sanity: a STOP_MARKET must have been placed");
-    assert.ok(stopCall!.includes(String(doc.emergencyHardStopPrice.toFixed(2))) || stopCall!.includes(doc.emergencyHardStopPrice.toFixed(2)), `the physical stop order's own trigger must use emergencyHardStopPrice, got: ${stopCall}`);
+    assert.ok(stopCall!.includes(doc.strategyInvalidationPrice.toFixed(2)), `the physical SL order's own trigger must use strategyInvalidationPrice itself, got: ${stopCall}`);
   });
 
-  await scenario("G.2. sizing still uses ONLY strategyInvalidationPrice, unchanged, never the wider emergency price", async () => {
+  await scenario("G.2. estimatedSlMaxLossUsd is computed from strategyInvalidationPrice (no separate, wider emergency price exists anymore)", async () => {
     const { mongo, userExecs } = fakeMongo();
     const rest = mockRestSuccess();
     const orch = new LiquidationOiRuntimeOrchestrator(TEST_STRATEGY_CONFIG, DEFAULT_CAPACITY_MODEL_COEFFICIENTS, new LiquidationOiGlobalSignalRepository(mongo), new StrategyOrderRepository(mongo), () => [{ userId: "karo", riskUsd: 1, liquidationOiExecutionEnabled: true, binanceRest: rest, telegram: null }], true, true);
     await driveToEntryReady(orch, "SOLUSDT", 3_000_000);
     const userExec = userExecs.docs.find((d: any) => d.userId === "karo");
-    assert.ok(userExec.estimatedStrategyLossUsd === 1, "estimatedStrategyLossUsd must equal the configured riskUsd exactly (sizing driven by strategyInvalidationPrice, not the wider emergency price)");
-    assert.ok(userExec.estimatedEmergencyMaxLossUsd > userExec.estimatedStrategyLossUsd, "the emergency worst-case loss must be LARGER than the intended strategy risk, since it sits further away");
+    assert.ok(userExec.estimatedStrategyLossUsd === 1, "estimatedStrategyLossUsd must equal the configured riskUsd exactly");
+    assert.ok(userExec.estimatedSlMaxLossUsd > 0, "estimatedSlMaxLossUsd must be a positive, computed value");
+    const expected = Math.abs(userExec.entryPrice - userExec.slPrice) * userExec.quantity;
+    assert.ok(Math.abs(userExec.estimatedSlMaxLossUsd - expected) < 0.01, `estimatedSlMaxLossUsd (${userExec.estimatedSlMaxLossUsd}) must equal |entryPrice - slPrice| * quantity (${expected})`);
   });
 
-  await scenario("G.3. emergency-loss safety constraint skips execution rather than silently accepting excessive risk", async () => {
+  await scenario("G.3. SL-loss safety constraint skips execution rather than silently accepting excessive risk", async () => {
     const { mongo, userExecs } = fakeMongo();
     const rest = mockRestSuccess();
-    // configure an emergency buffer + cap combination that WILL violate maxEmergencyLossMultipleOfRiskUsd
-    const config = { ...DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG, emergencyHardStopBufferAtrMultiple: 50, maxEmergencyLossMultipleOfRiskUsd: 0.001, maxDistanceFromExtremeAtrForEntry: 2.0 };
+    // an extremely tight cap WILL violate maxSlLossMultipleOfRiskUsd even at the normal strategyInvalidationPrice distance
+    const config = { ...DEFAULT_LIQUIDATION_OI_STRATEGY_CONFIG, maxSlLossMultipleOfRiskUsd: 0.001, maxDistanceFromExtremeAtrForEntry: 2.0 };
     const orch = new LiquidationOiRuntimeOrchestrator(config, DEFAULT_CAPACITY_MODEL_COEFFICIENTS, new LiquidationOiGlobalSignalRepository(mongo), new StrategyOrderRepository(mongo), () => [{ userId: "karo", riskUsd: 1, liquidationOiExecutionEnabled: true, binanceRest: rest, telegram: null }], true, true);
     await driveToEntryReady(orch, "SOLUSDT", 4_000_000);
     const userExec = userExecs.docs.find((d: any) => d.userId === "karo");
     assert.strictEqual(userExec.state, "TERMINAL");
     assert.strictEqual(userExec.terminalReason, "EXECUTION_FAILED");
-    assert.ok(!rest.calls.some((c) => c.startsWith("createOrder:MARKET")), "no MARKET entry may ever be placed when the emergency-risk safety constraint is violated");
+    assert.ok(!rest.calls.some((c) => c.startsWith("createOrder:MARKET")), "no MARKET entry may ever be placed when the SL-risk safety constraint is violated");
   });
 
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

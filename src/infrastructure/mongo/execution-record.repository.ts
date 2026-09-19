@@ -2,9 +2,9 @@ import type { MongoClientWrapper } from "./mongo.client";
 import type {
   ExecutionRecordDoc,
   ExecutionStatus,
-} from './execution-record.model';
-import { TERMINAL_EXECUTION_STATUSES } from './execution-record.model';
-import { childLogger } from '../logging/logger';
+} from "./execution-record.model";
+import { TERMINAL_EXECUTION_STATUSES } from "./execution-record.model";
+import { childLogger } from "../logging/logger";
 
 const log = childLogger({ mod: "execution-record-repo" });
 

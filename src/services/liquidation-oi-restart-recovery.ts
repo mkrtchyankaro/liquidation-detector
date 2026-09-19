@@ -90,17 +90,17 @@ export async function recoverLoxOnRestart(
           const isFlat = !pos || Math.abs(Number(pos.positionAmt)) < 1e-9;
           if (isFlat) continue; // reconcileAll() below discovers and cleans this up
 
-          if (userExec.emergencyStopBinanceAlgoId !== null) {
-            const stop = (await rest.getAlgoOrder(userExec.emergencyStopBinanceAlgoId)) as { algoStatus?: string };
+          if (userExec.slBinanceAlgoId !== null) {
+            const stop = (await rest.getAlgoOrder(userExec.slBinanceAlgoId)) as { algoStatus?: string };
             if (stop.algoStatus !== "WORKING" && stop.algoStatus !== "NEW") {
-              log.error(`[LOX_RESTART_MISSING_EMERGENCY_STOP] userId=${userExec.userId} symbol=${signal.symbol} algoStatus=${stop.algoStatus} -- re-placing deterministically`);
-              if (signal.emergencyHardStopPrice !== null) {
-                const clientAlgoId = strategyClientOrderId(userExec.userId, signal.globalSignalId, "EMERGENCY_STOP", 0);
+              log.error(`[LOX_RESTART_MISSING_SL] userId=${userExec.userId} symbol=${signal.symbol} algoStatus=${stop.algoStatus} -- re-placing deterministically`);
+              if (signal.strategyInvalidationPrice !== null) {
+                const clientAlgoId = strategyClientOrderId(userExec.userId, signal.globalSignalId, "STOP_LOSS", 0);
                 const closeSide = userExec.side === "LONG" ? "SELL" : "BUY";
                 try {
-                  const replaced = (await rest.createAlgoOrder({ symbol: signal.symbol, side: closeSide, type: "STOP_MARKET", quantity: String(userExec.quantity ?? 0), triggerPrice: String(signal.emergencyHardStopPrice), reduceOnly: "true", newClientAlgoId: clientAlgoId })) as { algoId?: number };
-                  await strategyOrderRepo.upsert({ userId: userExec.userId, globalSignalId: signal.globalSignalId, symbol: signal.symbol, purpose: "EMERGENCY_STOP", revision: 0, clientOrderId: "", clientAlgoId, binanceOrderId: null, binanceAlgoId: replaced.algoId ?? null, state: "OPEN" });
-                  forensic({ ts: nowMs, symbol: signal.symbol, episodeId: signal.globalSignalId, victim: signal.victim, state: "ACTIVE", episodeAgeSec: 0, type: "RESTART_RECONCILIATION", outcome: "EMERGENCY_STOP_REPLACED", detail: `userId=${userExec.userId}` });
+                  const replaced = (await rest.createAlgoOrder({ symbol: signal.symbol, side: closeSide, type: "STOP_MARKET", quantity: String(userExec.quantity ?? 0), triggerPrice: String(signal.strategyInvalidationPrice), reduceOnly: "true", newClientAlgoId: clientAlgoId })) as { algoId?: number };
+                  await strategyOrderRepo.upsert({ userId: userExec.userId, globalSignalId: signal.globalSignalId, symbol: signal.symbol, purpose: "STOP_LOSS", revision: 0, clientOrderId: "", clientAlgoId, binanceOrderId: null, binanceAlgoId: replaced.algoId ?? null, state: "OPEN" });
+                  forensic({ ts: nowMs, symbol: signal.symbol, episodeId: signal.globalSignalId, victim: signal.victim, state: "ACTIVE", episodeAgeSec: 0, type: "RESTART_RECONCILIATION", outcome: "SL_REPLACED", detail: `userId=${userExec.userId}` });
                 } catch (err) {
                   log.error({ userId: userExec.userId, err: err instanceof Error ? err.message : String(err) }, "[LOX_RESTART_EMERGENCY_STOP_REPLACE_FAILED] -- genuinely unprotected position, requires manual attention");
                   forensic({ ts: nowMs, symbol: signal.symbol, episodeId: signal.globalSignalId, victim: signal.victim, state: "ACTIVE", episodeAgeSec: 0, type: "RESTART_RECONCILIATION", outcome: "EMERGENCY_STOP_REPLACE_FAILED", detail: `userId=${userExec.userId}: ${err instanceof Error ? err.message : String(err)}` });

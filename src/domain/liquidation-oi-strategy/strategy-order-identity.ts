@@ -24,31 +24,15 @@ import { createHash } from "crypto";
 const PREFIX = "lox";
 const HASH_HEX_LENGTH = 20;
 
-export type StrategyOrderPurpose =
-  | "ENTRY"
-  | "TAKE_PROFIT"
-  | "EMERGENCY_STOP"
-  | "MARKET_EXIT"
-  | "FAILSAFE_CLOSE";
+export type StrategyOrderPurpose = "ENTRY" | "TAKE_PROFIT" | "STOP_LOSS" | "MARKET_EXIT" | "FAILSAFE_CLOSE";
 
 /** Deterministic: the SAME (userId, globalSignalId, purpose, revision)
  *  ALWAYS produces the SAME id -- this is what makes retrying a failed
  *  placement safe. */
-export function strategyClientOrderId(
-  userId: string,
-  globalSignalId: string,
-  purpose: StrategyOrderPurpose,
-  revision: number,
-): string {
-  const digest = createHash("sha256")
-    .update(`${userId}|${globalSignalId}|${purpose}|${revision}`)
-    .digest("hex")
-    .slice(0, HASH_HEX_LENGTH);
+export function strategyClientOrderId(userId: string, globalSignalId: string, purpose: StrategyOrderPurpose, revision: number): string {
+  const digest = createHash("sha256").update(`${userId}|${globalSignalId}|${purpose}|${revision}`).digest("hex").slice(0, HASH_HEX_LENGTH);
   const id = `${PREFIX}${digest}`;
-  if (id.length > 36)
-    throw new Error(
-      `strategyClientOrderId exceeded Binance's 36-char limit: "${id}" (${id.length} chars)`,
-    );
+  if (id.length > 36) throw new Error(`strategyClientOrderId exceeded Binance's 36-char limit: "${id}" (${id.length} chars)`);
   return id;
 }
 
@@ -59,8 +43,5 @@ export function strategyClientOrderId(
  *  Mongo, and to positively rule OUT legacy V3 orders (prefix "v3")
  *  and manual/unrelated orders. */
 export function isStrategyOwnedOrderId(clientOrderId: string): boolean {
-  return (
-    clientOrderId.startsWith(PREFIX) &&
-    clientOrderId.length === PREFIX.length + HASH_HEX_LENGTH
-  );
+  return clientOrderId.startsWith(PREFIX) && clientOrderId.length === PREFIX.length + HASH_HEX_LENGTH;
 }

@@ -1,9 +1,5 @@
 import type { Side } from "../../shared/common.types";
-import type {
-  UserExecutionState,
-  CleanupState,
-  UserTerminalReason,
-} from "./lifecycle.types";
+import type { UserExecutionState, CleanupState, UserTerminalReason } from "./lifecycle.types";
 
 /**
  * Sep 16 2026 (Karo), operator-approved architecture, Phase 5-7.
@@ -32,10 +28,10 @@ export interface LiquidationOiUserExecutionState {
 
   entryClientOrderId: string | null;
   entryBinanceOrderId: number | null;
-  emergencyStopClientAlgoId: string | null;
-  emergencyStopBinanceAlgoId: number | null;
-  emergencyStopPrice: number | null;
-  estimatedEmergencyMaxLossUsd: number | null;
+  slClientAlgoId: string | null;
+  slBinanceAlgoId: number | null;
+  slPrice: number | null;
+  estimatedSlMaxLossUsd: number | null;
   tpClientOrderId: string | null;
   tpBinanceOrderId: number | null;
   tpPrice: number | null;
@@ -60,50 +56,16 @@ export interface LiquidationOiUserExecutionState {
   updatedAt: number;
 }
 
-export function newPendingUserExecution(
-  userId: string,
-  globalSignalId: string,
-  symbol: string,
-  side: Side,
-  riskUsd: number,
-  now: number,
-  mode: "PAPER" | "REAL" = "REAL",
-): LiquidationOiUserExecutionState {
+export function newPendingUserExecution(userId: string, globalSignalId: string, symbol: string, side: Side, riskUsd: number, now: number, mode: "PAPER" | "REAL" = "REAL"): LiquidationOiUserExecutionState {
   return {
-    userId,
-    globalSignalId,
-    symbol,
-    side,
-    state: "PENDING",
-    terminalReason: null,
-    cleanupState: "PENDING",
-    mode,
-    riskUsd,
-    entryPrice: null,
-    quantity: null,
-    positionSizeUsdt: null,
-    entryClientOrderId: null,
-    entryBinanceOrderId: null,
-    emergencyStopClientAlgoId: null,
-    emergencyStopBinanceAlgoId: null,
-    emergencyStopPrice: null,
-    estimatedEmergencyMaxLossUsd: null,
-    tpClientOrderId: null,
-    tpBinanceOrderId: null,
-    tpPrice: null,
-    appliedTpRevision: 0,
-    estimatedStrategyLossUsd: null,
-    expectedTpPnlUsd: null,
-    realizedPnlUsd: null,
-    pnlSource: null,
-    exitPrice: null,
-    lastCleanupAttemptAt: null,
-    cleanupFailureReason: null,
-    grossPnlUsd: null,
-    priceMovePct: null,
-    simulatedFeesUsd: null,
-    paperNetPnlUsd: null,
-    createdAt: now,
-    updatedAt: now,
+    userId, globalSignalId, symbol, side, state: "PENDING", terminalReason: null, cleanupState: "PENDING", mode,
+    riskUsd, entryPrice: null, quantity: null, positionSizeUsdt: null,
+    entryClientOrderId: null, entryBinanceOrderId: null,
+    slClientAlgoId: null, slBinanceAlgoId: null, slPrice: null, estimatedSlMaxLossUsd: null,
+    tpClientOrderId: null, tpBinanceOrderId: null, tpPrice: null, appliedTpRevision: 0,
+    estimatedStrategyLossUsd: null, expectedTpPnlUsd: null, realizedPnlUsd: null, pnlSource: null,
+    exitPrice: null, lastCleanupAttemptAt: null, cleanupFailureReason: null,
+    grossPnlUsd: null, priceMovePct: null, simulatedFeesUsd: null, paperNetPnlUsd: null,
+    createdAt: now, updatedAt: now,
   };
 }

@@ -29,7 +29,7 @@ export interface EntryMessageInput {
   symbol: string; candidateSide: Side; mode: "PAPER" | "REAL";
   globalSignalId: string; entryTimestamp: number;
   entryPrice: number; quantity: number; riskUsd: number;
-  tpPrice: number; strategyInvalidationPrice: number; emergencyHardStopPrice: number | null;
+  tpPrice: number; strategyInvalidationPrice: number;
   sameDirectionLiqUsd: number; percentileRank: number; oiMetricLine: string | null; counterMoveAtr: number;
   orderBook: OrderBookObservation | null;
   protectionConfirmed: boolean | null;
@@ -61,9 +61,12 @@ export function formatEntryMessage(input: EntryMessageInput): string {
     `TP        ${formatPrice(input.tpPrice)}  (${formatPct(tpPct)})  \u2502 ${formatSignedUsd(tpUsd)}`,
     `SL        ${formatPrice(input.strategyInvalidationPrice)}  (${formatPct(slPct)})  \u2502 ${formatSignedUsd(slUsd)}`,
   ];
-  if (input.mode === "REAL" && input.emergencyHardStopPrice !== null) {
-    lines.push(`Emergency ${formatPrice(input.emergencyHardStopPrice)}`);
-  }
+  // Sep 19 2026 (Karo), operator-requested REVISION -- no more separate
+  // "Emergency" line: strategyInvalidationPrice IS now the real resting
+  // Binance SL order itself for REAL users (see
+  // liquidation-oi-user-execution.service.ts's own doc comment), not a
+  // distinct, wider catastrophe-only buffer. The "SL" line above already
+  // shows the one price that matters.
   lines.push(
     "",
     `Risk      $${input.riskUsd.toFixed(2)}`,

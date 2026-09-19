@@ -26,10 +26,6 @@ export interface LiquidationOiGlobalSignalDoc {
   extremePrice: number;
   entryPrice: number | null;
   strategyInvalidationPrice: number | null;
-  /** Sep 17 2026 (Karo), operator-requested -- catastrophe-only price,
-   *  explicitly OUTSIDE strategyInvalidationPrice. See config.ts's own
-   *  emergencyHardStopBufferAtrMultiple doc comment. */
-  emergencyHardStopPrice: number | null;
   initialCapacityAtr: number | null;
   initialTpPrice: number | null;
   tpRevision: number;
