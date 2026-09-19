@@ -10,17 +10,24 @@ module.exports = {
       max_restarts: 20,
       restart_delay: 5000,
       watch: false,
-      // Sep 8 2026 (Karo) -- defensive safety net for a 1GB-RAM server
-      // (confirmed real deployment target). Caps Node's own heap so a
-      // future leak (or a temporary spike) triggers a clean, fast
-      // "heap out of memory" PM2 restart at ~512MB, rather than
-      // growing toward 2GB+ and risking the whole box hanging/OOM-
-      // killing something else. The root cause of the one confirmed
-      // OOM crash (unbounded per-tick Mongo queries in
-      // ReconciliationManager) is fixed separately -- this is
-      // defense-in-depth, not a substitute for that fix.
-      node_args: "--max-old-space-size=512",
-      max_memory_restart: "600M",
+      // Sep 19 2026 (Karo), operator-reported PRODUCTION MEMORY
+      // INCIDENT -- CORRECTED: the server is NOT 1GB RAM as the
+      // previous comment (and the 512MB heap cap it justified)
+      // assumed -- confirmed via `free -h` on the real deployment
+      // target: 3.8GB total, ~2.6GB available. The stale 512MB cap
+      // was almost certainly causing V8's OWN "JavaScript heap out of
+      // memory" fatal crashes (a hard process abort, distinct from
+      // pm2's own max_memory_restart below, and one that may not
+      // surface cleanly in pm2's normal error log) well before
+      // legitimate memory needs were met -- especially after Sep 19's
+      // Episode Research capture feature added meaningful new
+      // in-memory buffering. Raised to a cap that leaves comfortable
+      // headroom on the real 3.8GB box. If this server's actual specs
+      // ever change again, update BOTH this and max_memory_restart
+      // below together, and confirm with `free -h` first rather than
+      // trusting a hostname or an old comment.
+      node_args: "--max-old-space-size=2048",
+      max_memory_restart: "2400M",
       env: {
         NODE_ENV: "production",
       },
