@@ -11,6 +11,7 @@ import type { AtrLookup } from "../domain/liquidation-oi-strategy/episode-end-de
 import type { LiquidationOiStrategyConfig } from "../domain/liquidation-oi-strategy/config";
 import type { CapacityModelCoefficients } from "../domain/liquidation-oi-strategy/initial-capacity-model";
 import type { LiquidationOiWaitStateRepository } from "../infrastructure/mongo/liquidation-oi-wait-state.repository";
+import { OrderFlowEpisodeTracker, type LifecycleSnapshot } from "../domain/liquidation-oi-strategy/order-flow-episode-tracker";
 import { computePositionSizing } from "../domain/liquidation-oi-strategy/sizing-adapter";
 import { candidateTradeSideForVictim } from "../domain/liquidation-oi-strategy/lifecycle.types";
 import { newPendingUserExecution, type LiquidationOiUserExecutionState } from "../domain/liquidation-oi-strategy/user-execution.types";
@@ -19,7 +20,7 @@ import { LiquidationOiGlobalSignalRepository } from "../infrastructure/mongo/liq
 import { StrategyOrderRepository } from "../infrastructure/mongo/strategy-order.repository";
 import { captureOrderBookObservation, type OrderBookObservation, type WallLookup } from "../domain/liquidation-oi-strategy/order-book-observation";
 import { DEFAULT_ACTIVE_LIFECYCLE_CONFIG, type LiquidationOiActiveLifecycleConfig } from "../domain/liquidation-oi-strategy/active-lifecycle-config";
-import { formatEntryMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
+import { formatEntryMessage, formatFlowLine } from "../domain/liquidation-oi-strategy/telegram-formatter";
 import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
 import { displayNameFromUserId, formatCompactUsd } from "../domain/liquidation-oi-strategy/telegram-display-format";
 import { resolveUserExecutionMode } from "../domain/liquidation-oi-strategy/user-execution-mode";
@@ -117,12 +118,33 @@ export class LiquidationOiRuntimeOrchestrator {
      *  supplied, WAIT_FOR_POST_EPISODE_OI_CREATION state is persisted/
      *  cleared after every tick so it survives restart. */
     private readonly waitStateRepo: LiquidationOiWaitStateRepository | null = null,
+    /** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
+     *  observation -- optional, default null (no-op) for every existing
+     *  call site/test that predates this. When supplied, fed a
+     *  LifecycleSnapshot before/after every onTick()/onLiquidationEvent()
+     *  call (same before/after pattern as waitStateRepo above) so it can
+     *  observe episode start/freeze/resume/stop without any change to
+     *  the pure watch-manager itself. Purely observational -- read at
+     *  ENTRY_READY construction time only, never gates anything. */
+    private readonly orderFlowTracker: OrderFlowEpisodeTracker | null = null,
   ) {
     this.watchManager = new LiquidationOiWatchManager(strategyConfig, undefined, undefined, forensic);
     log.info(`[LOX_RUNTIME] constructed observationEnabled=${observationEnabled} executionEnabled=${executionEnabled}`);
   }
 
   getWatchManager(): LiquidationOiWatchManager { return this.watchManager; }
+
+  /** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
+   *  observation -- narrows a full SymbolLifecycle down to the small
+   *  structural shape OrderFlowEpisodeTracker actually needs. */
+  private toLifecycleSnapshot(lc: ReturnType<LiquidationOiWatchManager["getLifecycle"]>): LifecycleSnapshot | null {
+    if (lc === null) return null;
+    return {
+      episodeId: lc.episodeId, globalState: lc.globalState, victim: lc.episode.victim,
+      startPrice: lc.episode.startPrice, startOiQuantity: lc.episode.startOiQuantity, sameDirectionLiqUsd: lc.episode.sameDirectionLiqUsd,
+      episodeEndPrice: lc.episodeEndPrice, episodeEndOiQuantity: lc.episodeEndOiQuantity,
+    };
+  }
 
   /** Sep 17 2026 (Karo), operator-approved final capacity architecture,
    *  Section 31/4 -- restores every persisted WAIT_FOR_POST_EPISODE_OI_CREATION
@@ -172,12 +194,17 @@ export class LiquidationOiRuntimeOrchestrator {
     // longer reflects reality, not a write something else depends on
     // being durable before the next tick.
     const before = this.waitStateRepo !== null ? this.watchManager.getLifecycle(event.symbol)?.globalState : undefined;
+    const beforeFull = this.orderFlowTracker !== null ? this.watchManager.getLifecycle(event.symbol) : null;
     this.watchManager.onLiquidationEvent(event, oiAtEvent);
     if (this.waitStateRepo !== null && before === "WAIT_FOR_POST_EPISODE_OI_CREATION") {
       const after = this.watchManager.getLifecycle(event.symbol)?.globalState;
       if (after !== "WAIT_FOR_POST_EPISODE_OI_CREATION") {
         void this.waitStateRepo.delete(event.symbol);
       }
+    }
+    if (this.orderFlowTracker !== null) {
+      const afterFull = this.watchManager.getLifecycle(event.symbol);
+      this.orderFlowTracker.onLifecycleTransition(event.symbol, this.toLifecycleSnapshot(beforeFull), this.toLifecycleSnapshot(afterFull), event.timestamp);
     }
   }
 
@@ -221,6 +248,10 @@ export class LiquidationOiRuntimeOrchestrator {
 
     this.watchManager.onTick(symbol, percentile, oiHistory, currentPrice, atr3m, atr3mAgeMs, nowMs, new1mCandles, all3mCandlesSorted, atrLookup, testEconomicsOverride);
     const after = this.watchManager.getLifecycle(symbol);
+
+    if (this.orderFlowTracker !== null) {
+      this.orderFlowTracker.onLifecycleTransition(symbol, this.toLifecycleSnapshot(before), this.toLifecycleSnapshot(after), nowMs);
+    }
 
     // Sep 17 2026 (Karo), operator-approved final capacity architecture,
     // Section 31 -- persist/clear WAIT_FOR_POST_EPISODE_OI_CREATION
@@ -327,6 +358,14 @@ export class LiquidationOiRuntimeOrchestrator {
 
     log.info(`[LOX_ENTRY_READY] ${symbol} ${candidateSide} globalSignalId=${globalSignalId} entry=${entryPrice} strategyInvalidation=${strategyInvalidationPrice} capacityAtr=${capacity.initialCapacityAtr} tp=${tpPrice} atr3mAtEntry=${atr3mAtEntry} netRR=${netRR !== null ? netRR.toFixed(3) : "n/a"} oiToLiqRatio=${oiToLiqRatio !== null ? oiToLiqRatio.toFixed(3) : "n/a"} postEndOiCreationUsd=${postEndOiCreationUsd !== null ? postEndOiCreationUsd.toFixed(0) : "n/a"}`);
 
+    // Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
+    // observation -- purely observational, read once here and passed
+    // through to the Telegram formatter below. Never affects entry,
+    // sizing, SL, or TP in any way.
+    const orderFlowEpisodeId = this.watchManager.getLifecycle(symbol)?.episodeId ?? null;
+    const orderFlowStats = this.orderFlowTracker !== null && orderFlowEpisodeId !== null ? this.orderFlowTracker.getFrozenStats(symbol, orderFlowEpisodeId) : null;
+    const flowLine = orderFlowStats !== null ? formatFlowLine(orderFlowStats) : null;
+
     // Sep 16 2026 (Karo), operator-requested lifecycle fix: the
     // persisted signal starts at ENTRY_READY, NOT ACTIVE -- ACTIVE is
     // earned only once the fan-out below confirms a real position,
@@ -354,7 +393,7 @@ export class LiquidationOiRuntimeOrchestrator {
     const outcomes: UserFanOutOutcome[] = [];
     for (const runtime of this.getUserRuntimes()) {
       try {
-        outcomes.push(await this.executeForUser(runtime, symbol, globalSignalId, candidateSide, entryPrice, strategyInvalidationPrice, tpPrice, watchResult.episodePercentileRank, episode.sameDirectionLiqUsd, counterMoveAtr, capacityAtr, netRR, orderBook, oiMetricLine, nowMs));
+        outcomes.push(await this.executeForUser(runtime, symbol, globalSignalId, candidateSide, entryPrice, strategyInvalidationPrice, tpPrice, watchResult.episodePercentileRank, episode.sameDirectionLiqUsd, counterMoveAtr, capacityAtr, netRR, orderBook, oiMetricLine, flowLine, nowMs));
       } catch (err) {
         outcomes.push("FAILED");
         log.error({ userId: runtime.userId, symbol, globalSignalId, err: err instanceof Error ? err.message : String(err) }, "[LOX_USER_EXECUTION_UNEXPECTED_ERROR] -- isolated, other users unaffected");
@@ -421,7 +460,7 @@ export class LiquidationOiRuntimeOrchestrator {
     return { code: "ENTRY_READY_ALL_EXECUTIONS_FAILED", detail: "at least one user was manageable but every attempt failed" };
   }
 
-  private async executeForUser(runtime: LiquidationOiUserRuntimeRef, symbol: string, globalSignalId: string, side: Side, entryPrice: number, strategyInvalidationPrice: number, tpPrice: number, percentileRank: number, sameDirectionLiqUsd: number, counterMoveAtr: number, capacityAtr: number | null, netRR: number | null, orderBook: OrderBookObservation | null, oiMetricLine: string | null, nowMs: number): Promise<UserFanOutOutcome> {
+  private async executeForUser(runtime: LiquidationOiUserRuntimeRef, symbol: string, globalSignalId: string, side: Side, entryPrice: number, strategyInvalidationPrice: number, tpPrice: number, percentileRank: number, sameDirectionLiqUsd: number, counterMoveAtr: number, capacityAtr: number | null, netRR: number | null, orderBook: OrderBookObservation | null, oiMetricLine: string | null, flowLine: string | null, nowMs: number): Promise<UserFanOutOutcome> {
     const existing = await this.globalSignalRepo.findUserExecution(runtime.userId, globalSignalId);
     if (existing !== null) {
       log.info(`[LOX_USER_EXECUTION_ALREADY_EXISTS] userId=${runtime.userId} globalSignalId=${globalSignalId} state=${existing.state} -- skipping, idempotent`);
@@ -489,7 +528,7 @@ export class LiquidationOiRuntimeOrchestrator {
         userId: runtime.userId, globalSignalId, symbol, side, quantity: sizing.positionQty,
         entryPriceEstimate: entryPrice, slPrice: strategyInvalidationPrice, initialTpPrice: tpPrice,
       });
-      return await this.persistOutcome(userExec, outcome, symbol, side, strategyInvalidationPrice, tpPrice, percentileRank, sameDirectionLiqUsd, counterMoveAtr, capacityAtr, netRR, orderBook, oiMetricLine, runtime);
+      return await this.persistOutcome(userExec, outcome, symbol, side, strategyInvalidationPrice, tpPrice, percentileRank, sameDirectionLiqUsd, counterMoveAtr, capacityAtr, netRR, orderBook, oiMetricLine, flowLine, runtime);
     }
 
     // Sep 17 2026 (Karo), operator-requested Section 2/3 -- PAPER mode.
@@ -510,7 +549,7 @@ export class LiquidationOiRuntimeOrchestrator {
         const text = formatEntryMessage({
           symbol, candidateSide: side, mode: "PAPER", globalSignalId, entryTimestamp: userExec.createdAt,
           entryPrice, quantity: sizing.positionQty, riskUsd: runtime.riskUsd, tpPrice, strategyInvalidationPrice,
-          sameDirectionLiqUsd, percentileRank, oiMetricLine, counterMoveAtr, capacityAtr, netRR, orderBook,
+          sameDirectionLiqUsd, percentileRank, oiMetricLine, flowLine, counterMoveAtr, capacityAtr, netRR, orderBook,
           protectionConfirmed: null, displayName: displayNameFromUserId(runtime.userId),
         });
         await sendTelegramWithRetry(runtime.telegram, text, `PAPER_ENTRY userId=${runtime.userId} symbol=${symbol}`);
@@ -521,7 +560,7 @@ export class LiquidationOiRuntimeOrchestrator {
     return "PAPER_ACTIVE";
   }
 
-  private async persistOutcome(userExec: LiquidationOiUserExecutionState, outcome: Awaited<ReturnType<typeof runEntrySequence>>, symbol: string, side: Side, strategyInvalidationPrice: number, tpPrice: number, percentileRank: number, sameDirectionLiqUsd: number, counterMoveAtr: number, capacityAtr: number | null, netRR: number | null, orderBook: OrderBookObservation | null, oiMetricLine: string | null, runtime: LiquidationOiUserRuntimeRef): Promise<UserFanOutOutcome> {
+  private async persistOutcome(userExec: LiquidationOiUserExecutionState, outcome: Awaited<ReturnType<typeof runEntrySequence>>, symbol: string, side: Side, strategyInvalidationPrice: number, tpPrice: number, percentileRank: number, sameDirectionLiqUsd: number, counterMoveAtr: number, capacityAtr: number | null, netRR: number | null, orderBook: OrderBookObservation | null, oiMetricLine: string | null, flowLine: string | null, runtime: LiquidationOiUserRuntimeRef): Promise<UserFanOutOutcome> {
     const now = Date.now();
     if (outcome.outcome === "ENTRY_FAILED") {
       await this.globalSignalRepo.upsertUserExecution({ ...userExec, state: "TERMINAL", terminalReason: "EXECUTION_FAILED", cleanupState: "COMPLETE", updatedAt: now });
@@ -562,7 +601,7 @@ export class LiquidationOiRuntimeOrchestrator {
         const text = formatEntryMessage({
           symbol, candidateSide: side, mode: "REAL", globalSignalId: userExec.globalSignalId, entryTimestamp: updated.createdAt,
           entryPrice: outcome.entryPrice, quantity: outcome.quantity, riskUsd: userExec.riskUsd, tpPrice, strategyInvalidationPrice,
-          sameDirectionLiqUsd, percentileRank, oiMetricLine, counterMoveAtr, capacityAtr, netRR, orderBook,
+          sameDirectionLiqUsd, percentileRank, oiMetricLine, flowLine, counterMoveAtr, capacityAtr, netRR, orderBook,
           protectionConfirmed: outcome.outcome === "ENTRY_ACTIVE_WITH_TP" || outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP", displayName: displayNameFromUserId(userExec.userId),
         });
         await sendTelegramWithRetry(runtime.telegram, text, `REAL_ENTRY userId=${userExec.userId} symbol=${symbol}`);

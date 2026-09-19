@@ -327,6 +327,7 @@ export class BinanceWsClient extends EventEmitter {
       quoteQty: price * qty,
       isBuyerMaker: ev.m,
       aggressor: ev.m ? "SELL" : "BUY",
+      aggTradeId: ev.a,
     };
     this.emit("aggTrade", trade);
   }

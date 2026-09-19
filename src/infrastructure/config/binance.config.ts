@@ -24,3 +24,16 @@ export function loadBinanceConfig(): BinanceConfig {
     recvWindowMs: 5_000,
   };
 }
+
+/** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
+ *  observation -- Binance SPOT's own WebSocket base URL, a completely
+ *  separate endpoint/connection from the Futures one above. Reuses
+ *  the SAME BINANCE_TESTNET env var for consistency, since the
+ *  operator's own testnet/prod choice should apply uniformly. */
+const PROD_SPOT_WS = 'wss://stream.binance.com:9443';
+const TEST_SPOT_WS = 'wss://testnet.binance.vision';
+
+export function loadBinanceSpotWsConfig(): { wsBaseUrl: string } {
+  const testnet = (process.env.BINANCE_TESTNET ?? 'false').toLowerCase() === 'true';
+  return { wsBaseUrl: testnet ? TEST_SPOT_WS : PROD_SPOT_WS };
+}

@@ -68,12 +68,32 @@ function readAllForensicLines(): ForensicLine[] {
   for (const file of files) {
     const raw = fs.readFileSync(file, "utf8").split("\n");
     for (const line of raw) {
-      if (!line.includes("lox-forensic")) continue;
+      // Sep 19 2026 (Karo), operator-requested -- also pick up
+      // order-flow-episode-tracker.ts's own [ORDER_FLOW_FROZEN] log
+      // line (mod:"order-flow"), a SEPARATE mod tag from the LOX
+      // strategy's own forensic events.
+      if (!line.includes("lox-forensic") && !line.includes("order-flow"))
+        continue;
       const jsonStart = line.indexOf("{");
       if (jsonStart === -1) continue;
       try {
         const parsed = JSON.parse(line.slice(jsonStart)) as ForensicLine;
-        if (parsed.mod === "lox-forensic") out.push(parsed);
+        if (parsed.mod === "lox-forensic") {
+          out.push(parsed);
+        } else if (
+          parsed.mod === "order-flow" &&
+          typeof parsed.msg === "string" &&
+          parsed.msg.includes("[ORDER_FLOW_FROZEN]")
+        ) {
+          // order-flow's own log has no `ts`/`type` fields (unlike LOX
+          // forensic events) -- normalize onto the same shape so it
+          // sorts and groups by episodeId identically to everything else.
+          out.push({
+            ...parsed,
+            type: "ORDER_FLOW_FROZEN",
+            ts: parsed.frozenAtMs as number | undefined,
+          });
+        }
       } catch {
         // partial/truncated JSON line -- skip
       }
@@ -96,6 +116,22 @@ function fmtUsd(n: unknown): string {
   const v = typeof n === "number" ? n : Number(n);
   if (!Number.isFinite(v)) return "n/a";
   return `$${v.toFixed(0)}`;
+}
+
+/** Sep 19 2026 (Karo), operator-requested -- flow amounts (Spot/Futures
+ *  taker volume) can run into the millions; mirrors the main app's own
+ *  formatCompactUsd() (telegram-display-format.ts) so the timeline
+ *  reads the same way the Telegram message itself does. */
+function fmtCompactUsd(n: unknown): string {
+  const v = typeof n === "number" ? n : Number(n);
+  if (!Number.isFinite(v)) return "n/a";
+  const abs = Math.abs(v);
+  const sign = v < 0 ? "-" : "";
+  if (abs >= 1_000_000)
+    return `${sign}$${(abs / 1_000_000).toFixed(abs >= 10_000_000 ? 1 : 2)}M`;
+  if (abs >= 1_000)
+    return `${sign}$${(abs / 1_000).toFixed(abs >= 10_000 ? 0 : 1)}K`;
+  return `${sign}$${abs.toFixed(0)}`;
 }
 
 function runTimeline(symbol: string, episodeIdFilter: string | null): void {
@@ -191,6 +227,20 @@ function runTimeline(symbol: string, episodeIdFilter: string | null): void {
             `[${t}] \u{1F504} RESTART_RECONCILIATION  outcome=${e.outcome}  ${e.detail ?? ""}`,
           );
           break;
+        case "ORDER_FLOW_FROZEN": {
+          const spotAvail = e.spotDataAvailable === true;
+          console.log(`[${t}] \u{1F30A} ORDER_FLOW_FROZEN`);
+          console.log(
+            `             FUT:  Buy ${fmtCompactUsd(e.futuresTakerBuyUsd)}  Sell ${fmtCompactUsd(e.futuresTakerSellUsd)}  Imb ${Number(e.futuresImbalancePct).toFixed(2)}%`,
+          );
+          console.log(
+            `             SPOT: ${spotAvail ? `Buy ${fmtCompactUsd(e.spotTakerBuyUsd)}  Sell ${fmtCompactUsd(e.spotTakerSellUsd)}  Imb ${Number(e.spotImbalancePct).toFixed(2)}%` : "N/A"}`,
+          );
+          console.log(
+            `             OI: ${e.oiDeltaPct !== null && e.oiDeltaPct !== undefined ? `${Number(e.oiDeltaPct).toFixed(2)}%` : "n/a"}  |  Spot: ${e.spotConfirmationLabel}  |  Move: ${e.futuresOiMoveLabel ?? "N/A"}`,
+          );
+          break;
+        }
         default:
           console.log(`[${t}] (${e.type})`);
       }

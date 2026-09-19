@@ -1,5 +1,6 @@
 import type { Side } from "../../shared/common.types";
 import type { OrderBookObservation } from "./order-book-observation";
+import type { OrderFlowFrozenStats } from "./order-flow-episode-tracker";
 import { pctMoveFromEntry } from "./pnl-calculator";
 import { formatPrice, formatSignedUsd, formatCompactUsd, formatPct, formatUtcTime, formatDuration } from "./telegram-display-format";
 
@@ -40,6 +41,31 @@ export interface EntryMessageInput {
    *  available (should not happen for a real ENTRY_READY signal). */
   netRR: number | null;
   capacityAtr: number | null;
+  /** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
+   *  observation -- a pre-formatted, multi-line block (see
+   *  formatFlowLine below), or null if no order-flow tracker is wired
+   *  up. Purely observational -- never affects any price/size above. */
+  flowLine: string | null;
+}
+
+/** Sep 19 2026 (Karo), operator-requested Spot-vs-Futures order-flow
+ *  observation. Pure formatter -- takes the already-frozen,
+ *  already-classified stats and produces the exact concise block the
+ *  operator specified. Handles the "Spot data unavailable" case by
+ *  printing SPOT: N/A rather than fabricating zeros. */
+export function formatFlowLine(stats: OrderFlowFrozenStats): string {
+  const spot = stats.spotDataAvailable
+    ? `SPOT: Buy ${formatCompactUsd(stats.spotTakerBuyUsd)} | Sell ${formatCompactUsd(stats.spotTakerSellUsd)} | Imb ${formatPct(stats.spotImbalancePct)}`
+    : "SPOT: N/A";
+  const oiPart = stats.oiDeltaPct !== null ? formatPct(stats.oiDeltaPct) : "n/a";
+  const spotLabel = stats.spotConfirmationLabel.replace("SPOT_", "");
+  const movePart = stats.futuresOiMoveLabel ?? "N/A";
+  return [
+    "Flow (episode)",
+    `FUT: Buy ${formatCompactUsd(stats.futuresTakerBuyUsd)} | Sell ${formatCompactUsd(stats.futuresTakerSellUsd)} | Imb ${formatPct(stats.futuresImbalancePct)}`,
+    spot,
+    `OI: ${oiPart} | Spot: ${spotLabel} | Move: ${movePart}`,
+  ].join("\n");
 }
 
 export function formatEntryMessage(input: EntryMessageInput): string {
@@ -80,6 +106,7 @@ export function formatEntryMessage(input: EntryMessageInput): string {
   if (input.netRR !== null) lines.push(`\ud83d\udcca Net RR    ${input.netRR.toFixed(2)}`);
   const bookLine = fmtOrderBookLine(input.orderBook, input.candidateSide);
   if (bookLine !== null) lines.push(bookLine);
+  if (input.flowLine !== null) lines.push("", input.flowLine);
   if (input.mode === "REAL") lines.push(`Protection ${input.protectionConfirmed ? "CONFIRMED \u2713" : "NOT CONFIRMED \u2717"}`);
   lines.push(SEP, `${input.displayName} \u00b7 ${modeTag}`);
   return lines.join("\n");
@@ -90,7 +117,7 @@ const CLOSE_HEADER: Record<string, { emoji: string; label: string }> = {
   STRATEGY_INVALIDATION: { emoji: "\ud83d\udd34", label: "STOP LOSS" },
   ADVERSE_OI_PRICE_EFFICIENCY_FLIP: { emoji: "\u26a0\ufe0f", label: "MARKET EXIT" },
   DYNAMIC_EXIT: { emoji: "\u26a0\ufe0f", label: "MARKET EXIT" },
-  EMERGENCY_STOP: { emoji: "\ud83d\udea8", label: "EMERGENCY STOP" },
+  SL_FILLED: { emoji: "\ud83d\udea8", label: "STOP LOSS" },
   POSITION_CLOSED_EXTERNALLY: { emoji: "\u2753", label: "EXTERNAL CLOSE" },
   MANUAL_CLOSE: { emoji: "\ud83d\udc64", label: "MANUAL CLOSE" },
   PROTECTION_FAILED: { emoji: "\u26a0\ufe0f", label: "PROTECTION FAILED" },
