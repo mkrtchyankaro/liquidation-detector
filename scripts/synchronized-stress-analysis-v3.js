@@ -169,7 +169,15 @@ async function controlForwardReturns(symbol, windowStartMs, windowEndMs) {
   const rng = mulberry32(seedFromString(symbol));
   const anchors = [];
   for (let i = 0; i < CONTROL_SAMPLES; i++) {
-    anchors.push(windowStartMs + rng() * (latestAnchorMs - windowStartMs));
+    // Sep 20 2026 (Karo) -- CRITICAL FIX: without Math.floor, this was
+    // a non-integer ms timestamp -- Binance's klines endpoint silently
+    // rejects a non-integer endTime with 400 Bad Request, which is
+    // NOT a 429/418, so the retry-on-rate-limit logic never caught it
+    // either. Confirmed live: every single control sample failed this
+    // way while onset-anchored fetches (always integers) worked fine.
+    anchors.push(
+      Math.floor(windowStartMs + rng() * (latestAnchorMs - windowStartMs)),
+    );
   }
   const perHorizonReturns = FORWARD_HORIZONS_SEC.map(() => []);
   for (const anchorMs of anchors) {
@@ -194,7 +202,7 @@ async function controlForwardReturns(symbol, windowStartMs, windowEndMs) {
 }
 
 async function nearestKlineClose(symbol, targetMs) {
-  const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1m&endTime=${targetMs}&limit=2`;
+  const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1m&endTime=${Math.round(targetMs)}&limit=2`;
   for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url);
     if (res.status === 429 || res.status === 418) {
