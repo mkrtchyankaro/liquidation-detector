@@ -72,7 +72,8 @@ const FORWARD_HORIZONS_SEC = [60, 300, 900]; // +1m, +5m, +15m -- wider horizons
 // average, that is evidence the onset timing itself matters, not just
 // "the whole window trended down". If it's roughly the same as the
 // control, the onset timing added nothing beyond generic drift.
-const CONTROL_SAMPLES = 10;
+const CONTROL_SAMPLES = 6; // Sep 20 2026 (Karo) -- reduced from 10 after a confirmed live rate-limit failure (see sleep() below)
+const KLINE_FETCH_DELAY_MS = 120; // throttle between sequential kline fetches -- confirmed necessary: an untherottled burst (~270 calls) hit Binance's public rate limit and silently returned null for every control sample
 
 function parseArgTime(s) {
   const iso = s.includes("T")
@@ -117,6 +118,10 @@ function median(arr) {
   const s = [...arr].sort((a, b) => a - b);
   const mid = Math.floor(s.length / 2);
   return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function mean(arr) {
@@ -169,12 +174,13 @@ async function controlForwardReturns(symbol, windowStartMs, windowEndMs) {
   const perHorizonReturns = FORWARD_HORIZONS_SEC.map(() => []);
   for (const anchorMs of anchors) {
     const anchorPrice = await nearestKlineClose(symbol, anchorMs);
+    await sleep(KLINE_FETCH_DELAY_MS);
     if (anchorPrice === null) continue;
-    const forwardPrices = await Promise.all(
-      FORWARD_HORIZONS_SEC.map((s) =>
-        nearestKlineClose(symbol, anchorMs + s * 1000),
-      ),
-    );
+    const forwardPrices = [];
+    for (const s of FORWARD_HORIZONS_SEC) {
+      forwardPrices.push(await nearestKlineClose(symbol, anchorMs + s * 1000));
+      await sleep(KLINE_FETCH_DELAY_MS);
+    }
     forwardPrices.forEach((p, hi) => {
       if (p !== null)
         perHorizonReturns[hi].push(((p - anchorPrice) / anchorPrice) * 100);
@@ -189,11 +195,20 @@ async function controlForwardReturns(symbol, windowStartMs, windowEndMs) {
 
 async function nearestKlineClose(symbol, targetMs) {
   const url = `https://fapi.binance.com/fapi/v1/klines?symbol=${symbol}&interval=1m&endTime=${targetMs}&limit=2`;
-  const res = await fetch(url);
-  if (!res.ok) return null;
-  const rows = await res.json();
-  if (!Array.isArray(rows) || rows.length === 0) return null;
-  return Number(rows[rows.length - 1][4]);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const res = await fetch(url);
+    if (res.status === 429 || res.status === 418) {
+      // Sep 20 2026 (Karo) -- confirmed live: an unthrottled burst hit
+      // this. Back off and retry rather than silently returning null.
+      await sleep(500 * (attempt + 1));
+      continue;
+    }
+    if (!res.ok) return null;
+    const rows = await res.json();
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    return Number(rows[rows.length - 1][4]);
+  }
+  return null;
 }
 
 async function main() {
