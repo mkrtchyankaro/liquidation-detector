@@ -65,6 +65,15 @@ interface TradeBufferEntry {
   price: number;
   quoteQty: number;
   aggressor: "BUY" | "SELL";
+  /** Sep 20 2026 (Karo), operator-reported CRITICAL MEMORY LEAK FIX --
+   *  stored so pruneTradeBuffer() can evict the matching id from the
+   *  dedup Set below in lockstep with the array. Previously the Set
+   *  was NEVER pruned within an episode's lifetime -- for long-running
+   *  episodes (some observed lasting 2+ hours) on high-frequency
+   *  symbols (BTC/ETH), this grew unbounded, confirmed live: RSS
+   *  climbing to 2.3GB+ repeatedly before pm2's max_memory_restart
+   *  killed and reset it, wiping in-progress episode state every time. */
+  aggTradeId: number | undefined;
 }
 
 interface OiBufferEntry {
@@ -212,8 +221,9 @@ export class RecoveryFlowTracker {
       price: trade.price,
       quoteQty: trade.quoteQty,
       aggressor: trade.aggressor,
+      aggTradeId: trade.aggTradeId,
     });
-    this.pruneTradeBuffer(s.futuresBuffer, trade.timestamp);
+    this.pruneTradeBuffer(s.futuresBuffer, s.futuresSeenIds, trade.timestamp);
   }
 
   ingestSpotTrade(trade: Trade): void {
@@ -228,8 +238,9 @@ export class RecoveryFlowTracker {
       price: trade.price,
       quoteQty: trade.quoteQty,
       aggressor: trade.aggressor,
+      aggTradeId: trade.aggTradeId,
     });
-    this.pruneTradeBuffer(s.spotBuffer, trade.timestamp);
+    this.pruneTradeBuffer(s.spotBuffer, s.spotSeenIds, trade.timestamp);
   }
 
   /** Ingest OI samples -- the SAME oiHistory slice already passed into
@@ -260,9 +271,21 @@ export class RecoveryFlowTracker {
     return s.frozenSnapshot;
   }
 
-  private pruneTradeBuffer(buf: TradeBufferEntry[], nowMs: number): void {
+  /** Sep 20 2026 (Karo), operator-reported CRITICAL MEMORY LEAK FIX --
+   *  now ALSO evicts the pruned entry's aggTradeId from seenIds, so the
+   *  dedup Set stays bounded to roughly the buffer's own window
+   *  instead of growing for an episode's entire (possibly hours-long)
+   *  lifetime. */
+  private pruneTradeBuffer(
+    buf: TradeBufferEntry[],
+    seenIds: Set<number>,
+    nowMs: number,
+  ): void {
     const cutoff = nowMs - MAX_BUFFER_MS;
-    while (buf.length > 0 && buf[0]!.ts < cutoff) buf.shift();
+    while (buf.length > 0 && buf[0]!.ts < cutoff) {
+      const removed = buf.shift()!;
+      if (removed.aggTradeId !== undefined) seenIds.delete(removed.aggTradeId);
+    }
   }
 
   private nearestOiSample(

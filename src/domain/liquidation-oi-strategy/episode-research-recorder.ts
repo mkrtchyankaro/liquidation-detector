@@ -178,6 +178,7 @@ interface TradeBufferEntry {
   price: number;
   quoteQty: number;
   aggressor: "BUY" | "SELL";
+  aggTradeId: number | undefined;
 }
 interface OiBufferEntry {
   contracts: number;
@@ -225,8 +226,9 @@ export class EpisodeResearchRecorder {
       price: trade.price,
       quoteQty: trade.quoteQty,
       aggressor: trade.aggressor,
+      aggTradeId: trade.aggTradeId,
     });
-    this.prune(s.futuresBuffer, trade.timestamp);
+    this.prune(s.futuresBuffer, s.futuresSeenIds, trade.timestamp);
   }
 
   ingestSpotTrade(trade: Trade): void {
@@ -241,8 +243,9 @@ export class EpisodeResearchRecorder {
       price: trade.price,
       quoteQty: trade.quoteQty,
       aggressor: trade.aggressor,
+      aggTradeId: trade.aggTradeId,
     });
-    this.prune(s.spotBuffer, trade.timestamp);
+    this.prune(s.spotBuffer, s.spotSeenIds, trade.timestamp);
   }
 
   ingestOiSamples(
@@ -262,9 +265,21 @@ export class EpisodeResearchRecorder {
       s.oiBuffer.shift();
   }
 
-  private prune(buf: TradeBufferEntry[], nowMs: number): void {
+  /** Sep 20 2026 (Karo), operator-reported CRITICAL MEMORY LEAK FIX --
+   *  now ALSO evicts the pruned entry's aggTradeId from seenIds (same
+   *  fix as recovery-flow-tracker.ts's own pruneTradeBuffer -- see its
+   *  doc comment for the full incident). Previously the dedup Sets
+   *  here grew unbounded for an episode's entire lifetime. */
+  private prune(
+    buf: TradeBufferEntry[],
+    seenIds: Set<number>,
+    nowMs: number,
+  ): void {
     const cutoff = nowMs - MAX_BUFFER_MS;
-    while (buf.length > 0 && buf[0]!.ts < cutoff) buf.shift();
+    while (buf.length > 0 && buf[0]!.ts < cutoff) {
+      const removed = buf.shift()!;
+      if (removed.aggTradeId !== undefined) seenIds.delete(removed.aggTradeId);
+    }
   }
 
   private nearestOi(
