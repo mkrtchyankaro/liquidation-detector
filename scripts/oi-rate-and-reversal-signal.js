@@ -141,30 +141,34 @@ async function main() {
       lastVal = val;
     }
 
-    let sawDecline = false;
-    let flattenMs = null;
-    for (let i = 1; i < bucketed.length; i++) {
-      const prev = bucketed[i - 1].val;
-      const cur = bucketed[i].val;
-      if (prev === null || cur === null) continue;
-      const delta = cur - prev;
-      if (delta < 0) sawDecline = true;
-      if (sawDecline && i >= FLATTEN_LOOKBACK_BUCKETS) {
-        let allNonNegative = true;
-        for (let j = i - FLATTEN_LOOKBACK_BUCKETS + 1; j <= i; j++) {
-          const a = bucketed[j - 1]?.val;
-          const b = bucketed[j]?.val;
-          if (a === null || b === null || b - a < 0) {
-            allNonNegative = false;
-            break;
-          }
-        }
-        if (allNonNegative) {
-          flattenMs = bucketed[i - FLATTEN_LOOKBACK_BUCKETS + 1].t;
-          break;
-        }
-      }
+    // Sep 20 2026 (Karo) -- CRITICAL FIX: the original "first 3
+    // consecutive non-declining buckets after ANY decline" rule was a
+    // trap -- it fired on brief early-episode noise, long before the
+    // real decline even got going, producing absurd leading lags
+    // (-60 to -99 minutes) that were really just "near episode
+    // start", not genuine pre-extreme flattening. Fixed: find the
+    // longest NON-DECLINING SUFFIX ending at the extreme bucket --
+    // i.e. walk backward from the extreme while OI is flat-or-rising,
+    // stop at the first decline. flattenMs is where that suffix
+    // begins. Only accepted if the suffix is at least
+    // FLATTEN_LOOKBACK_BUCKETS long (else there's no real flattening,
+    // OI was still declining right up to the extreme).
+    const extremeBucketIdx = bucketed.reduce(
+      (bestIdx, b, idx) => (b.t <= extremeMs ? idx : bestIdx),
+      0,
+    );
+    let suffixStartIdx = extremeBucketIdx;
+    for (let i = extremeBucketIdx; i > 0; i--) {
+      const a = bucketed[i - 1]?.val;
+      const b = bucketed[i]?.val;
+      if (a === null || b === null || b - a < 0) break;
+      suffixStartIdx = i - 1;
     }
+    const suffixLenBuckets = extremeBucketIdx - suffixStartIdx;
+    const flattenMs =
+      suffixLenBuckets >= FLATTEN_LOOKBACK_BUCKETS
+        ? bucketed[suffixStartIdx].t
+        : null;
 
     if (flattenMs === null) continue;
 
