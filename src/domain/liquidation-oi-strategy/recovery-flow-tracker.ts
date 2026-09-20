@@ -93,6 +93,9 @@ interface SymbolRecoveryState {
   spotBuffer: TradeBufferEntry[];
   spotSeenIds: Set<number>;
   oiBuffer: OiBufferEntry[];
+  /** Sep 20 2026 (Karo), operator-reported CRITICAL MEMORY LEAK FIX --
+   *  see ingestOiSamples()'s own doc comment for the full incident. */
+  lastOiFetchedAt: number;
 
   frozenSnapshot: RecoveryFlowFrozenStats | null;
 }
@@ -183,6 +186,7 @@ export class RecoveryFlowTracker {
         spotBuffer: [],
         spotSeenIds: new Set(),
         oiBuffer: [],
+        lastOiFetchedAt: 0,
         frozenSnapshot: null,
       });
     }
@@ -245,6 +249,15 @@ export class RecoveryFlowTracker {
 
   /** Ingest OI samples -- the SAME oiHistory slice already passed into
    *  watchManager.onTick() every tick; no new OI polling. */
+  /** Sep 20 2026 (Karo), operator-reported CRITICAL MEMORY LEAK FIX --
+   *  THE root cause of repeated 2GB+ RSS cycling: oiHistory is the OI
+   *  tracker's own FULL RETAINED rolling window (~21 minutes),
+   *  re-fetched and passed into onTick() on EVERY Futures bookTicker
+   *  tick (dozens-hundreds/sec/symbol) -- pushing it whole, with no
+   *  dedup, every single time. See episode-research-recorder.ts's own
+   *  identical fix (same bug, same root cause) for the full incident.
+   *  Fixed by only ingesting samples strictly newer than the last one
+   *  already seen for this symbol. */
   ingestOiSamples(
     symbol: string,
     samples: readonly { contracts: number; fetchedAt: number }[],
@@ -252,11 +265,14 @@ export class RecoveryFlowTracker {
   ): void {
     const s = this.state.get(symbol);
     if (s === undefined || samples.length === 0) return;
-    for (const sample of samples)
+    for (const sample of samples) {
+      if (sample.fetchedAt <= s.lastOiFetchedAt) continue;
       s.oiBuffer.push({
         contracts: sample.contracts,
         fetchedAt: sample.fetchedAt,
       });
+      s.lastOiFetchedAt = sample.fetchedAt;
+    }
     const cutoff = nowMs - MAX_BUFFER_MS;
     while (s.oiBuffer.length > 0 && s.oiBuffer[0]!.fetchedAt < cutoff)
       s.oiBuffer.shift();
