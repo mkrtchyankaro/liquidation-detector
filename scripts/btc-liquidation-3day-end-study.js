@@ -749,7 +749,10 @@ async function main() {
       ep.usable[ep.usable.length - 1].endTs + 30 * 60 * 1000,
       rangeEndMs + 3 * 3600 * 1000,
     );
-    const chartObsStartIdx = nearestObsIdxAtOrBefore(allOi, chartStartMs);
+    const chartObsStartIdx = Math.max(
+      0,
+      nearestObsIdxAtOrBefore(allOi, chartStartMs),
+    ); // Sep 22 2026 (Karo), operator-reported CRASH FIX -- nearestObsIdxAtOrBefore returns -1 when chartStartMs falls before the earliest loaded observation (episodes near the very start of the 3-day window); the unguarded -1 made allOi[-1].ts throw "Cannot read properties of undefined (reading 'ts')". Clamped to 0 (earliest available observation) instead.
     let chartObsEndIdx = chartObsStartIdx;
     for (let k = chartObsStartIdx; k < allOi.length; k++) {
       if (allOi[k].ts <= chartEndMs) chartObsEndIdx = k;
