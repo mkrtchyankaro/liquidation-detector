@@ -339,8 +339,6 @@ async function main() {
       recentEfficiencyEnd = recentGross > 0 ? recentProg / recentGross : null;
     }
     c.recentEfficiencyEnd = recentEfficiencyEnd;
-    c.impliedMove =
-      recentEfficiencyEnd !== null ? -1 * recentEfficiencyEnd * c.netOi : null;
     c.responseDirectionAtEnd =
       recentEfficiencyEnd === null
         ? "N/A"
@@ -349,6 +347,25 @@ async function main() {
           : recentEfficiencyEnd > 0
             ? "ADVERSE-CONTINUING"
             : "FLAT";
+    // FIX: recentEfficiencyEnd's denominator (recentGross) is always
+    // >=0 (a sum of |ΔOI|), while NET_OI is SIGNED -- multiplying a
+    // signed value by an unsigned-denominator ratio mixes units and
+    // can flip sign unpredictably when NET_OI<0. Magnitude and
+    // direction are now computed SEPARATELY and then combined
+    // explicitly, per the operator's audit.
+    c.impliedMoveMagnitude =
+      recentEfficiencyEnd !== null
+        ? Math.abs(recentEfficiencyEnd) * Math.abs(c.netOi)
+        : null;
+    c.impliedFavorableMove =
+      c.impliedMoveMagnitude === null
+        ? null
+        : c.responseDirectionAtEnd === "FAVORABLE-LEANING"
+          ? c.impliedMoveMagnitude
+          : c.responseDirectionAtEnd === "ADVERSE-CONTINUING"
+            ? -c.impliedMoveMagnitude
+            : 0; // FLAT
+    c.impliedMove = c.impliedFavorableMove; // kept for downstream error/ratio calc below, now sign-consistent
 
     // Actual post-END outcome, same math as btc-post-episode-outcomes.js.
     const maxHorizonEndTs = c.endTs + Math.max(...OUTCOME_HORIZONS_MIN) * 60000;
@@ -403,13 +420,13 @@ async function main() {
     `${"=".repeat(200)}\nALL EPISODES -- NET_OI / IMPLIED_MOVE vs ACTUAL\n${"=".repeat(200)}`,
   );
   console.log(
-    "ID    | DIR   | END                      | OI_START   | OI_END     | NET_OI     | f_END(recentEff) | direction         | IMPLIED   | MFE30    | err30    | MFE60    | err60",
+    "ID    | DIR   | END                      | OI_START   | OI_END     | NET_OI     | f_END(recentEff) | RESPONSE_DIRECTION | IMPLIED_MAGNITUDE | IMPLIED_FAVORABLE | MFE30    | err30    | MFE60    | err60",
   );
   allCandidates.forEach((c) => {
     const o30 = c.actualOutcome[30],
       o60 = c.actualOutcome[60];
     console.log(
-      `${c.id} | ${c.direction.padEnd(5)} | ${fmtDate(c.endTs)} | ${fmtBtc(c.oiStart).padEnd(10)} | ${fmtBtc(c.oiEnd).padEnd(10)} | ${fmtBtcDelta(c.netOi).padEnd(10)} | ${(c.recentEfficiencyEnd !== null ? c.recentEfficiencyEnd.toFixed(5) : "N/A").padEnd(17)} | ${c.responseDirectionAtEnd.padEnd(17)} | ${(c.impliedMove !== null ? fmtPct(c.impliedMove) : "N/A").padEnd(9)} | ${(o30 ? fmtPct(o30.MFE) : "N/A").padEnd(8)} | ${(o30 ? fmtPct(o30.error) : "N/A").padEnd(8)} | ${(o60 ? fmtPct(o60.MFE) : "N/A").padEnd(8)} | ${o60 ? fmtPct(o60.error) : "N/A"}`,
+      `${c.id} | ${c.direction.padEnd(5)} | ${fmtDate(c.endTs)} | ${fmtBtc(c.oiStart).padEnd(10)} | ${fmtBtc(c.oiEnd).padEnd(10)} | ${fmtBtcDelta(c.netOi).padEnd(10)} | ${(c.recentEfficiencyEnd !== null ? c.recentEfficiencyEnd.toFixed(5) : "N/A").padEnd(17)} | ${c.responseDirectionAtEnd.padEnd(19)} | ${(c.impliedMoveMagnitude !== null ? fmtPct(c.impliedMoveMagnitude) : "N/A").padEnd(18)} | ${(c.impliedFavorableMove !== null ? fmtPct(c.impliedFavorableMove) : "N/A").padEnd(18)} | ${(o30 ? fmtPct(o30.MFE) : "N/A").padEnd(8)} | ${(o30 ? fmtPct(o30.error) : "N/A").padEnd(8)} | ${(o60 ? fmtPct(o60.MFE) : "N/A").padEnd(8)} | ${o60 ? fmtPct(o60.error) : "N/A"}`,
     );
   });
 
@@ -463,10 +480,10 @@ async function main() {
       `OI_START=${fmtBtc(c.oiStart)}   OI_END=${fmtBtc(c.oiEnd)}   NET_OI=${fmtBtcDelta(c.netOi)}`,
     );
     console.log(
-      `recentEfficiencyEnd (f_END): ${c.recentEfficiencyEnd !== null ? c.recentEfficiencyEnd.toFixed(6) : "N/A"}   response direction at END: ${c.responseDirectionAtEnd}`,
+      `recentEfficiencyEnd (f_END): ${c.recentEfficiencyEnd !== null ? c.recentEfficiencyEnd.toFixed(6) : "N/A"}   RESPONSE_DIRECTION: ${c.responseDirectionAtEnd}`,
     );
     console.log(
-      `IMPLIED_MOVE: ${c.impliedMove !== null ? fmtPct(c.impliedMove) : "N/A"}`,
+      `IMPLIED_MOVE_MAGNITUDE: ${c.impliedMoveMagnitude !== null ? fmtPct(c.impliedMoveMagnitude) : "N/A"}   IMPLIED_FAVORABLE_MOVE: ${c.impliedFavorableMove !== null ? fmtPct(c.impliedFavorableMove) : "N/A"}`,
     );
     console.log(`Actual subsequent path:`);
     for (const h of OUTCOME_HORIZONS_MIN) {
