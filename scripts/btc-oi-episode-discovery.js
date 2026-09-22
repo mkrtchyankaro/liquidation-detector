@@ -1,6 +1,10 @@
-// BTC OI EPISODE DISCOVERY -- pure Open Interest structure, no
-// liquidation data, no price-based detection, no previous P90 logic.
-// Research/measurement tool only.
+// BTC OI EPISODE DISCOVERY -- COMPACT MANUAL-REVIEW VERSION.
+// Modified from the original (full-dump) version per operator
+// request: internally detects the same OI-only episodes (no
+// liquidation data, no price-based detection), but prints only a
+// short ranked list for manual chart inspection instead of every
+// detected episode. Uses the NORMAL scale (Tukey fence on abs(ΔOI
+// over 10s) pairs) as the single episode population for ranking.
 //
 //   node scripts/btc-oi-episode-discovery.js
 //
@@ -260,174 +264,92 @@ async function main() {
   }
 
   // ============================================================
-  // PART 1: descriptive distributions
+  // Internal detection -- NORMAL scale only (Tukey fence on abs(ΔOI
+  // over 10s) pairs), the middle of the three scales from the
+  // previous version. Not printed in full -- used only to build the
+  // episode population for ranking below.
   // ============================================================
-  console.log(`\n${"=".repeat(160)}`);
-  console.log(
-    "PART 1 -- DESCRIPTIVE OI CHANGE DISTRIBUTIONS (absolute BTC, by horizon)",
-  );
-  console.log("=".repeat(160));
-
-  const horizonDefs = [
-    { label: "1s", ms: 1000, tol: 500 },
-    { label: "5s", ms: 5000, tol: 1500 },
-    { label: "10s", ms: 10000, tol: 3000 },
-    { label: "30s", ms: 30000, tol: 5000 },
-    { label: "60s", ms: 60000, tol: 8000 },
-  ];
-  const horizonStats = {};
-  for (const h of horizonDefs) {
-    const deltas = horizonDeltas(obs, h.ms, h.tol)
-      .map((d) => Math.abs(d))
-      .sort((a, b) => a - b);
-    const m = mean(deltas),
-      sd = stddev(deltas, m);
-    horizonStats[h.label] = { deltas, m, sd };
-    console.log(
-      `\n${h.label} horizon (N=${deltas.length} paired observations, tolerance ±${h.tol}ms):`,
-    );
-    console.log(
-      `  MIN=${fmtBtc(deltas[0])}  P25=${fmtBtc(percentile(deltas, 25))}  P50=${fmtBtc(percentile(deltas, 50))}  P75=${fmtBtc(percentile(deltas, 75))}  P90=${fmtBtc(percentile(deltas, 90))}  P95=${fmtBtc(percentile(deltas, 95))}  P99=${fmtBtc(percentile(deltas, 99))}  MAX=${fmtBtc(deltas[deltas.length - 1])}  MEAN=${fmtBtc(m)}  STDDEV=${fmtBtc(sd)}`,
-    );
-  }
-
-  console.log(
-    `\nDIRECTIONAL RUN LENGTHS (raw, zero-threshold -- every direction flip ends a run, descriptive only):`,
-  );
-  const rawDurationsSec = rawRunDurations(obs)
-    .map((ms) => ms / 1000)
+  const horizonForScale = horizonDeltas(obs, 10000, 3000)
+    .map((d) => Math.abs(d))
     .sort((a, b) => a - b);
-  console.log(
-    `  N=${rawDurationsSec.length}  MIN=${rawDurationsSec[0]?.toFixed(1)}s  P50=${percentile(rawDurationsSec, 50)?.toFixed(1)}s  P90=${percentile(rawDurationsSec, 90)?.toFixed(1)}s  MAX=${rawDurationsSec[rawDurationsSec.length - 1]?.toFixed(1)}s  MEAN=${mean(rawDurationsSec)?.toFixed(1)}s`,
-  );
+  const scaleFence = tukeyFence(horizonForScale);
+  const episodes = detectOiEpisodes(obs, scaleFence.fence);
 
   // ============================================================
-  // PART 2/3: multiple candidate scales, each derived from the data
+  // Percentile ranks across the detected population, thresholds
+  // derived from that population (not invented).
   // ============================================================
-  console.log(`\n${"=".repeat(160)}`);
-  console.log(
-    "PART 2/3 -- CANDIDATE SCALES (each derived from its OWN horizon's observed distribution)",
-  );
-  console.log("=".repeat(160));
+  const absDeltas = episodes
+    .map((e) => Math.abs(e.deltaStartToExtremeBtc))
+    .sort((a, b) => a - b);
+  const absSpeeds = episodes
+    .map((e) => Math.abs(e.avgSpeedBtcPerMin))
+    .sort((a, b) => a - b);
+  const deltaP90 = percentile(absDeltas, 90);
+  const speedP90 = percentile(absSpeeds, 90);
 
-  const sensitiveFence = tukeyFence(horizonStats["1s"].deltas);
-  const normalFence = tukeyFence(horizonStats["10s"].deltas);
-  const strongFence = tukeyFence(horizonStats["60s"].deltas);
-
-  const scales = [
-    {
-      name: "SENSITIVE",
-      derivation: "Tukey IQR fence on abs(ΔOI over 1s) pairs",
-      fence: sensitiveFence,
-    },
-    {
-      name: "NORMAL",
-      derivation: "Tukey IQR fence on abs(ΔOI over 10s) pairs",
-      fence: normalFence,
-    },
-    {
-      name: "STRONG",
-      derivation: "Tukey IQR fence on abs(ΔOI over 60s) pairs",
-      fence: strongFence,
-    },
-  ];
-
-  for (const scale of scales) {
-    console.log(`\n${scale.name}: ${scale.derivation}`);
-    console.log(
-      `  Q1=${fmtBtc(scale.fence.q1)}  Q3=${fmtBtc(scale.fence.q3)}  IQR=${fmtBtc(scale.fence.iqr)}  significance threshold (single-step) = ${fmtBtc(scale.fence.fence)} BTC`,
-    );
-  }
-  console.log(
-    `\nNote: "significance threshold" above is a standard statistical outlier fence (Tukey, Q3+1.5*IQR) on real`,
-  );
-  console.log(
-    `observed step-size distributions -- not labeled "statistically significant" in the hypothesis-testing sense,`,
-  );
-  console.log(
-    `since no significance test was performed; it is only the conventional IQR-based outlier boundary.`,
-  );
-
-  const scaleResults = {};
-  for (const scale of scales) {
-    const episodes = detectOiEpisodes(obs, scale.fence.fence);
-    scaleResults[scale.name] = episodes;
+  for (const ep of episodes) {
+    ep.inGroupA = Math.abs(ep.deltaStartToExtremeBtc) >= deltaP90;
+    ep.inGroupB = Math.abs(ep.avgSpeedBtcPerMin) >= speedP90;
+    ep.inGroupC = ep.inGroupA && ep.inGroupB;
+    ep.groupLabel = ep.inGroupC
+      ? "C"
+      : ep.inGroupA
+        ? "A"
+        : ep.inGroupB
+          ? "B"
+          : "-";
   }
 
-  // ============================================================
-  // PART 4: output for manual chart review, per scale
-  // ============================================================
-  for (const scale of scales) {
-    const episodes = scaleResults[scale.name];
-    console.log(`\n${"=".repeat(160)}`);
-    console.log(
-      `${scale.name} SCALE -- ${episodes.length} episode(s) detected`,
-    );
-    console.log("=".repeat(160));
+  const groupACount = episodes.filter((e) => e.inGroupA).length;
+  const groupBCount = episodes.filter((e) => e.inGroupB).length;
+  const groupCCount = episodes.filter((e) => e.inGroupC).length;
 
-    episodes.forEach((ep, idx) => {
-      console.log(`\n${scale.name}-EP${idx + 1}`);
-      console.log(`TYPE: ${ep.type}`);
-      console.log(
-        `START UTC: ${isoUtc(ep.startTs)}   EXTREME UTC: ${isoUtc(ep.extremeTs)}   END UTC: ${isoUtc(ep.endTs)}`,
-      );
-      console.log(
-        `START OI: ${fmtBtc(ep.startOi)}   EXTREME OI: ${fmtBtc(ep.extremeOi)}   END OI: ${fmtBtc(ep.endOi)}`,
-      );
-      console.log(
-        `START -> EXTREME ΔOI BTC: ${fmtBtcDelta(ep.deltaStartToExtremeBtc)}   ΔOI %: ${fmtPct(ep.deltaStartToExtremePct)}`,
-      );
-      console.log(
-        `DURATION TO EXTREME: ${fmtDurationMin(ep.durationToExtremeMs)}   TOTAL EPISODE DURATION: ${fmtDurationMin(ep.totalDurationMs)}`,
-      );
-      console.log(
-        `AVERAGE OI SPEED: ${ep.avgSpeedBtcPerMin.toFixed(2)} BTC/min   MAX OI SPEED: ${ep.maxSpeedBtcPerMin.toFixed(2)} BTC/min`,
-      );
-      console.log(
-        `PRICE AT START: ${fmtPrice(ep.startPrice)}   PRICE AT EXTREME: ${fmtPrice(ep.extremePrice)}   PRICE AT END: ${fmtPrice(ep.endPrice)}   (observational only, not used in detection)`,
-      );
-    });
+  const buildEpisodes = episodes
+    .filter((e) => e.type === "BUILD")
+    .sort(
+      (a, b) =>
+        Math.abs(b.deltaStartToExtremeBtc) - Math.abs(a.deltaStartToExtremeBtc),
+    )
+    .slice(0, 10);
+  const deleverEpisodes = episodes
+    .filter((e) => e.type === "DELEVERAGING")
+    .sort(
+      (a, b) =>
+        Math.abs(b.deltaStartToExtremeBtc) - Math.abs(a.deltaStartToExtremeBtc),
+    )
+    .slice(0, 10);
 
-    console.log(`\n${scale.name} COMPACT TABLE (chronological):`);
-    console.log(
-      "ID              | TYPE         | START                    | EXTREME                  | END                      | ΔOI BTC    | DURATION | START PRICE  | EXTREME PRICE | END PRICE",
-    );
-    console.log("-".repeat(180));
-    episodes.forEach((ep, idx) => {
-      console.log(
-        `${scale.name}-EP${String(idx + 1).padEnd(3)} | ${ep.type.padEnd(12)} | ${isoUtc(ep.startTs)} | ${isoUtc(ep.extremeTs)} | ${isoUtc(ep.endTs)} | ${fmtBtcDelta(ep.deltaStartToExtremeBtc).padEnd(10)} | ${fmtDurationMin(ep.totalDurationMs).padEnd(8)} | ${fmtPrice(ep.startPrice).padEnd(12)} | ${fmtPrice(ep.extremePrice).padEnd(13)} | ${fmtPrice(ep.endPrice)}`,
-      );
-    });
-  }
+  console.log(
+    `\nDetection scale used: NORMAL (Tukey fence on abs(ΔOI over 10s) pairs) = ${fmtBtc(scaleFence.fence)} BTC single-step significance threshold.`,
+  );
+  console.log(`\nTOTAL RAW OI EPISODES: ${episodes.length}`);
+  console.log(
+    `BUILD COUNT: ${episodes.filter((e) => e.type === "BUILD").length}`,
+  );
+  console.log(
+    `DELEVERAGING COUNT: ${episodes.filter((e) => e.type === "DELEVERAGING").length}`,
+  );
+  console.log(`\nTOP-10% ΔOI THRESHOLD: ${fmtBtc(deltaP90)} BTC`);
+  console.log(`TOP-10% SPEED THRESHOLD: ${speedP90.toFixed(2)} BTC/min`);
+  console.log(`\nGROUP A COUNT (top 10% by |ΔOI|): ${groupACount}`);
+  console.log(`GROUP B COUNT (top 10% by |avg speed|): ${groupBCount}`);
+  console.log(`GROUP C COUNT (both): ${groupCCount}`);
 
-  // ============================================================
-  // PART 5: validation
-  // ============================================================
-  console.log(`\n${"=".repeat(160)}`);
-  console.log("PART 5 -- VALIDATION");
-  console.log("=".repeat(160));
-  for (const scale of scales) {
-    const episodes = scaleResults[scale.name];
-    let allValid = true;
-    let overlapCount = 0;
-    for (let idx = 0; idx < episodes.length; idx++) {
-      const ep = episodes[idx];
-      const extremeOk =
-        ep.type === "BUILD"
-          ? ep.extremeOi >= ep.startOi
-          : ep.extremeOi <= ep.startOi;
-      if (!extremeOk) {
-        allValid = false;
-        console.log(
-          `  ${scale.name}-EP${idx + 1}: FAILED extreme validation (type=${ep.type}, start=${ep.startOi}, extreme=${ep.extremeOi})`,
-        );
-      }
-      if (idx > 0 && ep.startTs < episodes[idx - 1].endTs) overlapCount++;
-    }
+  console.log(`\n${"=".repeat(180)}`);
+  console.log(
+    `MANUAL-REVIEW LIST -- top ${buildEpisodes.length} BUILD + top ${deleverEpisodes.length} DELEVERAGING, ranked by |ΔOI BTC|`,
+  );
+  console.log("=".repeat(180));
+  console.log(
+    "ID       | TYPE         | GRP | START UTC                | EXTREME UTC              | END UTC                  | ΔOI BTC    | ΔOI %      | DUR TO EXTREME | AVG SPEED  | START PRICE  | EXTREME PRICE | END PRICE",
+  );
+  console.log("-".repeat(200));
+  [...buildEpisodes, ...deleverEpisodes].forEach((ep, idx) => {
     console.log(
-      `${scale.name}: ${episodes.length} episode(s), extreme-validation ${allValid ? "PASSED for all" : "FAILED for some (see above)"}, overlap count=${overlapCount} (episodes are sequential by construction -- each new episode starts exactly where the previous one's significant reversal was detected, so overlap should be 0 unless noted).`,
+      `EP${String(idx + 1).padEnd(6)} | ${ep.type.padEnd(12)} | ${ep.groupLabel.padEnd(3)} | ${isoUtc(ep.startTs)} | ${isoUtc(ep.extremeTs)} | ${isoUtc(ep.endTs)} | ${fmtBtcDelta(ep.deltaStartToExtremeBtc).padEnd(10)} | ${fmtPct(ep.deltaStartToExtremePct).padEnd(10)} | ${fmtDurationMin(ep.durationToExtremeMs).padEnd(14)} | ${ep.avgSpeedBtcPerMin.toFixed(2).padEnd(10)} | ${fmtPrice(ep.startPrice).padEnd(12)} | ${fmtPrice(ep.extremePrice).padEnd(13)} | ${fmtPrice(ep.endPrice)}`,
     );
-  }
+  });
 
   await client.close();
 }
