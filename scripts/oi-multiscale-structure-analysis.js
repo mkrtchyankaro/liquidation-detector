@@ -1,7 +1,28 @@
-// OI MULTI-SCALE STRUCTURE ANALYSIS -- pure OI, no liquidation data,
-// no episode boundaries used anywhere in detection. Discards the old
-// 8%-of-full-window-range swing threshold entirely. Threshold is now
-// derived ONLY from the actual 30-second ΔOI noise distribution.
+// OI MULTI-SCALE STRUCTURE ANALYSIS -- v2, CORRECTED.
+//
+// v1 BUG (operator-caught): rejected a CUMULATIVE swing's total size
+// using a multiple of a SINGLE-STEP noise statistic (3 x P90 =
+// 208.9 BTC > the old 140.55 BTC threshold it was supposed to beat)
+// -- mathematically backwards, and conceptually wrong: a cumulative
+// swing's size should never be judged against a single-step
+// statistic at all.
+//
+// v2 FIX: separates the two concepts explicitly.
+//   SINGLE-STEP NOISE: is one 30s step, by itself, a statistically
+//     ordinary fluctuation or a genuinely large single move? Uses
+//     Tukey's IQR outlier fence -- STANDARD statistics, not an
+//     invented multiplier: significant = value > Q3 + 1.5*IQR, where
+//     Q3=P75 and IQR=P75-P25 of the abs(ΔOI_30s) distribution.
+//   DIRECTIONAL RUN: walks the 30s series accumulating a run in one
+//     direction; a counter-direction step does NOT end the run unless
+//     THAT SINGLE STEP is itself "significant" per the rule above.
+//     The run's cumulative size is NEVER used as a rejection
+//     criterion -- whatever size results is reported as-is.
+//   MEDIUM / MAJOR: the exact same rule, self-similarly, one level up
+//     -- LOCAL runs become the "steps" for MEDIUM, MEDIUM runs become
+//     the "steps" for MAJOR, each level deriving its OWN Tukey fence
+//     from its OWN step-size distribution. No manually chosen
+//     multiplier at any level.
 //
 //   node scripts/oi-multiscale-structure-analysis.js
 //
@@ -23,7 +44,6 @@ const INSPECTION_WINDOWS = [
   ["2026-09-20T02:46:00Z", "2026-09-20T03:02:30Z"],
   ["2026-09-20T03:02:30Z", "2026-09-20T03:07:30Z"],
   ["2026-09-20T03:07:30Z", "2026-09-20T03:14:00Z"],
-  ["2026-09-20T03:14:00Z", "2026-09-20T03:16:19Z"],
 ];
 
 function isoUtc(ms) {
@@ -63,99 +83,81 @@ function stddev(arr, m) {
     : null;
 }
 
-/** Generic zigzag/swing detector, parametrized by threshold. Returns
- *  the sequence of turning points (peaks/troughs) on `series`. */
-function zigzag(series, thresholdBtc) {
-  if (series.length === 0) return [];
-  const turningPoints = [
-    { idx: 0, ts: series[0].ts, contracts: series[0].contracts, kind: "start" },
-  ];
-  let direction = null;
-  let extremeIdx = 0,
-    extremeVal = series[0].contracts;
-  for (let i = 1; i < series.length; i++) {
-    const v = series[i].contracts;
-    if (direction === null) {
-      if (v > extremeVal) {
-        extremeVal = v;
-        extremeIdx = i;
-        direction = "up";
-      } else if (v < extremeVal) {
-        extremeVal = v;
-        extremeIdx = i;
-        direction = "down";
-      }
-      continue;
-    }
-    if (direction === "up") {
-      if (v >= extremeVal) {
-        extremeVal = v;
-        extremeIdx = i;
-      } else if (extremeVal - v >= thresholdBtc) {
-        turningPoints.push({
-          idx: extremeIdx,
-          ts: series[extremeIdx].ts,
-          contracts: extremeVal,
-          kind: "peak",
-        });
-        direction = "down";
-        extremeVal = v;
-        extremeIdx = i;
-      }
-    } else {
-      if (v <= extremeVal) {
-        extremeVal = v;
-        extremeIdx = i;
-      } else if (v - extremeVal >= thresholdBtc) {
-        turningPoints.push({
-          idx: extremeIdx,
-          ts: series[extremeIdx].ts,
-          contracts: extremeVal,
-          kind: "trough",
-        });
-        direction = "up";
-        extremeVal = v;
-        extremeIdx = i;
-      }
-    }
-  }
-  turningPoints.push({
-    idx: series.length - 1,
-    ts: series[series.length - 1].ts,
-    contracts: series[series.length - 1].contracts,
-    kind: "end",
-  });
-  return turningPoints;
+/** Tukey's IQR outlier fence -- standard statistics, not an invented
+ *  multiplier. significant = value > Q3 + 1.5*IQR. */
+function tukeyFence(sortedAbsValues) {
+  const q1 = percentile(sortedAbsValues, 25);
+  const q3 = percentile(sortedAbsValues, 75);
+  const iqr = q3 - q1;
+  return { q1, q3, iqr, fence: q3 + 1.5 * iqr };
 }
-function swingsFromTurningPoints(turningPoints) {
-  const swings = [];
-  for (let i = 1; i < turningPoints.length; i++) {
-    const a = turningPoints[i - 1],
-      b = turningPoints[i];
-    const deltaBtc = b.contracts - a.contracts;
-    const durationMs = b.ts - a.ts;
-    const ratePerMin = durationMs > 0 ? (deltaBtc / durationMs) * 60000 : 0;
-    swings.push({
-      direction: deltaBtc >= 0 ? "UP" : "DOWN",
+
+/** DIRECTIONAL RUN detector. `steps` is a sequence of {ts, value,
+ *  delta} where `delta` is this step's own signed change from the
+ *  previous step (the level series' own successive differences).
+ *  `significantThreshold` (Tukey fence on abs(delta)) decides whether
+ *  a counter-direction step ENDS the current run. A run's cumulative
+ *  size is NEVER checked against any threshold -- only individual
+ *  counter-steps are. Returns an array of runs with the raw series
+ *  points that belong to each. */
+function detectDirectionalRuns(points, significantThreshold) {
+  if (points.length === 0) return [];
+  const runs = [];
+  let runStartIdx = 0;
+  let direction = null; // "UP" | "DOWN"
+  let largestCounterMove = 0;
+
+  function closeRun(endIdx) {
+    const a = points[runStartIdx],
+      b = points[endIdx];
+    runs.push({
       startTs: a.ts,
       endTs: b.ts,
-      startOi: a.contracts,
-      endOi: b.contracts,
-      deltaBtc,
-      durationMs,
-      ratePerMin,
+      startOi: a.value,
+      endOi: b.value,
+      deltaBtc: b.value - a.value,
+      durationMs: b.ts - a.ts,
+      ratePerMin:
+        b.ts > a.ts ? ((b.value - a.value) / (b.ts - a.ts)) * 60000 : 0,
+      observationCount: endIdx - runStartIdx + 1,
+      largestCounterMove,
     });
   }
-  return swings;
+
+  for (let i = 1; i < points.length; i++) {
+    const stepDelta = points[i].value - points[i - 1].value;
+    const stepDir = stepDelta > 0 ? "UP" : stepDelta < 0 ? "DOWN" : direction;
+    if (direction === null) {
+      direction = stepDir;
+      continue;
+    }
+
+    if (stepDir === direction || stepDelta === 0) continue; // same direction (or flat) -- keep accumulating
+
+    // Counter-direction step.
+    if (Math.abs(stepDelta) <= significantThreshold) {
+      // Ordinary noise -- does NOT end the run. Track it as the largest counter-move seen so far.
+      largestCounterMove = Math.max(largestCounterMove, Math.abs(stepDelta));
+      continue;
+    }
+    // Statistically significant reversal -- end the run HERE (at i-1), start a new one at i-1.
+    closeRun(i - 1);
+    runStartIdx = i - 1;
+    direction = stepDir;
+    largestCounterMove = 0;
+  }
+  closeRun(points.length - 1);
+  return runs;
 }
-function printSwingTable(swings) {
+
+function printRunTable(runs) {
   console.log(
-    "DIRECTION | START    | END      | START OI   | END OI     | ΔOI BTC    | DURATION | BTC/min",
+    "START     | END      | START OI   | END OI     | ΔOI BTC    | DURATION | BTC/min | #OBS | LARGEST COUNTER-MOVE",
   );
-  console.log("-".repeat(100));
-  for (const s of swings) {
+  console.log("-".repeat(120));
+  for (const r of runs) {
     console.log(
-      `${s.direction.padEnd(9)} | ${hhmmss(s.startTs)} | ${hhmmss(s.endTs)} | ${fmtBtc(s.startOi).padEnd(10)} | ${fmtBtc(s.endOi).padEnd(10)} | ${fmtBtcDelta(s.deltaBtc).padEnd(10)} | ${fmtDurationMin(s.durationMs).padEnd(8)} | ${s.ratePerMin.toFixed(2)}`,
+      `${hhmmss(r.startTs)} | ${hhmmss(r.endTs)} | ${fmtBtc(r.startOi).padEnd(10)} | ${fmtBtc(r.endOi).padEnd(10)} | ${fmtBtcDelta(r.deltaBtc).padEnd(10)} | ${fmtDurationMin(r.durationMs).padEnd(8)} | ${r.ratePerMin.toFixed(2).padEnd(7)} | ${String(r.observationCount).padEnd(4)} | ${fmtBtc(r.largestCounterMove)}`,
     );
   }
 }
@@ -170,7 +172,7 @@ async function main() {
 
   console.log("=".repeat(150));
   console.log(
-    `OI MULTI-SCALE STRUCTURE ANALYSIS -- ${isoUtc(RANGE_START_MS)} to ${isoUtc(RANGE_END_MS)}`,
+    `OI MULTI-SCALE STRUCTURE ANALYSIS v2 -- ${isoUtc(RANGE_START_MS)} to ${isoUtc(RANGE_END_MS)}`,
   );
   console.log(
     "Pure OI. No liquidation data. No episode boundaries used in detection.",
@@ -211,9 +213,6 @@ async function main() {
     return best;
   }
 
-  // ============================================================
-  // STEP 1: 30-second series with ΔOI 30s/60s/120s + velocities
-  // ============================================================
   const bucketStart =
     Math.floor(RANGE_START_MS / (BUCKET_SEC * 1000)) * (BUCKET_SEC * 1000);
   const series = [];
@@ -221,28 +220,10 @@ async function main() {
     const obs = obsAtOrBefore(t);
     if (obs) series.push({ ts: t, contracts: obs.contracts });
   }
-
-  console.log(`\n${"=".repeat(150)}`);
-  console.log(`STEP 1 -- 30-SECOND OI SERIES (${series.length} points)`);
-  console.log("=".repeat(150));
-  console.log(
-    "TIME     | OI BTC     | ΔOI 30s   | ΔOI 60s   | ΔOI 120s  | VEL 30s(BTC/min) | VEL 60s(BTC/min) | VEL 120s(BTC/min)",
-  );
-  console.log("-".repeat(150));
-  for (let i = 0; i < series.length; i++) {
-    const d30 = i >= 1 ? series[i].contracts - series[i - 1].contracts : null;
-    const d60 = i >= 2 ? series[i].contracts - series[i - 2].contracts : null;
-    const d120 = i >= 4 ? series[i].contracts - series[i - 4].contracts : null;
-    const v30 = d30 !== null ? (d30 / 30) * 60 : null;
-    const v60 = d60 !== null ? (d60 / 60) * 60 : null;
-    const v120 = d120 !== null ? (d120 / 120) * 60 : null;
-    console.log(
-      `${hhmmss(series[i].ts)} | ${fmtBtc(series[i].contracts).padEnd(10)} | ${fmtBtcDelta(d30).padEnd(9)} | ${fmtBtcDelta(d60).padEnd(9)} | ${fmtBtcDelta(d120).padEnd(9)} | ${(v30 !== null ? v30.toFixed(2) : "N/A").padEnd(16)} | ${(v60 !== null ? v60.toFixed(2) : "N/A").padEnd(16)} | ${v120 !== null ? v120.toFixed(2) : "N/A"}`,
-    );
-  }
+  console.log(`30-second series: ${series.length} points.`);
 
   // ============================================================
-  // STEP 2: local noise scale distribution
+  // STEP 2: single-step noise distribution + Tukey fence
   // ============================================================
   const abs30 = [];
   for (let i = 1; i < series.length; i++)
@@ -250,192 +231,213 @@ async function main() {
   const sortedAbs30 = [...abs30].sort((a, b) => a - b);
   const m = mean(abs30),
     sd = stddev(abs30, m);
+  const localFence = tukeyFence(sortedAbs30);
 
   console.log(`\n${"=".repeat(150)}`);
-  console.log(
-    "STEP 2 -- DISTRIBUTION OF abs(ΔOI_30s)  (N=" + abs30.length + ")",
-  );
-  console.log("=".repeat(150));
-  console.log(`MIN:    ${fmtBtc(sortedAbs30[0])}`);
-  console.log(`P25:    ${fmtBtc(percentile(sortedAbs30, 25))}`);
-  console.log(`P50:    ${fmtBtc(percentile(sortedAbs30, 50))}`);
-  console.log(`P75:    ${fmtBtc(percentile(sortedAbs30, 75))}`);
-  console.log(`P90:    ${fmtBtc(percentile(sortedAbs30, 90))}`);
-  console.log(`P95:    ${fmtBtc(percentile(sortedAbs30, 95))}`);
-  console.log(`P99:    ${fmtBtc(percentile(sortedAbs30, 99))}`);
-  console.log(`MAX:    ${fmtBtc(sortedAbs30[sortedAbs30.length - 1])}`);
-  console.log(`MEAN:   ${fmtBtc(m)}`);
-  console.log(`STDDEV: ${fmtBtc(sd)}`);
-
-  // ============================================================
-  // STEP 3: raw local extremes, NO filtering at all
-  // ============================================================
-  console.log(`\n${"=".repeat(150)}`);
-  console.log(
-    "STEP 3 -- RAW LOCAL EXTREMES (no filtering -- every direction change)",
-  );
-  console.log("=".repeat(150));
-  const rawTurningPoints = zigzag(series, 0.0000001); // effectively zero threshold -- every direction change registers
-  console.log(
-    `Found ${rawTurningPoints.length} raw candidates (including start/end markers).`,
-  );
-  console.log(
-    "KIND    | TIME     | OI BTC     | ΔOI from prev candidate | DURATION | BTC/min",
-  );
-  console.log("-".repeat(100));
-  for (let i = 0; i < rawTurningPoints.length; i++) {
-    const tp = rawTurningPoints[i];
-    const prev = i > 0 ? rawTurningPoints[i - 1] : null;
-    const delta = prev ? tp.contracts - prev.contracts : null;
-    const durMs = prev ? tp.ts - prev.ts : null;
-    const rate = delta !== null && durMs > 0 ? (delta / durMs) * 60000 : null;
-    console.log(
-      `${tp.kind.padEnd(7)} | ${hhmmss(tp.ts)} | ${fmtBtc(tp.contracts).padEnd(10)} | ${fmtBtcDelta(delta).padEnd(23)} | ${durMs !== null ? fmtDurationMin(durMs).padEnd(8) : "N/A".padEnd(8)} | ${rate !== null ? rate.toFixed(2) : "N/A"}`,
-    );
-  }
-
-  // ============================================================
-  // STEP 4: derive MICRO_NOISE_THRESHOLD
-  // ============================================================
-  const p90 = percentile(sortedAbs30, 90);
-  const MICRO_NOISE_THRESHOLD = 3 * p90;
-  console.log(`\n${"=".repeat(150)}`);
-  console.log("STEP 4 -- MICRO-NOISE FILTER DERIVATION");
+  console.log("STEP 2 -- SINGLE-STEP NOISE DISTRIBUTION -- abs(ΔOI_30s)");
   console.log("=".repeat(150));
   console.log(
-    `MICRO_NOISE_THRESHOLD = 3 x P90(abs(ΔOI_30s)) = 3 x ${fmtBtc(p90)} = ${fmtBtc(MICRO_NOISE_THRESHOLD)} BTC`,
+    `MIN=${fmtBtc(sortedAbs30[0])}  P25=${fmtBtc(percentile(sortedAbs30, 25))}  P50=${fmtBtc(percentile(sortedAbs30, 50))}  P75=${fmtBtc(percentile(sortedAbs30, 75))}  P90=${fmtBtc(percentile(sortedAbs30, 90))}  P95=${fmtBtc(percentile(sortedAbs30, 95))}  P99=${fmtBtc(percentile(sortedAbs30, 99))}  MAX=${fmtBtc(sortedAbs30[sortedAbs30.length - 1])}  MEAN=${fmtBtc(m)}  STDDEV=${fmtBtc(sd)}`,
   );
   console.log(
-    `DERIVATION = P90 of single-30s-step absolute changes represents the size of a typical noisy single`,
+    `\nSINGLE-STEP NOISE RULE (Tukey's IQR outlier fence -- standard statistics, not an invented multiplier):`,
   );
   console.log(
-    `step; requiring a cumulative swing of 3x that (not derived from the full-window OI range at all)`,
+    `  Q1 (P25) = ${fmtBtc(localFence.q1)}   Q3 (P75) = ${fmtBtc(localFence.q3)}   IQR = Q3-Q1 = ${fmtBtc(localFence.iqr)}`,
   );
   console.log(
-    `means a swing must clear roughly three ordinary noise-steps' worth of movement to count as real --`,
+    `  A single 30s step is ORDINARY NOISE if abs(step) <= Q3 + 1.5*IQR = ${fmtBtc(localFence.fence)} BTC.`,
   );
   console.log(
-    `well below the old 140.55 BTC (8%-of-range) threshold, so genuine 20-100 BTC moves are NOT discarded.`,
+    `  A single step LARGER than that is a statistically significant individual move (Tukey's standard`,
+  );
+  console.log(
+    `  "outlier" definition), and is the ONLY thing allowed to end a directional run below.`,
   );
 
   // ============================================================
-  // STEP 5: THREE separate structures -- LOCAL, MEDIUM, MAJOR
+  // STEP 3: LOCAL directional runs (from raw 30s series)
   // ============================================================
-  const MEDIUM_THRESHOLD = MICRO_NOISE_THRESHOLD * 3;
-  const MAJOR_THRESHOLD = MICRO_NOISE_THRESHOLD * 10;
+  const localPoints = series.map((s) => ({ ts: s.ts, value: s.contracts }));
+  const localRuns = detectDirectionalRuns(localPoints, localFence.fence);
   console.log(`\n${"=".repeat(150)}`);
-  console.log("STEP 5 -- THREE SEPARATE SWING STRUCTURES");
+  console.log(
+    `STEP 3/4 -- LOCAL DIRECTIONAL RUNS (N=${localRuns.length}, no size floor -- whatever the rule produces)`,
+  );
   console.log("=".repeat(150));
-  console.log(
-    `LOCAL threshold  = MICRO_NOISE_THRESHOLD        = ${fmtBtc(MICRO_NOISE_THRESHOLD)} BTC`,
-  );
-  console.log(
-    `MEDIUM threshold = 3 x MICRO_NOISE_THRESHOLD    = ${fmtBtc(MEDIUM_THRESHOLD)} BTC`,
-  );
-  console.log(
-    `MAJOR threshold  = 10 x MICRO_NOISE_THRESHOLD   = ${fmtBtc(MAJOR_THRESHOLD)} BTC`,
-  );
+  printRunTable(localRuns);
 
-  const localTP = zigzag(series, MICRO_NOISE_THRESHOLD);
-  const mediumTP = zigzag(series, MEDIUM_THRESHOLD);
-  const majorTP = zigzag(series, MAJOR_THRESHOLD);
-  const localSwings = swingsFromTurningPoints(localTP);
-  const mediumSwings = swingsFromTurningPoints(mediumTP);
-  const majorSwings = swingsFromTurningPoints(majorTP);
+  // ---- MEDIUM: same rule, one level up, using LOCAL run deltas as the new "steps" ----
+  const localDeltasAbs = localRuns
+    .map((r) => Math.abs(r.deltaBtc))
+    .sort((a, b) => a - b);
+  const mediumFence = tukeyFence(localDeltasAbs);
+  const mediumPoints = [
+    { ts: localRuns[0].startTs, value: localRuns[0].startOi },
+    ...localRuns.map((r) => ({ ts: r.endTs, value: r.endOi })),
+  ];
+  const mediumRuns = detectDirectionalRuns(mediumPoints, mediumFence.fence);
+  console.log(
+    `\nMEDIUM-level Tukey fence (derived from the distribution of LOCAL run sizes, N=${localDeltasAbs.length}):`,
+  );
+  console.log(
+    `  Q1=${fmtBtc(mediumFence.q1)}  Q3=${fmtBtc(mediumFence.q3)}  IQR=${fmtBtc(mediumFence.iqr)}  fence=${fmtBtc(mediumFence.fence)} BTC`,
+  );
+  console.log(`\n--- B) MEDIUM SWINGS (N=${mediumRuns.length}) ---`);
+  printRunTable(mediumRuns);
 
-  console.log(`\n--- A) LOCAL SWINGS (N=${localSwings.length}) ---`);
-  printSwingTable(localSwings);
-  console.log(`\n--- B) MEDIUM SWINGS (N=${mediumSwings.length}) ---`);
-  printSwingTable(mediumSwings);
-  console.log(`\n--- C) MAJOR SWINGS (N=${majorSwings.length}) ---`);
-  printSwingTable(majorSwings);
+  // ---- MAJOR: same rule, one level up again, using MEDIUM run deltas ----
+  const mediumDeltasAbs = mediumRuns
+    .map((r) => Math.abs(r.deltaBtc))
+    .sort((a, b) => a - b);
+  const majorFence = tukeyFence(mediumDeltasAbs);
+  const majorPoints = [
+    { ts: mediumRuns[0].startTs, value: mediumRuns[0].startOi },
+    ...mediumRuns.map((r) => ({ ts: r.endTs, value: r.endOi })),
+  ];
+  const majorRuns = detectDirectionalRuns(majorPoints, majorFence.fence);
+  console.log(
+    `\nMAJOR-level Tukey fence (derived from the distribution of MEDIUM run sizes, N=${mediumDeltasAbs.length}):`,
+  );
+  console.log(
+    `  Q1=${fmtBtc(majorFence.q1)}  Q3=${fmtBtc(majorFence.q3)}  IQR=${fmtBtc(majorFence.iqr)}  fence=${fmtBtc(majorFence.fence)} BTC`,
+  );
+  console.log(`\n--- C) MAJOR SWINGS (N=${majorRuns.length}) ---`);
+  printRunTable(majorRuns);
 
   // ============================================================
-  // STEP 6: special inspection windows + the flagged ~98 BTC move
+  // STEP 5: sanity-check the named inspection windows
   // ============================================================
   console.log(`\n${"=".repeat(150)}`);
   console.log(
-    "STEP 6 -- SPECIAL INSPECTION WINDOWS (raw start/end OI, independent of swing detection)",
+    "STEP 5 -- SANITY CHECK NAMED WINDOWS (numeric evidence, no assumption)",
   );
   console.log("=".repeat(150));
   for (const [fromIso, toIso] of INSPECTION_WINDOWS) {
     const fromMs = Date.parse(fromIso),
       toMs = Date.parse(toIso);
-    const startObs = obsAtOrBefore(fromMs);
-    const endObs = obsAtOrBefore(toMs);
-    const delta =
-      startObs && endObs ? endObs.contracts - startObs.contracts : null;
-    console.log(
-      `${hhmmss(fromMs)} -> ${hhmmss(toMs)}: OI ${fmtBtc(startObs?.contracts)} -> ${fmtBtc(endObs?.contracts)}  (Δ ${fmtBtcDelta(delta)})`,
-    );
-  }
-
-  const flagStart = obsAtOrBefore(Date.parse("2026-09-20T03:02:30Z"));
-  const flagEnd = obsAtOrBefore(Date.parse("2026-09-20T03:07:30Z"));
-  const flagDelta =
-    flagStart && flagEnd ? flagEnd.contracts - flagStart.contracts : null;
-  console.log(
-    `\nFLAGGED MOVE 03:02:30 -> 03:07:30: OI ${fmtBtc(flagStart?.contracts)} -> ${fmtBtc(flagEnd?.contracts)}  (Δ ${fmtBtcDelta(flagDelta)})`,
-  );
-  console.log(
-    `Compared to MICRO_NOISE_THRESHOLD (${fmtBtc(MICRO_NOISE_THRESHOLD)}) and MEDIUM_THRESHOLD (${fmtBtc(MEDIUM_THRESHOLD)}):`,
-  );
-  console.log(
-    `  abs(flagged delta) ${Math.abs(flagDelta) > MICRO_NOISE_THRESHOLD ? "EXCEEDS" : "does NOT exceed"} LOCAL threshold.`,
-  );
-  console.log(
-    `  abs(flagged delta) ${Math.abs(flagDelta) > MEDIUM_THRESHOLD ? "EXCEEDS" : "does NOT exceed"} MEDIUM threshold.`,
-  );
-  console.log(
-    `  This move ${Math.abs(flagDelta) > MICRO_NOISE_THRESHOLD ? "DOES register as its own swing at LOCAL scale (check the LOCAL SWINGS table above for its exact entry)." : "is filtered out even at LOCAL scale -- it is within the derived noise floor."}`,
-  );
-
-  // ============================================================
-  // STEP 7: nested structure -- MAJOR contains MEDIUM contains LOCAL
-  // ============================================================
-  console.log(`\n${"=".repeat(150)}`);
-  console.log("STEP 7 -- NESTED STRUCTURE (MAJOR > MEDIUM > LOCAL)");
-  console.log("=".repeat(150));
-  for (const major of majorSwings) {
-    console.log(
-      `\nMAJOR ${major.direction} MOVE: ${hhmmss(major.startTs)} -> ${hhmmss(major.endTs)}  (${fmtBtcDelta(major.deltaBtc)} BTC)`,
-    );
-    const mediumInside = mediumSwings.filter(
-      (s) => s.startTs >= major.startTs && s.endTs <= major.endTs,
-    );
-    for (const med of mediumInside) {
-      console.log(
-        `   MEDIUM ${med.direction}: ${hhmmss(med.startTs)} -> ${hhmmss(med.endTs)}  (${fmtBtcDelta(med.deltaBtc)} BTC)`,
-      );
-      const localInside = localSwings.filter(
-        (s) => s.startTs >= med.startTs && s.endTs <= med.endTs,
-      );
-      for (const loc of localInside) {
-        console.log(
-          `      LOCAL ${loc.direction}: ${hhmmss(loc.startTs)} -> ${hhmmss(loc.endTs)}  (${fmtBtcDelta(loc.deltaBtc)} BTC)`,
+    const pointsInWindow = series.filter((s) => s.ts >= fromMs && s.ts <= toMs);
+    if (pointsInWindow.length < 2) {
+      console.log(`${hhmmss(fromMs)} -> ${hhmmss(toMs)}: insufficient points.`);
+      continue;
+    }
+    const netDelta =
+      pointsInWindow[pointsInWindow.length - 1].contracts -
+      pointsInWindow[0].contracts;
+    const netDir = netDelta >= 0 ? "UP" : "DOWN";
+    let sameDirCount = 0,
+      oppositeDirCount = 0,
+      largestOppositeStep = 0;
+    for (let i = 1; i < pointsInWindow.length; i++) {
+      const stepDelta =
+        pointsInWindow[i].contracts - pointsInWindow[i - 1].contracts;
+      const stepDir = stepDelta >= 0 ? "UP" : "DOWN";
+      if (stepDir === netDir) sameDirCount++;
+      else {
+        oppositeDirCount++;
+        largestOppositeStep = Math.max(
+          largestOppositeStep,
+          Math.abs(stepDelta),
         );
       }
     }
+    const hasInternalSignificantReversal =
+      largestOppositeStep > localFence.fence;
+    const classification = hasInternalSignificantReversal
+      ? "CONTAINS AN INTERNAL SIGNIFICANT REVERSAL -- this window is not one clean structure, it is multiple runs glued together by the fixed time boundary"
+      : sameDirCount >= oppositeDirCount
+        ? "MEANINGFUL DIRECTIONAL MOVE"
+        : "ORDINARY OSCILLATION";
+    console.log(
+      `\n${hhmmss(fromMs)} -> ${hhmmss(toMs)}: net ${fmtBtcDelta(netDelta)} BTC (${netDir})`,
+    );
+    console.log(
+      `  steps same-direction: ${sameDirCount}   steps opposite-direction: ${oppositeDirCount}   largest opposite single step: ${fmtBtc(largestOppositeStep)} BTC (fence=${fmtBtc(localFence.fence)})`,
+    );
+    console.log(`  CLASSIFICATION: ${classification}`);
   }
+
+  // Specifically re-confirm the flagged 03:02:30 -> 03:07:30 move using the SAME method.
+  const flagFrom = Date.parse("2026-09-20T03:02:30Z"),
+    flagTo = Date.parse("2026-09-20T03:07:30Z");
+  const flagPoints = series.filter((s) => s.ts >= flagFrom && s.ts <= flagTo);
+  const flagNet =
+    flagPoints.length >= 2
+      ? flagPoints[flagPoints.length - 1].contracts - flagPoints[0].contracts
+      : null;
+  console.log(`\n${"=".repeat(150)}`);
+  console.log(
+    `FLAGGED MOVE RE-CHECK: 03:02:30 -> 03:07:30, net = ${fmtBtcDelta(flagNet)} BTC`,
+  );
+  console.log(
+    "This move's classification is printed in the STEP 5 list above (it is one of the 7 named windows).",
+  );
+  console.log(
+    "Also check the LOCAL SWINGS table above directly -- if this move survived as its own run (not merged",
+  );
+  console.log(
+    "away by a larger counter-move), it will appear there as an explicit UP or DOWN entry near this time.",
+  );
 
   // ============================================================
   // FOOTER
   // ============================================================
+  const runNear = (runs, tsApprox) =>
+    runs.find(
+      (r) =>
+        Math.abs(r.startTs - tsApprox) < 5 * 60000 ||
+        Math.abs(r.endTs - tsApprox) < 5 * 60000,
+    );
+  const flagRun =
+    localRuns.find(
+      (r) => r.startTs <= flagFrom + 30000 && r.endTs >= flagTo - 30000,
+    ) ??
+    localRuns.find((r) => r.startTs >= flagFrom - 30000 && r.startTs <= flagTo);
+
+  const rebuildWindowRuns = localRuns.filter(
+    (r) =>
+      r.startTs >= Date.parse("2026-09-20T02:46:00Z") &&
+      r.endTs <= Date.parse("2026-09-20T03:16:00Z"),
+  );
+
   console.log(`\n${"=".repeat(150)}`);
-  console.log("SCRIPT CREATED:");
-  console.log("scripts/oi-multiscale-structure-analysis.js");
+  console.log("SINGLE-STEP NOISE RULE:");
+  console.log(
+    `Tukey IQR fence on abs(ΔOI_30s): ordinary if <= Q3+1.5*IQR = ${fmtBtc(localFence.fence)} BTC; larger = statistically significant.`,
+  );
+  console.log("");
+  console.log("LOCAL SWING RULE:");
+  console.log(
+    "Directional run continues through counter-steps <= the fence above; ends only when a single counter-step",
+  );
+  console.log(
+    "exceeds the fence. Cumulative run size is never itself checked against any threshold.",
+  );
+  console.log("");
+  console.log("ARBITRARY MULTIPLIER USED:");
+  console.log("NO");
   console.log("");
   console.log("OLD 140.55 BTC THRESHOLD USED:");
   console.log("NO");
   console.log("");
-  console.log("FULL-WINDOW 8% ZIGZAG USED:");
+  console.log("FULL-WINDOW RANGE THRESHOLD USED:");
   console.log("NO");
   console.log("");
-  console.log("LIQUIDATION DATA USED:");
-  console.log("NO");
+  console.log("03:02:30 -> 03:07:30 CLASSIFICATION:");
+  console.log(
+    "(see STEP 5 output above for this exact window's printed classification and supporting counts)",
+  );
   console.log("");
-  console.log("EPISODE BOUNDARIES USED FOR DETECTION:");
-  console.log("NO");
+  console.log("02:46 -> 03:16 CLASSIFICATION:");
+  console.log(
+    `(${rebuildWindowRuns.length} separate LOCAL run(s) detected inside this span -- see LOCAL SWINGS table above;`,
+  );
+  console.log(
+    "if more than one run appears here, 02:46->03:16 was NOT one uninterrupted move at LOCAL scale, though it",
+  );
+  console.log(
+    "may still consolidate into a single MEDIUM or MAJOR run above -- check those tables too.)",
+  );
 
   await client.close();
 }
