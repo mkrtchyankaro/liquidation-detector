@@ -2,6 +2,16 @@
 // vs BTC price effect). Historical MongoDB only, no live connections.
 // Same 4 episodes, unchanged.
 //
+// v2 FIX (operator-requested, Episode 33 only): if an episode's own
+// START timestamp has no valid causal OI observation, this now
+// searches FORWARD through that SAME episode's own liquidation
+// events (in order) for the first one that DOES have valid causal
+// OI, and uses THAT event's timestamp as the OI baseline. The
+// episode's actual start/end and total liquidation USD are NEVER
+// changed by this -- only which timestamp anchors the OI side of the
+// decomposition. Episodes 31/32/34 are unaffected (their own start
+// already had valid OI, so baseline delay = 0.000s for them).
+//
 // METHODOLOGY NOTE (read before trusting the reconciliation number):
 // To split OI USD change into a contract-count effect and a price
 // effect, we need an independent PRICE at the start and end OI
@@ -161,19 +171,53 @@ async function main() {
       .toArray();
     const totalLiq = events.reduce((a, e) => a + (e.quoteQty ?? 0), 0);
 
-    const startObs = await oiObservationAtOrBefore(ep.startMs);
-    const endObs = await oiObservationAtOrBefore(ep.endMs);
+    function isValidObs(o) {
+      return (
+        o &&
+        o.contracts !== undefined &&
+        o.usd !== undefined &&
+        o.price !== null
+      );
+    }
 
-    if (
-      !startObs ||
-      !endObs ||
-      startObs.contracts === undefined ||
-      endObs.contracts === undefined ||
-      startObs.price === null ||
-      endObs.price === null
-    ) {
+    // Sep 20 2026 (Karo), operator-requested FIX -- if the episode's
+    // own start timestamp has no valid causal OI observation (as with
+    // Episode 33), search FORWARD through this SAME episode's own
+    // liquidation events (in order) for the first one that DOES have
+    // valid causal OI, and use THAT event's timestamp as the OI
+    // baseline. The episode's actual start/end and total liquidation
+    // USD are NEVER changed by this -- only which timestamp anchors
+    // the OI decomposition's "start" side. No OI is invented or
+    // interpolated; this only widens the search to real, already-
+    // stored observations within the episode itself.
+    let startObs = await oiObservationAtOrBefore(ep.startMs);
+    let oiBaselineMs = ep.startMs;
+    if (!isValidObs(startObs)) {
+      for (const e of events) {
+        const candidate = await oiObservationAtOrBefore(e.timestamp);
+        if (isValidObs(candidate)) {
+          startObs = candidate;
+          oiBaselineMs = e.timestamp;
+          break;
+        }
+      }
+    }
+    const endObs = await oiObservationAtOrBefore(ep.endMs);
+    const oiBaselineDelaySec = (oiBaselineMs - ep.startMs) / 1000;
+
+    console.log(
+      `Episode actual start:       ${new Date(ep.startMs).toISOString().slice(11, 23)}`,
+    );
+    console.log(
+      `OI calculation baseline:    ${new Date(oiBaselineMs).toISOString().slice(11, 23)}`,
+    );
+    console.log(
+      `OI baseline delay:          ${oiBaselineDelaySec.toFixed(3)} seconds`,
+    );
+
+    if (!isValidObs(startObs) || !isValidObs(endObs)) {
       console.log(
-        "Insufficient OI data (missing contracts/usd/price at start or end) -- cannot decompose. Skipping.",
+        "Insufficient OI data (no valid causal OI found anywhere in this episode, or missing at end) -- cannot decompose. Skipping.",
       );
       continue;
     }
@@ -235,6 +279,7 @@ async function main() {
     summaryRows.push({
       num: ep.num,
       totalLiq,
+      oiBaselineDelaySec,
       contractChange,
       contractEffectUsd,
       priceEffectUsd,
@@ -242,14 +287,14 @@ async function main() {
     });
   }
 
-  console.log(`\n${"=".repeat(110)}`);
+  console.log(`\n${"=".repeat(130)}`);
   console.log(
-    "EPISODE | LIQ USD    | CONTRACT Δ BTC     | CONTRACT EFFECT USD | PRICE EFFECT USD | TOTAL OI USD Δ",
+    "EPISODE | LIQ USD    | OI BASELINE DELAY | CONTRACT Δ BTC     | CONTRACT EFFECT USD | PRICE EFFECT USD | TOTAL OI USD Δ",
   );
-  console.log("-".repeat(110));
+  console.log("-".repeat(130));
   for (const r of summaryRows) {
     console.log(
-      `${String(r.num).padEnd(7)} | ${fmtUsdPlain(r.totalLiq).padEnd(10)} | ${fmtBtcDelta(r.contractChange).padEnd(18)} | ${fmtUsd(r.contractEffectUsd).padEnd(20)} | ${fmtUsd(r.priceEffectUsd).padEnd(17)} | ${fmtUsd(r.totalOiUsdChange)}`,
+      `${String(r.num).padEnd(7)} | ${fmtUsdPlain(r.totalLiq).padEnd(10)} | ${(r.oiBaselineDelaySec.toFixed(3) + "s").padEnd(18)} | ${fmtBtcDelta(r.contractChange).padEnd(18)} | ${fmtUsd(r.contractEffectUsd).padEnd(20)} | ${fmtUsd(r.priceEffectUsd).padEnd(17)} | ${fmtUsd(r.totalOiUsdChange)}`,
     );
   }
 
