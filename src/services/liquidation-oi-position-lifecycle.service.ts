@@ -10,6 +10,7 @@ import { computePaperPnl } from "../domain/liquidation-oi-strategy/pnl-calculato
 import { formatCloseMessage } from "../domain/liquidation-oi-strategy/telegram-formatter";
 import { sendTelegramWithRetry } from "../domain/liquidation-oi-strategy/telegram-send-retry";
 import { displayNameFromUserId } from "../domain/liquidation-oi-strategy/telegram-display-format";
+import { buildRealCloseReport, type RealCloseReport, type UserTradeFill } from "../domain/liquidation-oi-strategy/real-close-report";
 import { childLogger } from "../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "lox-position-lifecycle" });
@@ -97,11 +98,18 @@ export class LiquidationOiPositionLifecycleService {
     if (positionFlat === null) return;
     if (!positionFlat) return;
 
-    const terminalReason = await this.determineTerminalReason(userExec, runtime.binanceRest);
-    const updated: LiquidationOiUserExecutionState = { ...userExec, state: "TERMINAL", terminalReason, updatedAt: nowMs };
+    // Exact close from Binance's own fills: reason (TP / SL / manual),
+    // real exit price and realized PnL after fees. Falls back to the
+    // order-status check only if the trade history is unavailable.
+    const report = await this.buildCloseReport(userExec, runtime.binanceRest);
+    const terminalReason = report?.reason ?? await this.determineTerminalReason(userExec, runtime.binanceRest);
+    const updated: LiquidationOiUserExecutionState = {
+      ...userExec, state: "TERMINAL", terminalReason, updatedAt: nowMs,
+      ...(report !== null ? { exitPrice: report.exitPrice, realizedPnlUsd: report.realizedPnlUsd, pnlSource: "REALIZED" as const } : {}),
+    };
     await this.globalSignalRepo.upsertUserExecution(updated);
     this.emit(userExec, nowMs, { type: "POSITION_TERMINAL_DETECTED", userId: userExec.userId, reason: terminalReason ?? "UNKNOWN" });
-    log.info(`[LOX_POSITION_TERMINAL_DETECTED] userId=${userExec.userId} symbol=${userExec.symbol} reason=${terminalReason}`);
+    log.info(`[LOX_POSITION_TERMINAL_DETECTED] userId=${userExec.userId} symbol=${userExec.symbol} reason=${terminalReason} exit=${report?.exitPrice ?? "n/a"} realizedPnlUsd=${report?.realizedPnlUsd.toFixed(4) ?? "n/a"} feesUsd=${report?.feesUsd.toFixed(4) ?? "n/a"}`);
 
     await this.runCleanup(updated, nowMs);
   }
@@ -117,6 +125,27 @@ export class LiquidationOiPositionLifecycleService {
     }
   }
 
+  private async buildCloseReport(userExec: LiquidationOiUserExecutionState, rest: BinanceRestLike): Promise<RealCloseReport | null> {
+    if (typeof rest.getUserTrades !== "function") return null;
+    try {
+      let slActualOrderId: number | null = null;
+      if (userExec.slBinanceAlgoId !== null) {
+        try {
+          const stop = (await rest.getAlgoOrder(userExec.slBinanceAlgoId)) as { actualOrderId?: string | number };
+          const id = Number(stop?.actualOrderId);
+          if (id > 0) slActualOrderId = id;
+        } catch { /* SL never triggered or not queryable -- not an SL close */ }
+      }
+      // 60s margin before the row's creation covers clock skew between
+      // this server and Binance; fills are matched by order id anyway.
+      const fills = (await rest.getUserTrades(userExec.symbol, userExec.createdAt - 60_000)) as UserTradeFill[];
+      return buildRealCloseReport({ side: userExec.side, fills: Array.isArray(fills) ? fills : [], sinceMs: userExec.createdAt - 60_000, tpOrderId: userExec.tpBinanceOrderId, slActualOrderId });
+    } catch (err) {
+      log.warn({ userId: userExec.userId, symbol: userExec.symbol, err: err instanceof Error ? err.message : String(err) }, "[LOX_CLOSE_REPORT_UNAVAILABLE] -- falling back to order-status classification");
+      return null;
+    }
+  }
+
   private async determineTerminalReason(userExec: LiquidationOiUserExecutionState, rest: BinanceRestLike): Promise<LiquidationOiUserExecutionState["terminalReason"]> {
     try {
       if (userExec.tpBinanceOrderId !== null) {
@@ -127,7 +156,10 @@ export class LiquidationOiPositionLifecycleService {
     try {
       if (userExec.slBinanceAlgoId !== null) {
         const stop = (await rest.getAlgoOrder(userExec.slBinanceAlgoId)) as { algoStatus?: string };
-        if (stop.algoStatus === "FILLED" || stop.algoStatus === "EXECUTED") return "SL_FILLED";
+        // Binance algo orders never report FILLED: a fired stop shows
+        // TRIGGERED/FINISHED and carries the id of the order it created.
+        const fired = (stop as { actualOrderId?: string | number }).actualOrderId;
+        if (["TRIGGERED", "FINISHED", "FILLED", "EXECUTED"].includes(String(stop.algoStatus)) || Number(fired) > 0) return "SL_FILLED";
       }
     } catch { /* fall through */ }
     return "POSITION_CLOSED_EXTERNALLY";

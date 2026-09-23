@@ -133,6 +133,13 @@ export class BinanceRestClient {
     return this.signedGet("/fapi/v2/balance");
   }
 
+  /** Account trade history for a symbol (fills), newest-last. Each fill
+   *  carries orderId, side, price, qty, realizedPnl and commission -- the
+   *  exchange's own record of how and at what price a position closed. */
+  async getUserTrades(symbol: string, startTime: number): Promise<unknown> {
+    return this.signedGet("/fapi/v1/userTrades", { symbol, startTime, limit: 1000 });
+  }
+
   /** Account position mode. { dualSidePosition: true } = Hedge Mode.
    *  This bot sends one-way orders (no positionSide), which Binance
    *  rejects in Hedge Mode -- checked once at startup for REAL users. */

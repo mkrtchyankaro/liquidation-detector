@@ -23,6 +23,7 @@ import { BinanceRestClient } from "../infrastructure/binance/binanceRest.client"
 import { getSymbolFilters, runEntrySequence } from "../infrastructure/binance/liquidation-oi-user-execution.service";
 import { loadUsersConfig } from "../infrastructure/config/users.config.loader";
 import { checkLoxRealReadiness } from "../services/lox-real-readiness";
+import { buildRealCloseReport, type UserTradeFill } from "../domain/liquidation-oi-strategy/real-close-report";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -102,13 +103,25 @@ async function main(): Promise<void> {
   }
   await sleep(1500);
 
+  // The cleanup above IS a manual close (like closing in the Binance app).
+  // Prove the bot's close detection reads it correctly from Binance fills.
+  let closeOk = true;
+  if (outcome.outcome === "ENTRY_ACTIVE_WITH_TP" || outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP") {
+    const since = Date.now() - 5 * 60_000;
+    const fills = (await rest.getUserTrades(symbol, since)) as UserTradeFill[];
+    const report = buildRealCloseReport({ side, fills, sinceMs: since, tpOrderId: outcome.outcome === "ENTRY_ACTIVE_WITH_TP" ? outcome.tpBinanceOrderId : null, slActualOrderId: null });
+    console.log(`\n=== 4b. Close detection (same code the bot uses) ===`);
+    console.log(report ? `reason=${report.reason}  exit=${report.exitPrice}  qty=${report.closedQty}  realizedPnl=$${report.realizedPnlUsd.toFixed(4)}  fees=$${report.feesUsd.toFixed(4)}` : "no closing fills found");
+    closeOk = report !== null && report.reason === "POSITION_CLOSED_EXTERNALLY" && report.closedQty === outcome.quantity;
+  }
+
   console.log(`\n=== 5. Final Binance state (must be flat, no open orders) ===`);
   const pos = ((await rest.getPositionRisk(symbol)) as Array<{ symbol: string; positionAmt: string }>).find((p) => p.symbol === symbol);
   const openOrders = (await rest.getOpenOrders(symbol)) as unknown[];
   const openAlgo = (await rest.getOpenAlgoOrders(symbol)) as unknown[];
   console.log(`positionAmt=${pos?.positionAmt ?? 0}  openOrders=${openOrders.length}  openAlgoOrders=${openAlgo.length}`);
   const clean = Number(pos?.positionAmt ?? 0) === 0 && openOrders.length === 0 && openAlgo.length === 0;
-  const passed = (outcome.outcome === "ENTRY_ACTIVE_WITH_TP") && clean;
+  const passed = (outcome.outcome === "ENTRY_ACTIVE_WITH_TP") && clean && closeOk;
   console.log(passed ? "\nRESULT: PASS -- entry, SL, TP and cleanup all work on this account." : "\nRESULT: FAIL -- see outcome and state above. If anything is still open, close it manually in Binance.");
   if (!passed) process.exitCode = 1;
 }

@@ -69,6 +69,7 @@ export interface BinanceRestLike {
    *  a method is missing (older test doubles), the corresponding step is
    *  skipped and the sequence behaves exactly as before. */
   getBookTicker?(symbol: string): Promise<unknown>;
+  getUserTrades?(symbol: string, startTime: number): Promise<unknown>;
   setLeverage?(symbol: string, leverage: number): Promise<unknown>;
   setMarginType?(symbol: string, marginType: "ISOLATED" | "CROSSED"): Promise<unknown>;
 }
