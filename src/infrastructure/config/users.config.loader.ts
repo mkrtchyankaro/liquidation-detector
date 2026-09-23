@@ -177,3 +177,41 @@ export function loadUsersConfig(filePath: string): UserConfig[] {
   );
   return result;
 }
+
+/**
+ * Global execution settings, read from the SAME users.config.json file
+ * (top level, next to "users"). Single source of truth for whether ANY
+ * real Binance order may be placed by the LOX strategy.
+ *
+ *   { "realOrdersEnabled": true, "users": [ ... ] }
+ *
+ * Absent or not exactly `true` -> false (every user runs PAPER). Fails
+ * fast on a non-boolean value so a typo ("true" as a string) can never
+ * silently arm or disarm real trading.
+ */
+export interface ExecutionSettings {
+  realOrdersEnabled: boolean;
+}
+
+export function loadExecutionSettings(filePath: string): ExecutionSettings {
+  const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
+    realOrdersEnabled?: unknown;
+  };
+  const value = raw.realOrdersEnabled;
+  if (value !== undefined && typeof value !== "boolean") {
+    throw new Error(
+      `users config at ${filePath}: "realOrdersEnabled" must be true or false (got ${JSON.stringify(value)}).`,
+    );
+  }
+  const realOrdersEnabled = value === true;
+  if (realOrdersEnabled) {
+    log.warn(
+      "[REAL_ORDERS_ENABLED] realOrdersEnabled=true -- LOX may place REAL Binance orders for users whose own gates allow it",
+    );
+  } else {
+    log.info(
+      "realOrdersEnabled=false -- every LOX user runs PAPER (no Binance orders)",
+    );
+  }
+  return { realOrdersEnabled };
+}

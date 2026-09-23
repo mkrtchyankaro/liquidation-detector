@@ -4,7 +4,7 @@ import { childLogger } from "./infrastructure/logging/logger";
 import { loadBinanceConfig } from "./infrastructure/config/binance.config";
 import { loadSymbolsConfig } from "./infrastructure/config/symbols.config";
 import { loadObservabilityConfig } from "./infrastructure/config/observability.config";
-import { loadUsersConfig } from "./infrastructure/config/users.config.loader";
+import { loadUsersConfig, loadExecutionSettings } from "./infrastructure/config/users.config.loader";
 import {
   MongoClientWrapper,
   type MongoDetectorConfig,
@@ -75,11 +75,40 @@ async function main(): Promise<void> {
     process.env.USERS_CONFIG_PATH ??
     path.join(process.cwd(), "users.config.json");
   const users = loadUsersConfig(usersConfigPath);
+  // Global REAL-order master switch, read from users.config.json
+  // (top-level "realOrdersEnabled", default false). Replaces the former
+  // hardcoded `false` passed to LiquidationOiRuntimeOrchestrator.
+  const executionSettings = loadExecutionSettings(usersConfigPath);
 
   const userRuntimes: UserRuntime[] = users.map((u) =>
     buildUserRuntime(u, mongo),
   );
   log.info(`built ${userRuntimes.length} user runtime(s)`);
+
+  // LOX user fan-out list -- ONE definition, shared by the orchestrator,
+  // the position lifecycle and the active-main runtime (previously three
+  // copy-pasted lambdas). A user can be REAL only when every per-user
+  // gate agrees; otherwise the user runs PAPER (full virtual lifecycle,
+  // zero Binance calls) instead of failing with no Binance client.
+  const isLoxRealCapable = (r: UserRuntime): boolean =>
+    r.config.liquidationOiExecutionEnabled === true &&
+    r.binanceRest !== null &&
+    r.config.binance?.mode === "live" &&
+    r.config.binance?.orderExecutionEnabled === true;
+  const loxUserRefs = () =>
+    userRuntimes
+      .filter((r) => r.config.enabled)
+      .map((r) => ({
+        userId: r.config.userId,
+        riskUsd: r.config.risk.riskUsd,
+        liquidationOiExecutionEnabled: isLoxRealCapable(r),
+        binanceRest: r.binanceRest,
+        telegram: r.telegram,
+      }));
+  for (const r of userRuntimes.filter((u) => u.config.enabled)) {
+    const mode = executionSettings.realOrdersEnabled && isLoxRealCapable(r) ? "REAL" : "PAPER";
+    log.warn(`[LOX_USER_MODE] userId=${r.config.userId} mode=${mode} riskUsd=${r.config.risk.riskUsd} realOrdersEnabled=${executionSettings.realOrdersEnabled}`);
+  }
 
   // Sep 8 2026 (Karo) -- startup-blocker index validation, same
   // severity as liqwatch-bot's own execution-record/execution-claim
@@ -295,18 +324,9 @@ async function main(): Promise<void> {
     DEFAULT_CAPACITY_MODEL_COEFFICIENTS,
     liquidationOiGlobalSignalRepo,
     liquidationOiStrategyOrderRepo,
-    () =>
-      userRuntimes
-        .filter((r) => r.config.enabled)
-        .map((r) => ({
-          userId: r.config.userId,
-          riskUsd: r.config.risk.riskUsd,
-          liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled,
-          binanceRest: r.binanceRest,
-          telegram: r.telegram,
-        })),
+    loxUserRefs,
     true, // observationEnabled
-    false, // executionEnabled -- MUST be explicitly changed to true here to allow real orders
+    executionSettings.realOrdersEnabled, // global master switch -- users.config.json "realOrdersEnabled"
     undefined,
     // Sep 16 2026 (Karo), operator-requested forensic observability --
     // structured, event-driven (not per-tick spam), so the live bot's
@@ -330,17 +350,7 @@ async function main(): Promise<void> {
       liquidationOiGlobalSignalRepo,
       liquidationOiStrategyOrderRepo,
       liquidationOiOrchestrator.getWatchManager(),
-      () =>
-        userRuntimes
-          .filter((r) => r.config.enabled)
-          .map((r) => ({
-            userId: r.config.userId,
-            riskUsd: r.config.risk.riskUsd,
-            liquidationOiExecutionEnabled:
-              r.config.liquidationOiExecutionEnabled,
-            binanceRest: r.binanceRest,
-            telegram: r.telegram,
-          })),
+      loxUserRefs,
       DEFAULT_ACTIVE_LIFECYCLE_CONFIG.positionReconciliationIntervalMs,
       liquidationOiForensicSink,
     );
@@ -348,16 +358,7 @@ async function main(): Promise<void> {
     liquidationOiGlobalSignalRepo,
     liquidationOiStrategyOrderRepo,
     liquidationOiPositionLifecycle,
-    () =>
-      userRuntimes
-        .filter((r) => r.config.enabled)
-        .map((r) => ({
-          userId: r.config.userId,
-          riskUsd: r.config.risk.riskUsd,
-          liquidationOiExecutionEnabled: r.config.liquidationOiExecutionEnabled,
-          binanceRest: r.binanceRest,
-          telegram: r.telegram,
-        })),
+    loxUserRefs,
     DEFAULT_ACTIVE_LIFECYCLE_CONFIG,
     liquidationOiForensicSink,
   );
@@ -505,17 +506,7 @@ async function main(): Promise<void> {
       liquidationOiStrategyOrderRepo,
       liquidationOiPositionLifecycle,
       liquidationOiOrchestrator.getWatchManager(),
-      () =>
-        userRuntimes
-          .filter((r) => r.config.enabled)
-          .map((r) => ({
-            userId: r.config.userId,
-            riskUsd: r.config.risk.riskUsd,
-            liquidationOiExecutionEnabled:
-              r.config.liquidationOiExecutionEnabled,
-            binanceRest: r.binanceRest,
-            telegram: r.telegram,
-          })),
+      loxUserRefs,
       liquidationOiForensicSink,
       Date.now(),
     );
