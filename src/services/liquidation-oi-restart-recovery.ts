@@ -98,7 +98,7 @@ export async function recoverLoxOnRestart(
                 const clientAlgoId = strategyClientOrderId(userExec.userId, signal.globalSignalId, "STOP_LOSS", 0);
                 const closeSide = userExec.side === "LONG" ? "SELL" : "BUY";
                 try {
-                  const replaced = (await rest.createAlgoOrder({ symbol: signal.symbol, side: closeSide, type: "STOP_MARKET", quantity: String(userExec.quantity ?? 0), triggerPrice: String(signal.strategyInvalidationPrice), reduceOnly: "true", newClientAlgoId: clientAlgoId })) as { algoId?: number };
+                  const replaced = (await rest.createAlgoOrder({ symbol: signal.symbol, side: closeSide, type: "STOP_MARKET", quantity: String(userExec.quantity ?? 0), triggerPrice: String(signal.strategyInvalidationPrice), reduceOnly: "true", clientAlgoId })) as { algoId?: number };
                   await strategyOrderRepo.upsert({ userId: userExec.userId, globalSignalId: signal.globalSignalId, symbol: signal.symbol, purpose: "STOP_LOSS", revision: 0, clientOrderId: "", clientAlgoId, binanceOrderId: null, binanceAlgoId: replaced.algoId ?? null, state: "OPEN" });
                   forensic({ ts: nowMs, symbol: signal.symbol, episodeId: signal.globalSignalId, victim: signal.victim, state: "ACTIVE", episodeAgeSec: 0, type: "RESTART_RECONCILIATION", outcome: "SL_REPLACED", detail: `userId=${userExec.userId}` });
                 } catch (err) {

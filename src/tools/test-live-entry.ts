@@ -81,6 +81,15 @@ async function main(): Promise<void> {
   });
   console.log(JSON.stringify(outcome, null, 2));
 
+  if (outcome.outcome === "ENTRY_ACTIVE_WITH_TP" || outcome.outcome === "ENTRY_ACTIVE_WITHOUT_TP") {
+    // Evidence for how Binance answers algo-order queries on this account
+    // (used later by restart recovery and SL-fill detection).
+    await sleep(2000);
+    const byId = await rest.getAlgoOrder(outcome.slBinanceAlgoId).then((r) => JSON.stringify(r), (e) => `ERROR ${e.message}`);
+    const byClient = await rest.getAlgoOrderByClientId(outcome.slClientAlgoId).then((r) => JSON.stringify(r), (e) => `ERROR ${e.message}`);
+    console.log(`\n=== 3b. SL query check (2s after entry) ===\nby algoId:      ${byId}\nby clientAlgoId: ${byClient}`);
+  }
+
   console.log(`\n=== 4. Cleanup ===`);
   if (outcome.outcome === "ENTRY_ACTIVE_WITH_TP") {
     await rest.cancelOrder(symbol, outcome.tpBinanceOrderId).then(() => console.log("TP cancelled"), (e) => console.log("TP cancel:", e.message));

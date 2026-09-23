@@ -9,7 +9,7 @@
  * Usage: npx tsx tests/liquidation-oi-entry-hardening.test.ts
  */
 import * as assert from "assert";
-import { runEntrySequence, type BinanceRestLike } from "../src/infrastructure/binance/liquidation-oi-user-execution.service";
+import { runEntrySequence, safeLeverage, type BinanceRestLike } from "../src/infrastructure/binance/liquidation-oi-user-execution.service";
 import { checkLoxRealReadiness } from "../src/services/lox-real-readiness";
 
 let passed = 0;
@@ -26,6 +26,7 @@ const EXCHANGE_INFO = { symbols: [{ symbol: "DOGEUSDT", pricePrecision: 5, quant
 interface MockOpts {
   ask?: number; bid?: number; positionAmt?: string; positionLagsForever?: boolean;
   fillAvg?: string; fillQty?: string; marginErr?: string;
+  algoQueryFails?: boolean; algoInOpenList?: boolean;
 }
 function mockRest(o: MockOpts = {}) {
   const calls: Array<{ fn: string; p?: Record<string, unknown> }> = [];
@@ -41,14 +42,14 @@ function mockRest(o: MockOpts = {}) {
       return { orderId: 2 };
     },
     createAlgoOrder: async (p: Record<string, unknown>) => { calls.push({ fn: "createAlgoOrder", p }); return { algoId: 9 }; },
-    getAlgoOrder: async () => ({ algoStatus: "WORKING" }),
+    getAlgoOrder: async () => { if (o.algoQueryFails) throw new Error("Binance API error -2013: Order does not exist."); return { algoStatus: "WORKING" }; },
     getAlgoOrderByClientId: async () => ({ algoStatus: "WORKING" }),
-    cancelAlgoOrder: async () => ({}),
+    cancelAlgoOrder: async (id: number) => { calls.push({ fn: "cancelAlgoOrder", p: { id } }); return {}; },
     getOrder: async () => ({ status: "NEW" }),
     getPositionRisk: async () => [{ symbol: "DOGEUSDT", positionAmt: o.positionLagsForever ? "0" : (o.positionAmt ?? "100"), entryPrice: "0.2" }],
     cancelOrder: async () => ({}),
     getOpenOrders: async () => [],
-    getOpenAlgoOrders: async () => [],
+    getOpenAlgoOrders: async () => (o.algoInOpenList ? [{ algoId: 9, clientAlgoId: "x", orderType: "STOP_MARKET" }] : []),
   };
   return rest as typeof rest & BinanceRestLike;
 }
@@ -115,6 +116,32 @@ async function run(): Promise<void> {
     const sl = r.calls.find((c) => c.fn === "createAlgoOrder");
     assert.strictEqual(sl?.p?.quantity, "50");
     assert.ok(out.outcome === "ENTRY_ACTIVE_WITH_TP" && out.quantity === 50);
+  });
+
+  await scenario("SL not yet queryable by id (-2013) but present in the open list -> verified, trade stays protected", async () => {
+    const r = mockRest({ algoQueryFails: true, algoInOpenList: true });
+    const out = await runEntrySequence(r, base);
+    assert.strictEqual(out.outcome, "ENTRY_ACTIVE_WITH_TP");
+  });
+
+  await scenario("SL never verifiable -> position fail-safe closed AND the SL algo order is cancelled (no orphan stop)", async () => {
+    const r = mockRest({ algoQueryFails: true, algoInOpenList: false });
+    const out = await runEntrySequence(r, base);
+    assert.strictEqual(out.outcome, "PROTECTION_FAILED_CLOSED");
+    assert.ok(r.calls.some((c) => c.fn === "createOrder" && c.p?.reduceOnly === "true" && c.p?.type === "MARKET"), "fail-safe close sent");
+    assert.ok(r.calls.some((c) => c.fn === "cancelAlgoOrder" && c.p?.id === 9), "orphan SL cancelled");
+  });
+
+  await scenario("leverage is a CAP: lowered so ISOLATED liquidation stays beyond the SL", async () => {
+    assert.strictEqual(safeLeverage(60, 1, "ISOLATED"), 60);
+    assert.strictEqual(safeLeverage(60, 2, "ISOLATED"), 35);
+    assert.strictEqual(safeLeverage(20, 5, "ISOLATED"), 14);
+    assert.strictEqual(safeLeverage(60, 2, "CROSSED"), 60);
+    assert.strictEqual(safeLeverage(5, 50, "ISOLATED"), 1);
+    // SL 0.198 vs ask 0.2 = 1% -> 60 allowed; SL 0.194 = 3% -> 23
+    const r = mockRest();
+    await runEntrySequence(r, { ...base, slPrice: 0.194, leverage: 60, marginMode: "ISOLATED" });
+    assert.strictEqual(r.calls.find((c) => c.fn === "setLeverage")?.p?.l, 23);
   });
 
   await scenario("readiness: hedge mode is refused with a clear reason", async () => {

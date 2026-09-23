@@ -141,11 +141,7 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
     if (!filters) return { outcome: "ENTRY_FAILED", reason: `could not load symbol filters for ${input.symbol}` };
     const long = input.side === "LONG";
 
-    // ── 1. Account setup for this symbol (before any order) ──────────
-    const setup = await applySymbolSetup(rest, input);
-    if (setup !== null) return { outcome: "ENTRY_FAILED", reason: setup };
-
-    // ── 2. Pre-flight at the EXECUTABLE price ───────────────────────
+    // ── 1. Pre-flight at the EXECUTABLE price ───────────────────────
     // The signal price can be seconds old. Re-check geometry and re-size
     // at the price a MARKET order would actually cross, so the SL still
     // costs riskUsd, and never enter when price already passed SL or TP.
@@ -170,6 +166,20 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
         plannedQty: input.quantity, resizedQty: quantity,
       }, "[LOX_PRE_FLIGHT]");
     }
+
+    // ── 2. Account setup for this symbol (before any order) ──────────
+    // In ISOLATED mode the exchange liquidates at roughly 1/leverage away
+    // from entry. The configured leverage is treated as a CAP: it is
+    // lowered so the strategy SL always sits well inside the liquidation
+    // price (SL distance <= 70% of 1/leverage). Otherwise a wide SL
+    // would be pre-empted by liquidation, losing the whole margin.
+    const slDistancePct = Math.abs(referencePrice - input.slPrice) / referencePrice * 100;
+    const effectiveLeverage = input.leverage ? safeLeverage(input.leverage, slDistancePct, input.marginMode) : undefined;
+    if (effectiveLeverage !== undefined && effectiveLeverage !== input.leverage) {
+      log.warn({ userId: input.userId, symbol: input.symbol, configuredLeverage: input.leverage, effectiveLeverage, slDistancePct: Number(slDistancePct.toFixed(3)) }, "[LOX_LEVERAGE_CAPPED] configured leverage would put liquidation before the SL -- using a lower leverage");
+    }
+    const setup = await applySymbolSetup(rest, { ...input, leverage: effectiveLeverage });
+    if (setup !== null) return { outcome: "ENTRY_FAILED", reason: setup };
 
     const roundedQty = floorToStep(quantity, filters.stepSize, filters.qtyPrecision);
     if (roundedQty < filters.minQty) return { outcome: "ENTRY_FAILED", reason: `quantity ${roundedQty} below exchange minQty ${filters.minQty}` };
@@ -226,10 +236,13 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
       log.error({ userId: input.userId, symbol: input.symbol, err: err instanceof Error ? err.message : String(err) }, "[LOX_SL_PLACEMENT_FAILED]");
     }
 
-    const stopVerified = slAlgoId !== null && await verifyAlgoOrderOpen(rest, slAlgoId);
+    const stopVerified = slAlgoId !== null && await verifyAlgoOrderOpen(rest, input.symbol, slAlgoId, slClientAlgoId);
     if (!stopVerified) {
       log.error({ userId: input.userId, symbol: input.symbol }, "[LOX_PROTECTION_FAILED] SL could not be confirmed -- fail-safe closing the position now");
       await failSafeMarketClose(rest, input.symbol, closeSide, protectQty, filters);
+      // The SL may exist even though verification failed -- never leave it
+      // resting on Binance after the position it protected is gone.
+      await cancelOwnAlgoOrder(rest, input.symbol, slAlgoId, slClientAlgoId);
       return { outcome: "PROTECTION_FAILED_CLOSED", entryPrice: position.entryPrice, quantity: protectQty, entryClientOrderId, reason: "SL placement/verification failed -- position fail-safe closed" };
     }
 
@@ -306,13 +319,49 @@ async function verifyPositionOpen(rest: BinanceRestLike, symbol: string, expecte
   }
   return null;
 }
-async function verifyAlgoOrderOpen(rest: BinanceRestLike, algoId: number): Promise<boolean> {
-  try {
-    const res = (await rest.getAlgoOrder(algoId)) as { algoStatus?: string };
-    return res.algoStatus === "WORKING" || res.algoStatus === "NEW";
-  } catch {
-    return false;
+/** A freshly created algo order is not always queryable by id right away
+ *  (Binance returned -2013 "Order does not exist" ~0.5s after creation in
+ *  production). Retry, and accept the symbol's open-algo-order list as
+ *  equally authoritative proof that the order is resting. */
+async function verifyAlgoOrderOpen(rest: BinanceRestLike, symbol: string, algoId: number, clientAlgoId: string, attempts = 5, delayMs = 400): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = (await rest.getAlgoOrder(algoId)) as { algoStatus?: string };
+      if (res?.algoStatus === "WORKING" || res?.algoStatus === "NEW") return true;
+    } catch { /* not queryable yet -- fall through to the open list */ }
+    try {
+      const open = (await rest.getOpenAlgoOrders(symbol)) as Array<{ algoId?: number | string; clientAlgoId?: string }>;
+      if (Array.isArray(open) && open.some((o) => Number(o.algoId) === algoId || o.clientAlgoId === clientAlgoId)) return true;
+    } catch { /* retry */ }
+    if (i < attempts - 1) await sleep(delayMs);
   }
+  return false;
+}
+
+/** Best-effort: cancel our own SL algo order by id, then sweep the open
+ *  list for our clientAlgoId in case the id was never learned. */
+async function cancelOwnAlgoOrder(rest: BinanceRestLike, symbol: string, algoId: number | null, clientAlgoId: string): Promise<void> {
+  if (algoId !== null) {
+    try { await rest.cancelAlgoOrder(algoId); return; } catch { /* sweep below */ }
+  }
+  try {
+    const open = (await rest.getOpenAlgoOrders(symbol)) as Array<{ algoId?: number | string; clientAlgoId?: string }>;
+    for (const o of Array.isArray(open) ? open : []) {
+      if (o.clientAlgoId === clientAlgoId && o.algoId !== undefined) {
+        try { await rest.cancelAlgoOrder(Number(o.algoId)); } catch { /* logged below if still open */ }
+      }
+    }
+  } catch (err) {
+    log.error({ symbol, clientAlgoId, err: err instanceof Error ? err.message : String(err) }, "[LOX_ORPHAN_SL_CANCEL_FAILED] -- a stop order may remain resting on Binance; cancel it manually");
+  }
+}
+
+/** Highest leverage <= configured such that, in ISOLATED mode, the SL
+ *  distance is at most 70% of the ~1/leverage liquidation distance. */
+export function safeLeverage(configured: number, slDistancePct: number, marginMode?: "ISOLATED" | "CROSSED"): number {
+  if (marginMode !== "ISOLATED" || !(slDistancePct > 0)) return configured;
+  const maxByLiquidation = Math.floor((0.7 * 100) / slDistancePct);
+  return Math.max(1, Math.min(configured, maxByLiquidation));
 }
 async function verifyOrderOpen(rest: BinanceRestLike, symbol: string, orderId: number): Promise<boolean> {
   try {
