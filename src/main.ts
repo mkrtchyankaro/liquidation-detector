@@ -4,7 +4,10 @@ import { childLogger } from "./infrastructure/logging/logger";
 import { loadBinanceConfig } from "./infrastructure/config/binance.config";
 import { loadSymbolsConfig } from "./infrastructure/config/symbols.config";
 import { loadObservabilityConfig } from "./infrastructure/config/observability.config";
-import { loadUsersConfig, loadExecutionSettings } from "./infrastructure/config/users.config.loader";
+import {
+  loadUsersConfig,
+  loadExecutionSettings,
+} from "./infrastructure/config/users.config.loader";
 import {
   MongoClientWrapper,
   type MongoDetectorConfig,
@@ -106,8 +109,13 @@ async function main(): Promise<void> {
         telegram: r.telegram,
       }));
   for (const r of userRuntimes.filter((u) => u.config.enabled)) {
-    const mode = executionSettings.realOrdersEnabled && isLoxRealCapable(r) ? "REAL" : "PAPER";
-    log.warn(`[LOX_USER_MODE] userId=${r.config.userId} mode=${mode} riskUsd=${r.config.risk.riskUsd} realOrdersEnabled=${executionSettings.realOrdersEnabled}`);
+    const mode =
+      executionSettings.realOrdersEnabled && isLoxRealCapable(r)
+        ? "REAL"
+        : "PAPER";
+    log.warn(
+      `[LOX_USER_MODE] userId=${r.config.userId} mode=${mode} riskUsd=${r.config.risk.riskUsd} realOrdersEnabled=${executionSettings.realOrdersEnabled}`,
+    );
   }
 
   // Sep 8 2026 (Karo) -- startup-blocker index validation, same

@@ -1,4 +1,5 @@
 {
+  "realOrdersEnabled": false,
   "users": [
     {
       "userId": "main",
@@ -7,10 +8,14 @@
       "telegram": {
         "enabled": true,
         "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
-        "chatIds": ["PLACEHOLDER_MAIN_CHAT_ID_1", "PLACEHOLDER_MAIN_CHAT_ID_2"]
+        "chatIds": [
+          "PLACEHOLDER_MAIN_CHAT_ID_1",
+          "PLACEHOLDER_MAIN_CHAT_ID_2"
+        ]
       },
       "longEnabled": true,
-      "shortEnabled": true
+      "shortEnabled": true,
+      "liquidationOiExecutionEnabled": false
     },
     {
       "userId": "karo",
@@ -19,7 +24,9 @@
       "telegram": {
         "enabled": true,
         "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
-        "chatIds": ["PLACEHOLDER_KARO_CHAT_ID"]
+        "chatIds": [
+          "PLACEHOLDER_KARO_CHAT_ID"
+        ]
       },
       "binance": {
         "enabled": true,
@@ -36,7 +43,8 @@
         "dailyLossLimitPct": 5
       },
       "longEnabled": true,
-      "shortEnabled": true
+      "shortEnabled": true,
+      "liquidationOiExecutionEnabled": false
     },
     {
       "userId": "friend",
@@ -45,7 +53,9 @@
       "telegram": {
         "enabled": true,
         "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
-        "chatIds": ["PLACEHOLDER_FRIEND_CHAT_ID"]
+        "chatIds": [
+          "PLACEHOLDER_FRIEND_CHAT_ID"
+        ]
       },
       "binance": {
         "enabled": true,
@@ -62,7 +72,8 @@
         "dailyLossLimitPct": 5
       },
       "longEnabled": true,
-      "shortEnabled": true
+      "shortEnabled": true,
+      "liquidationOiExecutionEnabled": false
     },
     {
       "userId": "artak",
@@ -71,7 +82,10 @@
       "telegram": {
         "enabled": true,
         "botToken": "PLACEHOLDER_TELEGRAM_BOT_TOKEN",
-        "chatIds": ["PLACEHOLDER_ARTAK_CHAT_ID", "PLACEHOLDER_KARO_CHAT_ID"]
+        "chatIds": [
+          "PLACEHOLDER_ARTAK_CHAT_ID",
+          "PLACEHOLDER_KARO_CHAT_ID"
+        ]
       },
       "binance": {
         "enabled": false,
@@ -88,7 +102,8 @@
         "dailyLossLimitPct": 5
       },
       "longEnabled": true,
-      "shortEnabled": true
+      "shortEnabled": true,
+      "liquidationOiExecutionEnabled": false
     }
   ]
 }

@@ -1,38 +1,79 @@
 #!/usr/bin/env bash
+# Safe deploy for liquidation-detector.
+#
+# Order matters: nothing that the RUNNING bot depends on (dist/, the pm2
+# process) is touched until the new code has been pulled, installed,
+# built into a separate folder, tested, and its config validated. A
+# failed step aborts the deploy and leaves the currently running bot
+# exactly as it was.
 set -euo pipefail
+cd "$(dirname "$0")"
 
-BOT_NAME="$(basename "$(pwd)")"
+APP_NAME="liquidation-detector"   # must match ecosystem.config.js "name"
+BUILD_DIR="dist.next"
 
-echo "==> Deploying ${BOT_NAME}"
+echo "==> [1/7] Pulling latest code (fast-forward only)"
+git pull --ff-only origin main
 
-git pull origin main
-npm install
+echo "==> [2/7] Installing exact dependencies from package-lock.json"
+npm ci
 
-# Sep 8 2026 fix (Karo's own deploy.sh had this unconditional -- it would
-# silently overwrite real .env/users.config.json with blank placeholder
-# templates on EVERY deploy after the first one, destroying MONGO_URI,
-# Binance API keys, and Telegram tokens. Now only copies the template the
-# FIRST time (file doesn't exist yet); every subsequent deploy leaves
-# your real, already-configured files completely untouched.
+echo "==> [3/7] Checking local config files (never overwritten)"
 if [ ! -f .env ]; then
-  echo "==> .env not found -- copying .env.example (fill in real values before starting)"
-  cp .env.example .env
+  if [ -f .env.example ]; then
+    cp .env.example .env
+    echo "!! .env was missing -- copied .env.example. Fill in real values, then run ./deploy.sh again."
+  else
+    echo "!! .env is missing. Create it (MONGO_URI, ...) and run ./deploy.sh again."
+  fi
+  exit 1
 fi
 if [ ! -f users.config.json ]; then
-  echo "==> users.config.json not found -- copying users.config.example.json (fill in real secrets before starting)"
   cp users.config.example.json users.config.json
+  echo "!! users.config.json was missing -- copied the example. Fill in real secrets, then run ./deploy.sh again."
+  exit 1
 fi
 
-rm -rf dist/
-npm run build
+echo "==> [4/7] Building into ${BUILD_DIR}/ (running bot keeps using dist/)"
+rm -rf "${BUILD_DIR}"
+npx tsc -p . --outDir "${BUILD_DIR}"
+
+echo "==> [5/7] Running tests"
 npm test
 
-# Sep 8 2026 fix -- ecosystem.config.js (not a raw `pm2 start dist/main.js`)
-# so autorestart/max_restarts/restart_delay/cwd from that file are
-# actually applied. `pm2 start` is a safe no-op if the process is already
-# running under this name (use --update-env to pick up .env changes).
-pm2 start ecosystem.config.js
-pm2 restart "${BOT_NAME}" --update-env
+echo "==> [6/7] Validating users.config.json with the NEW code"
+node -e '
+  const l = require("./'"${BUILD_DIR}"'/infrastructure/config/users.config.loader");
+  const users = l.loadUsersConfig("users.config.json");
+  const s = l.loadExecutionSettings("users.config.json");
+  console.log("realOrdersEnabled=" + s.realOrdersEnabled);
+  for (const u of users.filter((x) => x.enabled)) {
+    const b = u.binance;
+    const real = s.realOrdersEnabled && u.liquidationOiExecutionEnabled === true &&
+      !!b && b.enabled && b.mode === "live" && b.orderExecutionEnabled === true;
+    console.log("  " + u.userId.padEnd(10) + (real ? "REAL " : "PAPER") + "  riskUsd=" + u.risk.riskUsd);
+  }
+'
+
+echo "==> [7/7] Swapping build and restarting ${APP_NAME}"
+rm -rf dist.prev
+if [ -d dist ]; then mv dist dist.prev; fi
+mv "${BUILD_DIR}" dist
+pm2 startOrRestart ecosystem.config.js --update-env
 pm2 save
 
-echo "==> Done. Check: pm2 logs ${BOT_NAME} --lines 50"
+echo "==> Waiting 20s for startup..."
+sleep 20
+if ! pm2 describe "${APP_NAME}" | grep -q "status.*online"; then
+  echo "!! ${APP_NAME} is NOT online. Rolling back to the previous build."
+  if [ -d dist.prev ]; then
+    rm -rf dist && mv dist.prev dist
+    pm2 restart "${APP_NAME}" --update-env
+  fi
+  pm2 logs "${APP_NAME}" --lines 80 --nostream
+  exit 1
+fi
+
+echo "==> Startup user modes:"
+pm2 logs "${APP_NAME}" --lines 400 --nostream | grep -E "LOX_USER_MODE|REAL_ORDERS_ENABLED" | tail -10 || true
+echo "==> Done. Previous build kept in dist.prev/ for quick rollback."

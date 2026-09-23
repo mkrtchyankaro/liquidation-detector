@@ -194,9 +194,7 @@ export interface ExecutionSettings {
 }
 
 export function loadExecutionSettings(filePath: string): ExecutionSettings {
-  const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as {
-    realOrdersEnabled?: unknown;
-  };
+  const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as { realOrdersEnabled?: unknown };
   const value = raw.realOrdersEnabled;
   if (value !== undefined && typeof value !== "boolean") {
     throw new Error(
@@ -205,13 +203,9 @@ export function loadExecutionSettings(filePath: string): ExecutionSettings {
   }
   const realOrdersEnabled = value === true;
   if (realOrdersEnabled) {
-    log.warn(
-      "[REAL_ORDERS_ENABLED] realOrdersEnabled=true -- LOX may place REAL Binance orders for users whose own gates allow it",
-    );
+    log.warn("[REAL_ORDERS_ENABLED] realOrdersEnabled=true -- LOX may place REAL Binance orders for users whose own gates allow it");
   } else {
-    log.info(
-      "realOrdersEnabled=false -- every LOX user runs PAPER (no Binance orders)",
-    );
+    log.info("realOrdersEnabled=false -- every LOX user runs PAPER (no Binance orders)");
   }
   return { realOrdersEnabled };
 }
