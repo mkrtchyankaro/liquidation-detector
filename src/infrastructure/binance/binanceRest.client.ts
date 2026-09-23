@@ -133,6 +133,13 @@ export class BinanceRestClient {
     return this.signedGet("/fapi/v2/balance");
   }
 
+  /** Account position mode. { dualSidePosition: true } = Hedge Mode.
+   *  This bot sends one-way orders (no positionSide), which Binance
+   *  rejects in Hedge Mode -- checked once at startup for REAL users. */
+  async getPositionMode(): Promise<unknown> {
+    return this.signedGet("/fapi/v1/positionSide/dual");
+  }
+
   async setLeverage(symbol: string, leverage: number): Promise<unknown> {
     return this.signedPost("/fapi/v1/leverage", { symbol, leverage });
   }

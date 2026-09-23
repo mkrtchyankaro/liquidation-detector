@@ -64,6 +64,11 @@ export interface LiquidationOiUserRuntimeRef {
   liquidationOiExecutionEnabled: boolean;
   binanceRest: BinanceRestLike | null;
   telegram: { sendMessage(text: string): Promise<unknown> } | null;
+  /** From this user's own users.config.json "binance" block. Applied to
+   *  the symbol right before a REAL entry. Optional: absent = leave the
+   *  account's current setting untouched. */
+  leverage?: number;
+  marginMode?: "ISOLATED" | "CROSSED";
 }
 
 /** Sep 16 2026 (Karo), operator-requested. What one user's fan-out
@@ -581,6 +586,7 @@ export class LiquidationOiRuntimeOrchestrator {
       const outcome = await runEntrySequence(runtime.binanceRest, {
         userId: runtime.userId, globalSignalId, symbol, side, quantity: sizing.positionQty,
         entryPriceEstimate: entryPrice, slPrice: strategyInvalidationPrice, initialTpPrice: tpPrice,
+        riskUsd: runtime.riskUsd, leverage: runtime.leverage, marginMode: runtime.marginMode,
       });
       return await this.persistOutcome(userExec, outcome, symbol, side, strategyInvalidationPrice, tpPrice, percentileRank, sameDirectionLiqUsd, counterMoveAtr, capacityAtr, netRR, orderBook, oiMetricLine, flowLine, runtime);
     }

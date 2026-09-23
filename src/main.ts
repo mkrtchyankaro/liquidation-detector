@@ -8,6 +8,7 @@ import {
   loadUsersConfig,
   loadExecutionSettings,
 } from "./infrastructure/config/users.config.loader";
+import { checkLoxRealReadiness } from "./services/lox-real-readiness";
 import {
   MongoClientWrapper,
   type MongoDetectorConfig,
@@ -93,11 +94,43 @@ async function main(): Promise<void> {
   // copy-pasted lambdas). A user can be REAL only when every per-user
   // gate agrees; otherwise the user runs PAPER (full virtual lifecycle,
   // zero Binance calls) instead of failing with no Binance client.
-  const isLoxRealCapable = (r: UserRuntime): boolean =>
+  const isLoxRealConfigured = (r: UserRuntime): boolean =>
     r.config.liquidationOiExecutionEnabled === true &&
     r.binanceRest !== null &&
     r.config.binance?.mode === "live" &&
     r.config.binance?.orderExecutionEnabled === true;
+  // Startup proof that each REAL-configured account can actually trade
+  // (valid keys, One-Way mode, USDT available). A failing user runs
+  // PAPER until the next restart, with the reason logged + on Telegram.
+  const loxRealVerified = new Set<string>();
+  if (executionSettings.realOrdersEnabled) {
+    for (const r of userRuntimes.filter(
+      (u) => u.config.enabled && isLoxRealConfigured(u),
+    )) {
+      const result = await checkLoxRealReadiness(
+        r.config.userId,
+        r.binanceRest!,
+      );
+      if (result.ok) {
+        loxRealVerified.add(r.config.userId);
+      } else {
+        log.error(
+          `[LOX_REAL_NOT_READY] userId=${r.config.userId} reason=${result.reason} -- this user runs PAPER until the next restart`,
+        );
+        if (r.telegram !== null) {
+          try {
+            await r.telegram.sendMessage(
+              `⚠️ REAL trading NOT active for ${r.config.userId}\nReason: ${result.reason}\nYou will receive PAPER signals until this is fixed and the bot is restarted.`,
+            );
+          } catch {
+            /* alert is best-effort */
+          }
+        }
+      }
+    }
+  }
+  const isLoxRealCapable = (r: UserRuntime): boolean =>
+    isLoxRealConfigured(r) && loxRealVerified.has(r.config.userId);
   const loxUserRefs = () =>
     userRuntimes
       .filter((r) => r.config.enabled)
@@ -107,6 +140,8 @@ async function main(): Promise<void> {
         liquidationOiExecutionEnabled: isLoxRealCapable(r),
         binanceRest: r.binanceRest,
         telegram: r.telegram,
+        leverage: r.config.binance?.leverage,
+        marginMode: r.config.binance?.marginMode,
       }));
   for (const r of userRuntimes.filter((u) => u.config.enabled)) {
     const mode =

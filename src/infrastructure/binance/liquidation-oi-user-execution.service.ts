@@ -65,6 +65,12 @@ export interface BinanceRestLike {
   cancelOrder(symbol: string, orderId: number): Promise<unknown>;
   getOpenOrders(symbol: string): Promise<unknown>;
   getOpenAlgoOrders(symbol: string): Promise<unknown>;
+  /** Optional capabilities (present on the real BinanceRestClient). When
+   *  a method is missing (older test doubles), the corresponding step is
+   *  skipped and the sequence behaves exactly as before. */
+  getBookTicker?(symbol: string): Promise<unknown>;
+  setLeverage?(symbol: string, leverage: number): Promise<unknown>;
+  setMarginType?(symbol: string, marginType: "ISOLATED" | "CROSSED"): Promise<unknown>;
 }
 
 export interface SymbolFilters {
@@ -80,7 +86,9 @@ function roundToStep(value: number, step: number, precision: number): number {
   return Number((Math.round(value / step) * step).toFixed(precision));
 }
 function floorToStep(value: number, step: number, precision: number): number {
-  return Number((Math.floor(value / step) * step).toFixed(precision));
+  // 1e-9 absorbs float noise (e.g. 1/(0.199-0.198) = 999.9999999999991)
+  // so an exact step count is never floored one step short.
+  return Number((Math.floor(value / step + 1e-9) * step).toFixed(precision));
 }
 
 export async function getSymbolFilters(rest: BinanceRestLike, symbol: string): Promise<SymbolFilters | null> {
@@ -107,11 +115,18 @@ export interface EntrySequenceInput {
   entryPriceEstimate: number;
   slPrice: number;
   initialTpPrice: number;
+  /** When set, quantity is RE-SIZED at the executable price (best ask for
+   *  LONG, best bid for SHORT) so the dollar risk to SL stays riskUsd even
+   *  if price moved between the signal and the order. */
+  riskUsd?: number;
+  /** When set, applied to the symbol before the entry order. */
+  leverage?: number;
+  marginMode?: "ISOLATED" | "CROSSED";
 }
 
 export type EntrySequenceOutcome =
-  | { outcome: "ENTRY_ACTIVE_WITH_TP"; entryPrice: number; quantity: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpClientOrderId: string; tpBinanceOrderId: number }
-  | { outcome: "ENTRY_ACTIVE_WITHOUT_TP"; entryPrice: number; quantity: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpFailureReason: string }
+  | { outcome: "ENTRY_ACTIVE_WITH_TP"; entryPrice: number; quantity: number; actualRiskUsd?: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpClientOrderId: string; tpBinanceOrderId: number }
+  | { outcome: "ENTRY_ACTIVE_WITHOUT_TP"; entryPrice: number; quantity: number; actualRiskUsd?: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpFailureReason: string }
   | { outcome: "PROTECTION_FAILED_CLOSED"; entryPrice: number; quantity: number; entryClientOrderId: string; reason: string }
   | { outcome: "ENTRY_FAILED"; reason: string };
 
@@ -124,33 +139,87 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
   try {
     const filters = await getSymbolFilters(rest, input.symbol);
     if (!filters) return { outcome: "ENTRY_FAILED", reason: `could not load symbol filters for ${input.symbol}` };
+    const long = input.side === "LONG";
 
-    const roundedQty = floorToStep(input.quantity, filters.stepSize, filters.qtyPrecision);
+    // ── 1. Account setup for this symbol (before any order) ──────────
+    const setup = await applySymbolSetup(rest, input);
+    if (setup !== null) return { outcome: "ENTRY_FAILED", reason: setup };
+
+    // ── 2. Pre-flight at the EXECUTABLE price ───────────────────────
+    // The signal price can be seconds old. Re-check geometry and re-size
+    // at the price a MARKET order would actually cross, so the SL still
+    // costs riskUsd, and never enter when price already passed SL or TP.
+    let quantity = input.quantity;
+    let referencePrice = input.entryPriceEstimate;
+    const exec = await executablePrice(rest, input.symbol, input.side);
+    if (exec !== null) {
+      if (long ? exec <= input.slPrice : exec >= input.slPrice) {
+        return { outcome: "ENTRY_FAILED", reason: `pre-flight: executable price ${exec} already beyond SL ${input.slPrice}` };
+      }
+      if (long ? exec >= input.initialTpPrice : exec <= input.initialTpPrice) {
+        return { outcome: "ENTRY_FAILED", reason: `pre-flight: executable price ${exec} already beyond TP ${input.initialTpPrice}` };
+      }
+      referencePrice = exec;
+      if (input.riskUsd !== undefined && input.riskUsd > 0) {
+        quantity = input.riskUsd / Math.abs(exec - input.slPrice);
+      }
+      log.info({
+        userId: input.userId, symbol: input.symbol, side: input.side,
+        signalPrice: input.entryPriceEstimate, executablePrice: exec,
+        deviationPct: Number((((exec - input.entryPriceEstimate) / input.entryPriceEstimate) * 100).toFixed(4)),
+        plannedQty: input.quantity, resizedQty: quantity,
+      }, "[LOX_PRE_FLIGHT]");
+    }
+
+    const roundedQty = floorToStep(quantity, filters.stepSize, filters.qtyPrecision);
     if (roundedQty < filters.minQty) return { outcome: "ENTRY_FAILED", reason: `quantity ${roundedQty} below exchange minQty ${filters.minQty}` };
-    const estimatedNotional = roundedQty * input.entryPriceEstimate;
-    if (estimatedNotional < filters.minNotional) return { outcome: "ENTRY_FAILED", reason: `notional $${estimatedNotional.toFixed(2)} below exchange minNotional $${filters.minNotional}` };
+    const estimatedNotional = roundedQty * referencePrice;
+    if (estimatedNotional < filters.minNotional) return { outcome: "ENTRY_FAILED", reason: `notional $${estimatedNotional.toFixed(2)} below exchange minNotional $${filters.minNotional} (raise riskUsd or this SL is too wide)` };
 
+    // ── 3. Entry (MARKET, full fill result requested) ────────────────
     const entryClientOrderId = strategyClientOrderId(input.userId, input.globalSignalId, "ENTRY", 0);
-    const entrySide = input.side === "LONG" ? "BUY" : "SELL";
+    const entrySide = long ? "BUY" : "SELL";
+    let fill: { avgPrice: number; executedQty: number } | null = null;
     try {
-      await rest.createOrder({ symbol: input.symbol, side: entrySide, type: "MARKET", quantity: roundedQty.toFixed(filters.qtyPrecision), newClientOrderId: entryClientOrderId });
+      const res = (await rest.createOrder({
+        symbol: input.symbol, side: entrySide, type: "MARKET",
+        quantity: roundedQty.toFixed(filters.qtyPrecision), newClientOrderId: entryClientOrderId,
+        newOrderRespType: "RESULT",
+      })) as { avgPrice?: string; executedQty?: string };
+      const avg = Number(res?.avgPrice), qty = Number(res?.executedQty);
+      if (avg > 0 && qty > 0) fill = { avgPrice: avg, executedQty: qty };
     } catch (err) {
       return { outcome: "ENTRY_FAILED", reason: `entry order rejected: ${err instanceof Error ? err.message : String(err)}` };
     }
 
-    const position = await verifyPositionOpen(rest, input.symbol, roundedQty);
-    if (position === null) {
-      return { outcome: "ENTRY_FAILED", reason: "entry order submitted but position could not be verified open on Binance -- treating as failed, never assuming a fill occurred" };
+    // ── 4. Confirm the position (retries: positionRisk can lag a fill) ─
+    let position = await verifyPositionOpen(rest, input.symbol, roundedQty);
+    if (position === null && fill !== null) {
+      // The exchange itself reported a fill. NEVER leave a filled position
+      // unprotected just because positionRisk lagged -- protect the filled qty.
+      log.warn({ userId: input.userId, symbol: input.symbol, fill }, "[LOX_POSITION_VERIFY_LAGGED] using the order's own fill result to place protection");
+      position = { entryPrice: fill.avgPrice, positionAmt: fill.executedQty };
     }
+    if (position === null) {
+      return { outcome: "ENTRY_FAILED", reason: "entry order submitted but no fill was reported and the position could not be verified open on Binance -- treating as failed, never assuming a fill occurred" };
+    }
+    // OUR order's own fill is the truth for OUR trade: positionRisk is the
+    // symbol aggregate and would include any unrelated (e.g. manual)
+    // position on the same symbol.
+    if (fill !== null) position = { entryPrice: fill.avgPrice, positionAmt: fill.executedQty };
+    const protectQty = floorToStep(fill !== null ? fill.executedQty : roundedQty, filters.stepSize, filters.qtyPrecision) || roundedQty;
+    const actualRiskUsd = Math.abs(position.entryPrice - input.slPrice) * protectQty;
+    log.info({ userId: input.userId, symbol: input.symbol, fillPrice: position.entryPrice, qty: protectQty, sl: input.slPrice, tp: input.initialTpPrice, actualRiskUsd: Number(actualRiskUsd.toFixed(4)) }, "[LOX_ENTRY_FILLED]");
 
-    const closeSide = input.side === "LONG" ? "SELL" : "BUY";
+    // ── 5. Stop loss (algo STOP_MARKET) -> verify, else fail-safe close ─
+    const closeSide = long ? "SELL" : "BUY";
     const slClientAlgoId = strategyClientOrderId(input.userId, input.globalSignalId, "STOP_LOSS", 0);
     let slAlgoId: number | null = null;
     try {
       const res = (await rest.createAlgoOrder({
         symbol: input.symbol, side: closeSide, type: "STOP_MARKET",
         triggerPrice: roundToStep(input.slPrice, filters.tickSize, filters.pricePrecision).toFixed(filters.pricePrecision),
-        quantity: roundedQty.toFixed(filters.qtyPrecision), reduceOnly: "true", clientAlgoId: slClientAlgoId,
+        quantity: protectQty.toFixed(filters.qtyPrecision), reduceOnly: "true", clientAlgoId: slClientAlgoId,
       })) as { algoId: number };
       slAlgoId = res.algoId;
     } catch (err) {
@@ -160,42 +229,82 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
     const stopVerified = slAlgoId !== null && await verifyAlgoOrderOpen(rest, slAlgoId);
     if (!stopVerified) {
       log.error({ userId: input.userId, symbol: input.symbol }, "[LOX_PROTECTION_FAILED] SL could not be confirmed -- fail-safe closing the position now");
-      await failSafeMarketClose(rest, input.symbol, closeSide, position.positionAmt, filters);
-      return { outcome: "PROTECTION_FAILED_CLOSED", entryPrice: position.entryPrice, quantity: position.positionAmt, entryClientOrderId, reason: "SL placement/verification failed -- position fail-safe closed" };
+      await failSafeMarketClose(rest, input.symbol, closeSide, protectQty, filters);
+      return { outcome: "PROTECTION_FAILED_CLOSED", entryPrice: position.entryPrice, quantity: protectQty, entryClientOrderId, reason: "SL placement/verification failed -- position fail-safe closed" };
     }
 
+    // ── 6. Take profit (reduce-only LIMIT) -> verify ─────────────────
     const tpClientOrderId = strategyClientOrderId(input.userId, input.globalSignalId, "TAKE_PROFIT", 0);
     try {
       const tpRes = (await rest.createOrder({
         symbol: input.symbol, side: closeSide, type: "LIMIT", timeInForce: "GTC",
         price: roundToStep(input.initialTpPrice, filters.tickSize, filters.pricePrecision).toFixed(filters.pricePrecision),
-        quantity: roundedQty.toFixed(filters.qtyPrecision), reduceOnly: "true", newClientOrderId: tpClientOrderId,
+        quantity: protectQty.toFixed(filters.qtyPrecision), reduceOnly: "true", newClientOrderId: tpClientOrderId,
       })) as { orderId: number };
 
       const tpVerified = await verifyOrderOpen(rest, input.symbol, tpRes.orderId);
       if (!tpVerified) {
-        return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: position.positionAmt, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: "TP order placed but could not be verified open" };
+        return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: "TP order placed but could not be verified open" };
       }
-      return { outcome: "ENTRY_ACTIVE_WITH_TP", entryPrice: position.entryPrice, quantity: position.positionAmt, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpClientOrderId, tpBinanceOrderId: tpRes.orderId };
+      return { outcome: "ENTRY_ACTIVE_WITH_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpClientOrderId, tpBinanceOrderId: tpRes.orderId };
     } catch (err) {
-      return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: position.positionAmt, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: err instanceof Error ? err.message : String(err) };
+      return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: err instanceof Error ? err.message : String(err) };
     }
   } catch (err) {
     return { outcome: "ENTRY_FAILED", reason: `unexpected error: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
-async function verifyPositionOpen(rest: BinanceRestLike, symbol: string, expectedMinQty: number): Promise<{ entryPrice: number; positionAmt: number } | null> {
-  try {
-    const res = (await rest.getPositionRisk(symbol)) as Array<{ symbol: string; positionAmt: string; entryPrice: string }>;
-    const pos = res.find((p) => p.symbol === symbol);
-    if (!pos) return null;
-    const amt = Math.abs(Number(pos.positionAmt));
-    if (amt < expectedMinQty * 0.99) return null;
-    return { entryPrice: Number(pos.entryPrice), positionAmt: amt };
-  } catch {
-    return null;
+/** Margin mode + leverage for this symbol. Returns an error string, or
+ *  null when everything is set (or not requested / not supported). */
+async function applySymbolSetup(rest: BinanceRestLike, input: EntrySequenceInput): Promise<string | null> {
+  if (input.marginMode && typeof rest.setMarginType === "function") {
+    try {
+      await rest.setMarginType(input.symbol, input.marginMode);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // -4046 "No need to change margin type" = already correct.
+      if (!msg.includes("-4046") && !/no need to change margin type/i.test(msg)) {
+        return `setMarginType(${input.marginMode}) failed: ${msg}`;
+      }
+    }
   }
+  if (input.leverage && typeof rest.setLeverage === "function") {
+    try {
+      await rest.setLeverage(input.symbol, input.leverage);
+    } catch (err) {
+      return `setLeverage(${input.leverage}) failed: ${err instanceof Error ? err.message : String(err)}`;
+    }
+  }
+  return null;
+}
+
+async function executablePrice(rest: BinanceRestLike, symbol: string, side: Side): Promise<number | null> {
+  if (typeof rest.getBookTicker !== "function") return null;
+  try {
+    const t = (await rest.getBookTicker(symbol)) as { askPrice?: string; bidPrice?: string };
+    const p = Number(side === "LONG" ? t?.askPrice : t?.bidPrice);
+    return p > 0 ? p : null;
+  } catch {
+    return null; // market-data hiccup: fall back to the signal price, post-fill values are still exact
+  }
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function verifyPositionOpen(rest: BinanceRestLike, symbol: string, expectedMinQty: number, attempts = 4, delayMs = 400): Promise<{ entryPrice: number; positionAmt: number } | null> {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const res = (await rest.getPositionRisk(symbol)) as Array<{ symbol: string; positionAmt: string; entryPrice: string }>;
+      const pos = res.find((p) => p.symbol === symbol);
+      const amt = pos ? Math.abs(Number(pos.positionAmt)) : 0;
+      if (pos && amt >= expectedMinQty * 0.99) return { entryPrice: Number(pos.entryPrice), positionAmt: amt };
+    } catch {
+      // transient API error -- retry
+    }
+    if (i < attempts - 1) await sleep(delayMs);
+  }
+  return null;
 }
 async function verifyAlgoOrderOpen(rest: BinanceRestLike, algoId: number): Promise<boolean> {
   try {
