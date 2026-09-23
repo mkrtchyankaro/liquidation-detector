@@ -371,6 +371,13 @@ export class MarketDataOrchestrator {
         };
       } | null;
     } | null = null,
+    /** Stage 5 -- legacy engines (V5 waves, candle-physics cascade,
+     *  research checkpoints, V5 paper/live reconciliation). They produce
+     *  no signals in production (V5 production signals are disabled) but
+     *  run on EVERY tick/candle/liquidation. false = skip them entirely;
+     *  the LOX strategy and all market data it needs are unaffected.
+     *  Default true keeps existing behaviour for callers/tests. */
+    private readonly legacyStrategiesEnabled: boolean = true,
   ) {
     this.liquidationStats = new LiquidationStatsService(liquidationStatsConfig);
     this.wallTracker = new WallTrackerService(wallTrackerConfig);
@@ -622,7 +629,7 @@ export class MarketDataOrchestrator {
         // ROTATION mode is never enabled (this.directionalAtr is
         // still constructed unconditionally, cheap, isolated).
         this.directionalAtr.onCandle(c);
-        for (const victim of ["LONG", "SHORT"] as const) {
+        if (this.legacyStrategiesEnabled) for (const victim of ["LONG", "SHORT"] as const) {
           const currentP95 = this.liquidationStats.notionalPercentile(
             c.symbol,
             victim,
@@ -773,6 +780,7 @@ export class MarketDataOrchestrator {
       // convention). Fed regardless of mainSymbolLocks, same
       // convention as before -- willExecuteAsMain is decided inside
       // handleCandlePhysicsEntry() at the moment of entry, not here.
+      if (!this.legacyStrategiesEnabled) return; // Stage 5: everything below is legacy-only
       const unit1m = this.commonHorizonAtrReady(l.symbol)
         ? this.atrTracker.getWilderATR(
             l.symbol,
@@ -903,12 +911,14 @@ export class MarketDataOrchestrator {
       this.orderbookStore.setBookTicker(b);
       const mid = (b.bid + b.ask) / 2;
       this.lastKnownPriceForMain.set(b.symbol, mid);
-      const outcomes = this.v5.onTick(b.symbol, mid, b.timestamp);
-      for (const outcome of outcomes) void this.handleTickOutcome(outcome);
-      const closes = this.v5.onPriceTickForTrades(b.symbol, mid, b.timestamp);
-      for (const close of closes) void this.handleMainTradeClose(close);
-      void this.reconciliation.onTick(b.symbol, mid, b.timestamp);
-      this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
+      if (this.legacyStrategiesEnabled) {
+        const outcomes = this.v5.onTick(b.symbol, mid, b.timestamp);
+        for (const outcome of outcomes) void this.handleTickOutcome(outcome);
+        const closes = this.v5.onPriceTickForTrades(b.symbol, mid, b.timestamp);
+        for (const close of closes) void this.handleMainTradeClose(close);
+        void this.reconciliation.onTick(b.symbol, mid, b.timestamp);
+        this.tickResearchCheckpoints(b.symbol, mid, b.timestamp);
+      }
       // Sep 16 2026 (Karo), operator-approved architecture --
       // Liquidation+OI Exhaustion strategy. Only bothers gathering
       // percentile/ATR/OI-history context for a symbol that ALREADY
@@ -1032,9 +1042,11 @@ export class MarketDataOrchestrator {
     // Sep 14 2026 (Karo), operator-reported CRITICAL FIX -- see
     // V5WaveService.getSymbolsWithNonLiveActiveTrades()'s own doc
     // comment for the full root-cause writeup this closes.
-    setInterval(() => {
-      this.runMainCloseFallback();
-    }, MarketDataOrchestrator.MAIN_CLOSE_FALLBACK_MS);
+    if (this.legacyStrategiesEnabled) {
+      setInterval(() => {
+        this.runMainCloseFallback();
+      }, MarketDataOrchestrator.MAIN_CLOSE_FALLBACK_MS);
+    }
 
     this.ws.start();
   }

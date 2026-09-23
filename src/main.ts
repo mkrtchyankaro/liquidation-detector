@@ -83,6 +83,12 @@ async function main(): Promise<void> {
   // (top-level "realOrdersEnabled", default false). Replaces the former
   // hardcoded `false` passed to LiquidationOiRuntimeOrchestrator.
   const executionSettings = loadExecutionSettings(usersConfigPath);
+  // Stage 5: legacy engines (V5 waves, candle-physics cascade, research
+  // checkpoints, V5 reconciliation/startup-safety) are OFF unless
+  // LEGACY_STRATEGIES_ENABLED=true. LOX does not depend on any of them.
+  const legacyStrategiesEnabled =
+    process.env.LEGACY_STRATEGIES_ENABLED === "true";
+  log.warn(`[LEGACY_STRATEGIES] enabled=${legacyStrategiesEnabled}`);
 
   const userRuntimes: UserRuntime[] = users.map((u) =>
     buildUserRuntime(u, mongo),
@@ -516,6 +522,7 @@ async function main(): Promise<void> {
     process.env.V5_PRODUCTION_SIGNALS_ENABLED === "true",
     liquidationOiOrchestrator,
     episodePercentileService,
+    legacyStrategiesEnabled,
   );
   orchestratorPlaceholder.instance = orchestrator;
 
@@ -530,12 +537,12 @@ async function main(): Promise<void> {
   // liquidation event for an already-open MAIN symbol could slip
   // through and start a second, duplicate watch before hydration
   // finishes.
-  await orchestrator.hydrateMainLocks();
+  if (legacyStrategiesEnabled) await orchestrator.hydrateMainLocks();
   // Sep 10 2026 (Karo), operator-requested restart-safe persistence for
   // the production V5 multi-timeframe cascade lifecycle -- MUST also
   // run before any WS ticks flow, same ordering requirement as
   // hydrateMainLocks() above.
-  await orchestrator.hydrateActiveCascades();
+  if (legacyStrategiesEnabled) await orchestrator.hydrateActiveCascades();
 
   // Sep 17 2026 (Karo), operator-requested Section N -- LOX restart/crash
   // recovery. Same ordering requirement as hydrateMainLocks()/
@@ -697,7 +704,10 @@ async function main(): Promise<void> {
   // -- a live-armed user's first-ever real order must never be placed
   // before we've confirmed Binance's actual state matches what we
   // expect.
-  await runStartupSafetyChecks(userRuntimes, mongo, symbols);
+  // Legacy V5 execution safety checks. With legacy off they would treat
+  // LOX's own positions as "orphans" of the V5 executor and halt/alert.
+  if (legacyStrategiesEnabled)
+    await runStartupSafetyChecks(userRuntimes, mongo, symbols);
 
   // Sep 8 2026 (Karo) -- CRITICAL, ported from liqwatch-bot's own
   // initializeDailyPnlFromDb() call in app.ts. Without this, a
@@ -719,7 +729,7 @@ async function main(): Promise<void> {
     );
   }
 
-  await reconciliation.start();
+  if (legacyStrategiesEnabled) await reconciliation.start();
   orchestrator.start();
   spotWs.start(); // Sep 19 2026 (Karo), order-flow observation -- Spot WS lifecycle
   // Sep 16 2026 (Karo), operator-approved -- historical
