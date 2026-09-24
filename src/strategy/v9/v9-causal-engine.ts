@@ -3,7 +3,7 @@ import {
   type Bucket, type Episode, type EpisodeFeatures, type Regime, type SelectionReference, type SelectionResult, type Victim,
 } from "./v9-core";
 import { V9MinuteStore } from "./v9-minute-store";
-import { priceOiEpisodes } from "./v9-price-oi";
+import { priceOiEpisodes, typicalMinuteNoise } from "./v9-price-oi";
 
 /**
  * Causal (live) V9 engine for ONE symbol.
@@ -35,6 +35,14 @@ export interface V9EngineSettings {
   /** SL anchor: extreme price since the episode START, or since its PEAK
    *  liquidation minute (ignores early small liquidations). */
   slFrom: "START" | "PEAK";
+  /** PRICE_OI only: require the OI drop AND the price reversal to exceed this
+   *  symbol's typical one-minute noise (median over the data window). */
+  significantConfirm: boolean;
+  /** Extra room beyond the extreme for the SL, in units of the symbol's
+   *  typical one-minute high-low range over the last hour (0 = none). */
+  slBufferMinuteRanges: number;
+  /** Which filters must pass: ALL five, only DOM, or NONE (every confirmation). */
+  filters: "ALL" | "DOM" | "NONE";
 }
 
 export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
@@ -44,6 +52,9 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   maxSignalAgeMs: 2 * MINUTE_MS,
   confirmMode: "OPPOSITE_LIQ",
   slFrom: "START",
+  significantConfirm: false,
+  slBufferMinuteRanges: 0,
+  filters: "ALL",
 };
 
 export interface V9Decision {
@@ -113,7 +124,7 @@ export class V9CausalEngine {
     if (usable === null) return [];
     const regimes = changePoints(usable.map((b) => b.oi));
     const episodes = this.settings.confirmMode === "PRICE_OI"
-      ? priceOiEpisodes(usable, regimes, now)
+      ? priceOiEpisodes(usable, regimes, now, this.settings.significantConfirm ? typicalMinuteNoise(usable) : undefined)
       : mergeEpisodes(usable, subEpisodes(usable, regimes, now));
     this.lastSnapshot = this.snapshot(now, usable, regimes, episodes);
 
@@ -126,9 +137,11 @@ export class V9CausalEngine {
       const features = episodeFeatures(usable, e);
       const prior = this.reference.filter((r) => r.confirmTs < e.confirmTs && r.confirmTs >= e.confirmTs - this.settings.referenceWindowMs);
       const reference = buildReference(prior);
-      const selection = selectEpisode(features, reference);
+      const full = selectEpisode(features, reference);
+      const selection = this.settings.filters === "ALL" ? full
+        : { ...full, selected: this.settings.filters === "NONE" ? true : features.dom };
       const stale = now - e.confirmTs > this.settings.maxSignalAgeMs;
-      const small = reference.sampleCount < this.settings.minReferenceSamples;
+      const small = this.settings.filters === "ALL" && reference.sampleCount < this.settings.minReferenceSamples;
       const duplicate = e.start < this.lastTradableAt[e.victim];
       // Minutes with no poll at all = the collector was down (restart,
       // outage). Liquidations of that time are lost for good (Binance keeps
@@ -138,7 +151,9 @@ export class V9CausalEngine {
       const expectedMinutes = Math.floor(lastFull / MINUTE_MS) - Math.floor(e.start / MINUTE_MS) + 1;
       const missingMinutes = Math.max(0, expectedMinutes - this.store.minuteRange(e.start, lastFull).length);
       const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : "SELECTED";
-      const stopPrice = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", this.settings.slFrom === "PEAK" ? features.peakTs : e.start, now);
+      const extreme = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", this.settings.slFrom === "PEAK" ? features.peakTs : e.start, now);
+      const buffer = this.settings.slBufferMinuteRanges > 0 ? this.settings.slBufferMinuteRanges * this.typicalMinuteRange(now) : 0;
+      const stopPrice = e.victim === "LONG" ? extreme - buffer : extreme + buffer;
       decisions.push({
         symbol: this.symbol, episode: e, features, reference, selection,
         tradable: reason === "SELECTED", reason, evaluatedAt: now, missingMinutes,
@@ -151,6 +166,12 @@ export class V9CausalEngine {
     const keepFrom = now - this.settings.referenceWindowMs;
     while (this.reference.length && this.reference[0].confirmTs < keepFrom) this.reference.shift();
     return decisions;
+  }
+
+  /** Mean poll-price high-low of the last 60 full minutes. */
+  private typicalMinuteRange(now: number): number {
+    const r = this.store.minuteRange(now - 61 * MINUTE_MS, now - MINUTE_MS);
+    return r.length ? r.reduce((t, m) => t + (m.high - m.low), 0) / r.length : 0;
   }
 
   private snapshot(now: number, usable: Bucket[], regimes: Regime[], episodes: Episode[]): V9EpisodeSnapshot {

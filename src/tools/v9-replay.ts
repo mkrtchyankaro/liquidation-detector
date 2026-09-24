@@ -7,10 +7,12 @@
  * price at/after the decision, SL per variant, TP = rr x risk. Results are
  * shown gross and NET of Binance fees (taker entry; maker TP / taker SL).
  *
- * Variants compared side by side:
- *   A        current live rule: confirm by an opposite-side liquidation part; SL from episode start
- *   P        PRICE_OI: confirm when OI falls while price moves against the move; SL from episode start
- *   P+PEAK   PRICE_OI with SL from the peak liquidation minute
+ * Variants compared side by side (see VARIANTS below):
+ *   A             current live rule (opposite-side liquidation confirms)
+ *   P             PRICE_OI: OI falls while price moves against the move
+ *   _ATR          SL beyond the extreme by 1x the typical one-minute range
+ *   _SIG          OI drop and reversal must exceed the typical one-minute noise
+ *   _NOFILT/_NF   no filters (every confirmation trades);  _DOM  only DOM
  *
  * Read-only. Usage (takes ~2-3 min per symbol on the server; use nohup):
  *   npx tsx src/tools/v9-replay.ts
@@ -51,29 +53,28 @@ const stamp = (ms: number): string =>
 const time = (v: unknown): number =>
   v instanceof Date ? v.getTime() : Number(v);
 
+const base: V9EngineSettings = {
+  ...DEFAULT_V9_ENGINE_SETTINGS,
+  confirmMode: "PRICE_OI",
+};
 const VARIANTS: Array<{ name: string; settings: V9EngineSettings }> = [
+  { name: "A", settings: { ...DEFAULT_V9_ENGINE_SETTINGS } }, // live today
+  { name: "P", settings: base }, // PRICE_OI, 5 filters
+  { name: "P_ATR", settings: { ...base, slBufferMinuteRanges: 1 } }, // + SL buffer 1x minute range
+  { name: "P_SIG", settings: { ...base, significantConfirm: true } }, // + significant OI drop / reversal
   {
-    name: "A",
-    settings: {
-      ...DEFAULT_V9_ENGINE_SETTINGS,
-      confirmMode: "OPPOSITE_LIQ",
-      slFrom: "START",
-    },
+    name: "P_SIG_ATR",
+    settings: { ...base, significantConfirm: true, slBufferMinuteRanges: 1 },
   },
+  { name: "P_NOFILT", settings: { ...base, filters: "NONE" } }, // every confirmation
+  { name: "P_DOM", settings: { ...base, filters: "DOM" } }, // only DOM
   {
-    name: "P",
+    name: "P_SIG_ATR_NF",
     settings: {
-      ...DEFAULT_V9_ENGINE_SETTINGS,
-      confirmMode: "PRICE_OI",
-      slFrom: "START",
-    },
-  },
-  {
-    name: "P+PEAK",
-    settings: {
-      ...DEFAULT_V9_ENGINE_SETTINGS,
-      confirmMode: "PRICE_OI",
-      slFrom: "PEAK",
+      ...base,
+      significantConfirm: true,
+      slBufferMinuteRanges: 1,
+      filters: "NONE",
     },
   },
 ];
@@ -110,7 +111,7 @@ const median = (v: number[]): number => {
 };
 function line(name: string, t: Tally): string {
   const done = t.tp + t.sl;
-  return `${name.padEnd(8)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}`;
+  return `${name.padEnd(13)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}`;
 }
 
 async function main(): Promise<void> {

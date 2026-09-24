@@ -27,7 +27,25 @@ import { MINUTE_MS, type Bucket, type Episode, type Regime, type Victim } from "
  */
 const sideOf = (long: number, short: number): Victim => (long >= short ? "LONG" : "SHORT");
 
-export function priceOiEpisodes(buckets: readonly Bucket[], regimes: readonly Regime[], validUntil: number): Episode[] {
+/** Optional "significant" confirmation. Both are derived from the data
+ *  itself (typical one-minute noise of this symbol), never fixed numbers:
+ *   minOiDrop     OI must be below the base by at least this (contracts)
+ *   minReversal   price must be off the extreme by at least this (price units) */
+export interface PriceOiSignificance { minOiDrop: number; minReversal: number }
+
+/** Typical one-minute noise: median |change| between consecutive minutes. */
+export function typicalMinuteNoise(buckets: readonly Bucket[]): PriceOiSignificance {
+  const dOi: number[] = [], dP: number[] = [];
+  for (let i = 1; i < buckets.length; i++) {
+    const a = buckets[i - 1], b = buckets[i];
+    if (Number.isFinite(a.oi) && Number.isFinite(b.oi) && b.oi !== a.oi) dOi.push(Math.abs(b.oi - a.oi));
+    if (Number.isFinite(a.price) && Number.isFinite(b.price) && b.price !== a.price) dP.push(Math.abs(b.price - a.price));
+  }
+  const med = (v: number[]): number => { if (!v.length) return 0; v.sort((x, y) => x - y); const m = v.length >> 1; return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2; };
+  return { minOiDrop: med(dOi), minReversal: med(dP) };
+}
+
+export function priceOiEpisodes(buckets: readonly Bucket[], regimes: readonly Regime[], validUntil: number, significance?: PriceOiSignificance): Episode[] {
   const slopeAt = new Float64Array(buckets.length);
   const regimeStart = new Int32Array(buckets.length);
   for (const r of regimes) for (let i = r.a; i < r.b; i++) { slopeAt[i] = r.slope; regimeStart[i] = r.a; }
@@ -54,7 +72,9 @@ export function priceOiEpisodes(buckets: readonly Bucket[], regimes: readonly Re
       if (k <= peak || !(slopeAt[k] < 0) || dominant(x, v)) continue;
       // base: the minute before the falling-OI stretch that follows the last victim liquidation
       const base = buckets[Math.max(regimeStart[k], lastVictim + 1) - 1];
-      if (x.oi < base.oi && against(v, x.price, base.price)) { confirmIdx = k; break; }
+      const oiOk = significance ? base.oi - x.oi >= significance.minOiDrop && x.oi < base.oi : x.oi < base.oi;
+      const priceOk = against(v, x.price, base.price) && (!significance || Math.abs(buckets[extremeIdx].price - x.price) >= significance.minReversal);
+      if (oiOk && priceOk) { confirmIdx = k; break; }
     }
     const stop = confirmIdx >= 0 ? confirmIdx + 1 : buckets.length;
     let long = 0, short = 0, count = 0;
