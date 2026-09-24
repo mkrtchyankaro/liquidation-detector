@@ -24,6 +24,7 @@ function market(seed: number, minutes: number) {
   const from = 1_790_000_040_000 - (1_790_000_040_000 % 60_000);
   const liq: LiqEvent[] = [], oi: OiObservation[] = [];
   let level = 100_000, price = 50_000, burst = 0, side: "LONG" | "SHORT" = "LONG";
+  let lastUpdated = from - 30_000, lastLevel = level;
   for (let m = 0; m < minutes; m++) {
     const t = from + m * 60_000;
     if (burst === 0 && rnd() < 0.02) { burst = 5 + Math.floor(rnd() * 40); side = rnd() < 0.5 ? "LONG" : "SHORT"; }
@@ -34,7 +35,12 @@ function market(seed: number, minutes: number) {
       level *= 1 + (rnd() - 0.45) * 0.0008; price *= 1 + (rnd() - 0.5) * 0.0008;
       if (rnd() < 0.05) liq.push({ ts: t + Math.floor(rnd() * 59_000), victim: rnd() < 0.5 ? "LONG" : "SHORT", usd: rnd() * 5_000 });
     }
-    if (rnd() < 0.93) { const u = t + Math.floor(rnd() * 50_000); for (let p = 0; p < 3; p++) oi.push({ ts: u + 200 + p * 1000, updated: u, oi: level, price: price * (1 + (p - 1) * 1e-4) }); }
+    // The collector polls every minute; in ~7% of minutes Binance has no NEW
+    // OI update (the poll repeats the previous update time).
+    const fresh = rnd() < 0.93;
+    const u = fresh ? t + Math.floor(rnd() * 50_000) : lastUpdated;
+    if (fresh) { lastUpdated = u; lastLevel = level; }
+    for (let p = 0; p < 3; p++) oi.push({ ts: t + 51_000 + p * 2000, updated: u, oi: lastLevel, price: price * (1 + (p - 1) * 1e-4) });
   }
   liq.sort((a, b) => a.ts - b.ts); oi.sort((a, b) => a.ts - b.ts);
   return { liq, oi, from, until: from + minutes * 60_000 - 1 };
@@ -129,6 +135,52 @@ scenario("the same episode is never tradable twice (re-fit re-confirmations are 
       if (prevSame) assert.ok(tradable[i].episode.start >= prevSame.evaluatedAt, `seed ${seed}: overlapping re-trade`);
     }
   }
+});
+
+scenario("a selected episode with a whole minute of missing data is DATA_GAP, never tradable", () => {
+  // Remove every poll of one minute inside each would-be-tradable episode and replay again.
+  const base = replay(5, 1500);
+  const target = base.decisions.find((x) => x.tradable)!;
+  assert.ok(target, "synthetic market must contain a tradable decision");
+  const d = market(5, 1500);
+  const holeMinute = Math.floor((target.episode.start + 5 * 60_000) / 60_000) * 60_000;
+  d.oi = d.oi.filter((o) => Math.floor(o.ts / 60_000) * 60_000 !== holeMinute);
+  const engine = new V9CausalEngine("TESTUSDT");
+  const state = { li: 0, oi: 0 };
+  const out = [];
+  for (let t = d.from + 70_000; t <= d.until; t += 60_000) { feed(engine.store, d, t, state); out.push(...engine.evaluate(t)); }
+  const same = out.find((x) => x.episode.start === target.episode.start && x.episode.victim === target.episode.victim && x.reason !== "NOT_SELECTED");
+  assert.ok(same, "the same episode is still decided");
+  assert.strictEqual(same!.reason, "DATA_GAP");
+  assert.ok(same!.missingMinutes >= 1 && !same!.tradable);
+});
+
+scenario("after a restart, trades restored with markTraded() block re-trading the same episode", () => {
+  const base = replay(5, 1500);
+  const target = base.decisions.find((x) => x.tradable)!;
+  assert.ok(target, "synthetic market must contain a tradable decision");
+  const d = market(5, 1500);
+  const engine = new V9CausalEngine("TESTUSDT");
+  engine.markTraded(target.tradeSide, target.evaluatedAt + 60_000);
+  const state = { li: 0, oi: 0 };
+  const out = [];
+  for (let t = d.from + 70_000; t <= d.until; t += 60_000) { feed(engine.store, d, t, state); out.push(...engine.evaluate(t)); }
+  assert.ok(!out.some((x) => x.tradable && x.episode.victim === target.episode.victim && x.episode.start < target.evaluatedAt + 60_000));
+});
+
+scenario("every evaluation leaves a snapshot of what is forming right now", () => {
+  const d = market(5, 600);
+  const engine = new V9CausalEngine("TESTUSDT");
+  const state = { li: 0, oi: 0 };
+  let formingSeen = 0;
+  for (let t = d.from + 70_000; t <= d.until; t += 60_000) {
+    feed(engine.store, d, t, state); engine.evaluate(t);
+    if (engine.lastSnapshot && engine.lastSnapshot.ts === t) {
+      assert.ok(["OI_FALLING", "OI_RISING", "OI_FLAT"].includes(engine.lastSnapshot.oiPhase));
+      if (engine.lastSnapshot.forming) formingSeen++;
+    }
+  }
+  assert.ok(formingSeen > 0, "some minutes show a forming episode");
 });
 
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

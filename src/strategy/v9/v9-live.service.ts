@@ -74,6 +74,11 @@ export class V9LiveService {
       }
       log.info(`[V9_WARMUP] ${symbol} rows liq=${loaded.liq} oi=${loaded.oi} historicalDecisions=${decided}`);
     }
+    // Restore which episodes were already traded (exact, from the database)
+    // so a re-confirmed episode is never traded twice across restarts.
+    for (const t of await this.repo.findTradesSince(t0 - this.engineSettings.windowMs)) {
+      this.engines.get(t.symbol)?.markTraded(t.side, t.createdAt);
+    }
     this.ready = true;
     log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
     this.scheduleNextMinute();
@@ -100,15 +105,19 @@ export class V9LiveService {
     this.minuteBusy = true;
     try {
       const now = this.now();
+      const snapshots = [];
       for (const [symbol, engine] of this.engines) {
         try {
           await this.feed.poll(symbol, engine.store);
           for (const d of engine.evaluate(now)) await this.handleDecision(d);
+          if (engine.lastSnapshot?.ts === now) snapshots.push(engine.lastSnapshot);
           await this.monitorPaper(symbol, engine, now);
         } catch (err) {
           log.error({ symbol, err: err instanceof Error ? err.message : String(err) }, "[V9_SYMBOL_ROUND_FAILED] -- isolated, other symbols continue");
         }
       }
+      await this.repo.insertTimeline(snapshots).catch((err) =>
+        log.error({ err: err instanceof Error ? err.message : String(err) }, "[V9_TIMELINE_WRITE_FAILED] -- trading unaffected"));
     } finally {
       this.minuteBusy = false;
     }
@@ -135,7 +144,7 @@ export class V9LiveService {
       features: { dom: d.features.dom, dir: d.features.dir, exh: d.features.exh, dirMove: d.features.dirMove, clr: d.features.clr, victimLiq: d.features.victimLiq, oppLiq: d.features.oppLiq, preEff: d.features.preEff, postEff: d.features.postEff },
       reference: d.reference,
       episode: { longUsd: d.episode.long, shortUsd: d.episode.short, oiDropPct: d.episode.oiDropPct, priceMovePct: d.episode.priceMovePct, parts: d.episode.parts },
-      stopPrice: d.stopPrice, referencePrice: d.referencePrice, createdAt: new Date(),
+      stopPrice: d.stopPrice, referencePrice: d.referencePrice, missingMinutes: d.missingMinutes, createdAt: new Date(),
     };
     await this.repo.insertDecision(doc);
     log.info({ signalId, reason: d.reason, checks: d.selection.checks }, "[V9_DECISION]");

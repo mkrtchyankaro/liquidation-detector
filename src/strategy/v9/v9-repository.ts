@@ -1,6 +1,7 @@
 import type { Collection, Db } from "mongodb";
 import type { Victim } from "./v9-core";
 import type { V9UserMode } from "./v9-config";
+import type { V9EpisodeSnapshot } from "./v9-causal-engine";
 import { childLogger } from "../../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "v9-repo" });
@@ -23,8 +24,13 @@ export interface V9DecisionDoc {
   episode: { longUsd: number; shortUsd: number; oiDropPct: number; priceMovePct: number; parts: number };
   stopPrice: number;
   referencePrice: number;
+  missingMinutes: number;
   createdAt: Date;
 }
+
+/** One row per symbol per minute: what the engine saw live (the episode
+ *  that was forming, OI phase, price). Kept 60 days for audits/research. */
+export type V9TimelineDoc = V9EpisodeSnapshot & { createdAt: Date };
 
 export type V9TradeState = "OPEN" | "CLOSED" | "FAILED" | "SKIPPED";
 
@@ -66,6 +72,10 @@ export class V9Repository {
     const db = await this.getDb();
     return db ? db.collection<V9DecisionDoc>("v9_decisions") : null;
   }
+  private async timeline(): Promise<Collection<V9TimelineDoc> | null> {
+    const db = await this.getDb();
+    return db ? db.collection<V9TimelineDoc>("v9_episode_timeline") : null;
+  }
   private async trades(): Promise<Collection<V9TradeDoc> | null> {
     const db = await this.getDb();
     return db ? db.collection<V9TradeDoc>("v9_trades") : null;
@@ -81,6 +91,11 @@ export class V9Repository {
     await t.createIndex({ tradeId: 1 }, { unique: true });
     await t.createIndex({ state: 1 });
     await t.createIndex({ userId: 1, symbol: 1, state: 1 });
+    await t.createIndex({ createdAt: -1 });
+    const tl = await this.timeline();
+    if (!tl) throw new Error("Mongo unavailable for V9 indexes");
+    await tl.createIndex({ symbol: 1, ts: 1 });
+    await tl.createIndex({ createdAt: 1 }, { expireAfterSeconds: 60 * 24 * 3600 });
     this.indexesEnsured = true;
   }
 
@@ -111,6 +126,22 @@ export class V9Repository {
     const col = await this.trades();
     if (!col) return [];
     return col.find({ state: "OPEN" }, { projection: { _id: 0 } }).toArray() as Promise<V9TradeDoc[]>;
+  }
+
+  async insertTimeline(docs: V9EpisodeSnapshot[]): Promise<void> {
+    if (docs.length === 0) return;
+    const col = await this.timeline();
+    if (!col) throw new Error("Mongo unavailable");
+    const now = new Date();
+    await col.insertMany(docs.map((d) => ({ ...d, createdAt: now })), { ordered: false });
+  }
+
+  /** Trades created since `sinceMs` (any state) -- used after a restart to
+   *  restore which episodes were already traded. */
+  async findTradesSince(sinceMs: number): Promise<V9TradeDoc[]> {
+    const col = await this.trades();
+    if (!col) return [];
+    return col.find({ createdAt: { $gte: sinceMs } }, { projection: { _id: 0 } }).toArray() as Promise<V9TradeDoc[]>;
   }
 
   async hasOpenTrade(userId: string, symbol: string): Promise<boolean> {

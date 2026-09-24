@@ -26,18 +26,35 @@ Binance REST openInterest (1/s) ──► oi_second_observations ┘
 ```
 
 MongoDB collections (all others are unused):
-`liq_raw_events`, `oi_second_observations`, `v9_decisions`, `v9_trades`.
+
+| Collection | What | Kept |
+|---|---|---|
+| `liq_raw_events` | every liquidation (Binance keeps no history) | 4 days |
+| `oi_second_observations` | open interest every second + mid price | 3 days |
+| `v9_decisions` | every confirmed episode + why it was / was not a signal | 60 days |
+| `v9_trades` | every user's trade (entry, SL, TP, exit, PnL) | forever |
+| `v9_episode_timeline` | what the engine saw live, every minute per symbol | 60 days |
+| `market_positioning_5m` | % long of all accounts / top accounts / top positions (Binance keeps 30 days) | 1 year |
+| `market_premium_1m` | mark, index, premium %, funding rate | 1 year |
+
+Candles, taker buy/sell volume and ATR are not stored: Binance keeps full
+kline history (taker buy volume is inside every kline), backtests fetch them.
+
+Restarts: episodes are recomputed from the stored raw data, so a restart loses
+nothing except the seconds the collector is down; an episode with a whole
+minute of missing data is never traded (`DATA_GAP`). Already-traded episodes
+are restored from `v9_trades`.
 
 ## Layout
 
 | Path | What |
 |---|---|
 | `src/main.ts` | wiring: config → collector → V9 service |
-| `src/collector/` | Binance data collection |
+| `src/collector/` | Binance data collection (market data + research context) |
 | `src/strategy/v9/` | V9 core (pure), causal engine, live service, feed, repository, Telegram text |
 | `src/execution/` | Binance entry sequence, close report, account readiness |
 | `src/config/` | `.env` and `users.config.json` loading/validation |
-| `src/tools/` | `v9-replay` (honest backtest), `test-live-entry` (real order round-trip test) |
+| `src/tools/` | `v9-show-signal` (full story of one signal), `v9-replay` (honest backtest), `test-live-entry` (real order round-trip test) |
 | `scripts/liquidation-episodes-v13.js` | original research script (reference for the equivalence test) |
 
 ## Configuration
@@ -56,6 +73,7 @@ failure it runs PAPER and is told why on Telegram.
 
 ```bash
 bash deploy.sh                                         # pull, build, test, validate config, restart
+npx tsx src/tools/v9-show-signal.ts <signalId>        # the whole story of one signal
 npx tsx src/tools/v9-replay.ts                         # causal replay of history (read-only)
 npx tsx src/tools/test-live-entry.ts --user karo --confirm   # real tiny order round-trip
 npm test

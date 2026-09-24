@@ -29,6 +29,8 @@ class MemRepo {
   async insertTrade(t: V9TradeDoc): Promise<boolean> { if (this.trades.has(t.tradeId)) return false; this.trades.set(t.tradeId, { ...t }); return true; }
   async updateTrade(id: string, f: Partial<V9TradeDoc>): Promise<void> { const t = this.trades.get(id)!; this.trades.set(id, { ...t, ...f }); }
   async findOpenTrades(): Promise<V9TradeDoc[]> { return [...this.trades.values()].filter((t) => t.state === "OPEN").map((t) => ({ ...t })); }
+  async insertTimeline(): Promise<void> {}
+  async findTradesSince(): Promise<V9TradeDoc[]> { return []; }
   async hasOpenTrade(u: string, s: string): Promise<boolean> { return [...this.trades.values()].some((t) => t.userId === u && t.symbol === s && t.state === "OPEN"); }
 }
 const noFeed = { warmUp: async () => ({ liq: 0, oi: 0 }), poll: async () => ({ liq: 0, oi: 0 }) } as unknown as V9MongoFeed;
@@ -43,7 +45,7 @@ function decision(over: Partial<V9Decision> = {}): V9Decision {
     features: { dom: true, dir: true, exh: true, dirMove: 4.7, clr: 0.9, victimLiq: 5e6, oppLiq: 1e5, peakTs: T0 - 1_800_000, preEff: 2, postEff: 0.1 },
     reference: { medianClr: 0.5, medianMove: 0.6, sampleCount: 20 },
     selection: { selected: true, checks: { DOM: true, DIR: true, CLR: true, MOV: true, EXH: true } },
-    tradable: true, reason: "SELECTED", evaluatedAt: T0 + 10_000, tradeSide: "LONG", stopPrice: 0.099, referencePrice: 0.1,
+    tradable: true, reason: "SELECTED", evaluatedAt: T0 + 10_000, missingMinutes: 0, tradeSide: "LONG", stopPrice: 0.099, referencePrice: 0.1,
     ...over,
   };
 }
