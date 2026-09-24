@@ -120,5 +120,16 @@ scenario("confirmations found late (e.g. after a data gap) are STALE and never t
   assert.ok(decisions.some((x) => x.reason === "STALE_CONFIRMATION") || decisions.every((x) => x.reason !== "SELECTED"));
 });
 
+scenario("the same episode is never tradable twice (re-fit re-confirmations are DUPLICATE_EPISODE)", () => {
+  for (const seed of [5, 9, 21]) {
+    const { decisions } = replay(seed, 1500);
+    const tradable = decisions.filter((x) => x.tradable);
+    for (let i = 1; i < tradable.length; i++) {
+      const prevSame = tradable.slice(0, i).filter((p) => p.episode.victim === tradable[i].episode.victim).at(-1);
+      if (prevSame) assert.ok(tradable[i].episode.start >= prevSame.evaluatedAt, `seed ${seed}: overlapping re-trade`);
+    }
+  }
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

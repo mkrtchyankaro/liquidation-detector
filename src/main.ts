@@ -9,6 +9,10 @@ import {
   loadExecutionSettings,
 } from "./infrastructure/config/users.config.loader";
 import { checkLoxRealReadiness } from "./services/lox-real-readiness";
+import { loadV9Settings, type V9UserMode } from "./strategy/v9/v9-config";
+import { V9LiveService, type V9UserRef } from "./strategy/v9/v9-live.service";
+import { V9MongoFeed } from "./strategy/v9/v9-feed";
+import { V9Repository } from "./strategy/v9/v9-repository";
 import {
   MongoClientWrapper,
   type MongoDetectorConfig,
@@ -100,18 +104,38 @@ async function main(): Promise<void> {
   // copy-pasted lambdas). A user can be REAL only when every per-user
   // gate agrees; otherwise the user runs PAPER (full virtual lifecycle,
   // zero Binance calls) instead of failing with no Binance client.
-  const isLoxRealConfigured = (r: UserRuntime): boolean =>
-    r.config.liquidationOiExecutionEnabled === true &&
+  // V9 strategy settings ("v9" block in users.config.json).
+  const v9Settings = loadV9Settings(
+    usersConfigPath,
+    users.map((u) => u.userId),
+    symbols,
+  );
+  const v9Requested = (r: UserRuntime): V9UserMode =>
+    v9Settings.enabled
+      ? (v9Settings.userModes.get(r.config.userId) ?? "OFF")
+      : "OFF";
+  // Per-user Binance gates shared by every strategy.
+  const isBinanceRealConfigured = (r: UserRuntime): boolean =>
     r.binanceRest !== null &&
     r.config.binance?.mode === "live" &&
     r.config.binance?.orderExecutionEnabled === true;
+  // One Binance account, one-way mode: two strategies must never hold the
+  // same account at once (positions on one symbol would merge). A user who
+  // runs V9 REAL therefore runs LOX as PAPER only.
+  const isLoxRealConfigured = (r: UserRuntime): boolean =>
+    r.config.liquidationOiExecutionEnabled === true &&
+    isBinanceRealConfigured(r) &&
+    v9Requested(r) !== "REAL";
   // Startup proof that each REAL-configured account can actually trade
   // (valid keys, One-Way mode, USDT available). A failing user runs
   // PAPER until the next restart, with the reason logged + on Telegram.
   const loxRealVerified = new Set<string>();
   if (executionSettings.realOrdersEnabled) {
     for (const r of userRuntimes.filter(
-      (u) => u.config.enabled && isLoxRealConfigured(u),
+      (u) =>
+        u.config.enabled &&
+        isBinanceRealConfigured(u) &&
+        (isLoxRealConfigured(u) || v9Requested(u) === "REAL"),
     )) {
       const result = await checkLoxRealReadiness(
         r.config.userId,
@@ -158,6 +182,36 @@ async function main(): Promise<void> {
       `[LOX_USER_MODE] userId=${r.config.userId} mode=${mode} riskUsd=${r.config.risk.riskUsd} realOrdersEnabled=${executionSettings.realOrdersEnabled}`,
     );
   }
+
+  // V9 user fan-out. REAL only when globally armed, the account passed the
+  // readiness check and its Binance gates allow it; otherwise PAPER (logged).
+  const v9UserRefs: V9UserRef[] = [];
+  for (const r of userRuntimes.filter(
+    (u) => u.config.enabled && v9Requested(u) !== "OFF",
+  )) {
+    const requested = v9Requested(r);
+    const real =
+      requested === "REAL" &&
+      executionSettings.realOrdersEnabled &&
+      isBinanceRealConfigured(r) &&
+      loxRealVerified.has(r.config.userId);
+    if (requested === "REAL" && !real)
+      log.error(
+        `[V9_REAL_DOWNGRADED] userId=${r.config.userId} requested REAL but realOrdersEnabled/binance gates/readiness do not allow it -- runs PAPER`,
+      );
+    v9UserRefs.push({
+      userId: r.config.userId,
+      mode: real ? "REAL" : "PAPER",
+      riskUsd: r.config.risk.riskUsd,
+      binanceRest: real ? r.binanceRest : null,
+      leverage: r.config.binance?.leverage,
+      marginMode: r.config.binance?.marginMode,
+      telegram: r.telegram,
+    });
+  }
+  log.warn(
+    `[V9_USER_MODE] enabled=${v9Settings.enabled} ${v9UserRefs.map((u) => `${u.userId}=${u.mode}($${u.riskUsd})`).join(" ") || "(no users)"}`,
+  );
 
   // Sep 8 2026 (Karo) -- startup-blocker index validation, same
   // severity as liqwatch-bot's own execution-record/execution-claim
@@ -731,6 +785,26 @@ async function main(): Promise<void> {
 
   if (legacyStrategiesEnabled) await reconciliation.start();
   orchestrator.start();
+  // V9 live strategy: warms up from the DB, then runs every minute. Started
+  // after market data flows; its warm-up yields to the event loop.
+  const v9Service =
+    v9Settings.enabled && mongoCfg.enabled
+      ? new V9LiveService(
+          v9Settings,
+          () => v9UserRefs,
+          new V9MongoFeed(() => mongo.ensureOwn()),
+          new V9Repository(() => mongo.ensureOwn()),
+        )
+      : null;
+  if (v9Service) {
+    void v9Service
+      .start()
+      .catch((err) =>
+        log.error(
+          `[V9_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- V9 is NOT running`,
+        ),
+      );
+  }
   spotWs.start(); // Sep 19 2026 (Karo), order-flow observation -- Spot WS lifecycle
   // Sep 16 2026 (Karo), operator-approved -- historical
   // DISPLACEMENT_BALANCED episode-size percentile cache warmup.
@@ -801,6 +875,7 @@ async function main(): Promise<void> {
     log.info("shutting down (SIGINT)");
     reconciliation.stop();
     orchestrator.stop();
+    v9Service?.stop();
     spotWs.stop();
     loxPercentileRefreshLifecycle.stop();
     liquidationOiPositionLifecycle.stop();
@@ -813,6 +888,7 @@ async function main(): Promise<void> {
     log.info("shutting down (SIGTERM)");
     reconciliation.stop();
     orchestrator.stop();
+    v9Service?.stop();
     spotWs.stop();
     loxPercentileRefreshLifecycle.stop();
     liquidationOiPositionLifecycle.stop();

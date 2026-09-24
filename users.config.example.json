@@ -1,5 +1,24 @@
 {
   "realOrdersEnabled": false,
+  "v9": {
+    "enabled": false,
+    "symbols": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "BNBUSDT",
+      "DOGEUSDT",
+      "ADAUSDT",
+      "LINKUSDT",
+      "AVAXUSDT",
+      "SUIUSDT"
+    ],
+    "rr": 2.2,
+    "userModes": {
+      "main": "PAPER",
+      "karo": "PAPER"
+    }
+  },
   "users": [
     {
       "userId": "main",

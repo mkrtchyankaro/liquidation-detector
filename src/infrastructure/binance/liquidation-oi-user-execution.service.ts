@@ -123,11 +123,15 @@ export interface EntrySequenceInput {
   /** When set, applied to the symbol before the entry order. */
   leverage?: number;
   marginMode?: "ISOLATED" | "CROSSED";
+  /** When set, the TP is NOT initialTpPrice but is computed from the ACTUAL
+   *  fill: fill ± tpRMultiple x |fill - slPrice| (keeps the planned R:R
+   *  exact whatever the fill price). */
+  tpRMultiple?: number;
 }
 
 export type EntrySequenceOutcome =
-  | { outcome: "ENTRY_ACTIVE_WITH_TP"; entryPrice: number; quantity: number; actualRiskUsd?: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpClientOrderId: string; tpBinanceOrderId: number }
-  | { outcome: "ENTRY_ACTIVE_WITHOUT_TP"; entryPrice: number; quantity: number; actualRiskUsd?: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpFailureReason: string }
+  | { outcome: "ENTRY_ACTIVE_WITH_TP"; entryPrice: number; quantity: number; actualRiskUsd?: number; tpPrice?: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpClientOrderId: string; tpBinanceOrderId: number }
+  | { outcome: "ENTRY_ACTIVE_WITHOUT_TP"; entryPrice: number; quantity: number; actualRiskUsd?: number; tpPrice?: number; entryClientOrderId: string; slClientAlgoId: string; slBinanceAlgoId: number; tpFailureReason: string }
   | { outcome: "PROTECTION_FAILED_CLOSED"; entryPrice: number; quantity: number; entryClientOrderId: string; reason: string }
   | { outcome: "ENTRY_FAILED"; reason: string };
 
@@ -153,7 +157,7 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
       if (long ? exec <= input.slPrice : exec >= input.slPrice) {
         return { outcome: "ENTRY_FAILED", reason: `pre-flight: executable price ${exec} already beyond SL ${input.slPrice}` };
       }
-      if (long ? exec >= input.initialTpPrice : exec <= input.initialTpPrice) {
+      if (input.tpRMultiple === undefined && (long ? exec >= input.initialTpPrice : exec <= input.initialTpPrice)) {
         return { outcome: "ENTRY_FAILED", reason: `pre-flight: executable price ${exec} already beyond TP ${input.initialTpPrice}` };
       }
       referencePrice = exec;
@@ -248,21 +252,24 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
     }
 
     // ── 6. Take profit (reduce-only LIMIT) -> verify ─────────────────
+    const tpPrice = input.tpRMultiple !== undefined
+      ? (long ? position.entryPrice + input.tpRMultiple * (position.entryPrice - input.slPrice) : position.entryPrice - input.tpRMultiple * (input.slPrice - position.entryPrice))
+      : input.initialTpPrice;
     const tpClientOrderId = strategyClientOrderId(input.userId, input.globalSignalId, "TAKE_PROFIT", 0);
     try {
       const tpRes = (await rest.createOrder({
         symbol: input.symbol, side: closeSide, type: "LIMIT", timeInForce: "GTC",
-        price: roundToStep(input.initialTpPrice, filters.tickSize, filters.pricePrecision).toFixed(filters.pricePrecision),
+        price: roundToStep(tpPrice, filters.tickSize, filters.pricePrecision).toFixed(filters.pricePrecision),
         quantity: protectQty.toFixed(filters.qtyPrecision), reduceOnly: "true", newClientOrderId: tpClientOrderId,
       })) as { orderId: number };
 
       const tpVerified = await verifyOrderOpen(rest, input.symbol, tpRes.orderId);
       if (!tpVerified) {
-        return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: "TP order placed but could not be verified open" };
+        return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, tpPrice, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: "TP order placed but could not be verified open" };
       }
-      return { outcome: "ENTRY_ACTIVE_WITH_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpClientOrderId, tpBinanceOrderId: tpRes.orderId };
+      return { outcome: "ENTRY_ACTIVE_WITH_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, tpPrice, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpClientOrderId, tpBinanceOrderId: tpRes.orderId };
     } catch (err) {
-      return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: err instanceof Error ? err.message : String(err) };
+      return { outcome: "ENTRY_ACTIVE_WITHOUT_TP", entryPrice: position.entryPrice, quantity: protectQty, actualRiskUsd, tpPrice, entryClientOrderId, slClientAlgoId, slBinanceAlgoId: slAlgoId!, tpFailureReason: err instanceof Error ? err.message : String(err) };
     }
   } catch (err) {
     return { outcome: "ENTRY_FAILED", reason: `unexpected error: ${err instanceof Error ? err.message : String(err)}` };

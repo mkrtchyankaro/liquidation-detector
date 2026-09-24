@@ -42,9 +42,7 @@ export interface LiquidationOiGlobalSignalDoc {
   currentTargetPrice: number | null;
   /** Sep 17 2026 (Karo), operator-requested Section E -- captured at
    *  ENTRY_READY. Strictly observational; never read by any decision. */
-  orderBookAtEntryReady:
-    | import("../../domain/liquidation-oi-strategy/order-book-observation").OrderBookObservation
-    | null;
+  orderBookAtEntryReady: import("../../domain/liquidation-oi-strategy/order-book-observation").OrderBookObservation | null;
   /** Sep 17 2026 (Karo), operator-approved final capacity architecture,
    *  Section 19 -- FROZEN at the instant of ENTRY_READY, the live
    *  atr3m value used as the TP coordinate system's normalization
@@ -81,10 +79,7 @@ export class LiquidationOiGlobalSignalRepository {
       if (!sigCol || !userCol) return false;
       await sigCol.createIndex({ globalSignalId: 1 }, { unique: true });
       await sigCol.createIndex({ symbol: 1, state: 1 });
-      await userCol.createIndex(
-        { userId: 1, globalSignalId: 1 },
-        { unique: true },
-      );
+      await userCol.createIndex({ userId: 1, globalSignalId: 1 }, { unique: true });
       await userCol.createIndex({ globalSignalId: 1, state: 1 });
       return true;
     } catch (err) {
@@ -94,9 +89,7 @@ export class LiquidationOiGlobalSignalRepository {
     }
   }
 
-  async upsertSignal(
-    doc: Omit<LiquidationOiGlobalSignalDoc, "createdAt" | "updatedAt">,
-  ): Promise<boolean> {
+  async upsertSignal(doc: Omit<LiquidationOiGlobalSignalDoc, "createdAt" | "updatedAt">): Promise<boolean> {
     try {
       const col = await this.getSignalCollection();
       if (!col) return false;
@@ -107,29 +100,13 @@ export class LiquidationOiGlobalSignalRepository {
       // MongoDB reject the whole update ("would create a conflict at
       // 'createdAt'") -- in production every global CLOSE silently
       // failed this way and signals stayed ACTIVE. Strip them here, once.
-      const { _id, createdAt, updatedAt, ...fields } = doc as typeof doc & {
-        _id?: unknown;
-        createdAt?: unknown;
-        updatedAt?: unknown;
-      };
-      void _id;
-      void createdAt;
-      void updatedAt;
-      await col.updateOne(
-        { globalSignalId: doc.globalSignalId },
-        {
-          $set: { ...fields, updatedAt: now },
-          $setOnInsert: { createdAt: now },
-        },
-        { upsert: true },
-      );
+      const { _id, createdAt, updatedAt, ...fields } = doc as typeof doc & { _id?: unknown; createdAt?: unknown; updatedAt?: unknown };
+      void _id; void createdAt; void updatedAt;
+      await col.updateOne({ globalSignalId: doc.globalSignalId }, { $set: { ...fields, updatedAt: now }, $setOnInsert: { createdAt: now } }, { upsert: true });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(
-        { err: msg, globalSignalId: doc.globalSignalId },
-        "[LOX_GLOBAL_SIGNAL_UPSERT_FAILED]",
-      );
+      log.error({ err: msg, globalSignalId: doc.globalSignalId }, "[LOX_GLOBAL_SIGNAL_UPSERT_FAILED]");
       return false;
     }
   }
@@ -143,9 +120,7 @@ export class LiquidationOiGlobalSignalRepository {
   /** Sep 17 2026 (Karo), operator-requested Section O. Single-doc
    *  lookup by globalSignalId, used when a decision (MAIN market exit,
    *  global close) needs to read/update ONE signal's own state. */
-  async findSignal(
-    globalSignalId: string,
-  ): Promise<LiquidationOiGlobalSignalDoc | null> {
+  async findSignal(globalSignalId: string): Promise<LiquidationOiGlobalSignalDoc | null> {
     const col = await this.getSignalCollection();
     if (!col) return null;
     return col.findOne({ globalSignalId });
@@ -155,24 +130,15 @@ export class LiquidationOiGlobalSignalRepository {
    *  if a PENDING/ACTIVE row already exists for this exact (userId,
    *  globalSignalId), the caller must not start a second entry
    *  sequence. */
-  async upsertUserExecution(
-    doc: LiquidationOiUserExecutionState,
-  ): Promise<boolean> {
+  async upsertUserExecution(doc: LiquidationOiUserExecutionState): Promise<boolean> {
     try {
       const col = await this.getUserExecCollection();
       if (!col) return false;
-      await col.updateOne(
-        { userId: doc.userId, globalSignalId: doc.globalSignalId },
-        { $set: withoutId(doc) },
-        { upsert: true },
-      );
+      await col.updateOne({ userId: doc.userId, globalSignalId: doc.globalSignalId }, { $set: withoutId(doc) }, { upsert: true });
       return true;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(
-        { err: msg, userId: doc.userId, globalSignalId: doc.globalSignalId },
-        "[LOX_USER_EXECUTION_UPSERT_FAILED]",
-      );
+      log.error({ err: msg, userId: doc.userId, globalSignalId: doc.globalSignalId }, "[LOX_USER_EXECUTION_UPSERT_FAILED]");
       return false;
     }
   }
@@ -193,43 +159,26 @@ export class LiquidationOiGlobalSignalRepository {
    *  to skip all further processing (Telegram send, forensic events)
    *  for their own race-losing attempt, cleanly, with no separate
    *  read needed first. */
-  async terminalizeIfActive(
-    doc: LiquidationOiUserExecutionState,
-  ): Promise<boolean> {
+  async terminalizeIfActive(doc: LiquidationOiUserExecutionState): Promise<boolean> {
     try {
       const col = await this.getUserExecCollection();
       if (!col) return false;
-      const result = await col.updateOne(
-        {
-          userId: doc.userId,
-          globalSignalId: doc.globalSignalId,
-          state: "ACTIVE",
-        },
-        { $set: withoutId(doc) },
-      );
+      const result = await col.updateOne({ userId: doc.userId, globalSignalId: doc.globalSignalId, state: "ACTIVE" }, { $set: withoutId(doc) });
       return result.matchedCount > 0;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log.error(
-        { err: msg, userId: doc.userId, globalSignalId: doc.globalSignalId },
-        "[LOX_USER_EXECUTION_TERMINALIZE_IF_ACTIVE_FAILED]",
-      );
+      log.error({ err: msg, userId: doc.userId, globalSignalId: doc.globalSignalId }, "[LOX_USER_EXECUTION_TERMINALIZE_IF_ACTIVE_FAILED]");
       return false;
     }
   }
 
-  async findUserExecution(
-    userId: string,
-    globalSignalId: string,
-  ): Promise<LiquidationOiUserExecutionState | null> {
+  async findUserExecution(userId: string, globalSignalId: string): Promise<LiquidationOiUserExecutionState | null> {
     const col = await this.getUserExecCollection();
     if (!col) return null;
     return col.findOne({ userId, globalSignalId });
   }
 
-  async findUserExecutionsForSignal(
-    globalSignalId: string,
-  ): Promise<LiquidationOiUserExecutionState[]> {
+  async findUserExecutionsForSignal(globalSignalId: string): Promise<LiquidationOiUserExecutionState[]> {
     const col = await this.getUserExecCollection();
     if (!col) return [];
     return col.find({ globalSignalId }).toArray();
@@ -240,13 +189,9 @@ export class LiquidationOiGlobalSignalRepository {
    *  cleanupState is "FAILED_RETRYING" (needs another cleanup attempt)
    *  -- the two categories the periodic reconciler must act on. Rows
    *  already TERMINAL+COMPLETE are never re-touched. */
-  async findNonTerminalUserExecutions(): Promise<
-    LiquidationOiUserExecutionState[]
-  > {
+  async findNonTerminalUserExecutions(): Promise<LiquidationOiUserExecutionState[]> {
     const col = await this.getUserExecCollection();
     if (!col) return [];
-    return col
-      .find({ $or: [{ state: "ACTIVE" }, { cleanupState: "FAILED_RETRYING" }] })
-      .toArray();
+    return col.find({ $or: [{ state: "ACTIVE" }, { cleanupState: "FAILED_RETRYING" }] }).toArray();
   }
 }

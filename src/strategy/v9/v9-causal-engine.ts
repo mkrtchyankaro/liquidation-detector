@@ -1,17 +1,6 @@
 import {
-  MINUTE_MS,
-  buildReference,
-  changePoints,
-  episodeFeatures,
-  mergeEpisodes,
-  selectEpisode,
-  subEpisodes,
-  usableRange,
-  type Episode,
-  type EpisodeFeatures,
-  type SelectionReference,
-  type SelectionResult,
-  type Victim,
+  MINUTE_MS, buildReference, changePoints, episodeFeatures, mergeEpisodes, selectEpisode, subEpisodes, usableRange,
+  type Episode, type EpisodeFeatures, type SelectionReference, type SelectionResult, type Victim,
 } from "./v9-core";
 import { V9MinuteStore } from "./v9-minute-store";
 
@@ -54,11 +43,7 @@ export interface V9Decision {
   selection: SelectionResult;
   /** true only when selected AND fresh AND the reference is large enough. */
   tradable: boolean;
-  reason:
-    | "SELECTED"
-    | "NOT_SELECTED"
-    | "REFERENCE_TOO_SMALL"
-    | "STALE_CONFIRMATION";
+  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE";
   evaluatedAt: number;
   /** Trade plan (fade): LONG victims -> BUY, SHORT victims -> SELL. */
   tradeSide: Victim;
@@ -67,21 +52,20 @@ export interface V9Decision {
   referencePrice: number;
 }
 
-interface ReferenceSample {
-  confirmTs: number;
-  clr: number;
-  dirMove: number;
-}
+interface ReferenceSample { confirmTs: number; clr: number; dirMove: number }
 
 export class V9CausalEngine {
   readonly store = new V9MinuteStore();
   private lastConfirmTs = -Infinity;
   private readonly reference: ReferenceSample[] = [];
+  /** Time of the last TRADABLE decision per victim side. The regime fit is
+   *  re-done every minute, so the same liquidation episode can re-appear
+   *  with a later confirmation (seen in replay: SOL 15:53 signalled three
+   *  times). Any selected episode that STARTED before the last tradable
+   *  signal on the same side is the same move seen again -- never traded twice. */
+  private readonly lastTradableAt: Record<Victim, number> = { LONG: -Infinity, SHORT: -Infinity };
 
-  constructor(
-    readonly symbol: string,
-    private readonly settings: V9EngineSettings = DEFAULT_V9_ENGINE_SETTINGS,
-  ) {}
+  constructor(readonly symbol: string, private readonly settings: V9EngineSettings = DEFAULT_V9_ENGINE_SETTINGS) {}
 
   /** Evaluate with all data up to `now`. Returns decisions for episodes whose
    *  end became known since the previous call, oldest first. */
@@ -94,62 +78,31 @@ export class V9CausalEngine {
     const episodes = mergeEpisodes(usable, subEpisodes(usable, regimes, now));
 
     const fresh = episodes
-      .filter(
-        (e) =>
-          Number.isFinite(e.confirmTs) &&
-          e.confirmTs <= now &&
-          e.confirmTs > this.lastConfirmTs,
-      )
+      .filter((e) => Number.isFinite(e.confirmTs) && e.confirmTs <= now && e.confirmTs > this.lastConfirmTs)
       .sort((a, b) => a.confirmTs - b.confirmTs);
 
     const decisions: V9Decision[] = [];
     for (const e of fresh) {
       const features = episodeFeatures(usable, e);
-      const prior = this.reference.filter(
-        (r) =>
-          r.confirmTs < e.confirmTs &&
-          r.confirmTs >= e.confirmTs - this.settings.referenceWindowMs,
-      );
+      const prior = this.reference.filter((r) => r.confirmTs < e.confirmTs && r.confirmTs >= e.confirmTs - this.settings.referenceWindowMs);
       const reference = buildReference(prior);
       const selection = selectEpisode(features, reference);
       const stale = now - e.confirmTs > this.settings.maxSignalAgeMs;
       const small = reference.sampleCount < this.settings.minReferenceSamples;
-      const reason: V9Decision["reason"] = !selection.selected
-        ? "NOT_SELECTED"
-        : small
-          ? "REFERENCE_TOO_SMALL"
-          : stale
-            ? "STALE_CONFIRMATION"
-            : "SELECTED";
-      const stopPrice = this.store.extremePrice(
-        e.victim === "LONG" ? "LOW" : "HIGH",
-        e.start,
-        now,
-      );
+      const duplicate = e.start < this.lastTradableAt[e.victim];
+      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : "SELECTED";
+      const stopPrice = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", e.start, now);
       decisions.push({
-        symbol: this.symbol,
-        episode: e,
-        features,
-        reference,
-        selection,
-        tradable: reason === "SELECTED",
-        reason,
-        evaluatedAt: now,
-        tradeSide: e.victim,
-        stopPrice,
-        referencePrice: this.store.lastPrice(now),
+        symbol: this.symbol, episode: e, features, reference, selection,
+        tradable: reason === "SELECTED", reason, evaluatedAt: now,
+        tradeSide: e.victim, stopPrice, referencePrice: this.store.lastPrice(now),
       });
-      if (features.dir)
-        this.reference.push({
-          confirmTs: e.confirmTs,
-          clr: features.clr,
-          dirMove: features.dirMove,
-        });
+      if (reason === "SELECTED") this.lastTradableAt[e.victim] = now;
+      if (features.dir) this.reference.push({ confirmTs: e.confirmTs, clr: features.clr, dirMove: features.dirMove });
       this.lastConfirmTs = e.confirmTs;
     }
     const keepFrom = now - this.settings.referenceWindowMs;
-    while (this.reference.length && this.reference[0].confirmTs < keepFrom)
-      this.reference.shift();
+    while (this.reference.length && this.reference[0].confirmTs < keepFrom) this.reference.shift();
     return decisions;
   }
 }

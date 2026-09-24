@@ -144,6 +144,15 @@ async function run(): Promise<void> {
     assert.strictEqual(r.calls.find((c) => c.fn === "setLeverage")?.p?.l, 23);
   });
 
+  await scenario("tpRMultiple: TP is computed from the ACTUAL fill (2.2R exact), not the plan", async () => {
+    // fill 0.2, SL 0.198 -> R = 0.002 -> TP = 0.2 + 2.2*0.002 = 0.2044
+    const r = mockRest({ fillAvg: "0.2" });
+    const out = await runEntrySequence(r, { ...base, initialTpPrice: 999, tpRMultiple: 2.2 });
+    const tp = r.calls.find((c) => c.fn === "createOrder" && c.p?.type === "LIMIT");
+    assert.strictEqual(tp?.p?.price, "0.20440");
+    assert.ok(out.outcome === "ENTRY_ACTIVE_WITH_TP" && Math.abs((out.tpPrice ?? 0) - 0.2044) < 1e-12);
+  });
+
   await scenario("readiness: hedge mode is refused with a clear reason", async () => {
     const res = await checkLoxRealReadiness("karo", { getBalance: async () => [{ asset: "USDT", availableBalance: "50" }], getPositionMode: async () => ({ dualSidePosition: true }) });
     assert.ok(!res.ok && res.reason.includes("HEDGE"));
