@@ -18,12 +18,12 @@
  * plus the spread.
  */
 import "dotenv/config";
-import * as path from "path";
 import { BinanceRestClient } from "../infrastructure/binance/binanceRest.client";
-import { getSymbolFilters, runEntrySequence } from "../infrastructure/binance/liquidation-oi-user-execution.service";
-import { loadUsersConfig } from "../infrastructure/config/users.config.loader";
-import { checkLoxRealReadiness } from "../services/lox-real-readiness";
-import { buildRealCloseReport, type UserTradeFill } from "../domain/liquidation-oi-strategy/real-close-report";
+import { getSymbolFilters, runEntrySequence } from "../execution/entry-sequence";
+import { loadAppConfig } from "../config/users-config";
+import { loadEnv } from "../config/env";
+import { checkRealReadiness } from "../execution/readiness";
+import { buildRealCloseReport, type UserTradeFill } from "../execution/close-report";
 
 function arg(name: string, fallback?: string): string | undefined {
   const i = process.argv.indexOf(`--${name}`);
@@ -44,10 +44,10 @@ async function main(): Promise<void> {
   if (!(slPct > 0 && tpPct > 0)) throw new Error("--sl-pct and --tp-pct must be > 0");
   const confirm = process.argv.includes("--confirm");
 
-  const usersPath = process.env.USERS_CONFIG_PATH ?? path.join(process.cwd(), "users.config.json");
-  const user = loadUsersConfig(usersPath).find((u) => u.userId === userId);
-  if (!user) throw new Error(`user "${userId}" not found in ${usersPath}`);
-  if (!user.binance?.enabled) throw new Error(`user "${userId}" has binance.enabled=false`);
+  const env = loadEnv();
+  const user = loadAppConfig(env.usersConfigPath, env.symbols).users.find((u) => u.userId === userId);
+  if (!user) throw new Error(`user "${userId}" not found in ${env.usersConfigPath}`);
+  if (!user.binance) throw new Error(`user "${userId}" has binance.enabled=false`);
 
   const rest = new BinanceRestClient({
     restBaseUrl: "https://fapi.binance.com", wsBaseUrl: "wss://fstream.binance.com",
@@ -55,7 +55,7 @@ async function main(): Promise<void> {
   });
 
   console.log(`\n=== 1. Readiness (${userId}) ===`);
-  const ready = await checkLoxRealReadiness(userId, rest);
+  const ready = await checkRealReadiness(userId, rest);
   console.log(ready.ok ? `OK -- available USDT ${ready.availableUsdt.toFixed(2)}` : `NOT READY -- ${ready.reason}`);
   if (!ready.ok) process.exit(1);
 

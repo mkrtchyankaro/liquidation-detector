@@ -41,24 +41,17 @@ npx tsc -p . --outDir "${BUILD_DIR}"
 echo "==> [5/7] Running tests"
 npm test
 
-echo "==> [6/7] Validating users.config.json with the NEW code"
+echo "==> [6/7] Validating .env + users.config.json with the NEW code"
 node -e '
   require("dotenv/config");
-  const l = require("./'"${BUILD_DIR}"'/infrastructure/config/users.config.loader");
-  const users = l.loadUsersConfig("users.config.json");
-  const s = l.loadExecutionSettings("users.config.json");
-  const sym = require("./'"${BUILD_DIR}"'/infrastructure/config/symbols.config").loadSymbolsConfig().map((x) => x.symbol);
-  const v9 = require("./'"${BUILD_DIR}"'/strategy/v9/v9-config").loadV9Settings("users.config.json", users.map((u) => u.userId), sym);
-  console.log("v9.enabled=" + v9.enabled + (v9.enabled ? "  symbols=" + v9.symbols.join(",") + "  rr=" + v9.rr + "  modes=" + [...v9.userModes].map(([k, m]) => k + ":" + m).join(",") : ""));
-  console.log("realOrdersEnabled=" + s.realOrdersEnabled);
-  for (const u of users.filter((x) => x.enabled)) {
-    const b = u.binance;
-    const real = s.realOrdersEnabled && u.liquidationOiExecutionEnabled === true &&
-      !!b && b.enabled && b.mode === "live" && b.orderExecutionEnabled === true;
-    const v9Mode = v9.enabled ? (v9.userModes.get(u.userId) || "OFF") : "OFF";
-    const v9Real = v9Mode === "REAL" && s.realOrdersEnabled && !!b && b.enabled && b.mode === "live" && b.orderExecutionEnabled === true;
-    const loxReal = real && v9Mode !== "REAL";
-    console.log("  " + u.userId.padEnd(10) + "LOX=" + (loxReal ? "REAL " : "PAPER") + "  V9=" + (v9Mode === "OFF" ? "OFF  " : v9Real ? "REAL " : "PAPER") + "  riskUsd=" + u.risk.riskUsd);
+  const env = require("./'"${BUILD_DIR}"'/config/env").loadEnv();
+  const c = require("./'"${BUILD_DIR}"'/config/users-config").loadAppConfig(env.usersConfigPath, env.symbols);
+  console.log("symbols collected: " + env.symbols.join(","));
+  console.log("realOrdersEnabled=" + c.realOrdersEnabled + "  v9.enabled=" + c.v9.enabled + (c.v9.enabled ? "  v9.symbols=" + c.v9.symbols.join(",") + "  rr=" + c.v9.rr : ""));
+  for (const u of c.users.filter((x) => x.enabled)) {
+    const m = c.v9.enabled ? (c.v9.userModes.get(u.userId) || "OFF") : "OFF";
+    const real = m === "REAL" && c.realOrdersEnabled && !!u.binance;
+    console.log("  " + u.userId.padEnd(10) + "V9=" + (m === "OFF" ? "OFF" : real ? "REAL (after readiness check)" : "PAPER") + "  riskUsd=" + u.riskUsd + "  telegram=" + (u.telegram ? "yes" : "no"));
   }
 '
 
@@ -82,5 +75,5 @@ if ! pm2 describe "${APP_NAME}" | grep -q "status.*online"; then
 fi
 
 echo "==> Startup user modes:"
-pm2 logs "${APP_NAME}" --lines 400 --nostream | grep -E "LOX_USER_MODE|REAL_ORDERS_ENABLED|V9_USER_MODE|LEGACY_STRATEGIES" | tail -10 || true
+pm2 logs "${APP_NAME}" --lines 400 --nostream | grep -E "V9_USER_MODE|REAL_NOT_READY|REAL_DOWNGRADED|COLLECTOR_STARTED" | tail -10 || true
 echo "==> Done. Previous build kept in dist.prev/ for quick rollback."

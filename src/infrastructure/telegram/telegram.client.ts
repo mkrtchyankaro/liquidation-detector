@@ -1,5 +1,11 @@
 import axios, { type AxiosInstance } from 'axios';
-import type { TelegramConfig } from '../config/integrations.config';
+export interface TelegramConfig {
+  enabled: boolean;
+  botToken: string;
+  chatIds: string[];
+  parseMode: "HTML" | "Markdown" | "MarkdownV2" | "none";
+  disableNotification: boolean;
+}
 import { childLogger } from '../logging/logger';
 
 export interface TelegramChatSendResult {
