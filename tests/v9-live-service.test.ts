@@ -78,7 +78,7 @@ function mockRest(opts: { positionAmt?: string; fills?: unknown[]; slStatus?: st
 }
 
 function service(users: V9UserRef[], repo: MemRepo, now: { t: number }) {
-  const svc = new V9LiveService({ enabled: true, symbols: ["DOGEUSDT"], rr: 2.2, userModes: new Map() }, () => users, noFeed, repo as unknown as V9Repository, undefined, () => now.t);
+  const svc = new V9LiveService({ enabled: true, symbols: ["DOGEUSDT"], rr: 2.2, minSlPct: 0.33, userModes: new Map() }, () => users, noFeed, repo as unknown as V9Repository, undefined, () => now.t);
   (svc as unknown as { ready: boolean }).ready = true;
   return svc as unknown as {
     handleDecision(d: V9Decision): Promise<void>;

@@ -20,11 +20,13 @@ export interface V9Settings {
   enabled: boolean;
   symbols: string[];
   rr: number;
+  /** Minimum SL distance in percent (default 0.33). */
+  minSlPct: number;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -42,6 +44,8 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
 
   const rr = v.rr === undefined ? 2.2 : v.rr;
   if (typeof rr !== "number" || !(rr > 0) || rr > 20) throw new Error(`"v9.rr" must be a number between 0 and 20`);
+  const minSlPct = v.minSlPct === undefined ? 0.33 : v.minSlPct;
+  if (typeof minSlPct !== "number" || !(minSlPct >= 0) || minSlPct > 5) throw new Error(`"v9.minSlPct" must be a number between 0 and 5 (percent)`);
 
   const userModes = new Map<string, V9UserMode>();
   if (v.userModes !== undefined) {
@@ -52,7 +56,7 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
       userModes.set(userId, mode);
     }
   }
-  return { enabled: true, symbols, rr, userModes };
+  return { enabled: true, symbols, rr, minSlPct, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {

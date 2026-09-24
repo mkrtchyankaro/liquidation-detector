@@ -64,6 +64,8 @@ are restored from `v9_trades`.
 `users.config.json` (see `users.config.example.json`):
 - `realOrdersEnabled` — global switch; without it nobody trades REAL.
 - `v9.userModes` — `OFF` / `PAPER` / `REAL` per user.
+- `v9.rr` (default 2.2) and `v9.minSlPct` (default 0.33): stops closer than this
+  are moved out to it (TP follows), keeping stop-out fees <= ~0.3R.
 - per user: `telegram`, `binance` (keys, leverage cap, margin mode), `risk.riskUsd`.
 
 A REAL user is checked at startup (keys, One-Way mode, USDT balance); on

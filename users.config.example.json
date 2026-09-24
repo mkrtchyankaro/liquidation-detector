@@ -4,6 +4,7 @@
     "enabled": true,
     "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "SUIUSDT"],
     "rr": 2.2,
+    "minSlPct": 0.33,
     "userModes": { "main": "PAPER", "karo": "PAPER" }
   },
   "users": [

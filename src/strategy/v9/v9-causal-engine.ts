@@ -50,6 +50,11 @@ export interface V9EngineSettings {
   /** Skip a signal whose SL is so close that Binance fees on a stop-out would
    *  exceed this many R (null = never skip). */
   maxSlFeeR: number | null;
+  /** Minimum SL distance as a fraction of price (0.0033 = 0.33%). A tighter
+   *  stop is moved out to this distance (and the TP follows as rr x risk);
+   *  wider stops are unchanged. Keeps stop-out fees <= ~0.3R and the position
+   *  size <= ~300x the risk. 0 = off. */
+  minSlFraction: number;
 }
 
 export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
@@ -64,6 +69,7 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   filters: "ALL",
   significantOppositeLiq: false,
   maxSlFeeR: null,
+  minSlFraction: 0,
 };
 
 export interface V9Decision {
@@ -161,8 +167,10 @@ export class V9CausalEngine {
       const missingMinutes = Math.max(0, expectedMinutes - this.store.minuteRange(e.start, lastFull).length);
       const extreme = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", this.settings.slFrom === "PEAK" ? features.peakTs : e.start, now);
       const buffer = this.settings.slBufferMinuteRanges > 0 ? this.settings.slBufferMinuteRanges * this.typicalMinuteRange(now) : 0;
-      const stopPrice = e.victim === "LONG" ? extreme - buffer : extreme + buffer;
       const refPrice = this.store.lastPrice(now);
+      let stopPrice = e.victim === "LONG" ? extreme - buffer : extreme + buffer;
+      const minDist = refPrice * this.settings.minSlFraction;
+      if (minDist > 0 && Math.abs(refPrice - stopPrice) < minDist) stopPrice = e.victim === "LONG" ? refPrice - minDist : refPrice + minDist;
       const riskDist = Math.abs(refPrice - stopPrice);
       const slFeeR = riskDist > 0 ? (2 * TAKER_FEE * refPrice) / riskDist : Infinity;
       const tooTight = this.settings.maxSlFeeR !== null && slFeeR > this.settings.maxSlFeeR;

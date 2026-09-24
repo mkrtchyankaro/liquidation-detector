@@ -29,5 +29,11 @@ scenario("unknown user fails fast", () => assert.throws(() => parseV9Settings({ 
 scenario("symbol without collected data fails fast", () => assert.throws(() => parseV9Settings({ ...ok, symbols: ["XRPUSDT"] }, users, syms), /does not collect data/));
 scenario("enabled as a string fails fast", () => assert.throws(() => parseV9Settings({ enabled: "true" }, users, syms), /must be true or false/));
 scenario("bad rr fails fast", () => assert.throws(() => parseV9Settings({ ...ok, rr: "2.2" }, users, syms), /rr/));
+scenario("minSlPct defaults to 0.33 and is validated", () => {
+  assert.strictEqual(parseV9Settings(ok, users, syms).minSlPct, 0.33);
+  assert.strictEqual(parseV9Settings({ ...ok, minSlPct: 0.5 }, users, syms).minSlPct, 0.5);
+  assert.throws(() => parseV9Settings({ ...ok, minSlPct: "0.33" }, users, syms), /minSlPct/);
+  assert.throws(() => parseV9Settings({ ...ok, minSlPct: 10 }, users, syms), /minSlPct/);
+});
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

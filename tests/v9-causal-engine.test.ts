@@ -194,5 +194,18 @@ scenario("maxSlFeeR: a signal whose stop-out fees would exceed the limit is SL_T
   assert.strictEqual(loose.filter((x) => x.tradable).length, base.decisions.filter((x) => x.tradable).length);
 });
 
+scenario("minSlFraction: a tighter stop is moved out to the minimum distance; wider stops are unchanged", () => {
+  const base = replay(5, 1500).decisions.filter((x) => x.tradable);
+  assert.ok(base.length > 0);
+  const wide = replay(5, 1500, { ...DEFAULT_V9_ENGINE_SETTINGS, minSlFraction: 0.05 }).decisions.filter((x) => x.tradable);
+  for (const d of wide) {
+    const dist = Math.abs(d.referencePrice - d.stopPrice) / d.referencePrice;
+    assert.ok(dist >= 0.05 - 1e-12, `stop at least 5% away (${dist})`);
+    assert.ok(d.tradeSide === "LONG" ? d.stopPrice < d.referencePrice : d.stopPrice > d.referencePrice, "stop on the losing side");
+  }
+  const none = replay(5, 1500, { ...DEFAULT_V9_ENGINE_SETTINGS, minSlFraction: 1e-9 }).decisions.filter((x) => x.tradable);
+  assert.deepStrictEqual(none.map((d) => d.stopPrice), base.map((d) => d.stopPrice), "a tiny minimum changes nothing");
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
