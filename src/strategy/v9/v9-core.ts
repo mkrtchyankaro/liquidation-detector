@@ -211,7 +211,10 @@ export interface Episode {
 
 /** Same-side parts merge; an opposite part WITH an OI drop closes the group
  *  and confirmTs is the end of the first minute its OI fell below its base. */
-export function mergeEpisodes(buckets: readonly Bucket[], subs: readonly SubEpisode[]): Episode[] {
+/** minOppositeLiqUsd (optional, variant "A_LIQSIG"): an opposite part closes
+ *  the group only if its own liquidations reach this size; smaller ones are
+ *  absorbed as noise. Undefined = research behaviour (any size). */
+export function mergeEpisodes(buckets: readonly Bucket[], subs: readonly SubEpisode[], minOppositeLiqUsd?: number): Episode[] {
   const out: Episode[] = [];
   let group: SubEpisode[] | null = null;
   const finish = (closedBy: string, confirmTs = NaN): void => {
@@ -248,7 +251,7 @@ export function mergeEpisodes(buckets: readonly Bucket[], subs: readonly SubEpis
     if (!group) { group = [sub]; continue; }
     const side = group[0].victim;
     if (sub.victim === side) group.push(sub);
-    else if (sub.oiDropPct > 0) {
+    else if (sub.oiDropPct > 0 && (minOppositeLiqUsd === undefined || (sub.victim === "LONG" ? sub.long : sub.short) >= minOppositeLiqUsd)) {
       const base = buckets[Math.max(0, sub.sIdx - 1)].oi;
       let k = sub.sIdx;
       while (k < sub.eIdx && !(buckets[k].oi < base)) k++;
@@ -300,6 +303,11 @@ export function episodeFeatures(buckets: readonly Bucket[], e: Episode): Episode
     clr: dirMove > 0 ? e.oiDropPct / dirMove : NaN,
     victimLiq, oppLiq, peakTs: buckets[peak].ts, preEff: pre.eff, postEff: post.eff,
   };
+}
+
+/** Typical size of a liquidation minute: median USD of minutes that had any. */
+export function typicalLiquidationMinuteUsd(buckets: readonly Bucket[]): number {
+  return median(buckets.filter((b) => b.count > 0).map((b) => b.long + b.short));
 }
 
 export function median(values: readonly number[]): number {

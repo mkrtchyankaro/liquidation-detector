@@ -8,11 +8,12 @@
  * shown gross and NET of Binance fees (taker entry; maker TP / taker SL).
  *
  * Variants compared side by side (see VARIANTS below):
- *   A             current live rule (opposite-side liquidation confirms)
- *   P             PRICE_OI: OI falls while price moves against the move
- *   _ATR          SL beyond the extreme by 1x the typical one-minute range
- *   _SIG          OI drop and reversal must exceed the typical one-minute noise
- *   _NOFILT/_NF   no filters (every confirmation trades);  _DOM  only DOM
+ *   A          current live rule (opposite-side liquidation confirms), rr 2.2
+ *   _RR2       rr 2 instead of 2.2
+ *   _MINSL     skip signals whose SL is so tight that stop-out fees > 0.3R
+ *   _LIQSIG    the confirming opposite liquidations must be >= the symbol's
+ *              typical liquidation-minute size (not e.g. $80)
+ * (PRICE_OI variants were tested and rejected: net negative after fees.)
  *
  * Read-only. Usage (takes ~2-3 min per symbol on the server; use nohup):
  *   npx tsx src/tools/v9-replay.ts
@@ -53,29 +54,20 @@ const stamp = (ms: number): string =>
 const time = (v: unknown): number =>
   v instanceof Date ? v.getTime() : Number(v);
 
-const base: V9EngineSettings = {
-  ...DEFAULT_V9_ENGINE_SETTINGS,
-  confirmMode: "PRICE_OI",
-};
-const VARIANTS: Array<{ name: string; settings: V9EngineSettings }> = [
-  { name: "A", settings: { ...DEFAULT_V9_ENGINE_SETTINGS } }, // live today
-  { name: "P", settings: base }, // PRICE_OI, 5 filters
-  { name: "P_ATR", settings: { ...base, slBufferMinuteRanges: 1 } }, // + SL buffer 1x minute range
-  { name: "P_SIG", settings: { ...base, significantConfirm: true } }, // + significant OI drop / reversal
+const A: V9EngineSettings = { ...DEFAULT_V9_ENGINE_SETTINGS }; // live today
+const VARIANTS: Array<{
+  name: string;
+  settings: V9EngineSettings;
+  rr?: number;
+}> = [
+  { name: "A", settings: A },
+  { name: "A_RR2", settings: A, rr: 2 },
+  { name: "A_MINSL", settings: { ...A, maxSlFeeR: 0.3 } }, // skip if SL fees > 0.3R (SL < ~0.33%)
+  { name: "A_MINSL_RR2", settings: { ...A, maxSlFeeR: 0.3 }, rr: 2 },
+  { name: "A_LIQSIG", settings: { ...A, significantOppositeLiq: true } }, // opposite liquidation >= typical minute size
   {
-    name: "P_SIG_ATR",
-    settings: { ...base, significantConfirm: true, slBufferMinuteRanges: 1 },
-  },
-  { name: "P_NOFILT", settings: { ...base, filters: "NONE" } }, // every confirmation
-  { name: "P_DOM", settings: { ...base, filters: "DOM" } }, // only DOM
-  {
-    name: "P_SIG_ATR_NF",
-    settings: {
-      ...base,
-      significantConfirm: true,
-      slBufferMinuteRanges: 1,
-      filters: "NONE",
-    },
+    name: "A_LIQSIG_MINSL",
+    settings: { ...A, significantOppositeLiq: true, maxSlFeeR: 0.3 },
   },
 ];
 
@@ -188,7 +180,7 @@ async function main(): Promise<void> {
           oi,
           from,
           until,
-          RR,
+          v.rr ?? RR,
           v.settings,
         );
         const t = empty();

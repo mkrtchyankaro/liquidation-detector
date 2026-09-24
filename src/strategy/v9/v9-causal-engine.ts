@@ -1,9 +1,10 @@
 import {
   MINUTE_MS, buildReference, changePoints, episodeFeatures, mergeEpisodes, selectEpisode, subEpisodes, usableRange,
-  type Bucket, type Episode, type EpisodeFeatures, type Regime, type SelectionReference, type SelectionResult, type Victim,
+  typicalLiquidationMinuteUsd, type Bucket, type Episode, type EpisodeFeatures, type Regime, type SelectionReference, type SelectionResult, type Victim,
 } from "./v9-core";
 import { V9MinuteStore } from "./v9-minute-store";
 import { priceOiEpisodes, typicalMinuteNoise } from "./v9-price-oi";
+import { TAKER_FEE } from "./v9-fees";
 
 /**
  * Causal (live) V9 engine for ONE symbol.
@@ -43,6 +44,12 @@ export interface V9EngineSettings {
   slBufferMinuteRanges: number;
   /** Which filters must pass: ALL five, only DOM, or NONE (every confirmation). */
   filters: "ALL" | "DOM" | "NONE";
+  /** OPPOSITE_LIQ only: the confirming opposite liquidations must be at least
+   *  this symbol's typical liquidation-minute size (median, from the data). */
+  significantOppositeLiq: boolean;
+  /** Skip a signal whose SL is so close that Binance fees on a stop-out would
+   *  exceed this many R (null = never skip). */
+  maxSlFeeR: number | null;
 }
 
 export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
@@ -55,6 +62,8 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   significantConfirm: false,
   slBufferMinuteRanges: 0,
   filters: "ALL",
+  significantOppositeLiq: false,
+  maxSlFeeR: null,
 };
 
 export interface V9Decision {
@@ -65,7 +74,7 @@ export interface V9Decision {
   selection: SelectionResult;
   /** true only when selected AND fresh AND the reference is large enough. */
   tradable: boolean;
-  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "DATA_GAP" | "SYMBOL_BUSY";
+  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "DATA_GAP" | "SL_TOO_TIGHT" | "SYMBOL_BUSY";
   /** Whole minutes between episode start and the decision with no data at all. */
   missingMinutes: number;
   evaluatedAt: number;
@@ -125,7 +134,7 @@ export class V9CausalEngine {
     const regimes = changePoints(usable.map((b) => b.oi));
     const episodes = this.settings.confirmMode === "PRICE_OI"
       ? priceOiEpisodes(usable, regimes, now, this.settings.significantConfirm ? typicalMinuteNoise(usable) : undefined)
-      : mergeEpisodes(usable, subEpisodes(usable, regimes, now));
+      : mergeEpisodes(usable, subEpisodes(usable, regimes, now), this.settings.significantOppositeLiq ? typicalLiquidationMinuteUsd(usable) : undefined);
     this.lastSnapshot = this.snapshot(now, usable, regimes, episodes);
 
     const fresh = episodes
@@ -150,14 +159,18 @@ export class V9CausalEngine {
       const lastFull = now - MINUTE_MS;
       const expectedMinutes = Math.floor(lastFull / MINUTE_MS) - Math.floor(e.start / MINUTE_MS) + 1;
       const missingMinutes = Math.max(0, expectedMinutes - this.store.minuteRange(e.start, lastFull).length);
-      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : "SELECTED";
       const extreme = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", this.settings.slFrom === "PEAK" ? features.peakTs : e.start, now);
       const buffer = this.settings.slBufferMinuteRanges > 0 ? this.settings.slBufferMinuteRanges * this.typicalMinuteRange(now) : 0;
       const stopPrice = e.victim === "LONG" ? extreme - buffer : extreme + buffer;
+      const refPrice = this.store.lastPrice(now);
+      const riskDist = Math.abs(refPrice - stopPrice);
+      const slFeeR = riskDist > 0 ? (2 * TAKER_FEE * refPrice) / riskDist : Infinity;
+      const tooTight = this.settings.maxSlFeeR !== null && slFeeR > this.settings.maxSlFeeR;
+      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : tooTight ? "SL_TOO_TIGHT" : "SELECTED";
       decisions.push({
         symbol: this.symbol, episode: e, features, reference, selection,
         tradable: reason === "SELECTED", reason, evaluatedAt: now, missingMinutes,
-        tradeSide: e.victim, stopPrice, referencePrice: this.store.lastPrice(now),
+        tradeSide: e.victim, stopPrice, referencePrice: refPrice,
       });
       if (reason === "SELECTED") this.lastTradableAt[e.victim] = now;
       if (features.dir) this.reference.push({ confirmTs: e.confirmTs, clr: features.clr, dirMove: features.dirMove });

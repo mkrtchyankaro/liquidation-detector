@@ -183,5 +183,16 @@ scenario("every evaluation leaves a snapshot of what is forming right now", () =
   assert.ok(formingSeen > 0, "some minutes show a forming episode");
 });
 
+scenario("maxSlFeeR: a signal whose stop-out fees would exceed the limit is SL_TOO_TIGHT, never tradable", () => {
+  const base = replay(5, 1500);
+  const target = base.decisions.find((x) => x.tradable)!;
+  assert.ok(target, "synthetic market must contain a tradable decision");
+  const strict = replay(5, 1500, { ...DEFAULT_V9_ENGINE_SETTINGS, maxSlFeeR: 0 }).decisions;
+  assert.ok(strict.every((x) => !x.tradable));
+  assert.ok(strict.some((x) => x.reason === "SL_TOO_TIGHT"));
+  const loose = replay(5, 1500, { ...DEFAULT_V9_ENGINE_SETTINGS, maxSlFeeR: 1e9 }).decisions;
+  assert.strictEqual(loose.filter((x) => x.tradable).length, base.decisions.filter((x) => x.tradable).length);
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

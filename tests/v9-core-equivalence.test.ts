@@ -8,7 +8,7 @@
  */
 import * as assert from "assert";
 import * as path from "path";
-import { analyzeWindow, buildBuckets, changePoints, episodeFeatures, usableRange, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
+import { analyzeWindow, buildBuckets, changePoints, episodeFeatures, mergeEpisodes, subEpisodes, usableRange, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const research = require(path.join(__dirname, "..", "scripts", "liquidation-episodes-v13.js"));
@@ -88,5 +88,18 @@ for (const seed of [1, 7, 42, 99, 2024]) {
     });
   });
 }
+scenario("minOppositeLiqUsd: small opposite parts no longer close an episode; huge threshold = no confirmations", () => {
+  const d = market(42, 3 * 1440);
+  const w = analyzeWindow(d.liq, d.oi, d.from, d.until)!;
+  const regimes = changePoints(w.buckets.map((b) => b.oi));
+  const subs = subEpisodes(w.buckets, regimes, d.until);
+  const any = mergeEpisodes(w.buckets, subs);
+  const same = mergeEpisodes(w.buckets, subs, 0);
+  assert.deepStrictEqual(same.map((e) => e.confirmTs), any.map((e) => e.confirmTs), "threshold 0 = research behaviour");
+  const none = mergeEpisodes(w.buckets, subs, Infinity);
+  assert.ok(none.every((e) => !Number.isFinite(e.confirmTs)), "nothing can confirm");
+  assert.ok(none.length < any.length, "absorbed parts merge episodes");
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
