@@ -7,6 +7,7 @@ import type { V9Settings } from "./v9-config";
 import type { V9MongoFeed } from "./v9-feed";
 import type { V9DecisionDoc, V9Repository, V9TradeDoc } from "./v9-repository";
 import { formatV9Close, formatV9Entry, formatV9Failure } from "./v9-telegram";
+import { estimateFeesUsd } from "./v9-fees";
 
 const log = childLogger({ mod: "v9-live" });
 
@@ -203,7 +204,7 @@ export class V9LiveService {
   /** PAPER: first minute (after the entry minute) whose low/high crosses SL
    *  or TP decides; SL wins a same-minute tie (conservative). */
   private async monitorPaper(symbol: string, engine: V9CausalEngine, now: number): Promise<void> {
-    const open = (await this.repo.findOpenTrades()).filter((t) => t.mode === "PAPER" && t.symbol === symbol && !t.entryInProgress && t.entryPrice !== null && t.tpPrice !== null);
+    const open = (await this.repo.findOpenTrades()).filter((t) => t.mode === "PAPER" && t.symbol === symbol && !t.entryInProgress && t.entryPrice !== null && t.tpPrice !== null && t.quantity !== null);
     for (const t of open) {
       const long = t.side === "LONG";
       for (const m of engine.store.minuteRange(t.createdAt + MINUTE_MS, now - MINUTE_MS)) {
@@ -212,8 +213,13 @@ export class V9LiveService {
         if (!hitSl && !hitTp) continue;
         const reason = hitSl ? "SL_FILLED" : "TP_FILLED";
         const exit = hitSl ? t.slPrice : t.tpPrice!;
-        const pnlR = hitSl ? -1 : t.rr;
-        await this.closeTrade(t, { closedAt: m.ts + MINUTE_MS, exitPrice: exit, pnlUsd: pnlR * (t.actualRiskUsd ?? t.plannedRiskUsd), pnlR, feesUsd: null, closeReason: reason });
+        // Same fee model as Binance (taker entry, maker TP / taker SL) so
+        // PAPER net results are comparable with REAL.
+        const risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+        const fees = estimateFeesUsd(t.entryPrice! * t.quantity!);
+        const feesUsd = hitSl ? fees.sl : fees.tp;
+        const pnlUsd = (hitSl ? -risk : t.rr * risk) - feesUsd;
+        await this.closeTrade(t, { closedAt: m.ts + MINUTE_MS, exitPrice: exit, pnlUsd, pnlR: pnlUsd / risk, feesUsd, closeReason: reason });
         break;
       }
     }
