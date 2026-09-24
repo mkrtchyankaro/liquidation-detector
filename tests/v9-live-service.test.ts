@@ -486,6 +486,60 @@ async function run(): Promise<void> {
     },
   );
 
+  await scenario(
+    "symbol lock: while ANY user's trade on the symbol is open, a new signal (either side) opens nothing for anyone",
+    async () => {
+      const repo = new MemRepo(),
+        now = { t: T0 + 10_000 };
+      const users: V9UserRef[] = [
+        {
+          userId: "main",
+          mode: "PAPER",
+          riskUsd: 10,
+          binanceRest: null,
+          telegram: null,
+        },
+        {
+          userId: "karo",
+          mode: "PAPER",
+          riskUsd: 1,
+          binanceRest: null,
+          telegram: null,
+        },
+      ];
+      const svc = service(users, repo, now);
+      await svc.handleDecision(decision());
+      // karo's trade closes, main's is still open -> structure not finished
+      const karo = [...repo.trades.values()].find((t) => t.userId === "karo")!;
+      await repo.updateTrade(karo.tradeId, { state: "CLOSED" });
+      const later = decision({
+        episode: {
+          ...decision().episode,
+          confirmTs: T0 + 3_600_000,
+          victim: "SHORT",
+        },
+        tradeSide: "SHORT",
+        stopPrice: 0.101,
+      });
+      await svc.handleDecision(later);
+      assert.strictEqual(
+        repo.trades.size,
+        2,
+        "no new trades while main is still open",
+      );
+      assert.strictEqual(repo.decisions.at(-1)!.reason, "SYMBOL_BUSY");
+      // main closes -> symbol free -> next signal opens for everyone
+      const main = [...repo.trades.values()].find((t) => t.userId === "main")!;
+      await repo.updateTrade(main.tradeId, { state: "CLOSED" });
+      await svc.handleDecision(
+        decision({
+          episode: { ...decision().episode, confirmTs: T0 + 7_200_000 },
+        }),
+      );
+      assert.strictEqual(repo.trades.size, 4);
+    },
+  );
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

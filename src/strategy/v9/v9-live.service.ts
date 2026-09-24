@@ -114,8 +114,20 @@ export class V9LiveService {
     }
   }
 
-  private async handleDecision(d: V9Decision): Promise<void> {
-    const signalId = `v9-${d.symbol}-${new Date(d.episode.confirmTs).toISOString()}-${d.episode.victim}`;
+  private async handleDecision(d0: V9Decision): Promise<void> {
+    const signalId = `v9-${d0.symbol}-${new Date(d0.episode.confirmTs).toISOString()}-${d0.episode.victim}`;
+    // Symbol lock (decided centrally, for everyone): while ANY user still
+    // has a trade open on this symbol -- REAL or PAPER, main included --
+    // the previous signal's structure is not finished and no new signal may
+    // be opened on the symbol, for any user, in either direction.
+    let d = d0;
+    if (d0.tradable) {
+      const busy = (await this.repo.findOpenTrades()).filter((t) => t.symbol === d0.symbol);
+      if (busy.length > 0) {
+        d = { ...d0, tradable: false, reason: "SYMBOL_BUSY" as V9Decision["reason"] };
+        log.warn({ signalId, openSignals: [...new Set(busy.map((t) => t.signalId))] }, "[V9_SYMBOL_BUSY] previous signal still has open trades -- new signal not opened");
+      }
+    }
     const doc: V9DecisionDoc = {
       signalId, symbol: d.symbol, victim: d.episode.victim, reason: d.reason, tradable: d.tradable,
       episodeStart: d.episode.start, episodeEnd: d.episode.end, confirmTs: d.episode.confirmTs, evaluatedAt: d.evaluatedAt,

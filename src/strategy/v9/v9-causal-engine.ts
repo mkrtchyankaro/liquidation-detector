@@ -43,7 +43,7 @@ export interface V9Decision {
   selection: SelectionResult;
   /** true only when selected AND fresh AND the reference is large enough. */
   tradable: boolean;
-  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE";
+  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "SYMBOL_BUSY";
   evaluatedAt: number;
   /** Trade plan (fade): LONG victims -> BUY, SHORT victims -> SELL. */
   tradeSide: Victim;
