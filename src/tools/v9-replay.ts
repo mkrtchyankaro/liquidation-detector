@@ -1,88 +1,244 @@
 /**
- * V9 CAUSAL REPLAY -- the honest backtest before going live.
+ * V9 CAUSAL REPLAY -- honest backtest of strategy variants on stored history.
  *
- * Feeds real history from Mongo (liq_raw_events, oi_second_observations)
- * into the LIVE engine minute by minute, exactly as it will receive data in
- * production (only rows with timestamp <= now), and calls evaluate() each
- * minute at hh:mm:10 -- the same schedule the live service uses. No
- * look-ahead: regimes, confirmations and medians only ever see the past.
+ * Feeds real rows (liq_raw_events, oi_second_observations) into the LIVE
+ * engine minute by minute (only data <= now, evaluated at hh:mm:10 exactly like
+ * production) and simulates every tradable signal: entry at the first poll
+ * price at/after the decision, SL per variant, TP = rr x risk. Results are
+ * shown gross and NET of Binance fees (taker entry; maker TP / taker SL).
  *
- * Trades are simulated like the research backtest: entry at the first OI
- * poll price at/after the decision time, SL = episode extreme (from episode
- * start until the decision), TP = rr x risk. No fees, no slippage.
- * Also lists the research (offline, look-ahead) selections for comparison.
+ * Variants compared side by side:
+ *   A        current live rule: confirm by an opposite-side liquidation part; SL from episode start
+ *   P        PRICE_OI: confirm when OI falls while price moves against the move; SL from episode start
+ *   P+PEAK   PRICE_OI with SL from the peak liquidation minute
  *
- * Read-only. Usage:
+ * Read-only. Usage (takes ~2-3 min per symbol on the server; use nohup):
  *   npx tsx src/tools/v9-replay.ts
- *   npx tsx src/tools/v9-replay.ts --symbols BTC,ETH --rr 2.2
+ *   npx tsx src/tools/v9-replay.ts --symbols BTC,ETH --rr 2.2 --details P
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
 import { type Victim } from "../strategy/v9/v9-core";
 import { replaySymbol } from "../strategy/v9/v9-replay";
+import {
+  DEFAULT_V9_ENGINE_SETTINGS,
+  type V9EngineSettings,
+} from "../strategy/v9/v9-causal-engine";
 
-const DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "ADA", "LINK", "AVAX", "SUI"]; // XRP excluded
-const arg = (name: string, fallback: string): string => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : fallback; };
-const symbols = arg("symbols", DEFAULT_SYMBOLS.join(",")).split(",").map((s) => s.trim().toUpperCase()).map((s) => (s.endsWith("USDT") ? s : `${s}USDT`));
+const DEFAULT_SYMBOLS = [
+  "BTC",
+  "ETH",
+  "SOL",
+  "BNB",
+  "DOGE",
+  "ADA",
+  "LINK",
+  "AVAX",
+  "SUI",
+];
+const arg = (name: string, fallback: string): string => {
+  const i = process.argv.indexOf(`--${name}`);
+  return i >= 0 ? process.argv[i + 1] : fallback;
+};
+const symbols = arg("symbols", DEFAULT_SYMBOLS.join(","))
+  .split(",")
+  .map((s) => s.trim().toUpperCase())
+  .map((s) => (s.endsWith("USDT") ? s : `${s}USDT`));
 const RR = Number(arg("rr", "2.2"));
-const stamp = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
-const time = (v: unknown): number => (v instanceof Date ? v.getTime() : Number(v));
+const DETAILS = arg("details", "");
+const stamp = (ms: number): string =>
+  new Date(ms).toISOString().slice(0, 16).replace("T", " ");
+const time = (v: unknown): number =>
+  v instanceof Date ? v.getTime() : Number(v);
+
+const VARIANTS: Array<{ name: string; settings: V9EngineSettings }> = [
+  {
+    name: "A",
+    settings: {
+      ...DEFAULT_V9_ENGINE_SETTINGS,
+      confirmMode: "OPPOSITE_LIQ",
+      slFrom: "START",
+    },
+  },
+  {
+    name: "P",
+    settings: {
+      ...DEFAULT_V9_ENGINE_SETTINGS,
+      confirmMode: "PRICE_OI",
+      slFrom: "START",
+    },
+  },
+  {
+    name: "P+PEAK",
+    settings: {
+      ...DEFAULT_V9_ENGINE_SETTINGS,
+      confirmMode: "PRICE_OI",
+      slFrom: "PEAK",
+    },
+  },
+];
+
+interface Tally {
+  decisions: number;
+  tradable: number;
+  tp: number;
+  sl: number;
+  open: number;
+  noRisk: number;
+  r: number;
+  netR: number;
+  slPcts: number[];
+}
+const empty = (): Tally => ({
+  decisions: 0,
+  tradable: 0,
+  tp: 0,
+  sl: 0,
+  open: 0,
+  noRisk: 0,
+  r: 0,
+  netR: 0,
+  slPcts: [],
+});
+const median = (v: number[]): number => {
+  const s = [...v].sort((a, b) => a - b);
+  return s.length
+    ? s.length % 2
+      ? s[s.length >> 1]
+      : (s[s.length / 2 - 1] + s[s.length / 2]) / 2
+    : NaN;
+};
+function line(name: string, t: Tally): string {
+  const done = t.tp + t.sl;
+  return `${name.padEnd(8)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}`;
+}
 
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
-  const total = { decisions: 0, tradable: 0, stale: 0, small: 0, tp: 0, sl: 0, open: 0, noRisk: 0, sumR: 0 };
+  const totals = new Map(VARIANTS.map((v) => [v.name, empty()]));
   try {
     for (const symbol of symbols) {
-      const liqCol = db.collection("liq_raw_events"), oiCol = db.collection("oi_second_observations");
+      const liqCol = db.collection("liq_raw_events"),
+        oiCol = db.collection("oi_second_observations");
       const [firstLiq, lastLiq, firstOi, lastOi] = await Promise.all([
-        liqCol.findOne({ symbol }, { sort: { timestamp: 1 }, projection: { timestamp: 1 } }),
-        liqCol.findOne({ symbol }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
-        oiCol.findOne({ symbol }, { sort: { timestamp: 1 }, projection: { timestamp: 1 } }),
-        oiCol.findOne({ symbol }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
+        liqCol.findOne(
+          { symbol },
+          { sort: { timestamp: 1 }, projection: { timestamp: 1 } },
+        ),
+        liqCol.findOne(
+          { symbol },
+          { sort: { timestamp: -1 }, projection: { timestamp: 1 } },
+        ),
+        oiCol.findOne(
+          { symbol },
+          { sort: { timestamp: 1 }, projection: { timestamp: 1 } },
+        ),
+        oiCol.findOne(
+          { symbol },
+          { sort: { timestamp: -1 }, projection: { timestamp: 1 } },
+        ),
       ]);
-      if (!firstLiq || !lastLiq || !firstOi || !lastOi) { console.log(`\n${symbol}: no data`); continue; }
+      if (!firstLiq || !lastLiq || !firstOi || !lastOi) {
+        console.log(`\n${symbol}: no data`);
+        continue;
+      }
       const from = Math.max(time(firstLiq.timestamp), time(firstOi.timestamp));
       const until = Math.min(time(lastLiq.timestamp), time(lastOi.timestamp));
-      const liqRows = await liqCol.find({ symbol, victim: { $in: ["LONG", "SHORT"] }, timestamp: { $gte: from, $lte: until } })
-        .project({ timestamp: 1, victim: 1, quoteQty: 1 }).sort({ timestamp: 1 }).toArray();
-      const oiRows = await oiCol.find({ symbol, timestamp: { $gte: new Date(from), $lte: new Date(until) } })
-        .project({ timestamp: 1, oiUpdatedAt: 1, openInterest: 1, price: 1 }).sort({ timestamp: 1 }).toArray();
-      const liq = liqRows.map((x) => ({ ts: time(x.timestamp), victim: x.victim as Victim, usd: Number(x.quoteQty) }));
-      const oi = oiRows.map((x) => ({ ts: time(x.timestamp), updated: time(x.oiUpdatedAt), oi: Number(x.openInterest), price: Number(x.price) }));
-      const started = Date.now();
-      const { decisions, trades, offlineSelected } = replaySymbol(symbol, liq, oi, from, until, RR);
-      const stats = { tp: 0, sl: 0, open: 0, noRisk: 0, sumR: 0 };
-      console.log(`\n===== ${symbol}  ${stamp(from)} -> ${stamp(until)}  decisions=${decisions.length} =====`);
-      const reasons: Record<string, number> = {};
-      for (const d of decisions) reasons[d.reason] = (reasons[d.reason] ?? 0) + 1;
-      console.log(`reasons: ${JSON.stringify(reasons)}`);
-      console.log("SIGNAL (UTC)       SIDE   EPISODE START     CONFIRM            ENTRY          SL             TP             RESULT  MIN   R");
-      for (const { decision: d, trade: t } of trades) {
-        if (t.result === "TP") stats.tp++; else if (t.result === "SL") stats.sl++; else if (t.result === "OPEN") stats.open++; else stats.noRisk++;
-        stats.sumR += t.r;
-        console.log(`${stamp(d.evaluatedAt)}  ${(d.tradeSide === "LONG" ? "BUY" : "SELL").padEnd(5)}  ${stamp(d.episode.start)}  ${stamp(d.episode.confirmTs)}  ${String(t.entry ?? "-").padEnd(13)}  ${String(t.sl ?? "-").padEnd(13)}  ${String(t.tp?.toPrecision(8) ?? "-").padEnd(13)}  ${t.result.padEnd(6)}  ${String(t.minutes ?? "-").padStart(4)}  ${t.r}`);
-      }
-      const done = stats.tp + stats.sl;
-      console.log(`trades=${done} TP=${stats.tp} SL=${stats.sl} open=${stats.open} noRisk=${stats.noRisk} win=${done ? (100 * stats.tp / done).toFixed(1) : "n/a"}% sumR=${stats.sumR.toFixed(1)}`);
-      const tradedStarts = new Set(decisions.filter((x) => x.tradable).map((x) => `${x.episode.victim}:${x.episode.start}`));
-      console.log(`replay took ${((Date.now() - started) / 1000).toFixed(0)}s`);
-      console.log(`research (look-ahead) selections: ${offlineSelected.length}` + (offlineSelected.length ? ` -> ${offlineSelected.map((o) => `${stamp(o.start)} ${o.victim}${tradedStarts.has(`${o.victim}:${o.start}`) ? " (also live)" : ""}`).join("; ")}` : ""));
+      const liq = (
+        await liqCol
+          .find({
+            symbol,
+            victim: { $in: ["LONG", "SHORT"] },
+            timestamp: { $gte: from, $lte: until },
+          })
+          .project({ timestamp: 1, victim: 1, quoteQty: 1 })
+          .sort({ timestamp: 1 })
+          .toArray()
+      ).map((x) => ({
+        ts: time(x.timestamp),
+        victim: x.victim as Victim,
+        usd: Number(x.quoteQty),
+      }));
+      const oi = (
+        await oiCol
+          .find({
+            symbol,
+            timestamp: { $gte: new Date(from), $lte: new Date(until) },
+          })
+          .project({ timestamp: 1, oiUpdatedAt: 1, openInterest: 1, price: 1 })
+          .sort({ timestamp: 1 })
+          .toArray()
+      ).map((x) => ({
+        ts: time(x.timestamp),
+        updated: time(x.oiUpdatedAt),
+        oi: Number(x.openInterest),
+        price: Number(x.price),
+      }));
 
-      total.decisions += decisions.length; total.tradable += decisions.filter((x) => x.tradable).length;
-      total.stale += reasons.STALE_CONFIRMATION ?? 0; total.small += reasons.REFERENCE_TOO_SMALL ?? 0;
-      total.tp += stats.tp; total.sl += stats.sl; total.open += stats.open; total.noRisk += stats.noRisk; total.sumR += stats.sumR;
+      console.log(`\n===== ${symbol}  ${stamp(from)} -> ${stamp(until)} =====`);
+      for (const v of VARIANTS) {
+        const started = Date.now();
+        const { decisions, trades } = replaySymbol(
+          symbol,
+          liq,
+          oi,
+          from,
+          until,
+          RR,
+          v.settings,
+        );
+        const t = empty();
+        t.decisions = decisions.length;
+        t.tradable = decisions.filter((d) => d.tradable).length;
+        for (const { decision: d, trade: x } of trades) {
+          if (x.result === "TP") t.tp++;
+          else if (x.result === "SL") t.sl++;
+          else if (x.result === "OPEN") t.open++;
+          else t.noRisk++;
+          t.r += x.r;
+          t.netR += x.netR ?? 0;
+          if (x.slPct !== undefined && (x.result === "TP" || x.result === "SL"))
+            t.slPcts.push(x.slPct);
+          if (DETAILS === v.name) {
+            console.log(
+              `   ${v.name} ${stamp(d.evaluatedAt)} ${d.tradeSide === "LONG" ? "BUY " : "SELL"} start ${stamp(d.episode.start)} entry ${x.entry ?? "-"} SL ${x.sl ?? "-"} (${x.slPct?.toFixed(2) ?? "-"}%) ${x.result} ${x.minutes ?? "-"}m netR ${x.netR?.toFixed(2) ?? "-"}`,
+            );
+          }
+        }
+        console.log(
+          `${line(v.name, t)}  (${((Date.now() - started) / 1000).toFixed(0)}s)`,
+        );
+        const tot = totals.get(v.name)!;
+        for (const k of [
+          "decisions",
+          "tradable",
+          "tp",
+          "sl",
+          "open",
+          "noRisk",
+          "r",
+          "netR",
+        ] as const)
+          tot[k] += t[k];
+        tot.slPcts.push(...t.slPcts);
+      }
     }
   } finally {
     await client.close();
   }
-  const done = total.tp + total.sl;
-  console.log(`\n===== TOTAL (${symbols.length} symbols, rr=${RR}, break-even win ${(100 / (1 + RR)).toFixed(1)}%) =====`);
-  console.log(`decisions=${total.decisions} tradable=${total.tradable} stale=${total.stale} referenceTooSmall=${total.small}`);
-  console.log(`trades=${done} TP=${total.tp} SL=${total.sl} open=${total.open} noRisk=${total.noRisk} win=${done ? (100 * total.tp / done).toFixed(1) : "n/a"}% sumR=${total.sumR.toFixed(1)} avgR=${done ? (total.sumR / done).toFixed(2) : "n/a"}`);
-  console.log("Note: the first ~day of each symbol has a small reference set (REFERENCE_TOO_SMALL); live warm-up loads history so it starts full.");
+  console.log(
+    `\n===== TOTAL (${symbols.length} symbols, rr=${RR}; gross break-even win ${(100 / (1 + RR)).toFixed(1)}%) =====`,
+  );
+  for (const v of VARIANTS) console.log(line(v.name, totals.get(v.name)!));
+  console.log(
+    "netR = after Binance fees. Fees weigh more when the SL is tight (see medianSL).",
+  );
 }
 
-main().catch((err) => { console.error(err); process.exitCode = 1; });
+main().catch((err) => {
+  console.error(err);
+  process.exitCode = 1;
+});

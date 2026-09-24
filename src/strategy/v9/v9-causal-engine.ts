@@ -3,6 +3,7 @@ import {
   type Bucket, type Episode, type EpisodeFeatures, type Regime, type SelectionReference, type SelectionResult, type Victim,
 } from "./v9-core";
 import { V9MinuteStore } from "./v9-minute-store";
+import { priceOiEpisodes } from "./v9-price-oi";
 
 /**
  * Causal (live) V9 engine for ONE symbol.
@@ -26,6 +27,14 @@ export interface V9EngineSettings {
   /** A confirmation discovered later than this after confirmTs (e.g. after
    *  a data gap or a regime re-fit) is recorded but never traded. */
   maxSignalAgeMs: number;
+  /** How the end of an episode is confirmed:
+   *   OPPOSITE_LIQ  an opposite-side liquidation part with an OI drop (research v9)
+   *   PRICE_OI      OI falling while price moves against the liquidation move
+   *                 (the other side is being closed) -- see v9-price-oi.ts */
+  confirmMode: "OPPOSITE_LIQ" | "PRICE_OI";
+  /** SL anchor: extreme price since the episode START, or since its PEAK
+   *  liquidation minute (ignores early small liquidations). */
+  slFrom: "START" | "PEAK";
 }
 
 export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
@@ -33,6 +42,8 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   referenceWindowMs: 3 * 24 * 3_600_000,
   minReferenceSamples: 5,
   maxSignalAgeMs: 2 * MINUTE_MS,
+  confirmMode: "OPPOSITE_LIQ",
+  slFrom: "START",
 };
 
 export interface V9Decision {
@@ -101,7 +112,9 @@ export class V9CausalEngine {
     const usable = usableRange(this.store.toBuckets(from, now));
     if (usable === null) return [];
     const regimes = changePoints(usable.map((b) => b.oi));
-    const episodes = mergeEpisodes(usable, subEpisodes(usable, regimes, now));
+    const episodes = this.settings.confirmMode === "PRICE_OI"
+      ? priceOiEpisodes(usable, regimes, now)
+      : mergeEpisodes(usable, subEpisodes(usable, regimes, now));
     this.lastSnapshot = this.snapshot(now, usable, regimes, episodes);
 
     const fresh = episodes
@@ -125,7 +138,7 @@ export class V9CausalEngine {
       const expectedMinutes = Math.floor(lastFull / MINUTE_MS) - Math.floor(e.start / MINUTE_MS) + 1;
       const missingMinutes = Math.max(0, expectedMinutes - this.store.minuteRange(e.start, lastFull).length);
       const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : "SELECTED";
-      const stopPrice = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", e.start, now);
+      const stopPrice = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", this.settings.slFrom === "PEAK" ? features.peakTs : e.start, now);
       decisions.push({
         symbol: this.symbol, episode: e, features, reference, selection,
         tradable: reason === "SELECTED", reason, evaluatedAt: now, missingMinutes,

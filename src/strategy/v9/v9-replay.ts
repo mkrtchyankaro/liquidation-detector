@@ -1,5 +1,6 @@
 import { analyzeWindow, buildReference, episodeFeatures, selectEpisode, type LiqEvent, type OiObservation, type Victim } from "./v9-core";
 import { DEFAULT_V9_ENGINE_SETTINGS, V9CausalEngine, type V9Decision, type V9EngineSettings } from "./v9-causal-engine";
+import { MAKER_FEE, TAKER_FEE } from "./v9-fees";
 
 /**
  * Pure causal replay of one symbol (no I/O): feeds rows to the LIVE engine
@@ -7,7 +8,7 @@ import { DEFAULT_V9_ENGINE_SETTINGS, V9CausalEngine, type V9Decision, type V9Eng
  * schedule), then simulates each tradable decision on the raw poll prices.
  */
 export interface Poll { ts: number; price: number }
-export interface SimulatedTrade { result: "TP" | "SL" | "OPEN" | "NO_RISK" | "NO_DATA"; r: number; entry?: number; sl?: number; tp?: number; minutes?: number }
+export interface SimulatedTrade { result: "TP" | "SL" | "OPEN" | "NO_RISK" | "NO_DATA"; r: number; netR?: number; slPct?: number; entry?: number; sl?: number; tp?: number; minutes?: number }
 export interface ReplayResult {
   decisions: V9Decision[];
   trades: Array<{ decision: V9Decision; trade: SimulatedTrade }>;
@@ -20,6 +21,13 @@ function lowerBound(arr: readonly Poll[], ts: number): number {
   return lo;
 }
 
+/** Fees in R for a trade with this entry and risk distance (Binance model:
+ *  taker entry; maker TP, taker SL). Notional/risk = entry / risk distance. */
+export function feesInR(entry: number, risk: number, exit: "TP" | "SL"): number {
+  const perNotional = exit === "TP" ? TAKER_FEE + MAKER_FEE : 2 * TAKER_FEE;
+  return (perNotional * entry) / risk;
+}
+
 export function simulateTrade(polls: readonly Poll[], d: Pick<V9Decision, "evaluatedAt" | "tradeSide" | "stopPrice">, rr: number): SimulatedTrade {
   const i0 = lowerBound(polls, d.evaluatedAt);
   if (i0 >= polls.length) return { result: "NO_DATA", r: 0 };
@@ -29,13 +37,14 @@ export function simulateTrade(polls: readonly Poll[], d: Pick<V9Decision, "evalu
   const risk = long ? entry - sl : sl - entry;
   if (!(risk > 0)) return { result: "NO_RISK", r: 0, entry, sl };
   const tp = long ? entry + rr * risk : entry - rr * risk;
+  const slPct = (risk / entry) * 100;
   for (let i = i0 + 1; i < polls.length; i++) {
     const p = polls[i].price;
     const minutes = Math.round((polls[i].ts - polls[i0].ts) / 60_000);
-    if (long ? p <= sl : p >= sl) return { result: "SL", r: -1, entry, sl, tp, minutes };
-    if (long ? p >= tp : p <= tp) return { result: "TP", r: rr, entry, sl, tp, minutes };
+    if (long ? p <= sl : p >= sl) return { result: "SL", r: -1, netR: -1 - feesInR(entry, risk, "SL"), slPct, entry, sl, tp, minutes };
+    if (long ? p >= tp : p <= tp) return { result: "TP", r: rr, netR: rr - feesInR(entry, risk, "TP"), slPct, entry, sl, tp, minutes };
   }
-  return { result: "OPEN", r: 0, entry, sl, tp };
+  return { result: "OPEN", r: 0, slPct, entry, sl, tp };
 }
 
 export function replaySymbol(symbol: string, liq: readonly LiqEvent[], oi: readonly OiObservation[], from: number, until: number, rr: number, settings: V9EngineSettings = DEFAULT_V9_ENGINE_SETTINGS): ReplayResult {
