@@ -33,7 +33,7 @@ const ALL: ZBar[] = Array.from({ length: 600 }, (_, m) => ({ ts: T0 + m * M, clo
 
 function research(bars: ZBar[], maxDelay = 40) {
   const noise = trailingOiNoise(bars);
-  return buildChains(buildWaves(bars, noise.map((n) => 4 * n)), bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noise, maxConfirmDelayMin: maxDelay });
+  return buildChains(buildWaves(bars, noise.map((n) => 4 * n)), bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noise, maxConfirmDelayMin: maxDelay, tpShare: 0.8 });
 }
 
 function fakeDb() {
@@ -65,7 +65,7 @@ async function run(): Promise<void> {
     const t = chain!.trade!;
     const upto = ALL.filter((b) => b.ts <= t.decidedTs); // live: data only up to the decision minute
     const f = fakeDb(), sent: string[] = [];
-    const svc = new ZzPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], maxDelayMin: 40 },
+    const svc = new ZzPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], maxDelayMin: 40, tpShare: 0.8 },
       () => [{ userId: "main", riskUsd: 10, telegram: { sendMessage: async (m: string) => { sent.push(m); } } }],
       async () => upto, f.getDb, () => t.decidedTs + M + 40_000);
     await svc.onMinute();
@@ -82,7 +82,7 @@ async function run(): Promise<void> {
 
   await scenario("old decisions are never replayed (e.g. after a restart hours later)", async () => {
     const f = fakeDb(), sent: string[] = [];
-    const svc = new ZzPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], maxDelayMin: 40 },
+    const svc = new ZzPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], maxDelayMin: 40, tpShare: 0.8 },
       () => [{ userId: "main", riskUsd: 10, telegram: { sendMessage: async (m: string) => { sent.push(m); } } }],
       async () => ALL, f.getDb, () => ALL[ALL.length - 1].ts + M + 40_000);
     await svc.onMinute();
@@ -94,7 +94,7 @@ async function run(): Promise<void> {
     const f = fakeDb(), sent: string[] = [];
     let bars = ALL.filter((b) => b.ts <= t.decidedTs);
     let now = t.decidedTs + M + 40_000;
-    const svc = new ZzPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], maxDelayMin: 40 },
+    const svc = new ZzPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], maxDelayMin: 40, tpShare: 0.8 },
       () => [{ userId: "main", riskUsd: 10, telegram: { sendMessage: async (m: string) => { sent.push(m); } } }],
       async () => bars, f.getDb, () => now);
     await svc.onMinute();

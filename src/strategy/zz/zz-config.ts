@@ -1,7 +1,7 @@
 /**
  * ZZ (OI zigzag) PAPER settings -- users.config.json, top-level "zz" block:
  *
- *   "zz": { "enabled": true, "users": ["main"], "symbols": [...], "maxDelayMin": 40 }
+ *   "zz": { "enabled": true, "users": ["main"], "symbols": [...], "maxDelayMin": 40, "tpShare": 1 }
  *
  * PAPER ONLY by design: there is no REAL option here at all -- this strategy
  * never places a Binance order. Absent block -> disabled. Malformed values
@@ -13,10 +13,12 @@ export interface ZzSettings {
   symbols: string[];
   /** skip when the OI top became known more than this many minutes after it */
   maxDelayMin: number;
+  /** TP at this share of the remaining expected move (reserve), default 1 = no reserve */
+  tpShare: number;
 }
 
 export function parseZzSettings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): ZzSettings {
-  const off: ZzSettings = { enabled: false, users: [], symbols: [], maxDelayMin: 40 };
+  const off: ZzSettings = { enabled: false, users: [], symbols: [], maxDelayMin: 40, tpShare: 1 };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"zz" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -35,5 +37,7 @@ export function parseZzSettings(raw: unknown, knownUserIds: readonly string[], c
   }
   const maxDelayMin = v.maxDelayMin === undefined ? 40 : v.maxDelayMin;
   if (typeof maxDelayMin !== "number" || !(maxDelayMin > 0) || maxDelayMin > 240) throw new Error(`"zz.maxDelayMin" must be a number between 1 and 240`);
-  return { enabled: true, users, symbols, maxDelayMin };
+  const tpShare = v.tpShare === undefined ? 1 : v.tpShare;
+  if (typeof tpShare !== "number" || !(tpShare >= 0.3) || tpShare > 1) throw new Error(`"zz.tpShare" must be a number between 0.3 and 1`);
+  return { enabled: true, users, symbols, maxDelayMin, tpShare };
 }

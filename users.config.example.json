@@ -2,7 +2,17 @@
   "realOrdersEnabled": false,
   "v9": {
     "enabled": true,
-    "symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "SUIUSDT"],
+    "symbols": [
+      "BTCUSDT",
+      "ETHUSDT",
+      "SOLUSDT",
+      "BNBUSDT",
+      "DOGEUSDT",
+      "ADAUSDT",
+      "LINKUSDT",
+      "AVAXUSDT",
+      "SUIUSDT"
+    ],
     "rr": 2.2,
     "minSlPct": 0.33,
     "userModes": { "main": "PAPER", "karo": "PAPER" }
@@ -12,14 +22,28 @@
     {
       "userId": "main",
       "enabled": true,
-      "telegram": { "enabled": true, "botToken": "123456:REPLACE_ME", "chatIds": ["REPLACE_ME"] },
+      "telegram": {
+        "enabled": true,
+        "botToken": "123456:REPLACE_ME",
+        "chatIds": ["REPLACE_ME"]
+      },
       "risk": { "riskUsd": 10 }
     },
     {
       "userId": "karo",
       "enabled": true,
-      "telegram": { "enabled": true, "botToken": "123456:REPLACE_ME", "chatIds": ["REPLACE_ME"] },
-      "binance": { "enabled": true, "apiKey": "REPLACE_ME", "apiSecret": "REPLACE_ME", "leverage": 20, "marginMode": "ISOLATED" },
+      "telegram": {
+        "enabled": true,
+        "botToken": "123456:REPLACE_ME",
+        "chatIds": ["REPLACE_ME"]
+      },
+      "binance": {
+        "enabled": true,
+        "apiKey": "REPLACE_ME",
+        "apiSecret": "REPLACE_ME",
+        "leverage": 20,
+        "marginMode": "ISOLATED"
+      },
       "risk": { "riskUsd": 1 }
     }
   ]

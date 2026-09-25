@@ -15,7 +15,7 @@ const log = childLogger({ mod: "zz-paper" });
  *   1. load the last 4 days of minute_bars
  *   2. run EXACTLY the research code (src/research/oi-zigzag.ts): OI waves
  *      with the no-look-ahead threshold, cleaning -> accumulation, A/B/C
- *      grade, late entry (TP = remaining expected move, SL = TP / 2.2)
+ *      grade, late entry (TP = remaining expected move x tpShare (default 1), SL = remaining / 2.2)
  *   3. an A/B decision made in the minute that just closed -> PAPER trade
  *      (or a short "episode seen, no trade" note with the reason)
  *   4. open PAPER trades: SL / TP checked on each new minute's high/low
@@ -122,7 +122,7 @@ export class ZzPaperService {
     if (bars.length < 300) return;
     const noise = trailingOiNoise(bars);
     const waves = buildWaves(bars, noise.map((n) => K * n));
-    const chains = buildChains(waves, bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noise, maxConfirmDelayMin: this.settings.maxDelayMin });
+    const chains = buildChains(waves, bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noise, maxConfirmDelayMin: this.settings.maxDelayMin, tpShare: this.settings.tpShare });
     const lastTs = bars[bars.length - 1].ts;
     const col = await this.col();
 
@@ -167,7 +167,7 @@ export function toDoc(symbol: string, c: Chain): ZzTradeDoc {
   return {
     signalId: `zz-${symbol}-${new Date(t.decidedTs).toISOString()}`, symbol, grade: c.quality.grade as "A" | "B",
     side: t.side, state: t.skipReason ? "SKIPPED" : "OPEN", skipReason: t.skipReason,
-    decidedTs: t.decidedTs, entry: t.entry, slPrice: t.slPrice, tpPrice: t.tpPrice, rr: DEFAULT_CHAIN_PARAMS.rr,
+    decidedTs: t.decidedTs, entry: t.entry, slPrice: t.slPrice, tpPrice: t.tpPrice, rr: t.slPrice !== null && t.tpPrice !== null ? Math.abs(t.tpPrice - t.entry) / Math.abs(t.entry - t.slPrice) : DEFAULT_CHAIN_PARAMS.rr,
     expectedPct: pct(c.expectedMove ?? 0), alreadyMovedPct: pct(t.alreadyMoved), remainingPct: pct(t.remaining),
     cleaning: { victim: w.kind === "SHORT_CLEANING" ? "SHORT" : "LONG", startTs: w.from.ts, endTs: w.to.ts, coins: w.coins, movePct: (100 * c.cleaningMove) / w.priceStart, liqUsd: w.kind === "SHORT_CLEANING" ? w.shortLiqUsd : w.longLiqUsd },
     accumulation: { startTs: a.from.ts, endTs: a.to.ts, coins: a.coins },

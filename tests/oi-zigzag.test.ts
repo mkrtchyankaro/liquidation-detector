@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/oi-zigzag.test.ts
  */
 import * as assert from "assert";
-import { atr15Before, buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, trailingOiNoise, type ZBar } from "../src/research/oi-zigzag";
+import { atr15Before, buildChains, calibrate, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, trailingOiNoise, type ZBar } from "../src/research/oi-zigzag";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -145,13 +145,20 @@ scenario("expected move is capped at the cleaning's own move", () => {
   assert.ok(c.expectedMove! <= c.cleaningMove);
 });
 
-scenario("TARGET exits (default): TP = remaining expected move, SL = TP / 2.2", () => {
-  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1 });
+scenario("TARGET exits (tpShare 1): TP = remaining expected move, SL = remaining / 2.2", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1, tpShare: 1 });
   const t = c.trade!;
   assert.ok(Math.abs(t.entry - t.tpPrice! - t.remaining) < 1e-9, "SELL: TP is `remaining` below the entry");
   assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
   assert.strictEqual(t.skipReason, null, "TP == remaining must never be skipped as 'remaining < TP' (float rounding)");
   assert.ok(t.result === "TP" || t.result === "SL" || t.result === "OPEN");
+});
+
+scenario("TARGET exits with a reserve: TP at 80% of the remaining move, SL unchanged", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1, tpShare: 0.8 });
+  const t = c.trade!;
+  assert.ok(Math.abs(t.entry - t.tpPrice! - 0.8 * t.remaining) < 1e-9);
+  assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
 });
 
 scenario("TARGET exits: real-world prices (float rounding) are not skipped", () => {
@@ -167,13 +174,20 @@ scenario("TARGET exits: skipped when SL would be tighter than the fee minimum", 
   assert.ok(c.trade!.skipReason!.includes("fees"));
 });
 
-scenario("TARGET exits (default): TP = remaining expected move, SL = TP / 2.2", () => {
-  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1 });
+scenario("TARGET exits (tpShare 1): TP = remaining expected move, SL = remaining / 2.2", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1, tpShare: 1 });
   const t = c.trade!;
   assert.ok(Math.abs(t.entry - t.tpPrice! - t.remaining) < 1e-9, "SELL: TP is `remaining` below the entry");
   assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
   assert.strictEqual(t.skipReason, null, "TP == remaining must never be skipped as 'remaining < TP' (float rounding)");
   assert.ok(t.result === "TP" || t.result === "SL" || t.result === "OPEN");
+});
+
+scenario("TARGET exits with a reserve: TP at 80% of the remaining move, SL unchanged", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1, tpShare: 0.8 });
+  const t = c.trade!;
+  assert.ok(Math.abs(t.entry - t.tpPrice! - 0.8 * t.remaining) < 1e-9);
+  assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
 });
 
 scenario("TARGET exits: real-world prices (float rounding) are not skipped", () => {
@@ -187,6 +201,29 @@ scenario("TARGET exits: real-world prices (float rounding) are not skipped", () 
 scenario("TARGET exits: skipped when SL would be tighter than the fee minimum", () => {
   const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.5 });
   assert.ok(c.trade!.skipReason!.includes("fees"));
+});
+
+scenario("CALIBRATED depth: median ATR move per 1% OI over the last 24h of COMPLETED waves only", () => {
+  const flat: ZBar[] = Array.from({ length: 200 }, (_, m) => ({ ts: T0 + m * M, close: 100, high: 100, low: 100, oi: 1000, longLiq: 0, shortLiq: 0 }));
+  const pv = (idx: number, conf: number, oi: number) => ({ idx, ts: T0 + idx * M, oi, kind: "LOW" as const, confirmedIdx: conf, confirmedTs: T0 + conf * M });
+  const wave = (a: number, b: number, conf: number, oiPct: number, move: number) => ({
+    from: pv(a, a, 1000), to: pv(b, conf, 1000 * (1 + oiPct / 100)), kind: "OI_UP" as const, confirmed: true, minutes: b - a,
+    oiStart: 1000, oiEnd: 1000 * (1 + oiPct / 100), coins: 10 * oiPct, oiChangePct: oiPct,
+    priceStart: 100, priceEnd: 100 + move, priceLow: 100, priceHigh: 100 + move, longLiqUsd: 0, shortLiqUsd: 0,
+  });
+  // ATR fixed at 2 -> moves 2, 4, 6 for 1% OI -> 1, 2, 3 ATR per 1% -> median 2
+  const ws = [wave(10, 20, 25, 1, 2), wave(30, 40, 45, 1, 4), wave(50, 60, 65, 1, 6), wave(70, 80, 190, 1, 100)];
+  const c = calibrate(ws, flat, 100, () => 2, 3)!;
+  assert.strictEqual(c.waves, 3, "the 4th wave only became known at minute 190 -> excluded (no look-ahead)");
+  assert.strictEqual(c.atrPerOiPct, 2);
+  assert.strictEqual(calibrate(ws, flat, 100, () => 2, 4), null, "too few waves -> no calibration (falls back)");
+});
+
+scenario("CALIBRATED mode falls back to the cleaning's own depth when history is too short", () => {
+  const a = buildChains(buildWaves(bars, R), bars, { ...P, depthMode: "CLEANING" })[0];
+  const b = buildChains(buildWaves(bars, R), bars, { ...P, depthMode: "CALIBRATED", minCalibWaves: 50 })[0];
+  assert.strictEqual(b.calibration, null);
+  assert.strictEqual(a.expectedMove, b.expectedMove);
 });
 
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

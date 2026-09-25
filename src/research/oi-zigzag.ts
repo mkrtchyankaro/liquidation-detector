@@ -120,14 +120,17 @@ export interface Chain {
   /** price move per 1,000 coins closed */
   depthPer1k: number;
   expectedMove: number | null;
+  /** CALIBRATED mode: the coin's learned depth (ATR per 1% OI) and how many waves it came from */
+  calibration: { atrPerOiPct: number; waves: number } | null;
   /** resolution wave, measured from the accumulation's end price */
   actualUp: number | null; actualDown: number | null;
   trade: ChainTrade | null;
 }
 
 /** Stop / target:
- *   TARGET (default, Johnny): TP = the remaining expected move (expected
- *     minus what the price already did), SL = TP / rr. Skipped when that SL
+ *   TARGET (default, Johnny): TP = tpShare (default 100%) of the remaining expected
+ *     move (expected minus what the price already did) -- a reserve so a
+ *     move that falls just short still pays; SL = remaining / rr. Skipped when that SL
  *     would be closer than minSlPct (fees would eat it).
  *   STRUCTURE: SL just beyond the last extreme since the OI top
  *     (the swing the price made before turning) + atrBuffer x ATR(15m),
@@ -140,9 +143,20 @@ export interface ChainParams {
   noise15Pct: Threshold; horizonMin: number;
   slMode: "TARGET" | "STRUCTURE" | "PCT"; slPct: number; tpPct: number;
   rr: number; atrBuffer: number; minSlPct: number; maxConfirmDelayMin: number;
+  /** TARGET mode: TP is placed at this share of the remaining move (a reserve,
+   *  so a move that falls just short still pays); SL stays remaining / rr. */
+  tpShare: number;
+  /** How the expected move is estimated:
+   *   CLEANING   (default) depth = this cleaning's price move / coins it closed
+   *   CALIBRATED (Johnny's "ZZ-ATR" idea) depth learned from ALL waves of the
+   *              coin that completed in the last 24h: median(price move in ATR
+   *              per 1% OI change); expected = depth x accumulation OI% x ATR now.
+   *              Falls back to CLEANING with fewer than minCalibWaves waves. */
+  depthMode: "CLEANING" | "CALIBRATED";
+  minCalibWaves: number;
 }
 export const DEFAULT_CHAIN_PARAMS: Omit<ChainParams, "noise15Pct"> = {
-  horizonMin: 24 * 60, slMode: "TARGET", slPct: 0.3, tpPct: 0.7, rr: 2.2, atrBuffer: 0.25, minSlPct: 0.3, maxConfirmDelayMin: 20,
+  horizonMin: 24 * 60, slMode: "TARGET", slPct: 0.3, tpPct: 0.7, rr: 2.2, atrBuffer: 0.25, minSlPct: 0.3, maxConfirmDelayMin: 20, tpShare: 1, depthMode: "CLEANING", minCalibWaves: 8,
 };
 const TAKER = 0.05, MAKER = 0.02; // % of notional
 
@@ -194,6 +208,8 @@ function normalAt(t: Threshold, w: Wave): number {
  *  from the expected move; trade only if what remains >= the TP distance. */
 export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: ChainParams): Chain[] {
   const out: Chain[] = [];
+  const atrCache = new Map<number, number>();
+  const atrAt = (i: number): number => { if (!atrCache.has(i)) atrCache.set(i, atr15Before(bars, i)); return atrCache.get(i)!; };
   for (let k = 0; k < waves.length; k++) {
     const w = waves[k];
     if (w.kind !== "LONG_CLEANING" && w.kind !== "SHORT_CLEANING") continue;
@@ -201,17 +217,43 @@ export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: Ch
     const depthPer1k = w.coins > 0 ? cleaningMove / (w.coins / 1000) : NaN;
     const acc = waves[k + 1] ?? null;
     const res = waves[k + 2] ?? null;
-    const expectedMove = acc ? Math.min(cleaningMove, depthPer1k * (acc.coins / 1000)) : null;
+    let expectedMove: number | null = acc ? Math.min(cleaningMove, depthPer1k * (acc.coins / 1000)) : null;
+    let calib: Chain["calibration"] = null;
+    if (acc && p.depthMode === "CALIBRATED") {
+      calib = calibrate(waves, bars, acc.to.confirmedIdx, atrAt, p.minCalibWaves);
+      const atrNow = atrAt(acc.to.confirmedIdx + 1);
+      if (calib && atrNow > 0) expectedMove = Math.min(cleaningMove, calib.atrPerOiPct * Math.abs(acc.oiChangePct) * atrNow);
+    }
     const base = acc ? acc.priceEnd : NaN;
     out.push({
       cleaning: w, accumulation: acc, resolution: res, quality: quality(bars, w, cleaningMove, normalAt(p.noise15Pct, w)),
-      cleaningMove, depthPer1k, expectedMove,
+      cleaningMove, depthPer1k, expectedMove, calibration: calib,
       actualUp: res ? Math.max(0, res.priceHigh - base) : null,
       actualDown: res ? Math.max(0, base - res.priceLow) : null,
       trade: acc && acc.confirmed && expectedMove !== null ? lateEntry(bars, acc, expectedMove, p) : null,
     });
   }
   return out;
+}
+
+/** The coin's own "depth" from every wave that was COMPLETE (its end known)
+ *  by `decisionIdx` and ended in the 24h before it: price move (largest
+ *  excursion from the wave start, in ATR at the wave start) per 1% OI change.
+ *  Median, so one odd wave cannot dominate. No look-ahead. */
+export function calibrate(waves: readonly Wave[], bars: readonly ZBar[], decisionIdx: number, atrAt: (i: number) => number, minWaves: number): { atrPerOiPct: number; waves: number } | null {
+  const from = bars[decisionIdx].ts - 24 * 3_600_000;
+  const r: number[] = [];
+  for (const w of waves) {
+    if (!w.confirmed || w.to.confirmedIdx > decisionIdx || w.to.ts < from) continue;
+    const atr = atrAt(w.from.idx);
+    const oiPct = Math.abs(w.oiChangePct);
+    if (!(atr > 0) || !(oiPct > 0)) continue;
+    const move = Math.max(w.priceHigh - w.priceStart, w.priceStart - w.priceLow);
+    r.push(move / atr / oiPct);
+  }
+  if (r.length < minWaves) return null;
+  r.sort((a, b) => a - b);
+  return { atrPerOiPct: r[r.length >> 1], waves: r.length };
 }
 
 function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainParams): ChainTrade {
@@ -230,7 +272,7 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
     if (!(remaining > 0)) return { ...t, side, skipReason: "nothing left of the expected move" };
     const slDist = remaining / p.rr;
     if (slDist < entry * (p.minSlPct / 100)) return { ...t, side, skipReason: `SL would be ${((100 * slDist) / entry).toFixed(2)}% < ${p.minSlPct}% (fees)` };
-    tp = long ? entry + remaining : entry - remaining;
+    tp = long ? entry + p.tpShare * remaining : entry - p.tpShare * remaining;
     sl = long ? entry - slDist : entry + slDist;
   } else if (p.slMode === "PCT") {
     sl = long ? entry * (1 - p.slPct / 100) : entry * (1 + p.slPct / 100);

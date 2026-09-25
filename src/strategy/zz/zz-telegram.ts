@@ -31,9 +31,9 @@ export function formatZzEntry(t: ZzTradeDoc, riskUsd: number): string {
     `🆔 ${t.signalId}`,
     "",
     `Entry ${fmtPrice(t.entry)}`,
-    `TP ${fmtPrice(t.tpPrice)} (${t.side === "LONG" ? "+" : "-"}${t.remainingPct.toFixed(2)}%) ${fmtUsd(riskUsd * t.rr)}`,
+    `TP ${fmtPrice(t.tpPrice)} (${t.side === "LONG" ? "+" : "-"}${((100 * Math.abs(t.tpPrice! - t.entry)) / t.entry).toFixed(2)}%) ${fmtUsd(riskUsd * t.rr)}`,
     `SL ${fmtPrice(t.slPrice)} (${t.side === "LONG" ? "-" : "+"}${slPct.toFixed(2)}%) ${fmtUsd(-riskUsd)}`,
-    `Risk ${fmtUsd(riskUsd, false)} · RR ${t.rr} · Position ${fmtQty(qty)} ${t.symbol.replace("USDT", "")} (${fmtUsd(qty * t.entry, false)})`,
+    `Risk ${fmtUsd(riskUsd, false)} · RR ${t.rr.toFixed(2)} · Position ${fmtQty(qty)} ${t.symbol.replace("USDT", "")} (${fmtUsd(qty * t.entry, false)})`,
     "",
     ...story(t),
   ].join("\n");
