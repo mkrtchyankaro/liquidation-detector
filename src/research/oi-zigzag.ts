@@ -114,7 +114,25 @@ export interface ChainTrade {
   side: "LONG" | "SHORT" | null; skipReason: string | null;
   result: "TP" | "SL" | "OPEN" | null; netR: number | null; minutes: number | null;
   slPrice: number | null; tpPrice: number | null; exitTs: number | null; exitPrice: number | null;
+  /** minutes from the OI top (so far) to the decision -- how late we are */
+  lateMin: number;
+  /** expected move used for this decision (early modes: from the coins opened SO FAR) */
+  expected: number;
 }
+
+/** WHEN to enter after a cleaning (the waves themselves always use the full R):
+ *   TOP       (default, live) the accumulation top confirmed by an R pull-back
+ *   GIVEBACK  OI gave back `share` (e.g. 0.2) of its rise since the cleaning bottom
+ *   STALL     OI made no new high for `min` minutes
+ *   BREAKOUT  OI no new high for `stallMin` minutes AND the price closed
+ *             outside the accumulation zone (its low/high since the bottom)
+ *  Early modes look minute by minute from the moment the cleaning bottom is
+ *  known until the full-R top is confirmed, using only data up to that
+ *  minute; the first minute that meets the rule AND shows a direction
+ *  (price moved >= 0.05% from the OI top) is the decision. If nothing fires
+ *  before the R pull-back confirms the top, the normal TOP decision is used
+ *  -- so an early mode is never later than live. */
+export type EntryMode = { kind: "TOP" } | { kind: "GIVEBACK"; share: number } | { kind: "STALL"; min: number } | { kind: "BREAKOUT"; stallMin: number };
 
 export interface Chain {
   cleaning: Wave; accumulation: Wave | null; resolution: Wave | null;
@@ -158,6 +176,8 @@ export interface ChainParams {
    *              Falls back to CLEANING with fewer than minCalibWaves waves. */
   depthMode: "CLEANING" | "CALIBRATED";
   minCalibWaves: number;
+  /** when to enter (default TOP = live behaviour) */
+  entryMode?: EntryMode;
 }
 export const DEFAULT_CHAIN_PARAMS: Omit<ChainParams, "noise15Pct"> = {
   horizonMin: 24 * 60, slMode: "TARGET", slPct: 0.3, tpPct: 0.7, rr: 2.2, atrBuffer: 0.25, minSlPct: 0.3, maxConfirmDelayMin: 20, tpShare: 1, depthMode: "CLEANING", minCalibWaves: 8,
@@ -234,7 +254,9 @@ export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: Ch
       cleaningMove, depthPer1k, expectedMove, calibration: calib,
       actualUp: res ? Math.max(0, res.priceHigh - base) : null,
       actualDown: res ? Math.max(0, base - res.priceLow) : null,
-      trade: acc && acc.confirmed && expectedMove !== null ? lateEntry(bars, acc, expectedMove, p) : null,
+      trade: !acc || expectedMove === null ? null
+        : (p.entryMode?.kind ?? "TOP") === "TOP" ? (acc.confirmed ? lateEntry(bars, acc, expectedMove, p) : null)
+        : earlyEntry(bars, w, acc, cleaningMove, depthPer1k, p),
     });
   }
   return out;
@@ -276,14 +298,51 @@ export function calibrate(waves: readonly Wave[], bars: readonly ZBar[], decisio
 }
 
 function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainParams): ChainTrade {
-  const i0 = acc.to.confirmedIdx;
+  return entryAt(bars, acc.to.confirmedIdx, acc.to.idx, expected, p);
+}
+
+const MIN_DIRECTION = 0.0005; // price must have moved >= 0.05% from the OI top to show a direction
+
+/** Early entry modes (see EntryMode). No look-ahead: at minute i only bars <= i are used. */
+function earlyEntry(bars: readonly ZBar[], cleaning: Wave, acc: Wave, cleaningMove: number, depthPer1k: number, p: ChainParams): ChainTrade | null {
+  const mode = p.entryMode!;
+  const b0 = cleaning.to.idx, bottomOi = cleaning.to.oi;
+  const start = cleaning.to.confirmedIdx; // the cleaning bottom is known from here
+  const end = acc.confirmed ? acc.to.confirmedIdx : bars.length - 1;
+  let peak = bottomOi, peakIdx = b0;
+  let zLo = bars[b0].low, zHi = bars[b0].high;
+  for (let i = b0 + 1; i <= end; i++) {
+    const b = bars[i];
+    if (b.oi > peak) { peak = b.oi; peakIdx = i; }
+    if (i >= start && i > peakIdx) {
+      const rise = peak - bottomOi;
+      const stalled = i - peakIdx;
+      const fire = mode.kind === "GIVEBACK" ? rise > 0 && b.oi <= peak - mode.share * rise
+        : mode.kind === "STALL" ? stalled >= mode.min
+        : mode.kind === "BREAKOUT" ? stalled >= mode.stallMin && (b.close > zHi || b.close < zLo)
+        : false;
+      if (fire && Math.abs(b.close - bars[peakIdx].close) >= b.close * MIN_DIRECTION) {
+        const expected = Math.min(cleaningMove, depthPer1k * (rise / 1000));
+        return entryAt(bars, i, peakIdx, expected, p);
+      }
+    }
+    // the zone is updated AFTER the check: a breakout compares with the range known before this minute
+    zLo = Math.min(zLo, b.low); zHi = Math.max(zHi, b.high);
+  }
+  if (!acc.confirmed) return null; // still running, nothing yet
+  // no early signal: the normal decision when the R pull-back confirms the top (never LATER than live)
+  return lateEntry(bars, acc, Math.min(cleaningMove, depthPer1k * (acc.coins / 1000)), p);
+}
+
+/** Decision at bar i0; the OI top (so far) was at topIdx. */
+function entryAt(bars: readonly ZBar[], i0: number, topIdx: number, expected: number, p: ChainParams): ChainTrade {
   const entry = bars[i0].close;
-  const alreadyMoved = entry - acc.priceEnd;
+  const alreadyMoved = entry - bars[topIdx].close;
   const remaining = expected - Math.abs(alreadyMoved);
-  const t: ChainTrade = { decidedTs: bars[i0].ts, entry, alreadyMoved, remaining, side: null, skipReason: null, result: null, netR: null, minutes: null, slPrice: null, tpPrice: null, exitTs: null, exitPrice: null };
-  const delay = i0 - acc.to.idx;
+  const delay = i0 - topIdx;
+  const t: ChainTrade = { decidedTs: bars[i0].ts, entry, alreadyMoved, remaining, side: null, skipReason: null, result: null, netR: null, minutes: null, slPrice: null, tpPrice: null, exitTs: null, exitPrice: null, lateMin: delay, expected };
   if (delay > p.maxConfirmDelayMin) return { ...t, skipReason: `OI top known ${delay}m late` };
-  if (Math.abs(alreadyMoved) < entry * 0.0005) return { ...t, skipReason: "no direction yet" };
+  if (Math.abs(alreadyMoved) < entry * MIN_DIRECTION) return { ...t, skipReason: "no direction yet" };
   const long = alreadyMoved > 0;
   const side = long ? "LONG" : "SHORT";
   let sl: number, tp: number;
@@ -300,7 +359,7 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
   } else {
     // last extreme on the other side since the OI top, known at decision time
     let ext = long ? Infinity : -Infinity;
-    for (let i = acc.to.idx; i <= i0; i++) ext = long ? Math.min(ext, bars[i].low) : Math.max(ext, bars[i].high);
+    for (let i = topIdx; i <= i0; i++) ext = long ? Math.min(ext, bars[i].low) : Math.max(ext, bars[i].high);
     const atr = atr15Before(bars, i0 + 1);
     const buf = Number.isFinite(atr) ? p.atrBuffer * atr : 0;
     sl = long ? ext - buf : ext + buf;

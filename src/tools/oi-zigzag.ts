@@ -15,6 +15,12 @@
  *   --depth calibrated   expected move from the coin's last-24h waves in ATR
  *            (default: from this cleaning). The summary always shows BOTH.
  *   --grid   compare wave thresholds (k2/k3/k4/k6, P80/P90/P95, top/2) side by side
+ *   --timing compare WHEN to enter (same k waves): TOP (live), top/2, top/4,
+ *            give20/give30 (OI gave back 20/30% of its rise), stall3/5/10
+ *            (no new OI high for N min), break3/break5 (stall + price out of
+ *            the accumulation zone). Also shows how late we are (minutes after
+ *            the OI top, % of the expected move already gone).
+ *   --entry stall5   run the normal report with one of those entry modes
  *   --maxdelay 20   skip when the OI top became known more than 20 min after it
  *   late-entry test: at the moment the accumulation's end is
  *            KNOWN, the move already made shows the direction and is taken
@@ -27,7 +33,7 @@ import { writeFileSync } from "fs";
 import { MongoClient } from "mongodb";
 import { loadEnv } from "../config/env";
 import { MINUTE_BARS } from "../collector/minute-bars";
-import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, oneTradeAtATime, trailingOiNoise, type Chain, type Wave, type ZBar } from "../research/oi-zigzag";
+import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, oneTradeAtATime, trailingOiNoise, type Chain, type ChainParams, type EntryMode, type Wave, type ZBar } from "../research/oi-zigzag";
 import { zigzagChartHtml } from "../research/zigzag-chart";
 
 const arg = (name: string, fallback: string): string => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : fallback; };
@@ -51,12 +57,17 @@ async function main(): Promise<void> {
   const tpShare = Number(arg("tpshare", String(DEFAULT_CHAIN_PARAMS.tpShare)));
   const depthMode = (arg("depth", "cleaning").toUpperCase() === "CALIBRATED" ? "CALIBRATED" : "CLEANING") as "CLEANING" | "CALIBRATED";
   const otherMode = depthMode === "CLEANING" ? "CALIBRATED" : "CLEANING";
-  const exitParams = { slMode, slPct, tpPct, rr, atrBuffer, maxConfirmDelayMin, tpShare };
+  const entryMode = parseEntry(arg("entry", "top"));
+  const exitParams = { slMode, slPct, tpPct, rr, atrBuffer, maxConfirmDelayMin, tpShare, entryMode };
   const exitLabel = slMode === "PCT" ? `SL ${slPct}% / TP ${tpPct}%`
     : slMode === "STRUCTURE" ? `SL = last extreme + ${atrBuffer} ATR (min ${DEFAULT_CHAIN_PARAMS.minSlPct}%), TP = ${rr}R`
     : `TP = ${Math.round(tpShare * 100)}% of the remaining expected move, SL = remaining / ${rr} (skip if SL < ${DEFAULT_CHAIN_PARAMS.minSlPct}%)`;
   const client = new MongoClient(env.mongoUri);
   await client.connect();
+  if (process.argv.includes("--timing")) {
+    try { await timing(client, env.mongoDb, symbols, days, k, { ...DEFAULT_CHAIN_PARAMS, ...exitParams }); } finally { await client.close(); }
+    return;
+  }
   if (process.argv.includes("--grid")) {
     try { await grid(client, env.mongoDb, symbols, days, { ...DEFAULT_CHAIN_PARAMS, ...exitParams }); } finally { await client.close(); }
     return;
@@ -141,11 +152,11 @@ function printChain(c: Chain, coin: string): void {
 function tradeTable(symbol: string, chains: Chain[]): void {
   const rows = chains.filter((c) => c.trade);
   console.log(`\n-- ${symbol} TRADES (late entry when the OI top became known) --`);
-  console.log("GR SIDE  CLEANING (start -> OI bottom)   ENTRY time    price       SL (dist)              TP (dist)              RESULT  EXIT time     held   netR");
+  console.log("GR SIDE  CLEANING (start -> OI bottom)   ENTRY time (after OI top)  price       SL (dist)              TP (dist)              RESULT  EXIT time     held   netR");
   for (const c of rows) {
     const t = c.trade!, w = c.cleaning;
     const dist = (p: number): string => `${((100 * Math.abs(p - t.entry)) / t.entry).toFixed(2)}%`;
-    const head = `${c.quality.grade}  ${(t.side === "LONG" ? "BUY " : t.side === "SHORT" ? "SELL" : "  - ").padEnd(4)}  ${stamp(w.from.ts)} -> ${stamp(w.to.ts).slice(6)}      ${stamp(t.decidedTs)}  ${px(t.entry).padEnd(10)}`;
+    const head = `${c.quality.grade}  ${(t.side === "LONG" ? "BUY " : t.side === "SHORT" ? "SELL" : "  - ").padEnd(4)}  ${stamp(w.from.ts)} -> ${stamp(w.to.ts).slice(6)}      ${stamp(t.decidedTs)} ${`+${t.lateMin}m`.padStart(5)}  ${px(t.entry).padEnd(10)}`;
     if (t.skipReason) { console.log(`${head}  no trade: ${t.skipReason} (already moved ${dist(t.entry + t.alreadyMoved)}, remaining ${((100 * t.remaining) / t.entry).toFixed(2)}%)`); continue; }
     console.log(`${head}  ${`${px(t.slPrice!)} (${dist(t.slPrice!)})`.padEnd(21)}  ${`${px(t.tpPrice!)} (${dist(t.tpPrice!)})`.padEnd(21)}  ${t.result!.padEnd(6)}  ${t.exitTs ? stamp(t.exitTs) : "-".padEnd(11)}  ${(t.minutes !== null ? `${t.minutes}m` : "-").padStart(5)}  ${t.netR!.toFixed(2).padStart(5)}`);
   }
@@ -201,11 +212,72 @@ async function grid(client: MongoClient, dbName: string, symbols: string[], days
   console.log("kN = N x median 15-min OI move; Pxx = xx-th percentile; top/2 = accumulation top confirmed at half R. All from the 2 days BEFORE each minute (no look-ahead).");
 }
 
+/** "top" | "give20" | "stall5" | "break5" -> EntryMode */
+function parseEntry(name: string): EntryMode {
+  const m = /^(top|give|stall|break)(\d*)$/i.exec(name.trim());
+  if (!m) throw new Error(`--entry ${name}: use top, give20, stall5 or break5`);
+  const n = Number(m[2] || "5");
+  const kind = m[1].toLowerCase();
+  return kind === "give" ? { kind: "GIVEBACK", share: n / 100 } : kind === "stall" ? { kind: "STALL", min: n } : kind === "break" ? { kind: "BREAKOUT", stallMin: n } : { kind: "TOP" };
+}
+
+/** --timing: SAME waves (k x median), different moments to enter. */
+async function timing(client: MongoClient, dbName: string, symbols: string[], days: number, k: number, base: Omit<ChainParams, "noise15Pct">): Promise<void> {
+  const variants: Array<{ name: string; top: number; mode: EntryMode }> = [
+    { name: "TOP (live)", top: 1, mode: { kind: "TOP" } },
+    { name: "top/2", top: 0.5, mode: { kind: "TOP" } },
+    { name: "top/4", top: 0.25, mode: { kind: "TOP" } },
+    ...["give20", "give30", "stall3", "stall5", "stall10", "break3", "break5"].map((n) => ({ name: n, top: 1, mode: parseEntry(n) })),
+  ];
+  type Row = { trades: number; tp: number; sl: number; open: number; net: number; late: number[]; gone: number[]; skips: Map<string, number>; perCoin: Map<string, number> };
+  const rows = new Map(variants.map((v) => [v.name, { trades: 0, tp: 0, sl: 0, open: 0, net: 0, late: [], gone: [], skips: new Map(), perCoin: new Map() } as Row]));
+  const col = client.db(dbName).collection(MINUTE_BARS);
+  for (const symbol of symbols) {
+    const docs = await col.find({ symbol, ts: { $gte: new Date(Date.now() - days * 86_400_000 - 24 * 3_600_000) } }).sort({ ts: 1 }).toArray();
+    const bars = dense(docs.map((r) => ({ ts: new Date(r.ts).getTime(), high: r.high, low: r.low, close: r.close, oi: r.oiLast, longLiq: r.longLiqUsd ?? 0, shortLiq: r.shortLiqUsd ?? 0 })));
+    if (bars.length < 300) continue;
+    const noise = trailingOiNoise(bars);
+    const rArr = noise.map((n) => k * n);
+    const coin = symbol.replace("USDT", "");
+    for (const v of variants) {
+      const chains = oneTradeAtATime(buildChains(buildWaves(bars, rArr, v.top), bars, { ...base, noise15Pct: noise, entryMode: v.mode }));
+      const row = rows.get(v.name)!;
+      let coinNet = 0;
+      for (const c of chains) {
+        const t = c.trade;
+        if (!t || c.quality.grade === "C") continue;
+        row.late.push(t.lateMin);
+        if (t.expected > 0) row.gone.push((100 * Math.abs(t.alreadyMoved)) / t.expected);
+        if (t.skipReason) {
+          const key = t.skipReason.includes("fees") ? "SL<min" : t.skipReason.includes("late") ? "too late" : t.skipReason.includes("nothing left") || t.skipReason.includes("remaining") ? "move gone" : t.skipReason.includes("direction") ? "no dir" : t.skipReason.includes("another") ? "busy" : "other";
+          row.skips.set(key, (row.skips.get(key) ?? 0) + 1);
+          continue;
+        }
+        if (!t.result) continue;
+        row.trades++; row.net += t.netR ?? 0; coinNet += t.netR ?? 0;
+        if (t.result === "TP") row.tp++; else if (t.result === "SL") row.sl++; else row.open++;
+      }
+      row.perCoin.set(coin, coinNet);
+    }
+  }
+  const med = (v: number[]): string => { const s = [...v].sort((a, b) => a - b); return s.length ? s[s.length >> 1].toFixed(0) : "-"; };
+  const coinNames = symbols.map((s) => s.replace("USDT", ""));
+  console.log(`\n===== TIMING: when to enter -- k${k} waves, ${symbols.length} coins, ${days} days, A/B only =====`);
+  console.log(`VARIANT     trades  TP  SL  open  win%    netR  late(min, median)  gone(% of expected, median)  skipped                          | netR per coin: ${coinNames.join(" ")}`);
+  for (const v of variants) {
+    const r = rows.get(v.name)!;
+    const done = r.tp + r.sl;
+    const skips = [...r.skips.entries()].map(([k2, n]) => `${k2} ${n}`).join(", ") || "-";
+    console.log(`${v.name.padEnd(11)} ${String(r.trades).padStart(6)}  ${String(r.tp).padStart(2)}  ${String(r.sl).padStart(2)}  ${String(r.open).padStart(4)}  ${done ? ((100 * r.tp) / done).toFixed(0).padStart(3) : "n/a"}%  ${r.net.toFixed(2).padStart(6)}  ${med(r.late).padStart(10)}         ${med(r.gone).padStart(10)}%                 ${skips.padEnd(32)} | ${coinNames.map((c) => (r.perCoin.get(c) ?? 0).toFixed(1)).join(" ")}`);
+  }
+  console.log("late = minutes from the OI top to the decision; gone = price move already made / expected move. Early modes fall back to TOP when nothing fires first.");
+}
+
 function printTrade(c: Chain): void {
   const t = c.trade;
   if (!t) return;
   const pct = (m: number): string => `${((100 * m) / t.entry).toFixed(2)}%`;
-  const head = `   LATE ENTRY at ${stamp(t.decidedTs)} price ${px(t.entry)}: already moved ${t.alreadyMoved >= 0 ? "+" : "-"}${px(Math.abs(t.alreadyMoved))} (${pct(Math.abs(t.alreadyMoved))}) -> remaining ${px(t.remaining)} (${pct(t.remaining)})`;
+  const head = `   ENTRY at ${stamp(t.decidedTs)} (${t.lateMin}m after the OI top) price ${px(t.entry)}: already moved ${t.alreadyMoved >= 0 ? "+" : "-"}${px(Math.abs(t.alreadyMoved))} (${pct(Math.abs(t.alreadyMoved))}) -> remaining ${px(t.remaining)} (${pct(t.remaining)})`;
   if (t.skipReason) { console.log(`${head}  -> NO TRADE (${t.skipReason})`); return; }
   console.log(`${head}  -> ${t.side === "LONG" ? "BUY" : "SELL"}: ${t.result}${t.minutes !== null ? ` in ${t.minutes}m` : ""}  netR ${t.netR!.toFixed(2)}`);
 }

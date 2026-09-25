@@ -249,5 +249,55 @@ scenario("one trade per symbol at a time, like live: an A/B trade decided while 
   assert.strictEqual(out[1].trade!.skipReason, "another trade still open");
 });
 
+scenario("EARLY entry STALL 5: decides 5 min after the OI top (minute 65), before the R pull-back (70)", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, entryMode: { kind: "STALL", min: 5 } });
+  const t = c.trade!;
+  assert.strictEqual((t.decidedTs - T0) / M, 65);
+  assert.strictEqual(t.lateMin, 5);
+  assert.strictEqual(t.side, "SHORT");
+  assert.ok(Math.abs(t.expected - 37.5) < 1e-6, "expected from coins opened so far (1,500)");
+  assert.ok(Math.abs(t.alreadyMoved - -(50 * 5) / 30) < 1e-6);
+});
+
+scenario("EARLY entry GIVEBACK 20%: OI gave back 300 of its 1,500 rise -> minute 67", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, entryMode: { kind: "GIVEBACK", share: 0.2 } });
+  assert.strictEqual((c.trade!.decidedTs - T0) / M, 67);
+});
+
+scenario("EARLY entry BREAKOUT: fires when the price closes below the accumulation zone (2650) after a 5-min OI stall", () => {
+  const fast = bars.map((b, m) => (m > 60 && m <= 90 ? { ...b, close: 2680 - 8 * (m - 60), high: 2680 - 8 * (m - 60), low: 2680 - 8 * (m - 60) } : b));
+  const [c] = buildChains(buildWaves(fast, R), fast, { ...P, entryMode: { kind: "BREAKOUT", stallMin: 5 } });
+  assert.strictEqual((c.trade!.decidedTs - T0) / M, 65, "2640 < 2650 at minute 65");
+  assert.strictEqual(c.trade!.side, "SHORT");
+});
+
+scenario("EARLY entry BREAKOUT: no breakout before the R pull-back -> the normal TOP decision (never later than live)", () => {
+  const top = buildChains(buildWaves(bars, R), bars, P)[0].trade!;
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, entryMode: { kind: "BREAKOUT", stallMin: 5 } });
+  assert.deepStrictEqual(c.trade, top);
+});
+
+scenario("EARLY entry: default / TOP mode gives exactly the old decision", () => {
+  const a = buildChains(buildWaves(bars, R), bars, P)[0].trade!;
+  const b = buildChains(buildWaves(bars, R), bars, { ...P, entryMode: { kind: "TOP" } })[0].trade!;
+  assert.deepStrictEqual(a, b);
+  assert.strictEqual(a.lateMin, 10);
+});
+
+scenario("EARLY entry NO LOOK-AHEAD: same decision when data is cut right after the decision minute", () => {
+  for (const mode of [{ kind: "STALL" as const, min: 5 }, { kind: "GIVEBACK" as const, share: 0.2 }, { kind: "BREAKOUT" as const, stallMin: 5 }]) {
+    const full = buildChains(buildWaves(bars, R), bars, { ...P, entryMode: mode })[0].trade!;
+    const cut = bars.slice(0, (full.decidedTs - T0) / M + 1);
+    const t = buildChains(buildWaves(cut, R), cut, { ...P, entryMode: mode })[0].trade!;
+    assert.deepStrictEqual([t.decidedTs, t.entry, t.side, t.remaining, t.slPrice, t.tpPrice], [full.decidedTs, full.entry, full.side, full.remaining, full.slPrice, full.tpPrice], mode.kind);
+  }
+});
+
+scenario("EARLY entry: OI still rising -> no decision yet", () => {
+  const rising = bars.slice(0, 58);
+  const [c] = buildChains(buildWaves(rising, R), rising, { ...P, entryMode: { kind: "STALL", min: 5 } });
+  assert.strictEqual(c.trade, null);
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
