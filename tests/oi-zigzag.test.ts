@@ -34,7 +34,7 @@ const bars: ZBar[] = Array.from({ length: 100 }, (_, m) => ({
   longLiq: m >= 6 && m <= 18 && m % 3 === 0 ? 1_000_000 : 0, shortLiq: 0,
 }));
 const R = 0.4; // %
-const P = { ...DEFAULT_CHAIN_PARAMS, noise15Pct: 0.1 };
+const P = { ...DEFAULT_CHAIN_PARAMS, noise15Pct: 0.1, slMode: "PCT" as const, maxConfirmDelayMin: 60 };
 
 scenario("pivots at the real turns only; the +0.15% wiggle (< R) is noise", () => {
   const { pivots, lastExtreme } = oiPivots(bars, R);
@@ -119,6 +119,30 @@ scenario("NO LOOK-AHEAD: the coin's normal OI move at a minute ignores everythin
   const b = trailingOiNoise(wild);
   assert.deepStrictEqual(a.slice(0, 601), b.slice(0, 601));
   assert.ok(Number.isNaN(a[100]) && a[300] > 0, "no value before 4h of history");
+});
+
+scenario("STRUCTURE exits: SL beyond the last extreme since the OI top (+ ATR buffer), TP = 2.2R", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "STRUCTURE", atrBuffer: 0, minSlPct: 0.05, rr: 2.2 });
+  const t = c.trade!;
+  // SELL: highest high between the OI top (minute 60, price 2680) and the decision is 2680
+  assert.ok(Math.abs(t.slPrice! - 2680) < 1e-9, `SL ${t.slPrice}`);
+  const risk = t.slPrice! - t.entry;
+  assert.ok(Math.abs(t.entry - t.tpPrice! - 2.2 * risk) < 1e-9);
+});
+
+scenario("STRUCTURE exits: SL never closer than the minimum (fees)", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "STRUCTURE", atrBuffer: 0, minSlPct: 1.0, rr: 0.5 });
+  assert.ok(Math.abs(c.trade!.slPrice! - c.trade!.entry * 1.01) < 1e-6);
+});
+
+scenario("skip when the OI top became known too late", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, maxConfirmDelayMin: 5 });
+  assert.ok(c.trade!.skipReason!.includes("late"));
+});
+
+scenario("expected move is capped at the cleaning's own move", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, P);
+  assert.ok(c.expectedMove! <= c.cleaningMove);
 });
 
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

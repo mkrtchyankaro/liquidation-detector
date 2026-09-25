@@ -125,8 +125,22 @@ export interface Chain {
   trade: ChainTrade | null;
 }
 
-export interface ChainParams { noise15Pct: Threshold; slPct: number; tpPct: number; horizonMin: number }
-export const DEFAULT_CHAIN_PARAMS: Omit<ChainParams, "noise15Pct"> = { slPct: 0.3, tpPct: 0.7, horizonMin: 24 * 60 };
+/** Stop / target:
+ *   STRUCTURE (default): SL just beyond the last extreme since the OI top
+ *     (the swing the price made before turning) + atrBuffer x ATR(15m),
+ *     never closer than minSlPct (fees); TP = rr x that risk.
+ *   PCT: fixed slPct / tpPct.
+ *  maxConfirmDelayMin: skip when the OI top became known too long after it
+ *  happened (the move is gone). The expected move is capped at the
+ *  cleaning's own move (new positions > closed ones would give absurd targets). */
+export interface ChainParams {
+  noise15Pct: Threshold; horizonMin: number;
+  slMode: "STRUCTURE" | "PCT"; slPct: number; tpPct: number;
+  rr: number; atrBuffer: number; minSlPct: number; maxConfirmDelayMin: number;
+}
+export const DEFAULT_CHAIN_PARAMS: Omit<ChainParams, "noise15Pct"> = {
+  horizonMin: 24 * 60, slMode: "STRUCTURE", slPct: 0.3, tpPct: 0.7, rr: 2.2, atrBuffer: 0.25, minSlPct: 0.3, maxConfirmDelayMin: 20,
+};
 const TAKER = 0.05, MAKER = 0.02; // % of notional
 
 /** ATR of 14 fifteen-minute candles ending at bar index `end` (exclusive). */
@@ -177,7 +191,7 @@ export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: Ch
     const depthPer1k = w.coins > 0 ? cleaningMove / (w.coins / 1000) : NaN;
     const acc = waves[k + 1] ?? null;
     const res = waves[k + 2] ?? null;
-    const expectedMove = acc ? depthPer1k * (acc.coins / 1000) : null;
+    const expectedMove = acc ? Math.min(cleaningMove, depthPer1k * (acc.coins / 1000)) : null;
     const base = acc ? acc.priceEnd : NaN;
     out.push({
       cleaning: w, accumulation: acc, resolution: res, quality: quality(bars, w, cleaningMove, at(p.noise15Pct, w.from.idx)),
@@ -196,21 +210,37 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
   const alreadyMoved = entry - acc.priceEnd;
   const remaining = expected - Math.abs(alreadyMoved);
   const t: ChainTrade = { decidedTs: bars[i0].ts, entry, alreadyMoved, remaining, side: null, skipReason: null, result: null, netR: null, minutes: null, slPrice: null, tpPrice: null, exitTs: null, exitPrice: null };
+  const delay = i0 - acc.to.idx;
+  if (delay > p.maxConfirmDelayMin) return { ...t, skipReason: `OI top known ${delay}m late` };
   if (Math.abs(alreadyMoved) < entry * 0.0005) return { ...t, skipReason: "no direction yet" };
-  if (remaining < entry * (p.tpPct / 100)) return { ...t, side: alreadyMoved > 0 ? "LONG" : "SHORT", skipReason: "remaining < TP" };
   const long = alreadyMoved > 0;
-  const sl = long ? entry * (1 - p.slPct / 100) : entry * (1 + p.slPct / 100);
-  const tp = long ? entry * (1 + p.tpPct / 100) : entry * (1 - p.tpPct / 100);
-  const rr = p.tpPct / p.slPct;
   const side = long ? "LONG" : "SHORT";
+  let sl: number, tp: number;
+  if (p.slMode === "PCT") {
+    sl = long ? entry * (1 - p.slPct / 100) : entry * (1 + p.slPct / 100);
+    tp = long ? entry * (1 + p.tpPct / 100) : entry * (1 - p.tpPct / 100);
+  } else {
+    // last extreme on the other side since the OI top, known at decision time
+    let ext = long ? Infinity : -Infinity;
+    for (let i = acc.to.idx; i <= i0; i++) ext = long ? Math.min(ext, bars[i].low) : Math.max(ext, bars[i].high);
+    const atr = atr15Before(bars, i0 + 1);
+    const buf = Number.isFinite(atr) ? p.atrBuffer * atr : 0;
+    sl = long ? ext - buf : ext + buf;
+    const minDist = entry * (p.minSlPct / 100);
+    if (Math.abs(entry - sl) < minDist) sl = long ? entry - minDist : entry + minDist;
+    const risk = Math.abs(entry - sl);
+    tp = long ? entry + p.rr * risk : entry - p.rr * risk;
+  }
+  const risk = Math.abs(entry - sl), slPct = (100 * risk) / entry, rr = Math.abs(tp - entry) / risk;
+  if (remaining < Math.abs(tp - entry)) return { ...t, side, slPrice: sl, tpPrice: tp, skipReason: "remaining < TP" };
   const at = { ...t, side, slPrice: sl, tpPrice: tp } as const;
   for (let i = i0 + 1; i < bars.length && i - i0 <= p.horizonMin; i++) {
     const b = bars[i];
     const hitSl = long ? b.low <= sl : b.high >= sl;
     const hitTp = long ? b.high >= tp : b.low <= tp;
     // SL first when both are touched in the same minute (conservative)
-    if (hitSl) return { ...at, result: "SL", netR: -1 - (2 * TAKER) / p.slPct, minutes: i - i0, exitTs: b.ts, exitPrice: sl };
-    if (hitTp) return { ...at, result: "TP", netR: rr - (TAKER + MAKER) / p.slPct, minutes: i - i0, exitTs: b.ts, exitPrice: tp };
+    if (hitSl) return { ...at, result: "SL", netR: -1 - (2 * TAKER) / slPct, minutes: i - i0, exitTs: b.ts, exitPrice: sl };
+    if (hitTp) return { ...at, result: "TP", netR: rr - (TAKER + MAKER) / slPct, minutes: i - i0, exitTs: b.ts, exitPrice: tp };
   }
   return { ...at, result: "OPEN", netR: 0, minutes: null };
 }
