@@ -88,8 +88,27 @@ export function buildWaves(bars: readonly ZBar[], rPct: number): Wave[] {
   return waves;
 }
 
+/** Quality of a cleaning wave, each measure relative to the coin's normal:
+ *  speed      OI drop per minute (over the active 10%-90% part of the drop)
+ *             / the coin's normal OI change per minute
+ *  forced     victim liquidations $ / OI drop $  (how much of it was forced)
+ *  pushAtr    price move / ATR(14 x 15-min candles) BEFORE the wave
+ *  grade      A: speed >= 10, forced >= 10%, push >= 3 ATR
+ *             B: speed >= 5,  forced >= 3%,  push >= 2 ATR      else C */
+export interface Quality { speed: number; forcedPct: number; pushAtr: number; atr: number; grade: "A" | "B" | "C" }
+
+export interface ChainTrade {
+  /** when the accumulation's end became KNOWN (OI dropped R from its top) */
+  decidedTs: number; entry: number;
+  /** price already moved from the accumulation end to the decision moment */
+  alreadyMoved: number; remaining: number;
+  side: "LONG" | "SHORT" | null; skipReason: string | null;
+  result: "TP" | "SL" | "OPEN" | null; netR: number | null; minutes: number | null;
+}
+
 export interface Chain {
   cleaning: Wave; accumulation: Wave | null; resolution: Wave | null;
+  quality: Quality;
   /** price move of the cleaning (to its extreme), absolute, in quote currency */
   cleaningMove: number;
   /** price move per 1,000 coins closed */
@@ -97,10 +116,53 @@ export interface Chain {
   expectedMove: number | null;
   /** resolution wave, measured from the accumulation's end price */
   actualUp: number | null; actualDown: number | null;
+  trade: ChainTrade | null;
 }
 
-/** Cleaning -> accumulation -> resolution sequences. */
-export function buildChains(waves: readonly Wave[]): Chain[] {
+export interface ChainParams { noise15Pct: number; slPct: number; tpPct: number; horizonMin: number }
+export const DEFAULT_CHAIN_PARAMS: Omit<ChainParams, "noise15Pct"> = { slPct: 0.3, tpPct: 0.7, horizonMin: 24 * 60 };
+const TAKER = 0.05, MAKER = 0.02; // % of notional
+
+/** ATR of 14 fifteen-minute candles ending at bar index `end` (exclusive). */
+export function atr15Before(bars: readonly ZBar[], end: number): number {
+  const trs: number[] = [];
+  let prevClose = NaN;
+  for (let c = end - 15 * 15; c + 15 <= end; c += 15) {
+    if (c < 0) continue;
+    let hi = -Infinity, lo = Infinity;
+    for (let i = c; i < c + 15; i++) { hi = Math.max(hi, bars[i].high); lo = Math.min(lo, bars[i].low); }
+    if (!Number.isFinite(hi) || !Number.isFinite(lo)) continue;
+    const tr = Number.isFinite(prevClose) ? Math.max(hi - lo, Math.abs(hi - prevClose), Math.abs(lo - prevClose)) : hi - lo;
+    if (Number.isFinite(prevClose)) trs.push(tr);
+    prevClose = bars[c + 14].close;
+  }
+  const last = trs.slice(-14);
+  return last.length ? last.reduce((a, b) => a + b, 0) / last.length : NaN;
+}
+
+export function quality(bars: readonly ZBar[], w: Wave, move: number, noise15Pct: number): Quality {
+  // Speed over the ACTIVE part (10% -> 90% of the OI drop): a wave's start
+  // pivot can sit on a long flat OI stretch before the real drop.
+  const drop = w.oiStart - w.oiEnd;
+  let i10 = w.from.idx, i90 = w.to.idx;
+  for (let i = w.from.idx; i <= w.to.idx; i++) if (bars[i].oi <= w.oiStart - 0.1 * drop) { i10 = i; break; }
+  for (let i = i10; i <= w.to.idx; i++) if (bars[i].oi <= w.oiStart - 0.9 * drop) { i90 = i; break; }
+  const perMin = (0.8 * Math.abs(w.oiChangePct)) / Math.max(1, i90 - i10);
+  const speed = perMin / (noise15Pct / 15);
+  const victim = w.kind === "SHORT_CLEANING" ? w.shortLiqUsd : w.longLiqUsd;
+  const oiUsd = w.coins * ((w.priceStart + w.priceEnd) / 2);
+  const forcedPct = oiUsd > 0 ? (100 * victim) / oiUsd : 0;
+  const atr = atr15Before(bars, i10);
+  const pushAtr = atr > 0 ? move / atr : NaN;
+  const grade = speed >= 10 && forcedPct >= 10 && pushAtr >= 3 ? "A" : speed >= 5 && forcedPct >= 3 && pushAtr >= 2 ? "B" : "C";
+  return { speed, forcedPct, pushAtr, atr, grade };
+}
+
+/** Cleaning -> accumulation -> resolution sequences, graded, with the
+ *  late-entry test: at the moment the accumulation's end is KNOWN, the price
+ *  has already moved some way -- that shows the direction and is subtracted
+ *  from the expected move; trade only if what remains >= the TP distance. */
+export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: ChainParams): Chain[] {
   const out: Chain[] = [];
   for (let k = 0; k < waves.length; k++) {
     const w = waves[k];
@@ -112,12 +174,36 @@ export function buildChains(waves: readonly Wave[]): Chain[] {
     const expectedMove = acc ? depthPer1k * (acc.coins / 1000) : null;
     const base = acc ? acc.priceEnd : NaN;
     out.push({
-      cleaning: w, accumulation: acc, resolution: res, cleaningMove, depthPer1k, expectedMove,
+      cleaning: w, accumulation: acc, resolution: res, quality: quality(bars, w, cleaningMove, p.noise15Pct),
+      cleaningMove, depthPer1k, expectedMove,
       actualUp: res ? Math.max(0, res.priceHigh - base) : null,
       actualDown: res ? Math.max(0, base - res.priceLow) : null,
+      trade: acc && acc.confirmed && expectedMove !== null ? lateEntry(bars, acc, expectedMove, p) : null,
     });
   }
   return out;
+}
+
+function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainParams): ChainTrade {
+  const i0 = acc.to.confirmedIdx;
+  const entry = bars[i0].close;
+  const alreadyMoved = entry - acc.priceEnd;
+  const remaining = expected - Math.abs(alreadyMoved);
+  const t: ChainTrade = { decidedTs: bars[i0].ts, entry, alreadyMoved, remaining, side: null, skipReason: null, result: null, netR: null, minutes: null };
+  if (Math.abs(alreadyMoved) < entry * 0.0005) return { ...t, skipReason: "no direction yet" };
+  if (remaining < entry * (p.tpPct / 100)) return { ...t, side: alreadyMoved > 0 ? "LONG" : "SHORT", skipReason: "remaining < TP" };
+  const long = alreadyMoved > 0;
+  const sl = long ? entry * (1 - p.slPct / 100) : entry * (1 + p.slPct / 100);
+  const tp = long ? entry * (1 + p.tpPct / 100) : entry * (1 - p.tpPct / 100);
+  const rr = p.tpPct / p.slPct;
+  for (let i = i0 + 1; i < bars.length && i - i0 <= p.horizonMin; i++) {
+    const b = bars[i];
+    const hitSl = long ? b.low <= sl : b.high >= sl;
+    const hitTp = long ? b.high >= tp : b.low <= tp;
+    if (hitSl) return { ...t, side: long ? "LONG" : "SHORT", result: "SL", netR: -1 - (2 * TAKER) / p.slPct, minutes: i - i0 };
+    if (hitTp) return { ...t, side: long ? "LONG" : "SHORT", result: "TP", netR: rr - (TAKER + MAKER) / p.slPct, minutes: i - i0 };
+  }
+  return { ...t, side: long ? "LONG" : "SHORT", result: "OPEN", netR: 0, minutes: null };
 }
 
 /** Coin's normal OI noise: median |OI change| over 15 minutes, in %. */

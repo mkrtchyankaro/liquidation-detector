@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/oi-zigzag.test.ts
  */
 import * as assert from "assert";
-import { buildChains, buildWaves, oiPivots, type ZBar } from "../src/research/oi-zigzag";
+import { atr15Before, buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, type ZBar } from "../src/research/oi-zigzag";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -34,6 +34,7 @@ const bars: ZBar[] = Array.from({ length: 100 }, (_, m) => ({
   longLiq: m >= 6 && m <= 18 && m % 3 === 0 ? 1_000_000 : 0, shortLiq: 0,
 }));
 const R = 0.4; // %
+const P = { ...DEFAULT_CHAIN_PARAMS, noise15Pct: 0.1 };
 
 scenario("pivots at the real turns only; the +0.15% wiggle (< R) is noise", () => {
   const { pivots, lastExtreme } = oiPivots(bars, R);
@@ -57,7 +58,7 @@ scenario("waves alternate and are labelled: LONG cleaning, OI up, then down (sti
 });
 
 scenario("chain in coins: depth = move / closed coins; expected = depth x opened coins", () => {
-  const [c] = buildChains(buildWaves(bars, R));
+  const [c] = buildChains(buildWaves(bars, R), bars, P);
   assert.ok(Math.abs(c.cleaningMove - 50) < 1e-6);
   assert.ok(Math.abs(c.depthPer1k - 25) < 1e-6, "50 / 2 thousand coins = 25 per 1,000");
   assert.ok(Math.abs(c.expectedMove! - 37.5) < 1e-6, "25 x 1.5 thousand");
@@ -71,6 +72,36 @@ scenario("OI falling WITHOUT liquidations is not a cleaning", () => {
 
 scenario("bigger R -> fewer waves (the 1.3% resolution wave survives, nothing smaller)", () => {
   assert.ok(buildWaves(bars, 1.4).length < buildWaves(bars, R).length);
+});
+
+scenario("late entry: direction = move already made when the OI top became known; remaining = expected - that", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, P);
+  const t = c.trade!;
+  assert.strictEqual((t.decidedTs - T0) / M, 70, "OI fell R from its minute-60 top at minute 70");
+  assert.ok(Math.abs(t.alreadyMoved - -(50 * 10) / 30) < 1e-6, "price 2680 -> 2663.3 by then");
+  assert.ok(Math.abs(t.remaining - (37.5 - 50 / 3)) < 1e-6);
+  assert.strictEqual(t.side, "SHORT");
+  assert.strictEqual(t.result, "TP");
+  assert.ok(Math.abs(t.netR! - (0.7 / 0.3 - 0.07 / 0.3)) < 1e-9, "RR 2.33 minus fees");
+});
+
+scenario("late entry skipped when what remains is smaller than the TP distance", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, tpPct: 1.0 });
+  assert.strictEqual(c.trade!.skipReason, "remaining < TP");
+  assert.strictEqual(c.trade!.result, null);
+});
+
+scenario("quality: fast, forced, big-push cleaning = grade A; same wave slow and unforced = C", () => {
+  // 4h of calm before (ATR ~ 2), then the flush
+  const calm: ZBar[] = Array.from({ length: 240 }, (_, m) => ({ ts: T0 - (240 - m) * M, close: 2700 + (m % 2), high: 2701, low: 2699, oi: 100_000, longLiq: 0, shortLiq: 0 }));
+  const all = [...calm, ...bars];
+  assert.ok(Math.abs(atr15Before(all, 240) - 2) < 0.5, `ATR ${atr15Before(all, 240)}`);
+  const w = buildWaves(all, R).find((x) => x.kind === "LONG_CLEANING")!;
+  const strong = quality(all, w, 50, 0.1);
+  assert.strictEqual(strong.grade, "A", JSON.stringify(strong));
+  const weak = quality(all, { ...w, longLiqUsd: 1_000 }, 50, 0.1); // not forced
+  assert.ok(Math.abs(strong.speed - (0.8 * 2) / 12 / (0.1 / 15)) < 1.5, `speed over the active part ${strong.speed}`);
+  assert.strictEqual(weak.grade, "C");
 });
 
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

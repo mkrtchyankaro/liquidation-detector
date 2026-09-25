@@ -8,6 +8,9 @@
  *
  *   --k 4    wave threshold R = k x the coin's median 15-minute OI change
  *            (bigger k = fewer, bigger waves; smaller k = more, noisier)
+ *   --sl 0.3 --tp 0.7   late-entry test: at the moment the accumulation's end is
+ *            KNOWN, the move already made shows the direction and is taken
+ *            off the expected move; trade only if what remains >= TP
  *   --html   also writes zigzag-<SYMBOL>.html: price + OI chart with the
  *            waves coloured (open it in a browser)
  */
@@ -16,7 +19,7 @@ import { writeFileSync } from "fs";
 import { MongoClient } from "mongodb";
 import { loadEnv } from "../config/env";
 import { MINUTE_BARS } from "../collector/minute-bars";
-import { buildChains, buildWaves, medianOi15mPct, type Chain, type Wave, type ZBar } from "../research/oi-zigzag";
+import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, medianOi15mPct, type Chain, type Wave, type ZBar } from "../research/oi-zigzag";
 import { zigzagChartHtml } from "../research/zigzag-chart";
 
 const arg = (name: string, fallback: string): string => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : fallback; };
@@ -32,19 +35,20 @@ async function main(): Promise<void> {
   const days = Number(arg("days", "2"));
   const k = Number(arg("k", "4"));
   const html = process.argv.includes("--html");
+  const slPct = Number(arg("sl", String(DEFAULT_CHAIN_PARAMS.slPct))), tpPct = Number(arg("tp", String(DEFAULT_CHAIN_PARAMS.tpPct)));
   const client = new MongoClient(env.mongoUri);
   await client.connect();
   const allChains: Chain[] = [];
   try {
     const col = client.db(env.mongoDb).collection(MINUTE_BARS);
     for (const symbol of symbols) {
-      const rows = await col.find({ symbol, ts: { $gte: new Date(Date.now() - days * 86_400_000) } }).sort({ ts: 1 }).toArray();
+      const rows = await col.find({ symbol, ts: { $gte: new Date(Date.now() - days * 86_400_000 - 4 * 3_600_000) } /* +4h: ATR before the first wave */ }).sort({ ts: 1 }).toArray();
       const bars = dense(rows.map((r) => ({ ts: new Date(r.ts).getTime(), high: r.high, low: r.low, close: r.close, oi: r.oiLast, longLiq: r.longLiqUsd ?? 0, shortLiq: r.shortLiqUsd ?? 0 })));
       if (bars.length < 120) { console.log(`\n${symbol}: not enough minute bars (${bars.length}) -- run minute-bars-backfill first`); continue; }
       const noise = medianOi15mPct(bars);
       const rPct = k * noise;
       const waves = buildWaves(bars, rPct);
-      const chains = buildChains(waves);
+      const chains = buildChains(waves, bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noise, slPct, tpPct });
       allChains.push(...chains);
       const coin = symbol.replace("USDT", "");
 
@@ -67,24 +71,47 @@ async function main(): Promise<void> {
   } finally {
     await client.close();
   }
-  const done = allChains.filter((c) => c.expectedMove !== null && c.actualUp !== null && c.resolution?.confirmed);
-  if (done.length) {
-    const ratios = done.map((c) => Math.max(c.actualUp!, c.actualDown!) / c.expectedMove!).sort((a, b) => a - b);
-    console.log(`\n===== ${done.length} complete sequences: biggest real move / expected move -> median ${ratios[ratios.length >> 1].toFixed(2)}  (1.00 = exactly as expected) =====`);
+  summary(allChains, slPct, tpPct);
+}
+
+function summary(all: Chain[], slPct: number, tpPct: number): void {
+  const med = (v: number[]): string => { const s = [...v].sort((a, b) => a - b); return s.length ? s[s.length >> 1].toFixed(2) : "n/a"; };
+  console.log(`\n===== SUMMARY by grade (A strongest) -- late entry SL ${slPct}% / TP ${tpPct}% =====`);
+  console.log("GRADE  CLEANINGS  real/expected (median; 1.00 = exact)   TRADES  TP  SL  open  win%    netR");
+  for (const g of ["A", "B", "C"] as const) {
+    const cs = all.filter((c) => c.quality.grade === g);
+    const done = cs.filter((c) => c.expectedMove && c.actualUp !== null && c.resolution?.confirmed);
+    const ratios = done.map((c) => Math.max(c.actualUp!, c.actualDown!) / c.expectedMove!);
+    const tr = cs.map((c) => c.trade).filter((t) => t && t.result);
+    const tp = tr.filter((t) => t!.result === "TP").length, sl = tr.filter((t) => t!.result === "SL").length, open = tr.filter((t) => t!.result === "OPEN").length;
+    const net = tr.reduce((a, t) => a + (t!.netR ?? 0), 0);
+    console.log(`  ${g}    ${String(cs.length).padStart(5)}      ${med(ratios).padStart(6)}  (n=${done.length})                    ${String(tr.length).padStart(4)}  ${String(tp).padStart(2)}  ${String(sl).padStart(2)}  ${String(open).padStart(3)}  ${tp + sl ? ((100 * tp) / (tp + sl)).toFixed(0).padStart(3) : "n/a"}%  ${net.toFixed(2).padStart(6)}`);
   }
+  console.log(`netR after fees. Break-even win rate at RR ${(tpPct / slPct).toFixed(2)} before fees: ${(100 * slPct / (slPct + tpPct)).toFixed(0)}%. Tiny sample -- a direction to look, not proof.`);
 }
 
 function printChain(c: Chain, coin: string): void {
   const w = c.cleaning, a = c.accumulation, r = c.resolution;
   const pct = (m: number, base: number): string => `${((100 * m) / base).toFixed(2)}%`;
-  console.log(`\n${w.kind === "LONG_CLEANING" ? "LONG" : "SHORT"} cleaning ${stamp(w.from.ts)} -> ${stamp(w.to.ts)} (${w.minutes}m, OI bottom seen at ${stamp(w.to.confirmedTs)})`);
+  const q = c.quality;
+  console.log(`\n[${q.grade}] ${w.kind === "LONG_CLEANING" ? "LONG" : "SHORT"} cleaning ${stamp(w.from.ts)} -> ${stamp(w.to.ts)} (${w.minutes}m, OI bottom seen at ${stamp(w.to.confirmedTs)})   speed ${q.speed.toFixed(1)}x normal  forced ${q.forcedPct.toFixed(1)}%  push ${Number.isFinite(q.pushAtr) ? q.pushAtr.toFixed(1) : "n/a"} ATR`);
   console.log(`   closed ${coins(w.coins)} ${coin}   price moved ${px(c.cleaningMove)} (${pct(c.cleaningMove, w.priceStart)})   liq ${usd(w.longLiqUsd)} long / ${usd(w.shortLiqUsd)} short`);
   console.log(`   depth: ${px(c.depthPer1k)} per 1,000 ${coin}`);
   if (!a) { console.log("   accumulation: not yet"); return; }
   console.log(`   accumulation ${stamp(a.from.ts)} -> ${stamp(a.to.ts)} (${a.minutes}m${a.confirmed ? `, OI top seen at ${stamp(a.to.confirmedTs)}` : ", still running"})  opened ${coins(a.coins)} ${coin}  zone ${px(a.priceLow)} - ${px(a.priceHigh)}  ends at ${px(a.priceEnd)}`);
   console.log(`   EXPECTED move: ${px(c.expectedMove!)} (${pct(c.expectedMove!, a.priceEnd)})`);
-  if (!r) { console.log("   resolution: not yet"); return; }
+  if (!r) { printTrade(c); console.log("   resolution: not yet"); return; }
+  printTrade(c);
   console.log(`   REAL next wave ${stamp(r.from.ts)} -> ${stamp(r.to.ts)} (${r.minutes}m${r.confirmed ? "" : ", still running"}): up ${px(c.actualUp!)} (${pct(c.actualUp!, a.priceEnd)}) / down ${px(c.actualDown!)} (${pct(c.actualDown!, a.priceEnd)})  -> closed ${coins(r.coins)} ${coin}`);
+}
+
+function printTrade(c: Chain): void {
+  const t = c.trade;
+  if (!t) return;
+  const pct = (m: number): string => `${((100 * m) / t.entry).toFixed(2)}%`;
+  const head = `   LATE ENTRY at ${stamp(t.decidedTs)} price ${px(t.entry)}: already moved ${t.alreadyMoved >= 0 ? "+" : "-"}${px(Math.abs(t.alreadyMoved))} (${pct(Math.abs(t.alreadyMoved))}) -> remaining ${px(t.remaining)} (${pct(t.remaining)})`;
+  if (t.skipReason) { console.log(`${head}  -> NO TRADE (${t.skipReason})`); return; }
+  console.log(`${head}  -> ${t.side === "LONG" ? "BUY" : "SELL"}: ${t.result}${t.minutes !== null ? ` in ${t.minutes}m` : ""}  netR ${t.netR!.toFixed(2)}`);
 }
 
 function dense(rows: Array<{ ts: number; high: number | null; low: number | null; close: number | null; oi: number | null; longLiq: number; shortLiq: number }>): ZBar[] {
