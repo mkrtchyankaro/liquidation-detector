@@ -52,5 +52,9 @@ export function formatZzClose(t: ZzTradeDoc, riskUsd: number): string {
 }
 
 export function formatZzSkip(t: ZzTradeDoc): string {
-  return [`🔸 ZZ ${t.symbol} [${t.grade}] episode, NO TRADE`, `Reason: ${t.skipReason}`, ...story(t)].join("\n");
+  const pct = (p: number): string => `${p >= t.entry ? "+" : "-"}${((100 * Math.abs(p - t.entry)) / t.entry).toFixed(2)}%`;
+  const wouldBe = t.side && t.slPrice !== null && t.tpPrice !== null
+    ? [`Would have been: ${t.side === "LONG" ? "BUY" : "SELL"} at ${fmtPrice(t.entry)} · TP ${fmtPrice(t.tpPrice)} (${pct(t.tpPrice)}) · SL ${fmtPrice(t.slPrice)} (${pct(t.slPrice)})`]
+    : t.side ? [`Direction: ${t.side === "LONG" ? "BUY" : "SELL"} · price ${fmtPrice(t.entry)}`] : [`Price ${fmtPrice(t.entry)}`];
+  return [`🔸 ZZ ${t.symbol} [${t.grade}] episode, NO TRADE`, `Reason: ${t.skipReason}`, ...wouldBe, ...story(t)].join("\n");
 }

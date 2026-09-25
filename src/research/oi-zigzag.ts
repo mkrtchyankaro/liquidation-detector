@@ -271,9 +271,10 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
   if (p.slMode === "TARGET") {
     if (!(remaining > 0)) return { ...t, side, skipReason: "nothing left of the expected move" };
     const slDist = remaining / p.rr;
-    if (slDist < entry * (p.minSlPct / 100)) return { ...t, side, skipReason: `SL would be ${((100 * slDist) / entry).toFixed(2)}% < ${p.minSlPct}% (fees)` };
     tp = long ? entry + p.tpShare * remaining : entry - p.tpShare * remaining;
     sl = long ? entry - slDist : entry + slDist;
+    // skipped, but the would-be levels are kept so the message can show them
+    if (slDist < entry * (p.minSlPct / 100)) return { ...t, side, slPrice: sl, tpPrice: tp, skipReason: `SL would be ${((100 * slDist) / entry).toFixed(3)}% < ${p.minSlPct}% (fees)` };
   } else if (p.slMode === "PCT") {
     sl = long ? entry * (1 - p.slPct / 100) : entry * (1 + p.slPct / 100);
     tp = long ? entry * (1 + p.tpPct / 100) : entry * (1 - p.tpPct / 100);

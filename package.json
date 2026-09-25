@@ -15,7 +15,8 @@
     "sl-sweep": "tsx src/tools/v9-sl-sweep.ts",
     "minute-bars-backfill": "tsx src/tools/minute-bars-backfill.ts",
     "liq-episodes": "tsx src/tools/liq-episodes.ts",
-    "oi-zigzag": "tsx src/tools/oi-zigzag.ts"
+    "oi-zigzag": "tsx src/tools/oi-zigzag.ts",
+    "zz-show": "tsx src/tools/zz-show.ts"
   },
   "engines": {
     "node": ">=18.17"
