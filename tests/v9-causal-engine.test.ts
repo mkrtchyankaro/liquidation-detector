@@ -10,7 +10,7 @@
 import * as assert from "assert";
 import { buildBuckets, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
 import { V9MinuteStore } from "../src/strategy/v9/v9-minute-store";
-import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, sharpAccumulation } from "../src/strategy/v9/v9-causal-engine";
+import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, regrowShare, sharpAccumulation } from "../src/strategy/v9/v9-causal-engine";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -219,6 +219,19 @@ scenario("oiTurnTs: the highest-OI minute between the episode's last part and th
   const e = { eIdx: 3, confirmTs: 8 * 60_000 } as unknown as Parameters<typeof oiTurnTs>[1];
   assert.strictEqual(oiTurnTs(buckets, e), 5 * 60_000, "OI peaked at minute 5, then fell into the confirmation; minute 8 (after it) ignored");
   assert.strictEqual(oiTurnTs(buckets, { ...e, confirmTs: NaN }), null);
+});
+
+scenario("regrowShare: OI re-opened after the cleaning / coins the cleaning closed (no time window)", () => {
+  const b = (m: number, oi: number) => ({ ts: m * 60_000, long: 0, short: 0, count: 0, oi, price: 100, oiPoints: 1 });
+  // cleaning 100 -> 90 (10 closed), regrow to 95 at minute 6 (5 re-opened), confirming drop; minute 9 is after the confirmation
+  const buckets = [b(0, 100), b(1, 96), b(2, 92), b(3, 90), b(4, 92), b(5, 94), b(6, 95), b(7, 93), b(8, 91), b(9, 130)];
+  const e = { sIdx: 0, eIdx: 3, startOi: 100, minOi: 90, confirmTs: 8 * 60_000 } as unknown as Parameters<typeof regrowShare>[1];
+  assert.ok(Math.abs(regrowShare(buckets, e)! - 0.5) < 1e-9, String(regrowShare(buckets, e)));
+  // slow or fast does not matter -- only how much re-opened
+  const slow = [b(0, 100), b(1, 90), ...Array.from({ length: 50 }, (_, k) => b(2 + k, 90 + (5 * (k + 1)) / 50)), b(52, 91)];
+  const e2 = { ...e, eIdx: 2, confirmTs: 52 * 60_000 } as typeof e;
+  assert.ok(Math.abs(regrowShare(slow, e2)! - 0.5) < 1e-9);
+  assert.strictEqual(regrowShare(buckets, { ...e, confirmTs: NaN }), null);
 });
 
 scenario("sharpAccumulation: a fast, big OI rise after the cleaning passes P90; a slow drift of the same total does not", () => {
