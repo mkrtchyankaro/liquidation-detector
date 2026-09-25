@@ -11,7 +11,7 @@
 require("dotenv/config");
 const { MongoClient } = require("mongodb");
 
-const KEEP = new Set(["liq_raw_events", "oi_second_observations", "v9_decisions", "v9_trades", "v9_episode_timeline", "market_positioning_5m", "market_premium_1m", "minute_bars"]);
+const KEEP = new Set(["liq_raw_events", "oi_second_observations", "v9_decisions", "v9_trades", "v9_episode_timeline", "market_positioning_5m", "market_premium_1m", "minute_bars", "zz_paper_trades"]);
 const confirm = process.argv.includes("--confirm");
 
 (async () => {

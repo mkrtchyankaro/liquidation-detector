@@ -8,7 +8,7 @@
     "build": "tsc",
     "start": "node dist/main.js",
     "dev": "tsx src/main.ts",
-    "test": "tsx tests/v9-core-equivalence.test.ts && tsx tests/v9-causal-engine.test.ts && tsx tests/v9-replay.test.ts && tsx tests/v9-config.test.ts && tsx tests/v9-live-service.test.ts && tsx tests/v9-feed.test.ts && tsx tests/entry-sequence.test.ts && tsx tests/close-report.test.ts && tsx tests/users-config.test.ts && tsx tests/market-collector.test.ts && tsx tests/context-collector.test.ts && tsx tests/v9-signal-story.test.ts && tsx tests/v9-price-oi.test.ts && tsx tests/minute-bars.test.ts && tsx tests/liq-episodes.test.ts && tsx tests/oi-zigzag.test.ts",
+    "test": "tsx tests/v9-core-equivalence.test.ts && tsx tests/v9-causal-engine.test.ts && tsx tests/v9-replay.test.ts && tsx tests/v9-config.test.ts && tsx tests/v9-live-service.test.ts && tsx tests/v9-feed.test.ts && tsx tests/entry-sequence.test.ts && tsx tests/close-report.test.ts && tsx tests/users-config.test.ts && tsx tests/market-collector.test.ts && tsx tests/context-collector.test.ts && tsx tests/v9-signal-story.test.ts && tsx tests/v9-price-oi.test.ts && tsx tests/minute-bars.test.ts && tsx tests/liq-episodes.test.ts && tsx tests/oi-zigzag.test.ts && tsx tests/zz-paper.test.ts",
     "v9-replay": "tsx src/tools/v9-replay.ts",
     "test-live-entry": "tsx src/tools/test-live-entry.ts",
     "show-signal": "tsx src/tools/v9-show-signal.ts",

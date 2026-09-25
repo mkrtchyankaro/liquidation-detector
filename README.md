@@ -50,6 +50,16 @@ nothing except the seconds the collector is down; an episode with a whole
 minute of missing data is never traded (`DATA_GAP`). Already-traded episodes
 are restored from `v9_trades`.
 
+## ZZ (OI zigzag) -- PAPER only
+
+A second, separate strategy that only sends Telegram messages (never orders):
+OI is cut into waves; a fast, forced LONG/SHORT **cleaning** (grade A/B) followed
+by an **accumulation** gives an expected move (price move per coin closed x coins
+opened). When the accumulation ends (OI falls back), the move already made shows
+the direction; TP = the remaining expected move, SL = TP / 2.2. Same code as the
+research tool `oi-zigzag`. Enabled with `"zz": { "enabled": true, "users": ["main"] }`;
+decisions are stored in `zz_paper_trades`.
+
 ## Layout
 
 | Path | What |
@@ -57,6 +67,7 @@ are restored from `v9_trades`.
 | `src/main.ts` | wiring: config → collector → V9 service |
 | `src/collector/` | Binance data collection (market data + research context) |
 | `src/strategy/v9/` | V9 core (pure), causal engine, live service, feed, repository, Telegram text |
+| `src/strategy/zz/` | ZZ PAPER live service (Telegram only), config, messages |
 | `src/research/` | research-only logic (liquidation-episode definition), never used by trading |
 | `src/execution/` | Binance entry sequence, close report, account readiness |
 | `src/config/` | `.env` and `users.config.json` loading/validation |

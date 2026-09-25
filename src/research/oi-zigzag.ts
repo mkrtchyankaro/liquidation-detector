@@ -181,6 +181,13 @@ export function quality(bars: readonly ZBar[], w: Wave, move: number, noise15Pct
   return { speed, forcedPct, pushAtr, atr, grade };
 }
 
+/** The coin's normal OI move BEFORE the wave; if the wave starts before
+ *  enough history exists, the first value known by the wave's end. */
+function normalAt(t: Threshold, w: Wave): number {
+  const v = at(t, w.from.idx);
+  return Number.isFinite(v) ? v : at(t, w.to.idx);
+}
+
 /** Cleaning -> accumulation -> resolution sequences, graded, with the
  *  late-entry test: at the moment the accumulation's end is KNOWN, the price
  *  has already moved some way -- that shows the direction and is subtracted
@@ -197,7 +204,7 @@ export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: Ch
     const expectedMove = acc ? Math.min(cleaningMove, depthPer1k * (acc.coins / 1000)) : null;
     const base = acc ? acc.priceEnd : NaN;
     out.push({
-      cleaning: w, accumulation: acc, resolution: res, quality: quality(bars, w, cleaningMove, at(p.noise15Pct, w.from.idx)),
+      cleaning: w, accumulation: acc, resolution: res, quality: quality(bars, w, cleaningMove, normalAt(p.noise15Pct, w)),
       cleaningMove, depthPer1k, expectedMove,
       actualUp: res ? Math.max(0, res.priceHigh - base) : null,
       actualDown: res ? Math.max(0, base - res.priceLow) : null,

@@ -7,6 +7,7 @@
     "minSlPct": 0.33,
     "userModes": { "main": "PAPER", "karo": "PAPER" }
   },
+  "zz": { "enabled": true, "users": ["main"], "maxDelayMin": 40 },
   "users": [
     {
       "userId": "main",

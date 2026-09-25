@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import { parseV9Settings, type V9Settings } from "../strategy/v9/v9-config";
+import { parseZzSettings, type ZzSettings } from "../strategy/zz/zz-config";
 
 /**
  * users.config.json -- the ONE file that decides who trades what.
@@ -8,6 +9,7 @@ import { parseV9Settings, type V9Settings } from "../strategy/v9/v9-config";
  *   "realOrdersEnabled": false,          // global master switch for REAL Binance orders
  *   "v9": { "enabled": true, "symbols": [...], "rr": 2.2,
  *           "userModes": { "main": "PAPER", "karo": "REAL" } },
+ *   "zz": { "enabled": true, "users": ["main"] },   // OI-zigzag, PAPER only
  *   "users": [
  *     { "userId": "karo", "enabled": true,
  *       "telegram": { "enabled": true, "botToken": "...", "chatIds": ["123"] },
@@ -32,6 +34,8 @@ export interface AppConfig {
   realOrdersEnabled: boolean;
   users: UserConfig[];
   v9: V9Settings;
+  /** OI-zigzag strategy, PAPER only (Telegram messages, never orders). */
+  zz: ZzSettings;
 }
 
 const USER_ID = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -86,7 +90,13 @@ export function parseAppConfig(raw: unknown, path: string, collectedSymbols: rea
   } catch (err) {
     fail(path, err instanceof Error ? err.message : String(err));
   }
-  return { realOrdersEnabled: r.realOrdersEnabled === true, users, v9 };
+  let zz: ZzSettings;
+  try {
+    zz = parseZzSettings(r.zz, users.map((u) => u.userId), collectedSymbols);
+  } catch (err) {
+    fail(path, err instanceof Error ? err.message : String(err));
+  }
+  return { realOrdersEnabled: r.realOrdersEnabled === true, users, v9, zz };
 }
 
 export function loadAppConfig(path: string, collectedSymbols: readonly string[]): AppConfig {
