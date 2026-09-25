@@ -7,6 +7,7 @@ import * as fs from "fs";
  *     "enabled": true,
  *     "symbols": ["BTCUSDT", "ETHUSDT"],
  *     "rr": 2.2,
+ *     "lateSlPct": 0,          // optional: OITURN late-entry stop (0 = always, absent = off)
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
  *   }
  *
@@ -22,11 +23,15 @@ export interface V9Settings {
   rr: number;
   /** Minimum SL distance in percent (default 0.33). */
   minSlPct: number;
+  /** Late-entry stop ("OITURN"): when the stop at the episode extreme is
+   *  farther than this % from the entry, the stop moves to where the
+   *  confirming OI drop started (only if closer). 0 = always, null = off. */
+  lateSlPct: number | null;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -56,7 +61,9 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
       userModes.set(userId, mode);
     }
   }
-  return { enabled: true, symbols, rr, minSlPct, userModes };
+  const lateSlPct = v.lateSlPct === undefined || v.lateSlPct === null ? null : v.lateSlPct;
+  if (lateSlPct !== null && (typeof lateSlPct !== "number" || !(lateSlPct >= 0) || lateSlPct > 10)) throw new Error(`"v9.lateSlPct" must be null (off) or a number between 0 and 10 (percent; 0 = always)`);
+  return { enabled: true, symbols, rr, minSlPct, lateSlPct, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
