@@ -240,6 +240,21 @@ export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: Ch
   return out;
 }
 
+/** Live runs ONE trade per symbol at a time (A/B only). Research must do the
+ *  same, or overlapping trades are counted that live would never open.
+ *  A later A/B trade decided while an earlier one is still open becomes
+ *  "another trade still open". C-grade trades are not traded and ignored. */
+export function oneTradeAtATime(chains: readonly Chain[]): Chain[] {
+  let busyUntil = -Infinity;
+  return [...chains].sort((a, b) => (a.trade?.decidedTs ?? 0) - (b.trade?.decidedTs ?? 0)).map((c) => {
+    const t = c.trade;
+    if (!t || c.quality.grade === "C" || !t.result) return c;
+    if (t.decidedTs < busyUntil) return { ...c, trade: { ...t, result: null, netR: null, exitTs: null, exitPrice: null, minutes: null, skipReason: "another trade still open" } };
+    busyUntil = t.result === "OPEN" ? Infinity : t.exitTs ?? Infinity;
+    return c;
+  });
+}
+
 /** The coin's own "depth" from every wave that was COMPLETE (its end known)
  *  by `decisionIdx` and ended in the 24h before it: price move (largest
  *  excursion from the wave start, in ATR at the wave start) per 1% OI change.

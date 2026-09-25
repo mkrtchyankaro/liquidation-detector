@@ -27,7 +27,7 @@ import { writeFileSync } from "fs";
 import { MongoClient } from "mongodb";
 import { loadEnv } from "../config/env";
 import { MINUTE_BARS } from "../collector/minute-bars";
-import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, trailingOiNoise, type Chain, type Wave, type ZBar } from "../research/oi-zigzag";
+import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, oneTradeAtATime, trailingOiNoise, type Chain, type Wave, type ZBar } from "../research/oi-zigzag";
 import { zigzagChartHtml } from "../research/zigzag-chart";
 
 const arg = (name: string, fallback: string): string => { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : fallback; };
@@ -76,9 +76,9 @@ async function main(): Promise<void> {
       const noise = noiseArr[noiseArr.length - 1];
       const rPct = rArr[rArr.length - 1];
       const waves = buildWaves(bars, rArr);
-      const chains = buildChains(waves, bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noiseArr, ...exitParams, depthMode });
+      const chains = oneTradeAtATime(buildChains(waves, bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noiseArr, ...exitParams, depthMode }));
       allChains.push(...chains);
-      otherChains.push(...buildChains(waves, bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noiseArr, ...exitParams, depthMode: otherMode }));
+      otherChains.push(...oneTradeAtATime(buildChains(waves, bars, { ...DEFAULT_CHAIN_PARAMS, noise15Pct: noiseArr, ...exitParams, depthMode: otherMode })));
       const coin = symbol.replace("USDT", "");
 
       console.log(`\n===== ${symbol}  ${stamp(bars[0].ts)} -> ${stamp(bars[bars.length - 1].ts)} UTC =====`);
@@ -174,7 +174,7 @@ async function grid(client: MongoClient, dbName: string, symbols: string[], days
     for (const v of variants) {
       const base = v.q === 0.5 ? median : trailingOiNoise(bars, undefined, undefined, v.q);
       const rArr = base.map((n) => v.mult * n);
-      const chains = buildChains(buildWaves(bars, rArr, v.top), bars, { ...exit, noise15Pct: median });
+      const chains = oneTradeAtATime(buildChains(buildWaves(bars, rArr, v.top), bars, { ...exit, noise15Pct: median }));
       const row = rows.get(v.name)!;
       let coinNet = 0;
       for (const c of chains) {

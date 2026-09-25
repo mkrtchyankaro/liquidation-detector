@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/oi-zigzag.test.ts
  */
 import * as assert from "assert";
-import { atr15Before, buildChains, calibrate, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, trailingOiNoise, type ZBar } from "../src/research/oi-zigzag";
+import { atr15Before, buildChains, calibrate, oneTradeAtATime, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, trailingOiNoise, type ZBar } from "../src/research/oi-zigzag";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -238,6 +238,15 @@ scenario("top/2: the accumulation top is confirmed EARLIER (smaller pull-back), 
   assert.ok(top(half).confirmedIdx < top(full).confirmedIdx, `${top(half).confirmedIdx} < ${top(full).confirmedIdx}`);
   const low = (ps: typeof full) => ps.find((p) => p.kind === "LOW")!;
   assert.strictEqual(low(half).confirmedIdx, low(full).confirmedIdx);
+});
+
+scenario("one trade per symbol at a time, like live: an A/B trade decided while another is open is skipped", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, P);
+  const t = c.trade!;
+  const fake = (grade: "A" | "C", decidedTs: number, exitTs: number) => ({ ...c, quality: { ...c.quality, grade }, trade: { ...t, decidedTs, exitTs, result: "TP" as const } });
+  const out = oneTradeAtATime([fake("A", 100, 500), fake("A", 300, 900), fake("C", 350, 400), fake("A", 600, 700)]);
+  assert.deepStrictEqual(out.map((x) => x.trade!.result), ["TP", null, "TP", "TP"]);
+  assert.strictEqual(out[1].trade!.skipReason, "another trade still open");
 });
 
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
