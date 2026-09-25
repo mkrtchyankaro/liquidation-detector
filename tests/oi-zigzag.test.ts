@@ -145,5 +145,29 @@ scenario("expected move is capped at the cleaning's own move", () => {
   assert.ok(c.expectedMove! <= c.cleaningMove);
 });
 
+scenario("TARGET exits (default): TP = remaining expected move, SL = TP / 2.2", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1 });
+  const t = c.trade!;
+  assert.ok(Math.abs(t.entry - t.tpPrice! - t.remaining) < 1e-9, "SELL: TP is `remaining` below the entry");
+  assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
+});
+
+scenario("TARGET exits: skipped when SL would be tighter than the fee minimum", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.5 });
+  assert.ok(c.trade!.skipReason!.includes("fees"));
+});
+
+scenario("TARGET exits (default): TP = remaining expected move, SL = TP / 2.2", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.1 });
+  const t = c.trade!;
+  assert.ok(Math.abs(t.entry - t.tpPrice! - t.remaining) < 1e-9, "SELL: TP is `remaining` below the entry");
+  assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
+});
+
+scenario("TARGET exits: skipped when SL would be tighter than the fee minimum", () => {
+  const [c] = buildChains(buildWaves(bars, R), bars, { ...P, slMode: "TARGET", rr: 2.2, minSlPct: 0.5 });
+  assert.ok(c.trade!.skipReason!.includes("fees"));
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

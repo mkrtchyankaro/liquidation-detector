@@ -126,7 +126,10 @@ export interface Chain {
 }
 
 /** Stop / target:
- *   STRUCTURE (default): SL just beyond the last extreme since the OI top
+ *   TARGET (default, Johnny): TP = the remaining expected move (expected
+ *     minus what the price already did), SL = TP / rr. Skipped when that SL
+ *     would be closer than minSlPct (fees would eat it).
+ *   STRUCTURE: SL just beyond the last extreme since the OI top
  *     (the swing the price made before turning) + atrBuffer x ATR(15m),
  *     never closer than minSlPct (fees); TP = rr x that risk.
  *   PCT: fixed slPct / tpPct.
@@ -135,11 +138,11 @@ export interface Chain {
  *  cleaning's own move (new positions > closed ones would give absurd targets). */
 export interface ChainParams {
   noise15Pct: Threshold; horizonMin: number;
-  slMode: "STRUCTURE" | "PCT"; slPct: number; tpPct: number;
+  slMode: "TARGET" | "STRUCTURE" | "PCT"; slPct: number; tpPct: number;
   rr: number; atrBuffer: number; minSlPct: number; maxConfirmDelayMin: number;
 }
 export const DEFAULT_CHAIN_PARAMS: Omit<ChainParams, "noise15Pct"> = {
-  horizonMin: 24 * 60, slMode: "STRUCTURE", slPct: 0.3, tpPct: 0.7, rr: 2.2, atrBuffer: 0.25, minSlPct: 0.3, maxConfirmDelayMin: 20,
+  horizonMin: 24 * 60, slMode: "TARGET", slPct: 0.3, tpPct: 0.7, rr: 2.2, atrBuffer: 0.25, minSlPct: 0.3, maxConfirmDelayMin: 20,
 };
 const TAKER = 0.05, MAKER = 0.02; // % of notional
 
@@ -216,7 +219,13 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
   const long = alreadyMoved > 0;
   const side = long ? "LONG" : "SHORT";
   let sl: number, tp: number;
-  if (p.slMode === "PCT") {
+  if (p.slMode === "TARGET") {
+    if (!(remaining > 0)) return { ...t, side, skipReason: "nothing left of the expected move" };
+    const slDist = remaining / p.rr;
+    if (slDist < entry * (p.minSlPct / 100)) return { ...t, side, skipReason: `SL would be ${((100 * slDist) / entry).toFixed(2)}% < ${p.minSlPct}% (fees)` };
+    tp = long ? entry + remaining : entry - remaining;
+    sl = long ? entry - slDist : entry + slDist;
+  } else if (p.slMode === "PCT") {
     sl = long ? entry * (1 - p.slPct / 100) : entry * (1 + p.slPct / 100);
     tp = long ? entry * (1 + p.tpPct / 100) : entry * (1 - p.tpPct / 100);
   } else {

@@ -8,8 +8,10 @@
  *
  *   --k 4    wave threshold R = k x the coin's median 15-minute OI change
  *            (bigger k = fewer, bigger waves; smaller k = more, noisier)
- *   exits (default): SL = last extreme since the OI top + 0.25 ATR(15m), min 0.3%,
- *            TP = 2.2R   (--rr 2.2 --atr 0.25);  or fixed: --slmode pct --sl 0.3 --tp 0.7
+ *   exits (default): TP = remaining expected move, SL = TP / 2.2 (--rr 2.2)
+ *            or --slmode structure (SL = last extreme + 0.25 ATR, TP = 2.2R)
+ *            or --slmode pct --sl 0.3 --tp 0.7
+ *   --maxdelay 20   skip when the OI top became known more than 20 min after it
  *   late-entry test: at the moment the accumulation's end is
  *            KNOWN, the move already made shows the direction and is taken
  *            off the expected move; trade only if what remains >= TP
@@ -37,11 +39,15 @@ async function main(): Promise<void> {
   const days = Number(arg("days", "3"));
   const k = Number(arg("k", "4"));
   const html = process.argv.includes("--html");
-  const slMode = (arg("slmode", DEFAULT_CHAIN_PARAMS.slMode).toUpperCase() === "PCT" ? "PCT" : "STRUCTURE") as "PCT" | "STRUCTURE";
+  const slModeArg = arg("slmode", DEFAULT_CHAIN_PARAMS.slMode).toUpperCase();
+  const slMode = (slModeArg === "PCT" || slModeArg === "STRUCTURE" ? slModeArg : "TARGET") as "TARGET" | "PCT" | "STRUCTURE";
   const slPct = Number(arg("sl", String(DEFAULT_CHAIN_PARAMS.slPct))), tpPct = Number(arg("tp", String(DEFAULT_CHAIN_PARAMS.tpPct)));
   const rr = Number(arg("rr", String(DEFAULT_CHAIN_PARAMS.rr))), atrBuffer = Number(arg("atr", String(DEFAULT_CHAIN_PARAMS.atrBuffer)));
-  const exitParams = { slMode, slPct, tpPct, rr, atrBuffer };
-  const exitLabel = slMode === "PCT" ? `SL ${slPct}% / TP ${tpPct}%` : `SL = last extreme + ${atrBuffer} ATR (min ${DEFAULT_CHAIN_PARAMS.minSlPct}%), TP = ${rr}R`;
+  const maxConfirmDelayMin = Number(arg("maxdelay", String(DEFAULT_CHAIN_PARAMS.maxConfirmDelayMin)));
+  const exitParams = { slMode, slPct, tpPct, rr, atrBuffer, maxConfirmDelayMin };
+  const exitLabel = slMode === "PCT" ? `SL ${slPct}% / TP ${tpPct}%`
+    : slMode === "STRUCTURE" ? `SL = last extreme + ${atrBuffer} ATR (min ${DEFAULT_CHAIN_PARAMS.minSlPct}%), TP = ${rr}R`
+    : `TP = remaining expected move, SL = TP / ${rr} (skip if SL < ${DEFAULT_CHAIN_PARAMS.minSlPct}%)`;
   const client = new MongoClient(env.mongoUri);
   await client.connect();
   const allChains: Chain[] = [];
