@@ -40,7 +40,10 @@ export type Threshold = number | readonly number[];
 const at = (t: Threshold, i: number): number => (typeof t === "number" ? t : t[i]);
 
 /** Classic zigzag on OI with a relative reversal threshold rPct (% of OI). */
-export function oiPivots(bars: readonly ZBar[], rPct: Threshold): { pivots: Pivot[]; lastExtreme: Pivot | null } {
+/** `topConfirmFactor` < 1: the END of an UP wave (the accumulation top) is
+ *  confirmed by a smaller pull-back (e.g. 0.5 x R) -- earlier entries; all
+ *  other turns still need the full R. */
+export function oiPivots(bars: readonly ZBar[], rPct: Threshold, topConfirmFactor = 1): { pivots: Pivot[]; lastExtreme: Pivot | null } {
   const pivots: Pivot[] = [];
   const i0 = bars.findIndex((b) => b.oi > 0);
   if (i0 < 0) return { pivots, lastExtreme: null };
@@ -53,7 +56,8 @@ export function oiPivots(bars: readonly ZBar[], rPct: Threshold): { pivots: Pivo
     if (!(v > 0) || !(r > 0)) { if (v > hi) { hi = v; hiIdx = i; } if (v > 0 && v < lo) { lo = v; loIdx = i; } continue; }
     if (v > hi) { hi = v; hiIdx = i; }
     if (v < lo) { lo = v; loIdx = i; }
-    if (trend >= 0 && v <= hi * (1 - r) && hiIdx < i) {
+    const rTop = trend === 1 ? r * topConfirmFactor : r;
+    if (trend >= 0 && v <= hi * (1 - rTop) && hiIdx < i) {
       if (trend === 0 && hiIdx > i0) pivots.push(mk(i0, "LOW", i)); // the data start is the first wave's start
       pivots.push(mk(hiIdx, "HIGH", i));
       trend = -1; lo = v; loIdx = i;
@@ -68,8 +72,8 @@ export function oiPivots(bars: readonly ZBar[], rPct: Threshold): { pivots: Pivo
   return { pivots: clean, lastExtreme: last };
 }
 
-export function buildWaves(bars: readonly ZBar[], rPct: Threshold): Wave[] {
-  const { pivots, lastExtreme } = oiPivots(bars, rPct);
+export function buildWaves(bars: readonly ZBar[], rPct: Threshold, topConfirmFactor = 1): Wave[] {
+  const { pivots, lastExtreme } = oiPivots(bars, rPct, topConfirmFactor);
   const pts = lastExtreme && pivots.length && lastExtreme.idx > pivots[pivots.length - 1].idx ? [...pivots, lastExtreme] : pivots;
   const waves: Wave[] = [];
   for (let k = 1; k < pts.length; k++) {
@@ -307,8 +311,10 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
 
 /** NO LOOK-AHEAD version of medianOi15mPct: for every bar, the median
  *  |15-min OI change| over the `lookbackMin` minutes BEFORE it (recomputed
- *  every 15 minutes). NaN until `minHistoryMin` of history exists. */
-export function trailingOiNoise(bars: readonly ZBar[], lookbackMin = 2 * 1440, minHistoryMin = 240): number[] {
+ *  every 15 minutes). NaN until `minHistoryMin` of history exists.
+ *  `quantile` 0.5 = median (the coin's normal move); 0.9 = P90 (a move
+ *  bigger than 90% of the coin's 15-minute OI moves). */
+export function trailingOiNoise(bars: readonly ZBar[], lookbackMin = 2 * 1440, minHistoryMin = 240, quantile = 0.5): number[] {
   const out = new Array<number>(bars.length).fill(NaN);
   let cur = NaN;
   for (let i = 0; i < bars.length; i++) {
@@ -319,7 +325,7 @@ export function trailingOiNoise(bars: readonly ZBar[], lookbackMin = 2 * 1440, m
         if (a > 0 && b > 0) v.push((Math.abs(b - a) / a) * 100);
       }
       v.sort((x, y) => x - y);
-      cur = v.length ? v[v.length >> 1] : NaN;
+      cur = v.length ? v[Math.min(v.length - 1, Math.floor(quantile * v.length))] : NaN;
     }
     out[i] = cur;
   }

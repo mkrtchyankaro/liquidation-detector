@@ -226,5 +226,19 @@ scenario("CALIBRATED mode falls back to the cleaning's own depth when history is
   assert.strictEqual(a.expectedMove, b.expectedMove);
 });
 
+scenario("P90 threshold is larger than the median; both use only the past", () => {
+  const long: ZBar[] = Array.from({ length: 900 }, (_, m) => ({ ts: T0 + m * M, close: 100, high: 100, low: 100, oi: 1000 + (m % 11) * (m % 3), longLiq: 0, shortLiq: 0 }));
+  const med = trailingOiNoise(long), p90 = trailingOiNoise(long, undefined, undefined, 0.9);
+  assert.ok(p90[800] > med[800]);
+});
+
+scenario("top/2: the accumulation top is confirmed EARLIER (smaller pull-back), other turns unchanged", () => {
+  const full = oiPivots(bars, R).pivots, half = oiPivots(bars, R, 0.5).pivots;
+  const top = (ps: typeof full) => ps.find((p) => p.kind === "HIGH" && p.idx === 60)!;
+  assert.ok(top(half).confirmedIdx < top(full).confirmedIdx, `${top(half).confirmedIdx} < ${top(full).confirmedIdx}`);
+  const low = (ps: typeof full) => ps.find((p) => p.kind === "LOW")!;
+  assert.strictEqual(low(half).confirmedIdx, low(full).confirmedIdx);
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
