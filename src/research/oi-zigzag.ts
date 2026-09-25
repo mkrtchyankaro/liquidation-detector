@@ -104,6 +104,7 @@ export interface ChainTrade {
   alreadyMoved: number; remaining: number;
   side: "LONG" | "SHORT" | null; skipReason: string | null;
   result: "TP" | "SL" | "OPEN" | null; netR: number | null; minutes: number | null;
+  slPrice: number | null; tpPrice: number | null; exitTs: number | null; exitPrice: number | null;
 }
 
 export interface Chain {
@@ -189,21 +190,24 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
   const entry = bars[i0].close;
   const alreadyMoved = entry - acc.priceEnd;
   const remaining = expected - Math.abs(alreadyMoved);
-  const t: ChainTrade = { decidedTs: bars[i0].ts, entry, alreadyMoved, remaining, side: null, skipReason: null, result: null, netR: null, minutes: null };
+  const t: ChainTrade = { decidedTs: bars[i0].ts, entry, alreadyMoved, remaining, side: null, skipReason: null, result: null, netR: null, minutes: null, slPrice: null, tpPrice: null, exitTs: null, exitPrice: null };
   if (Math.abs(alreadyMoved) < entry * 0.0005) return { ...t, skipReason: "no direction yet" };
   if (remaining < entry * (p.tpPct / 100)) return { ...t, side: alreadyMoved > 0 ? "LONG" : "SHORT", skipReason: "remaining < TP" };
   const long = alreadyMoved > 0;
   const sl = long ? entry * (1 - p.slPct / 100) : entry * (1 + p.slPct / 100);
   const tp = long ? entry * (1 + p.tpPct / 100) : entry * (1 - p.tpPct / 100);
   const rr = p.tpPct / p.slPct;
+  const side = long ? "LONG" : "SHORT";
+  const at = { ...t, side, slPrice: sl, tpPrice: tp } as const;
   for (let i = i0 + 1; i < bars.length && i - i0 <= p.horizonMin; i++) {
     const b = bars[i];
     const hitSl = long ? b.low <= sl : b.high >= sl;
     const hitTp = long ? b.high >= tp : b.low <= tp;
-    if (hitSl) return { ...t, side: long ? "LONG" : "SHORT", result: "SL", netR: -1 - (2 * TAKER) / p.slPct, minutes: i - i0 };
-    if (hitTp) return { ...t, side: long ? "LONG" : "SHORT", result: "TP", netR: rr - (TAKER + MAKER) / p.slPct, minutes: i - i0 };
+    // SL first when both are touched in the same minute (conservative)
+    if (hitSl) return { ...at, result: "SL", netR: -1 - (2 * TAKER) / p.slPct, minutes: i - i0, exitTs: b.ts, exitPrice: sl };
+    if (hitTp) return { ...at, result: "TP", netR: rr - (TAKER + MAKER) / p.slPct, minutes: i - i0, exitTs: b.ts, exitPrice: tp };
   }
-  return { ...t, side: long ? "LONG" : "SHORT", result: "OPEN", netR: 0, minutes: null };
+  return { ...at, result: "OPEN", netR: 0, minutes: null };
 }
 
 /** Coin's normal OI noise: median |OI change| over 15 minutes, in %. */
