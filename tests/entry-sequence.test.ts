@@ -25,7 +25,7 @@ const EXCHANGE_INFO = { symbols: [{ symbol: "DOGEUSDT", pricePrecision: 5, quant
 
 interface MockOpts {
   ask?: number; bid?: number; positionAmt?: string; positionLagsForever?: boolean;
-  fillAvg?: string; fillQty?: string; marginErr?: string;
+  fillAvg?: string; fillQty?: string; marginErr?: string; marginType?: string;
   algoQueryFails?: boolean; algoInOpenList?: boolean;
 }
 function mockRest(o: MockOpts = {}) {
@@ -46,7 +46,7 @@ function mockRest(o: MockOpts = {}) {
     getAlgoOrderByClientId: async () => ({ algoStatus: "WORKING" }),
     cancelAlgoOrder: async (id: number) => { calls.push({ fn: "cancelAlgoOrder", p: { id } }); return {}; },
     getOrder: async () => ({ status: "NEW" }),
-    getPositionRisk: async () => [{ symbol: "DOGEUSDT", positionAmt: o.positionLagsForever ? "0" : (o.positionAmt ?? "100"), entryPrice: "0.2" }],
+    getPositionRisk: async () => [{ symbol: "DOGEUSDT", positionAmt: o.positionLagsForever ? "0" : (o.positionAmt ?? "100"), entryPrice: "0.2", ...(o.marginType ? { marginType: o.marginType } : {}) }],
     cancelOrder: async () => ({}),
     getOpenOrders: async () => [],
     getOpenAlgoOrders: async () => (o.algoInOpenList ? [{ algoId: 9, clientAlgoId: "x", orderType: "STOP_MARKET" }] : []),
@@ -78,6 +78,22 @@ async function run(): Promise<void> {
     const out = await runEntrySequence(r, { ...base, marginMode: "ISOLATED" });
     assert.strictEqual(out.outcome, "ENTRY_FAILED");
     assert.ok(!r.calls.some((c) => c.fn === "createOrder"));
+  });
+
+  await scenario("symbol already ISOLATED -> setMarginType is not called at all", async () => {
+    const r = mockRest({ marginType: "isolated" });
+    const out = await runEntrySequence(r, { ...base, marginMode: "ISOLATED", leverage: 20 });
+    assert.strictEqual(out.outcome, "ENTRY_ACTIVE_WITH_TP");
+    assert.ok(!r.calls.some((c) => c.fn === "setMarginType"));
+  });
+
+  await scenario("change refused because of open orders (LINK incident) -> trade proceeds in the CURRENT mode", async () => {
+    const r = mockRest({ marginType: "cross", marginErr: "Binance signed POST /fapi/v1/marginType failed: Position side cannot be changed if there exists open orders." });
+    const out = await runEntrySequence(r, { ...base, marginMode: "ISOLATED", leverage: 20 });
+    assert.strictEqual(out.outcome, "ENTRY_ACTIVE_WITH_TP");
+    // CROSSED: no isolated-liquidation cap, configured leverage is used
+    assert.strictEqual(r.calls.find((c) => c.fn === "setLeverage")?.p?.l, 20);
+    assert.ok(r.calls.some((c) => c.fn === "createAlgoOrder" && c.p?.type === "STOP_MARKET"));
   });
 
   await scenario("pre-flight: executable price already beyond SL -> no order", async () => {

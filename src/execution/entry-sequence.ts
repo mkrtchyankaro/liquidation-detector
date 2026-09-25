@@ -178,12 +178,17 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
     // lowered so the strategy SL always sits well inside the liquidation
     // price (SL distance <= 70% of 1/leverage). Otherwise a wide SL
     // would be pre-empted by liquidation, losing the whole margin.
+    // Margin mode first: the leverage cap depends on the mode the symbol
+    // is ACTUALLY in (Binance refuses a mode change while the symbol has
+    // open orders or a position -- then the current mode is kept).
+    const margin = await applyMarginMode(rest, input);
+    if ("error" in margin) return { outcome: "ENTRY_FAILED", reason: margin.error };
     const slDistancePct = Math.abs(referencePrice - input.slPrice) / referencePrice * 100;
-    const effectiveLeverage = input.leverage ? safeLeverage(input.leverage, slDistancePct, input.marginMode) : undefined;
+    const effectiveLeverage = input.leverage ? safeLeverage(input.leverage, slDistancePct, margin.mode) : undefined;
     if (effectiveLeverage !== undefined && effectiveLeverage !== input.leverage) {
       log.warn({ userId: input.userId, symbol: input.symbol, configuredLeverage: input.leverage, effectiveLeverage, slDistancePct: Number(slDistancePct.toFixed(3)) }, "[LEVERAGE_CAPPED] configured leverage would put liquidation before the SL -- using a lower leverage");
     }
-    const setup = await applySymbolSetup(rest, { ...input, leverage: effectiveLeverage });
+    const setup = await applyLeverage(rest, input.symbol, effectiveLeverage);
     if (setup !== null) return { outcome: "ENTRY_FAILED", reason: setup };
 
     const roundedQty = floorToStep(quantity, filters.stepSize, filters.qtyPrecision);
@@ -276,26 +281,52 @@ export async function runEntrySequence(rest: BinanceRestLike, input: EntrySequen
   }
 }
 
-/** Margin mode + leverage for this symbol. Returns an error string, or
- *  null when everything is set (or not requested / not supported). */
-async function applySymbolSetup(rest: BinanceRestLike, input: EntrySequenceInput): Promise<string | null> {
-  if (input.marginMode && typeof rest.setMarginType === "function") {
-    try {
-      await rest.setMarginType(input.symbol, input.marginMode);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // -4046 "No need to change margin type" = already correct.
-      if (!msg.includes("-4046") && !/no need to change margin type/i.test(msg)) {
-        return `setMarginType(${input.marginMode}) failed: ${msg}`;
-      }
+type MarginMode = "ISOLATED" | "CROSSED";
+
+/** The symbol's current margin mode from positionRisk (v2 reports
+ *  marginType "isolated" | "cross"), or null when it cannot be read. */
+async function currentMarginMode(rest: BinanceRestLike, symbol: string): Promise<MarginMode | null> {
+  try {
+    const res = (await rest.getPositionRisk(symbol)) as Array<{ symbol: string; marginType?: string }>;
+    const t = (Array.isArray(res) ? res.find((p) => p.symbol === symbol) : undefined)?.marginType?.toLowerCase();
+    if (t === "isolated") return "ISOLATED";
+    if (t === "cross" || t === "crossed") return "CROSSED";
+  } catch { /* unknown -- decided below */ }
+  return null;
+}
+
+/** Puts the symbol in the requested margin mode. Returns the mode the
+ *  trade will ACTUALLY run in, or an error when it cannot be known.
+ *  - already in the requested mode -> no call at all;
+ *  - Binance refuses the change because the symbol has open orders or a
+ *    position (e.g. a manual order on the same symbol) -> the CURRENT
+ *    mode is kept and the trade proceeds; the SL still caps the loss and
+ *    the leverage cap is computed for the real mode. */
+async function applyMarginMode(rest: BinanceRestLike, input: EntrySequenceInput): Promise<{ mode: MarginMode | undefined } | { error: string }> {
+  if (!input.marginMode || typeof rest.setMarginType !== "function") return { mode: input.marginMode };
+  const current = await currentMarginMode(rest, input.symbol);
+  if (current === input.marginMode) return { mode: current };
+  try {
+    await rest.setMarginType(input.symbol, input.marginMode);
+    return { mode: input.marginMode };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // -4046 "No need to change margin type" = already correct.
+    if (msg.includes("-4046") || /no need to change margin type/i.test(msg)) return { mode: input.marginMode };
+    if (current !== null) {
+      log.warn({ userId: input.userId, symbol: input.symbol, requested: input.marginMode, kept: current, err: msg }, "[MARGIN_MODE_KEPT] Binance refused the margin-mode change (open orders / position on this symbol?) -- trading in the current mode");
+      return { mode: current };
     }
+    return { error: `setMarginType(${input.marginMode}) failed: ${msg}` };
   }
-  if (input.leverage && typeof rest.setLeverage === "function") {
-    try {
-      await rest.setLeverage(input.symbol, input.leverage);
-    } catch (err) {
-      return `setLeverage(${input.leverage}) failed: ${err instanceof Error ? err.message : String(err)}`;
-    }
+}
+
+async function applyLeverage(rest: BinanceRestLike, symbol: string, leverage: number | undefined): Promise<string | null> {
+  if (!leverage || typeof rest.setLeverage !== "function") return null;
+  try {
+    await rest.setLeverage(symbol, leverage);
+  } catch (err) {
+    return `setLeverage(${leverage}) failed: ${err instanceof Error ? err.message : String(err)}`;
   }
   return null;
 }
@@ -366,7 +397,7 @@ async function cancelOwnAlgoOrder(rest: BinanceRestLike, symbol: string, algoId:
 
 /** Highest leverage <= configured such that, in ISOLATED mode, the SL
  *  distance is at most 70% of the ~1/leverage liquidation distance. */
-export function safeLeverage(configured: number, slDistancePct: number, marginMode?: "ISOLATED" | "CROSSED"): number {
+export function safeLeverage(configured: number, slDistancePct: number, marginMode?: MarginMode): number {
   if (marginMode !== "ISOLATED" || !(slDistancePct > 0)) return configured;
   const maxByLiquidation = Math.floor((0.7 * 100) / slDistancePct);
   return Math.max(1, Math.min(configured, maxByLiquidation));
