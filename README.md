@@ -60,7 +60,7 @@ are restored from `v9_trades`.
 | `src/research/` | research-only logic (liquidation-episode definition), never used by trading |
 | `src/execution/` | Binance entry sequence, close report, account readiness |
 | `src/config/` | `.env` and `users.config.json` loading/validation |
-| `src/tools/` | `v9-show-signal` (full story of one signal), `v9-replay` (honest backtest), `test-live-entry` (real order round-trip test), `minute-bars-backfill`, `liq-episodes` (list/measure liquidation episodes) |
+| `src/tools/` | `v9-show-signal` (full story of one signal), `v9-replay` (honest backtest), `test-live-entry` (real order round-trip test), `minute-bars-backfill`, `liq-episodes`, `oi-zigzag` (research: episodes and OI waves) |
 | `scripts/liquidation-episodes-v13.js` | original research script (reference for the equivalence test) |
 
 ## Configuration
@@ -86,5 +86,6 @@ npx tsx src/tools/v9-replay.ts                         # causal replay of histor
 npx tsx src/tools/test-live-entry.ts --user karo --confirm   # real tiny order round-trip
 npx tsx src/tools/minute-bars-backfill.ts              # once: raw rows -> minute_bars (safe to re-run)
 npx tsx src/tools/liq-episodes.ts [--symbols ADA]      # liquidation episodes with liq $, OI drop $, OI rise $
+npx tsx src/tools/oi-zigzag.ts --symbols ETH --days 2 --html   # OI waves: cleaning -> accumulation -> resolution (+ chart)
 npm test
 ```
