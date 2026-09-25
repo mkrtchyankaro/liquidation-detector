@@ -241,7 +241,8 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
     tp = long ? entry + p.rr * risk : entry - p.rr * risk;
   }
   const risk = Math.abs(entry - sl), slPct = (100 * risk) / entry, rr = Math.abs(tp - entry) / risk;
-  if (remaining < Math.abs(tp - entry)) return { ...t, side, slPrice: sl, tpPrice: tp, skipReason: "remaining < TP" };
+  // tolerance: in TARGET mode TP distance == remaining; float rounding must not skip it
+  if (remaining < Math.abs(tp - entry) - entry * 1e-9) return { ...t, side, slPrice: sl, tpPrice: tp, skipReason: "remaining < TP" };
   const at = { ...t, side, slPrice: sl, tpPrice: tp } as const;
   for (let i = i0 + 1; i < bars.length && i - i0 <= p.horizonMin; i++) {
     const b = bars[i];

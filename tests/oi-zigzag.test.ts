@@ -150,6 +150,16 @@ scenario("TARGET exits (default): TP = remaining expected move, SL = TP / 2.2", 
   const t = c.trade!;
   assert.ok(Math.abs(t.entry - t.tpPrice! - t.remaining) < 1e-9, "SELL: TP is `remaining` below the entry");
   assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
+  assert.strictEqual(t.skipReason, null, "TP == remaining must never be skipped as 'remaining < TP' (float rounding)");
+  assert.ok(t.result === "TP" || t.result === "SL" || t.result === "OPEN");
+});
+
+scenario("TARGET exits: real-world prices (float rounding) are not skipped", () => {
+  // ETH 09-23: entry 2669.7, remaining 29.63 -> TP 2640.07
+  for (const [entry, rem] of [[2669.7, 29.63], [114.81, 1.4001], [0.23985, 0.00935], [85667.4, 308.4]]) {
+    const tp = entry - rem;
+    assert.ok(!(rem < Math.abs(tp - entry) - entry * 1e-9), `${entry} / ${rem}`);
+  }
 });
 
 scenario("TARGET exits: skipped when SL would be tighter than the fee minimum", () => {
@@ -162,6 +172,16 @@ scenario("TARGET exits (default): TP = remaining expected move, SL = TP / 2.2", 
   const t = c.trade!;
   assert.ok(Math.abs(t.entry - t.tpPrice! - t.remaining) < 1e-9, "SELL: TP is `remaining` below the entry");
   assert.ok(Math.abs(t.slPrice! - t.entry - t.remaining / 2.2) < 1e-9);
+  assert.strictEqual(t.skipReason, null, "TP == remaining must never be skipped as 'remaining < TP' (float rounding)");
+  assert.ok(t.result === "TP" || t.result === "SL" || t.result === "OPEN");
+});
+
+scenario("TARGET exits: real-world prices (float rounding) are not skipped", () => {
+  // ETH 09-23: entry 2669.7, remaining 29.63 -> TP 2640.07
+  for (const [entry, rem] of [[2669.7, 29.63], [114.81, 1.4001], [0.23985, 0.00935], [85667.4, 308.4]]) {
+    const tp = entry - rem;
+    assert.ok(!(rem < Math.abs(tp - entry) - entry * 1e-9), `${entry} / ${rem}`);
+  }
 });
 
 scenario("TARGET exits: skipped when SL would be tighter than the fee minimum", () => {
