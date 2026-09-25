@@ -37,6 +37,11 @@ MongoDB collections (all others are unused):
 | `market_positioning_5m` | % long of all accounts / top accounts / top positions (Binance keeps 30 days) | 1 year |
 | `market_premium_1m` | mark, index, premium %, funding rate | 1 year |
 
+`minute_bars` (kept 365 days): one row per symbol per minute -- price OHLC,
+OI first/last/min/max, LONG/SHORT liquidation USD and count -- written every
+minute from the raw rows. Research only (liquidation-episode studies over
+months, while raw rows are kept a few days).
+
 Candles, taker buy/sell volume and ATR are not stored: Binance keeps full
 kline history (taker buy volume is inside every kline), backtests fetch them.
 
@@ -52,9 +57,10 @@ are restored from `v9_trades`.
 | `src/main.ts` | wiring: config → collector → V9 service |
 | `src/collector/` | Binance data collection (market data + research context) |
 | `src/strategy/v9/` | V9 core (pure), causal engine, live service, feed, repository, Telegram text |
+| `src/research/` | research-only logic (liquidation-episode definition), never used by trading |
 | `src/execution/` | Binance entry sequence, close report, account readiness |
 | `src/config/` | `.env` and `users.config.json` loading/validation |
-| `src/tools/` | `v9-show-signal` (full story of one signal), `v9-replay` (honest backtest), `test-live-entry` (real order round-trip test) |
+| `src/tools/` | `v9-show-signal` (full story of one signal), `v9-replay` (honest backtest), `test-live-entry` (real order round-trip test), `minute-bars-backfill`, `liq-episodes` (list/measure liquidation episodes) |
 | `scripts/liquidation-episodes-v13.js` | original research script (reference for the equivalence test) |
 
 ## Configuration
@@ -78,5 +84,7 @@ bash deploy.sh                                         # pull, build, test, vali
 npx tsx src/tools/v9-show-signal.ts <signalId>        # the whole story of one signal
 npx tsx src/tools/v9-replay.ts                         # causal replay of history (read-only)
 npx tsx src/tools/test-live-entry.ts --user karo --confirm   # real tiny order round-trip
+npx tsx src/tools/minute-bars-backfill.ts              # once: raw rows -> minute_bars (safe to re-run)
+npx tsx src/tools/liq-episodes.ts [--symbols ADA]      # liquidation episodes with liq $, OI drop $, OI rise $
 npm test
 ```

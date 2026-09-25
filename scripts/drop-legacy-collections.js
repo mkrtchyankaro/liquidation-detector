@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * One-time cleanup of MongoDB collections the old bot (LOX / V5 / research)
- * used to write. The V9 bot only uses the four collections in KEEP.
+ * used to write. The V9 bot only uses the collections in KEEP.
  *
  *   node scripts/drop-legacy-collections.js            # dry run: lists what WOULD be dropped
  *   node scripts/drop-legacy-collections.js --confirm  # actually drops them
@@ -11,7 +11,7 @@
 require("dotenv/config");
 const { MongoClient } = require("mongodb");
 
-const KEEP = new Set(["liq_raw_events", "oi_second_observations", "v9_decisions", "v9_trades"]);
+const KEEP = new Set(["liq_raw_events", "oi_second_observations", "v9_decisions", "v9_trades", "v9_episode_timeline", "market_positioning_5m", "market_premium_1m", "minute_bars"]);
 const confirm = process.argv.includes("--confirm");
 
 (async () => {
