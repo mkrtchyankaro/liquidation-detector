@@ -10,7 +10,7 @@
 import * as assert from "assert";
 import { buildBuckets, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
 import { V9MinuteStore } from "../src/strategy/v9/v9-minute-store";
-import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS } from "../src/strategy/v9/v9-causal-engine";
+import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs } from "../src/strategy/v9/v9-causal-engine";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -192,6 +192,33 @@ scenario("maxSlFeeR: a signal whose stop-out fees would exceed the limit is SL_T
   assert.ok(strict.some((x) => x.reason === "SL_TOO_TIGHT"));
   const loose = replay(5, 1500, { ...DEFAULT_V9_ENGINE_SETTINGS, maxSlFeeR: 1e9 }).decisions;
   assert.strictEqual(loose.filter((x) => x.tradable).length, base.decisions.filter((x) => x.tradable).length);
+});
+
+scenario("lateSlPct: a far extreme stop moves closer (to where the confirming OI drop started); never farther, never onto the wrong side", () => {
+  let moved = 0;
+  for (const seed of [5, 9, 21]) {
+    const base = replay(seed, 1500).decisions.filter((x) => x.tradable);
+    const late = replay(seed, 1500, { ...DEFAULT_V9_ENGINE_SETTINGS, lateSlPct: 0 }).decisions.filter((x) => x.tradable);
+    assert.strictEqual(late.length, base.length, "same signals, only the stop may change");
+    base.forEach((b, i) => {
+      const l = late[i];
+      assert.strictEqual(l.referencePrice, b.referencePrice);
+      assert.ok(Math.abs(l.referencePrice - l.stopPrice) <= Math.abs(b.referencePrice - b.stopPrice) + 1e-9, "never farther than the extreme stop");
+      assert.ok(l.tradeSide === "LONG" ? l.stopPrice < l.referencePrice : l.stopPrice > l.referencePrice, "stop on the losing side");
+      if (l.stopPrice !== b.stopPrice) moved++;
+    });
+    const off = replay(seed, 1500, { ...DEFAULT_V9_ENGINE_SETTINGS, lateSlPct: 1000 }).decisions.filter((x) => x.tradable);
+    assert.deepStrictEqual(off.map((d) => d.stopPrice), base.map((d) => d.stopPrice), "threshold never reached -> unchanged");
+  }
+  void moved; // the synthetic market has no late entries; the anchor itself is tested below
+});
+
+scenario("oiTurnTs: the highest-OI minute between the episode's last part and the confirmation (known before the confirmation)", () => {
+  const b = (m: number, oi: number) => ({ ts: m * 60_000, long: 0, short: 0, count: 0, oi, price: 100, oiPoints: 1 });
+  const buckets = [b(0, 100), b(1, 99), b(2, 98), b(3, 99), b(4, 101), b(5, 102), b(6, 100), b(7, 97), b(8, 120)];
+  const e = { eIdx: 3, confirmTs: 8 * 60_000 } as unknown as Parameters<typeof oiTurnTs>[1];
+  assert.strictEqual(oiTurnTs(buckets, e), 5 * 60_000, "OI peaked at minute 5, then fell into the confirmation; minute 8 (after it) ignored");
+  assert.strictEqual(oiTurnTs(buckets, { ...e, confirmTs: NaN }), null);
 });
 
 scenario("minSlFraction: a tighter stop is moved out to the minimum distance; wider stops are unchanged", () => {

@@ -1,6 +1,20 @@
 import {
-  MINUTE_MS, buildReference, changePoints, episodeFeatures, mergeEpisodes, selectEpisode, subEpisodes, usableRange,
-  typicalLiquidationMinuteUsd, type Bucket, type Episode, type EpisodeFeatures, type Regime, type SelectionReference, type SelectionResult, type Victim,
+  MINUTE_MS,
+  buildReference,
+  changePoints,
+  episodeFeatures,
+  mergeEpisodes,
+  selectEpisode,
+  subEpisodes,
+  usableRange,
+  typicalLiquidationMinuteUsd,
+  type Bucket,
+  type Episode,
+  type EpisodeFeatures,
+  type Regime,
+  type SelectionReference,
+  type SelectionResult,
+  type Victim,
 } from "./v9-core";
 import { V9MinuteStore } from "./v9-minute-store";
 import { priceOiEpisodes, typicalMinuteNoise } from "./v9-price-oi";
@@ -55,6 +69,12 @@ export interface V9EngineSettings {
    *  wider stops are unchanged. Keeps stop-out fees <= ~0.3R and the position
    *  size <= ~300x the risk. 0 = off. */
   minSlFraction: number;
+  /** LATE-ENTRY STOP (Johnny, Sep 25 2026): when the stop at the episode
+   *  extreme is farther than this % from the entry (we are "very late"),
+   *  the stop moves to where the confirming OI drop STARTED: the extreme
+   *  price since the OI peak between the episode end and the confirmation.
+   *  Used only if it is closer than the extreme stop. 0 = always, null = off. */
+  lateSlPct: number | null;
 }
 
 export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
@@ -70,6 +90,7 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   significantOppositeLiq: false,
   maxSlFeeR: null,
   minSlFraction: 0,
+  lateSlPct: null,
 };
 
 export interface V9Decision {
@@ -80,7 +101,15 @@ export interface V9Decision {
   selection: SelectionResult;
   /** true only when selected AND fresh AND the reference is large enough. */
   tradable: boolean;
-  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "DATA_GAP" | "SL_TOO_TIGHT" | "SYMBOL_BUSY";
+  reason:
+    | "SELECTED"
+    | "NOT_SELECTED"
+    | "REFERENCE_TOO_SMALL"
+    | "STALE_CONFIRMATION"
+    | "DUPLICATE_EPISODE"
+    | "DATA_GAP"
+    | "SL_TOO_TIGHT"
+    | "SYMBOL_BUSY";
   /** Whole minutes between episode start and the decision with no data at all. */
   missingMinutes: number;
   evaluatedAt: number;
@@ -91,7 +120,11 @@ export interface V9Decision {
   referencePrice: number;
 }
 
-interface ReferenceSample { confirmTs: number; clr: number; dirMove: number }
+interface ReferenceSample {
+  confirmTs: number;
+  clr: number;
+  dirMove: number;
+}
 
 /** What the engine sees RIGHT NOW for a symbol: the episode that is still
  *  forming (not yet confirmed), or none. Persisted every minute so an
@@ -103,8 +136,17 @@ export interface V9EpisodeSnapshot {
   oi: number;
   price: number;
   forming: null | {
-    start: number; victim: Victim; parts: number; longUsd: number; shortUsd: number;
-    oiDropPct: number; priceMovePct: number; dom: boolean; dir: boolean; exh: boolean; clr: number;
+    start: number;
+    victim: Victim;
+    parts: number;
+    longUsd: number;
+    shortUsd: number;
+    oiDropPct: number;
+    priceMovePct: number;
+    dom: boolean;
+    dir: boolean;
+    exh: boolean;
+    clr: number;
   };
 }
 
@@ -117,12 +159,18 @@ export class V9CausalEngine {
    *  with a later confirmation (seen in replay: SOL 15:53 signalled three
    *  times). Any selected episode that STARTED before the last tradable
    *  signal on the same side is the same move seen again -- never traded twice. */
-  private readonly lastTradableAt: Record<Victim, number> = { LONG: -Infinity, SHORT: -Infinity };
+  private readonly lastTradableAt: Record<Victim, number> = {
+    LONG: -Infinity,
+    SHORT: -Infinity,
+  };
 
   /** Latest snapshot produced by evaluate(). */
   lastSnapshot: V9EpisodeSnapshot | null = null;
 
-  constructor(readonly symbol: string, private readonly settings: V9EngineSettings = DEFAULT_V9_ENGINE_SETTINGS) {}
+  constructor(
+    readonly symbol: string,
+    private readonly settings: V9EngineSettings = DEFAULT_V9_ENGINE_SETTINGS,
+  ) {}
 
   /** Restore "this side was already traded at `ts`" after a restart, from
    *  the persisted trades -- so a re-confirmed old episode is never traded twice. */
@@ -138,79 +186,211 @@ export class V9CausalEngine {
     const usable = usableRange(this.store.toBuckets(from, now));
     if (usable === null) return [];
     const regimes = changePoints(usable.map((b) => b.oi));
-    const episodes = this.settings.confirmMode === "PRICE_OI"
-      ? priceOiEpisodes(usable, regimes, now, this.settings.significantConfirm ? typicalMinuteNoise(usable) : undefined)
-      : mergeEpisodes(usable, subEpisodes(usable, regimes, now), this.settings.significantOppositeLiq ? typicalLiquidationMinuteUsd(usable) : undefined);
+    const episodes =
+      this.settings.confirmMode === "PRICE_OI"
+        ? priceOiEpisodes(
+            usable,
+            regimes,
+            now,
+            this.settings.significantConfirm
+              ? typicalMinuteNoise(usable)
+              : undefined,
+          )
+        : mergeEpisodes(
+            usable,
+            subEpisodes(usable, regimes, now),
+            this.settings.significantOppositeLiq
+              ? typicalLiquidationMinuteUsd(usable)
+              : undefined,
+          );
     this.lastSnapshot = this.snapshot(now, usable, regimes, episodes);
 
     const fresh = episodes
-      .filter((e) => Number.isFinite(e.confirmTs) && e.confirmTs <= now && e.confirmTs > this.lastConfirmTs)
+      .filter(
+        (e) =>
+          Number.isFinite(e.confirmTs) &&
+          e.confirmTs <= now &&
+          e.confirmTs > this.lastConfirmTs,
+      )
       .sort((a, b) => a.confirmTs - b.confirmTs);
 
     const decisions: V9Decision[] = [];
     for (const e of fresh) {
       const features = episodeFeatures(usable, e);
-      const prior = this.reference.filter((r) => r.confirmTs < e.confirmTs && r.confirmTs >= e.confirmTs - this.settings.referenceWindowMs);
+      const prior = this.reference.filter(
+        (r) =>
+          r.confirmTs < e.confirmTs &&
+          r.confirmTs >= e.confirmTs - this.settings.referenceWindowMs,
+      );
       const reference = buildReference(prior);
       const full = selectEpisode(features, reference);
-      const selection = this.settings.filters === "ALL" ? full
-        : { ...full, selected: this.settings.filters === "NONE" ? true : features.dom };
+      const selection =
+        this.settings.filters === "ALL"
+          ? full
+          : {
+              ...full,
+              selected: this.settings.filters === "NONE" ? true : features.dom,
+            };
       const stale = now - e.confirmTs > this.settings.maxSignalAgeMs;
-      const small = this.settings.filters === "ALL" && reference.sampleCount < this.settings.minReferenceSamples;
+      const small =
+        this.settings.filters === "ALL" &&
+        reference.sampleCount < this.settings.minReferenceSamples;
       const duplicate = e.start < this.lastTradableAt[e.victim];
       // Minutes with no poll at all = the collector was down (restart,
       // outage). Liquidations of that time are lost for good (Binance keeps
       // no history), so such an episode is not trusted with money.
       // (the current minute is still in progress and is not checked)
       const lastFull = now - MINUTE_MS;
-      const expectedMinutes = Math.floor(lastFull / MINUTE_MS) - Math.floor(e.start / MINUTE_MS) + 1;
-      const missingMinutes = Math.max(0, expectedMinutes - this.store.minuteRange(e.start, lastFull).length);
-      const extreme = this.store.extremePrice(e.victim === "LONG" ? "LOW" : "HIGH", this.settings.slFrom === "PEAK" ? features.peakTs : e.start, now);
-      const buffer = this.settings.slBufferMinuteRanges > 0 ? this.settings.slBufferMinuteRanges * this.typicalMinuteRange(now) : 0;
+      const expectedMinutes =
+        Math.floor(lastFull / MINUTE_MS) - Math.floor(e.start / MINUTE_MS) + 1;
+      const missingMinutes = Math.max(
+        0,
+        expectedMinutes - this.store.minuteRange(e.start, lastFull).length,
+      );
+      const extreme = this.store.extremePrice(
+        e.victim === "LONG" ? "LOW" : "HIGH",
+        this.settings.slFrom === "PEAK" ? features.peakTs : e.start,
+        now,
+      );
+      const buffer =
+        this.settings.slBufferMinuteRanges > 0
+          ? this.settings.slBufferMinuteRanges * this.typicalMinuteRange(now)
+          : 0;
       const refPrice = this.store.lastPrice(now);
       let stopPrice = e.victim === "LONG" ? extreme - buffer : extreme + buffer;
+      if (
+        this.settings.lateSlPct !== null &&
+        refPrice > 0 &&
+        (Math.abs(refPrice - stopPrice) / refPrice) * 100 >
+          this.settings.lateSlPct
+      ) {
+        const turnTs = oiTurnTs(usable, e);
+        if (turnTs !== null) {
+          const turn = this.store.extremePrice(
+            e.victim === "LONG" ? "LOW" : "HIGH",
+            turnTs,
+            now,
+          );
+          const t = e.victim === "LONG" ? turn - buffer : turn + buffer;
+          const valid =
+            e.victim === "LONG"
+              ? t < refPrice && t > stopPrice
+              : t > refPrice && t < stopPrice;
+          if (Number.isFinite(t) && valid) stopPrice = t;
+        }
+      }
       const minDist = refPrice * this.settings.minSlFraction;
-      if (minDist > 0 && Math.abs(refPrice - stopPrice) < minDist) stopPrice = e.victim === "LONG" ? refPrice - minDist : refPrice + minDist;
+      if (minDist > 0 && Math.abs(refPrice - stopPrice) < minDist)
+        stopPrice =
+          e.victim === "LONG" ? refPrice - minDist : refPrice + minDist;
       const riskDist = Math.abs(refPrice - stopPrice);
-      const slFeeR = riskDist > 0 ? (2 * TAKER_FEE * refPrice) / riskDist : Infinity;
-      const tooTight = this.settings.maxSlFeeR !== null && slFeeR > this.settings.maxSlFeeR;
-      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : tooTight ? "SL_TOO_TIGHT" : "SELECTED";
+      const slFeeR =
+        riskDist > 0 ? (2 * TAKER_FEE * refPrice) / riskDist : Infinity;
+      const tooTight =
+        this.settings.maxSlFeeR !== null && slFeeR > this.settings.maxSlFeeR;
+      const reason: V9Decision["reason"] = !selection.selected
+        ? "NOT_SELECTED"
+        : small
+          ? "REFERENCE_TOO_SMALL"
+          : stale
+            ? "STALE_CONFIRMATION"
+            : duplicate
+              ? "DUPLICATE_EPISODE"
+              : missingMinutes > 0
+                ? "DATA_GAP"
+                : tooTight
+                  ? "SL_TOO_TIGHT"
+                  : "SELECTED";
       decisions.push({
-        symbol: this.symbol, episode: e, features, reference, selection,
-        tradable: reason === "SELECTED", reason, evaluatedAt: now, missingMinutes,
-        tradeSide: e.victim, stopPrice, referencePrice: refPrice,
+        symbol: this.symbol,
+        episode: e,
+        features,
+        reference,
+        selection,
+        tradable: reason === "SELECTED",
+        reason,
+        evaluatedAt: now,
+        missingMinutes,
+        tradeSide: e.victim,
+        stopPrice,
+        referencePrice: refPrice,
       });
       if (reason === "SELECTED") this.lastTradableAt[e.victim] = now;
-      if (features.dir) this.reference.push({ confirmTs: e.confirmTs, clr: features.clr, dirMove: features.dirMove });
+      if (features.dir)
+        this.reference.push({
+          confirmTs: e.confirmTs,
+          clr: features.clr,
+          dirMove: features.dirMove,
+        });
       this.lastConfirmTs = e.confirmTs;
     }
     const keepFrom = now - this.settings.referenceWindowMs;
-    while (this.reference.length && this.reference[0].confirmTs < keepFrom) this.reference.shift();
+    while (this.reference.length && this.reference[0].confirmTs < keepFrom)
+      this.reference.shift();
     return decisions;
   }
 
   /** Mean poll-price high-low of the last 60 full minutes. */
   private typicalMinuteRange(now: number): number {
     const r = this.store.minuteRange(now - 61 * MINUTE_MS, now - MINUTE_MS);
-    return r.length ? r.reduce((t, m) => t + (m.high - m.low), 0) / r.length : 0;
+    return r.length
+      ? r.reduce((t, m) => t + (m.high - m.low), 0) / r.length
+      : 0;
   }
 
-  private snapshot(now: number, usable: Bucket[], regimes: Regime[], episodes: Episode[]): V9EpisodeSnapshot {
+  private snapshot(
+    now: number,
+    usable: Bucket[],
+    regimes: Regime[],
+    episodes: Episode[],
+  ): V9EpisodeSnapshot {
     const lastIdx = usable.length - 1;
-    const slope = regimes.find((r) => lastIdx >= r.a && lastIdx < r.b)?.slope ?? 0;
+    const slope =
+      regimes.find((r) => lastIdx >= r.a && lastIdx < r.b)?.slope ?? 0;
     const last = episodes.at(-1);
     const formingEp = last && !Number.isFinite(last.confirmTs) ? last : null;
     const f = formingEp ? episodeFeatures(usable, formingEp) : null;
     return {
-      symbol: this.symbol, ts: now,
+      symbol: this.symbol,
+      ts: now,
       oiPhase: slope < 0 ? "OI_FALLING" : slope > 0 ? "OI_RISING" : "OI_FLAT",
-      oi: usable[lastIdx].oi, price: usable[lastIdx].price,
-      forming: formingEp && f ? {
-        start: formingEp.start, victim: formingEp.victim, parts: formingEp.parts,
-        longUsd: formingEp.long, shortUsd: formingEp.short,
-        oiDropPct: formingEp.oiDropPct, priceMovePct: formingEp.priceMovePct,
-        dom: f.dom, dir: f.dir, exh: f.exh, clr: f.clr,
-      } : null,
+      oi: usable[lastIdx].oi,
+      price: usable[lastIdx].price,
+      forming:
+        formingEp && f
+          ? {
+              start: formingEp.start,
+              victim: formingEp.victim,
+              parts: formingEp.parts,
+              longUsd: formingEp.long,
+              shortUsd: formingEp.short,
+              oiDropPct: formingEp.oiDropPct,
+              priceMovePct: formingEp.priceMovePct,
+              dom: f.dom,
+              dir: f.dir,
+              exh: f.exh,
+              clr: f.clr,
+            }
+          : null,
     };
   }
+}
+
+/** Where the confirming OI drop started: the minute of highest OI between
+ *  the episode's last part and the confirmation (both already known). */
+export function oiTurnTs(
+  buckets: readonly Bucket[],
+  e: Episode,
+): number | null {
+  if (!Number.isFinite(e.confirmTs)) return null;
+  let best = -1;
+  for (
+    let i = Math.max(0, e.eIdx - 1);
+    i < buckets.length && buckets[i].ts < e.confirmTs;
+    i++
+  ) {
+    if (!(buckets[i].oi > 0)) continue;
+    if (best < 0 || buckets[i].oi >= buckets[best].oi) best = i;
+  }
+  return best >= 0 ? buckets[best].ts : null;
 }
