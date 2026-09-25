@@ -10,7 +10,9 @@
  * Variants compared side by side (see VARIANTS below). LIVE = the rule running
  * live today (incl. min SL 0.33%). LIVE_LATEx: when the stop at the episode
  * extreme is farther than x% (a late entry), the stop moves to where the
- * confirming OI drop started (if closer). Older variants:
+ * confirming OI drop started (if closer). LIVE_ACCxx: trade only when the
+ * accumulation after the cleaning had a sharp OI rise (30-min rise >= the
+ * coin's Pxx of 30-min OI rises). Older variants:
  *   A          current live rule (opposite-side liquidation confirms), rr 2.2
  *   _RR2       rr 2 instead of 2.2
  *   _MINSL     skip signals whose SL is so tight that stop-out fees > 0.3R
@@ -18,14 +20,17 @@
  *              typical liquidation-minute size (not e.g. $80)
  * (PRICE_OI variants were tested and rejected: net negative after fees.)
  *
- * Read-only. Usage (takes ~2-3 min per symbol on the server; use nohup):
+ * Read-only. All variants run in ONE shared pass per symbol (the costly regime
+ * fit is computed once per minute and reused), and symbols run in parallel,
+ * `--jobs 2` by default (one per CPU). Usage (use nohup):
  *   npx tsx src/tools/v9-replay.ts
  *   npx tsx src/tools/v9-replay.ts --symbols BTC,ETH --rr 2.2 --details P
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
 import { type Victim } from "../strategy/v9/v9-core";
-import { replaySymbol } from "../strategy/v9/v9-replay";
+import { replaySymbolMulti } from "../strategy/v9/v9-replay";
+import { spawn } from "child_process";
 import { DEFAULT_V9_ENGINE_SETTINGS, type V9EngineSettings } from "../strategy/v9/v9-causal-engine";
 
 const DEFAULT_SYMBOLS = ["BTC", "ETH", "SOL", "BNB", "DOGE", "ADA", "LINK", "AVAX", "SUI"];
@@ -44,6 +49,9 @@ const VARIANTS: Array<{ name: string; settings: V9EngineSettings; rr?: number }>
   { name: "LIVE_LATE0.8", settings: { ...LIVE, lateSlPct: 0.8 } },
   { name: "LIVE_LATE1.2", settings: { ...LIVE, lateSlPct: 1.2 } },
   { name: "LIVE_OITURN", settings: { ...LIVE, lateSlPct: 0 } },       // always (whenever it is closer than the extreme)
+  // Sharp accumulation: after the cleaning, a 30-min OI rise >= the coin's P70 / P90 of 30-min OI rises
+  { name: "LIVE_ACC70", settings: { ...LIVE, minAccumPercentile: 70 } },
+  { name: "LIVE_ACC90", settings: { ...LIVE, minAccumPercentile: 90 } },
 ];
 
 interface Tally { decisions: number; tradable: number; tp: number; sl: number; open: number; noRisk: number; r: number; netR: number; slPcts: number[] }
@@ -54,57 +62,111 @@ function line(name: string, t: Tally): string {
   return `${name.padEnd(14)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}`;
 }
 
+type Tallies = Record<string, Tally>;
+
+/** One symbol: load its raw rows once, run ALL variants in one shared pass. */
+async function runSymbol(db: import("mongodb").Db, symbol: string, out: (line: string) => void): Promise<Tallies | null> {
+  const liqCol = db.collection("liq_raw_events"), oiCol = db.collection("oi_second_observations");
+  const [firstLiq, lastLiq, firstOi, lastOi] = await Promise.all([
+    liqCol.findOne({ symbol }, { sort: { timestamp: 1 }, projection: { timestamp: 1 } }),
+    liqCol.findOne({ symbol }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
+    oiCol.findOne({ symbol }, { sort: { timestamp: 1 }, projection: { timestamp: 1 } }),
+    oiCol.findOne({ symbol }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
+  ]);
+  if (!firstLiq || !lastLiq || !firstOi || !lastOi) { out(`\n${symbol}: no data`); return null; }
+  const from = Math.max(time(firstLiq.timestamp), time(firstOi.timestamp));
+  const until = Math.min(time(lastLiq.timestamp), time(lastOi.timestamp));
+  const liq = (await liqCol.find({ symbol, victim: { $in: ["LONG", "SHORT"] }, timestamp: { $gte: from, $lte: until } })
+    .project({ timestamp: 1, victim: 1, quoteQty: 1 }).sort({ timestamp: 1 }).toArray())
+    .map((x) => ({ ts: time(x.timestamp), victim: x.victim as Victim, usd: Number(x.quoteQty) }));
+  const oi = (await oiCol.find({ symbol, timestamp: { $gte: new Date(from), $lte: new Date(until) } })
+    .project({ timestamp: 1, oiUpdatedAt: 1, openInterest: 1, price: 1 }).sort({ timestamp: 1 }).toArray())
+    .map((x) => ({ ts: time(x.timestamp), updated: time(x.oiUpdatedAt), oi: Number(x.openInterest), price: Number(x.price) }));
+
+  const started = Date.now();
+  const results = replaySymbolMulti(symbol, liq, oi, from, until, VARIANTS.map((v) => ({ settings: v.settings, rr: v.rr ?? RR })));
+  out(`\n===== ${symbol}  ${stamp(from)} -> ${stamp(until)}  (${VARIANTS.length} variants in one pass, ${((Date.now() - started) / 1000).toFixed(0)}s) =====`);
+  const tallies: Tallies = {};
+  VARIANTS.forEach((v, k) => {
+    const { decisions, trades } = results[k];
+    const t = empty();
+    t.decisions = decisions.length; t.tradable = decisions.filter((d) => d.tradable).length;
+    for (const { decision: d, trade: x } of trades) {
+      if (x.result === "TP") t.tp++; else if (x.result === "SL") t.sl++; else if (x.result === "OPEN") t.open++; else t.noRisk++;
+      t.r += x.r; t.netR += x.netR ?? 0;
+      if (x.slPct !== undefined && (x.result === "TP" || x.result === "SL")) t.slPcts.push(x.slPct);
+      if (DETAILS === v.name) {
+        out(`   ${v.name} ${stamp(d.evaluatedAt)} ${d.tradeSide === "LONG" ? "BUY " : "SELL"} start ${stamp(d.episode.start)} entry ${x.entry ?? "-"} SL ${x.sl ?? "-"} (${x.slPct?.toFixed(2) ?? "-"}%) ${x.result} ${x.minutes ?? "-"}m netR ${x.netR?.toFixed(2) ?? "-"}`);
+      }
+    }
+    out(line(v.name, t));
+    tallies[v.name] = t;
+  });
+  return tallies;
+}
+
+function printTotals(totals: Map<string, Tally>, n: number): void {
+  console.log(`\n===== TOTAL (${n} symbols, rr=${RR}; gross break-even win ${(100 / (1 + RR)).toFixed(1)}%) =====`);
+  for (const v of VARIANTS) console.log(line(v.name, totals.get(v.name)!));
+  console.log("netR = after Binance fees. Fees weigh more when the SL is tight (see medianSL).");
+}
+
+function addInto(totals: Map<string, Tally>, t: Tallies): void {
+  for (const v of VARIANTS) {
+    const tot = totals.get(v.name)!, x = t[v.name];
+    if (!x) continue;
+    for (const k of ["decisions", "tradable", "tp", "sl", "open", "noRisk", "r", "netR"] as const) tot[k] += x[k];
+    tot.slPcts.push(...x.slPcts);
+  }
+}
+
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
+  const child = process.argv.includes("--child");
+  const jobs = Math.max(1, Number(arg("jobs", "2")));
+  const totals = new Map(VARIANTS.map((v) => [v.name, empty()]));
+
+  // Parallel: one child process per symbol, `jobs` at a time (one CPU each).
+  if (!child && jobs > 1 && symbols.length > 1) {
+    const queue = [...symbols];
+    const outputs = new Map<string, string>();
+    const runOne = (symbol: string): Promise<void> => new Promise((resolve) => {
+      const args = ["tsx", process.argv[1], "--child", "--symbols", symbol, "--rr", String(RR), ...(DETAILS ? ["--details", DETAILS] : [])];
+      const p = spawn("npx", args, { stdio: ["ignore", "pipe", "inherit"], env: process.env });
+      let buf = "";
+      p.stdout.on("data", (d) => { buf += d.toString(); });
+      p.on("close", () => {
+        const lines = buf.split("\n");
+        const tallyLine = lines.find((l) => l.startsWith("@@TALLY "));
+        if (tallyLine) addInto(totals, JSON.parse(tallyLine.slice(8)) as Tallies);
+        const text = lines.filter((l) => !l.startsWith("@@TALLY ")).join("\n");
+        outputs.set(symbol, text);
+        console.log(text); // each symbol printed as soon as it finishes
+        resolve();
+      });
+    });
+    const workers = Array.from({ length: Math.min(jobs, queue.length) }, async () => {
+      while (queue.length) await runOne(queue.shift()!);
+    });
+    await Promise.all(workers);
+    printTotals(totals, symbols.length);
+    return;
+  }
+
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
-  const totals = new Map(VARIANTS.map((v) => [v.name, empty()]));
   try {
     for (const symbol of symbols) {
-      const liqCol = db.collection("liq_raw_events"), oiCol = db.collection("oi_second_observations");
-      const [firstLiq, lastLiq, firstOi, lastOi] = await Promise.all([
-        liqCol.findOne({ symbol }, { sort: { timestamp: 1 }, projection: { timestamp: 1 } }),
-        liqCol.findOne({ symbol }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
-        oiCol.findOne({ symbol }, { sort: { timestamp: 1 }, projection: { timestamp: 1 } }),
-        oiCol.findOne({ symbol }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
-      ]);
-      if (!firstLiq || !lastLiq || !firstOi || !lastOi) { console.log(`\n${symbol}: no data`); continue; }
-      const from = Math.max(time(firstLiq.timestamp), time(firstOi.timestamp));
-      const until = Math.min(time(lastLiq.timestamp), time(lastOi.timestamp));
-      const liq = (await liqCol.find({ symbol, victim: { $in: ["LONG", "SHORT"] }, timestamp: { $gte: from, $lte: until } })
-        .project({ timestamp: 1, victim: 1, quoteQty: 1 }).sort({ timestamp: 1 }).toArray())
-        .map((x) => ({ ts: time(x.timestamp), victim: x.victim as Victim, usd: Number(x.quoteQty) }));
-      const oi = (await oiCol.find({ symbol, timestamp: { $gte: new Date(from), $lte: new Date(until) } })
-        .project({ timestamp: 1, oiUpdatedAt: 1, openInterest: 1, price: 1 }).sort({ timestamp: 1 }).toArray())
-        .map((x) => ({ ts: time(x.timestamp), updated: time(x.oiUpdatedAt), oi: Number(x.openInterest), price: Number(x.price) }));
-
-      console.log(`\n===== ${symbol}  ${stamp(from)} -> ${stamp(until)} =====`);
-      for (const v of VARIANTS) {
-        const started = Date.now();
-        const { decisions, trades } = replaySymbol(symbol, liq, oi, from, until, v.rr ?? RR, v.settings);
-        const t = empty();
-        t.decisions = decisions.length; t.tradable = decisions.filter((d) => d.tradable).length;
-        for (const { decision: d, trade: x } of trades) {
-          if (x.result === "TP") t.tp++; else if (x.result === "SL") t.sl++; else if (x.result === "OPEN") t.open++; else t.noRisk++;
-          t.r += x.r; t.netR += x.netR ?? 0;
-          if (x.slPct !== undefined && (x.result === "TP" || x.result === "SL")) t.slPcts.push(x.slPct);
-          if (DETAILS === v.name) {
-            console.log(`   ${v.name} ${stamp(d.evaluatedAt)} ${d.tradeSide === "LONG" ? "BUY " : "SELL"} start ${stamp(d.episode.start)} entry ${x.entry ?? "-"} SL ${x.sl ?? "-"} (${x.slPct?.toFixed(2) ?? "-"}%) ${x.result} ${x.minutes ?? "-"}m netR ${x.netR?.toFixed(2) ?? "-"}`);
-          }
-        }
-        console.log(`${line(v.name, t)}  (${((Date.now() - started) / 1000).toFixed(0)}s)`);
-        const tot = totals.get(v.name)!;
-        for (const k of ["decisions", "tradable", "tp", "sl", "open", "noRisk", "r", "netR"] as const) tot[k] += t[k];
-        tot.slPcts.push(...t.slPcts);
-      }
+      const t = await runSymbol(db, symbol, (l) => console.log(l));
+      if (!t) continue;
+      if (child) console.log(`@@TALLY ${JSON.stringify(t)}`);
+      else addInto(totals, t);
     }
   } finally {
     await client.close();
   }
-  console.log(`\n===== TOTAL (${symbols.length} symbols, rr=${RR}; gross break-even win ${(100 / (1 + RR)).toFixed(1)}%) =====`);
-  for (const v of VARIANTS) console.log(line(v.name, totals.get(v.name)!));
-  console.log("netR = after Binance fees. Fees weigh more when the SL is tight (see medianSL).");
+  if (!child) printTotals(totals, symbols.length);
 }
 
 main().catch((err) => { console.error(err); process.exitCode = 1; });

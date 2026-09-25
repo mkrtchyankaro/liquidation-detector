@@ -10,7 +10,7 @@
 import * as assert from "assert";
 import { buildBuckets, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
 import { V9MinuteStore } from "../src/strategy/v9/v9-minute-store";
-import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs } from "../src/strategy/v9/v9-causal-engine";
+import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, sharpAccumulation } from "../src/strategy/v9/v9-causal-engine";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -219,6 +219,25 @@ scenario("oiTurnTs: the highest-OI minute between the episode's last part and th
   const e = { eIdx: 3, confirmTs: 8 * 60_000 } as unknown as Parameters<typeof oiTurnTs>[1];
   assert.strictEqual(oiTurnTs(buckets, e), 5 * 60_000, "OI peaked at minute 5, then fell into the confirmation; minute 8 (after it) ignored");
   assert.strictEqual(oiTurnTs(buckets, { ...e, confirmTs: NaN }), null);
+});
+
+scenario("sharpAccumulation: a fast, big OI rise after the cleaning passes P90; a slow drift of the same total does not", () => {
+  const mk = (rise: (m: number) => number) => {
+    const bs = [];
+    // 600 minutes of normal life: OI swings +-0.4% (normal 30-min rises up to ~0.8%)
+    for (let m = 0; m < 600; m++) bs.push({ ts: m * 60_000, long: 0, short: 0, count: 0, oi: 1000 * (1 + 0.004 * Math.sin(m / 7)), price: 100, oiPoints: 1 });
+    // cleaning 600..620: OI -2%
+    for (let m = 600; m < 620; m++) bs.push({ ts: m * 60_000, long: 1, short: 0, count: 1, oi: 1000 - (m - 600), price: 100, oiPoints: 1 });
+    // accumulation 620..740 by the given curve, then the confirming drop
+    for (let m = 620; m < 740; m++) bs.push({ ts: m * 60_000, long: 0, short: 0, count: 0, oi: 980 + rise(m - 620), price: 100, oiPoints: 1 });
+    for (let m = 740; m < 760; m++) bs.push({ ts: m * 60_000, long: 0, short: 1, count: 1, oi: 980 + rise(119) - (m - 739), price: 100, oiPoints: 1 });
+    return bs;
+  };
+  const e = { sIdx: 600, eIdx: 620, confirmTs: 750 * 60_000 } as unknown as Parameters<typeof sharpAccumulation>[1];
+  const sharp = mk((k) => Math.min(15, k)); // +1.5% in 15 minutes
+  const slow = mk((k) => (15 * k) / 119);   // +1.5% over 2 hours
+  assert.strictEqual(sharpAccumulation(sharp, e, 90), true);
+  assert.strictEqual(sharpAccumulation(slow, e, 90), false);
 });
 
 scenario("minSlFraction: a tighter stop is moved out to the minimum distance; wider stops are unchanged", () => {
