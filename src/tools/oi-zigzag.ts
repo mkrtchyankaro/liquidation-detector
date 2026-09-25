@@ -23,7 +23,7 @@ import {
   buildChains,
   buildWaves,
   DEFAULT_CHAIN_PARAMS,
-  medianOi15mPct,
+  trailingOiNoise,
   type Chain,
   type Wave,
   type ZBar,
@@ -84,8 +84,8 @@ async function main(): Promise<void> {
         .find({
           symbol,
           ts: {
-            $gte: new Date(Date.now() - days * 86_400_000 - 4 * 3_600_000),
-          } /* +4h: ATR before the first wave */,
+            $gte: new Date(Date.now() - days * 86_400_000 - 24 * 3_600_000),
+          } /* +1 day of history before the first wave (normal OI move, ATR) */,
         })
         .sort({ ts: 1 })
         .toArray();
@@ -106,12 +106,16 @@ async function main(): Promise<void> {
         );
         continue;
       }
-      const noise = medianOi15mPct(bars);
-      const rPct = k * noise;
-      const waves = buildWaves(bars, rPct);
+      // No look-ahead: the "normal OI move" and R at each minute come only
+      // from the 2 days BEFORE that minute (never from later data).
+      const noiseArr = trailingOiNoise(bars);
+      const rArr = noiseArr.map((n) => k * n);
+      const noise = noiseArr[noiseArr.length - 1];
+      const rPct = rArr[rArr.length - 1];
+      const waves = buildWaves(bars, rArr);
       const chains = buildChains(waves, bars, {
         ...DEFAULT_CHAIN_PARAMS,
-        noise15Pct: noise,
+        noise15Pct: noiseArr,
         slPct,
         tpPct,
       });
@@ -122,7 +126,7 @@ async function main(): Promise<void> {
         `\n===== ${symbol}  ${stamp(bars[0].ts)} -> ${stamp(bars[bars.length - 1].ts)} UTC =====`,
       );
       console.log(
-        `OI now ${coins(bars[bars.length - 1].oi)} ${coin}.  Normal 15-min OI change ${noise.toFixed(3)}%  ->  wave threshold R = ${k} x = ${rPct.toFixed(3)}% (~${coins((rPct / 100) * bars[bars.length - 1].oi)} ${coin}). Smaller OI moves are noise.`,
+        `OI now ${coins(bars[bars.length - 1].oi)} ${coin}.  Normal 15-min OI change (last 2 days) ${noise.toFixed(3)}%  ->  wave threshold R now = ${k} x = ${rPct.toFixed(3)}% (~${coins((rPct / 100) * bars[bars.length - 1].oi)} ${coin}). Smaller OI moves are noise.`,
       );
       console.log(`\n-- all waves (${waves.length}) --`);
       console.log(

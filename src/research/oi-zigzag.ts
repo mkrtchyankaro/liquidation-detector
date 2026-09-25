@@ -34,9 +34,13 @@ export interface Wave {
   longLiqUsd: number; shortLiqUsd: number;
 }
 
+/** Reversal threshold per bar: a fixed % or, for honest (no look-ahead)
+ *  work, a per-bar array built only from data up to that bar. */
+export type Threshold = number | readonly number[];
+const at = (t: Threshold, i: number): number => (typeof t === "number" ? t : t[i]);
+
 /** Classic zigzag on OI with a relative reversal threshold rPct (% of OI). */
-export function oiPivots(bars: readonly ZBar[], rPct: number): { pivots: Pivot[]; lastExtreme: Pivot | null } {
-  const r = rPct / 100;
+export function oiPivots(bars: readonly ZBar[], rPct: Threshold): { pivots: Pivot[]; lastExtreme: Pivot | null } {
   const pivots: Pivot[] = [];
   const i0 = bars.findIndex((b) => b.oi > 0);
   if (i0 < 0) return { pivots, lastExtreme: null };
@@ -45,7 +49,8 @@ export function oiPivots(bars: readonly ZBar[], rPct: number): { pivots: Pivot[]
   const mk = (idx: number, kind: Pivot["kind"], conf: number): Pivot => ({ idx, ts: bars[idx].ts, oi: bars[idx].oi, kind, confirmedIdx: conf, confirmedTs: bars[conf].ts });
   for (let i = i0 + 1; i < bars.length; i++) {
     const v = bars[i].oi;
-    if (!(v > 0)) continue;
+    const r = at(rPct, i) / 100;
+    if (!(v > 0) || !(r > 0)) { if (v > hi) { hi = v; hiIdx = i; } if (v > 0 && v < lo) { lo = v; loIdx = i; } continue; }
     if (v > hi) { hi = v; hiIdx = i; }
     if (v < lo) { lo = v; loIdx = i; }
     if (trend >= 0 && v <= hi * (1 - r) && hiIdx < i) {
@@ -63,7 +68,7 @@ export function oiPivots(bars: readonly ZBar[], rPct: number): { pivots: Pivot[]
   return { pivots: clean, lastExtreme: last };
 }
 
-export function buildWaves(bars: readonly ZBar[], rPct: number): Wave[] {
+export function buildWaves(bars: readonly ZBar[], rPct: Threshold): Wave[] {
   const { pivots, lastExtreme } = oiPivots(bars, rPct);
   const pts = lastExtreme && pivots.length && lastExtreme.idx > pivots[pivots.length - 1].idx ? [...pivots, lastExtreme] : pivots;
   const waves: Wave[] = [];
@@ -120,7 +125,7 @@ export interface Chain {
   trade: ChainTrade | null;
 }
 
-export interface ChainParams { noise15Pct: number; slPct: number; tpPct: number; horizonMin: number }
+export interface ChainParams { noise15Pct: Threshold; slPct: number; tpPct: number; horizonMin: number }
 export const DEFAULT_CHAIN_PARAMS: Omit<ChainParams, "noise15Pct"> = { slPct: 0.3, tpPct: 0.7, horizonMin: 24 * 60 };
 const TAKER = 0.05, MAKER = 0.02; // % of notional
 
@@ -175,7 +180,7 @@ export function buildChains(waves: readonly Wave[], bars: readonly ZBar[], p: Ch
     const expectedMove = acc ? depthPer1k * (acc.coins / 1000) : null;
     const base = acc ? acc.priceEnd : NaN;
     out.push({
-      cleaning: w, accumulation: acc, resolution: res, quality: quality(bars, w, cleaningMove, p.noise15Pct),
+      cleaning: w, accumulation: acc, resolution: res, quality: quality(bars, w, cleaningMove, at(p.noise15Pct, w.from.idx)),
       cleaningMove, depthPer1k, expectedMove,
       actualUp: res ? Math.max(0, res.priceHigh - base) : null,
       actualDown: res ? Math.max(0, base - res.priceLow) : null,
@@ -210,7 +215,29 @@ function lateEntry(bars: readonly ZBar[], acc: Wave, expected: number, p: ChainP
   return { ...at, result: "OPEN", netR: 0, minutes: null };
 }
 
-/** Coin's normal OI noise: median |OI change| over 15 minutes, in %. */
+/** NO LOOK-AHEAD version of medianOi15mPct: for every bar, the median
+ *  |15-min OI change| over the `lookbackMin` minutes BEFORE it (recomputed
+ *  every 15 minutes). NaN until `minHistoryMin` of history exists. */
+export function trailingOiNoise(bars: readonly ZBar[], lookbackMin = 2 * 1440, minHistoryMin = 240): number[] {
+  const out = new Array<number>(bars.length).fill(NaN);
+  let cur = NaN;
+  for (let i = 0; i < bars.length; i++) {
+    if (i % 15 === 0 && i >= minHistoryMin) {
+      const v: number[] = [];
+      for (let j = Math.max(15, i - lookbackMin); j <= i; j += 5) {
+        const a = bars[j - 15].oi, b = bars[j].oi;
+        if (a > 0 && b > 0) v.push((Math.abs(b - a) / a) * 100);
+      }
+      v.sort((x, y) => x - y);
+      cur = v.length ? v[v.length >> 1] : NaN;
+    }
+    out[i] = cur;
+  }
+  return out;
+}
+
+/** Coin's normal OI noise: median |OI change| over 15 minutes, in %
+ *  (whole period -- descriptive only; decisions use trailingOiNoise). */
 export function medianOi15mPct(bars: readonly ZBar[]): number {
   const v: number[] = [];
   for (let i = 15; i < bars.length; i += 5) {

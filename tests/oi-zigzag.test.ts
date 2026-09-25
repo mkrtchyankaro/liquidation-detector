@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/oi-zigzag.test.ts
  */
 import * as assert from "assert";
-import { atr15Before, buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, type ZBar } from "../src/research/oi-zigzag";
+import { atr15Before, buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, trailingOiNoise, type ZBar } from "../src/research/oi-zigzag";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -102,6 +102,23 @@ scenario("quality: fast, forced, big-push cleaning = grade A; same wave slow and
   const weak = quality(all, { ...w, longLiqUsd: 1_000 }, 50, 0.1); // not forced
   assert.ok(Math.abs(strong.speed - (0.8 * 2) / 12 / (0.1 / 15)) < 1.5, `speed over the active part ${strong.speed}`);
   assert.strictEqual(weak.grade, "C");
+});
+
+scenario("NO LOOK-AHEAD: the trade decision is identical when the data is cut right after the decision minute", () => {
+  const full = buildChains(buildWaves(bars, R), bars, P)[0].trade!;
+  const cutAt = (full.decidedTs - T0) / M + 1;
+  const cut = bars.slice(0, cutAt);
+  const t = buildChains(buildWaves(cut, R), cut, P)[0].trade!;
+  assert.deepStrictEqual([t.decidedTs, t.entry, t.side, t.alreadyMoved, t.remaining], [full.decidedTs, full.entry, full.side, full.alreadyMoved, full.remaining]);
+});
+
+scenario("NO LOOK-AHEAD: the coin's normal OI move at a minute ignores everything after it", () => {
+  const long: ZBar[] = Array.from({ length: 900 }, (_, m) => ({ ts: T0 + m * M, close: 100, high: 100, low: 100, oi: 1000 + (m % 7), longLiq: 0, shortLiq: 0 }));
+  const a = trailingOiNoise(long);
+  const wild = long.map((b, m) => (m > 600 ? { ...b, oi: b.oi * (1 + (m % 2) * 0.05) } : b));
+  const b = trailingOiNoise(wild);
+  assert.deepStrictEqual(a.slice(0, 601), b.slice(0, 601));
+  assert.ok(Number.isNaN(a[100]) && a[300] > 0, "no value before 4h of history");
 });
 
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
