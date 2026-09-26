@@ -1,4 +1,4 @@
-import type { V9Decision } from "./v9-causal-engine";
+import type { V9Decision, V9Story } from "./v9-causal-engine";
 import type { V9TradeDoc } from "./v9-repository";
 import { estimateFeesUsd } from "./v9-fees";
 
@@ -50,12 +50,62 @@ export function formatV9Entry(d: V9Decision, t: V9TradeDoc): string {
     `Position  ${fmtQty(t.quantity)} ${d.symbol.replace(/USDT$/, "")}  (${Number.isFinite(notional) ? compact(notional) : "n/a"})`,
     `Fees est  TP ${fmtUsd(fees.tp, false)} (${(fees.tp / risk).toFixed(2)}R)  ·  SL ${fmtUsd(fees.sl, false)} (${(fees.sl / risk).toFixed(2)}R)`,
     "",
-    `⚡ ${e.victim} liq ${compact(e.victim === "LONG" ? e.long : e.short)} vs ${compact(e.victim === "LONG" ? e.short : e.long)}`,
-    `Episode   ${utc(e.start)} -> ${utc(e.confirmTs)} (${e.parts} part${e.parts > 1 ? "s" : ""})`,
-    `OI drop ${e.oiDropPct.toFixed(2)}% · move ${f.dirMove.toFixed(2)}% · CLR ${f.clr.toFixed(2)} (median ${d.reference.medianClr.toFixed(2)})`,
+    ...(d.story ? formatV9Story(d.story, d.symbol.replace(/USDT$/, "")) : [
+      `⚡ ${e.victim} liq ${compact(e.victim === "LONG" ? e.long : e.short)} vs ${compact(e.victim === "LONG" ? e.short : e.long)}`,
+      `Episode   ${utc(e.start)} -> ${utc(e.confirmTs)} (${e.parts} part${e.parts > 1 ? "s" : ""})`,
+      `OI drop ${e.oiDropPct.toFixed(2)}% · move ${f.dirMove.toFixed(2)}% · CLR ${f.clr.toFixed(2)} (median ${d.reference.medianClr.toFixed(2)})`,
+    ]),
   ];
   if (t.binance?.tpFailureReason) lines.push("", `⚠️ TP not placed: ${t.binance.tpFailureReason} -- SL is active`);
   return lines.join("\n");
+}
+
+/** Yerevan time (UTC+4, no daylight saving), HH:MM. */
+const yvn = (ms: number): string => new Date(ms + 4 * 3_600_000).toISOString().slice(11, 16);
+const coinsFmt = (v: number, coin: string): string => {
+  const a = Math.abs(v);
+  const n = a >= 1e6 ? `${(a / 1e6).toFixed(2)}M` : a >= 1e3 ? `${(a / 1e3).toFixed(1)}K` : a >= 10 ? a.toFixed(0) : a.toFixed(2);
+  return `${n} ${coin}`;
+};
+const signedPct = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+
+/** The episode in three phases, in Armenian (Johnny, Sep 26 2026). */
+export function formatV9Story(st: V9Story, coin: string): string[] {
+  const c = st.cleaning, a = st.accumulation, t = st.turn;
+  const victims = st.victim === "LONG" ? "Լոնգերը" : "Շորտերը";
+  const out = [
+    "📖 Ի՞նչ տեղի ունեցավ (Երևանի ժամով)",
+    "",
+    `1️⃣ Մաքրում · ${yvn(c.from)} → ${yvn(c.to)}`,
+    `${victims} լիկվիդացվեցին՝ ${compact(c.liqUsd)}`,
+    ...(c.biggestUsd > 0 ? [`(ամենամեծը՝ ${yvn(c.biggestTs)}, ${compact(c.biggestUsd)} մեկ րոպեում)`] : []),
+    `Փակվեց ${coinsFmt(c.coins, coin)} (OI ${signedPct(c.oiPct)})`,
+    `Գինը ${c.priceTo >= c.priceFrom ? "բարձրացավ" : "իջավ"} ${fmtPrice(c.priceFrom)} → ${fmtPrice(c.priceTo)} (${pct(c.priceFrom, c.priceTo)})`,
+  ];
+  if (a) {
+    out.push("", `2️⃣ Նոր դիրքեր · ${yvn(a.from)} → ${yvn(a.to)}`,
+      `Բացվեց ${coinsFmt(a.coins, coin)} (OI ${signedPct(a.oiPct)})`,
+      `Գինը՝ ${fmtPrice(a.priceFrom)} → ${fmtPrice(a.priceTo)} (${pct(a.priceFrom, a.priceTo)})`,
+      `👉 Նոր դիրքերը բացվեցին ${a.priceTo > a.priceFrom ? "վերևում" : a.priceTo < a.priceFrom ? "ներքևում" : "նույն գնի վրա"}`);
+  }
+  if (t) {
+    out.push("", `3️⃣ Շրջադարձ · ${yvn(t.from)} → ${yvn(t.to)}`,
+      `OI-ն սկսեց ընկնել՝ ${t.coins > 0 ? "−" : "+"}${coinsFmt(t.coins, coin)}`,
+      `${t.side === "LONG" ? "Լոնգերի" : "Շորտերի"} լիկվիդացիա՝ ${compact(t.liqUsd)}`,
+      `Գինը՝ ${fmtPrice(t.priceFrom)} → ${fmtPrice(t.priceTo)} (${pct(t.priceFrom, t.priceTo)})`);
+  }
+  out.push("", `✅ Ստուգումներ՝ ${st.checksPassed}/${st.checksTotal}`);
+  if (!st.warnings.length) out.push("⚠️ Զգուշացումներ չկան");
+  else {
+    out.push("⚠️ Զգուշացումներ");
+    for (const w of st.warnings) {
+      if (w.kind === "SMALL_CONFIRM") out.push(`• Հաստատող լիկվիդացիան փոքր է (${compact(w.liqUsd)}, սովորական րոպեն՝ ${compact(w.typicalUsd)})`);
+      else if (w.kind === "AGAINST_NOW") out.push(`• Մուտքի պահին գինը գնում էր մեր դեմ (վերջին 3 րոպեում ${signedPct(w.movePct)})`);
+      else if (w.kind === "AGAINST_TREND") out.push(`• 24 ժամում գինը ${signedPct(w.changePct)} է փոխվել (միտման դեմ ենք)`);
+      else out.push(`• Մաքրումը հիմնականում կամավոր փակումներ էր (լիկվիդացիա ${w.forcedPct.toFixed(1)}%, սովորականը՝ ${w.medianPct.toFixed(1)}%)`);
+    }
+  }
+  return out;
 }
 
 export function formatV9Close(t: V9TradeDoc): string {

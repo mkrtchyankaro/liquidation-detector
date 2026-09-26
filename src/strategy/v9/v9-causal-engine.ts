@@ -149,6 +149,25 @@ export interface V9Decision {
   /** Episode extreme from its start through `evaluatedAt` (SL anchor). */
   stopPrice: number;
   referencePrice: number;
+  /** The episode told in three phases for the entry message (tradable decisions only). */
+  story?: V9Story;
+}
+
+/** CLEANING (start -> lowest OI) -> NEW POSITIONS (lowest OI -> OI turn) ->
+ *  TURN (OI turn -> decision), with warnings about weak points. Coins = OI units. */
+export interface V9Story {
+  victim: Victim;
+  cleaning: { from: number; to: number; liqUsd: number; biggestTs: number; biggestUsd: number; coins: number; oiPct: number; priceFrom: number; priceTo: number };
+  accumulation: { from: number; to: number; coins: number; oiPct: number; priceFrom: number; priceTo: number } | null;
+  turn: { from: number; to: number; coins: number; side: Victim; liqUsd: number; priceFrom: number; priceTo: number } | null;
+  checksPassed: number;
+  checksTotal: number;
+  warnings: Array<
+    | { kind: "SMALL_CONFIRM"; liqUsd: number; typicalUsd: number }
+    | { kind: "AGAINST_NOW"; movePct: number }
+    | { kind: "AGAINST_TREND"; changePct: number }
+    | { kind: "NOT_FORCED"; forcedPct: number; medianPct: number }
+  >;
 }
 
 interface ReferenceSample { confirmTs: number; clr: number; dirMove: number; forced: number; victimLiq: number }
@@ -289,10 +308,13 @@ export class V9CausalEngine {
       const smallCleaning = this.settings.requireSize && !(features.victimLiq >= median(prior.map((r) => r.victimLiq)));
       const accNotAgainst = this.settings.requireAccAgainst && !accumulationAgainst(usable, e);
       const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : tooTight ? "SL_TOO_TIGHT" : accumWeak ? "ACCUM_WEAK" : wrongDirection ? "WRONG_DIRECTION" : notForced ? "NOT_FORCED" : smallCleaning ? "SMALL_CLEANING" : accNotAgainst ? "ACC_NOT_AGAINST" : "SELECTED";
+      const story = reason === "SELECTED"
+        ? buildV9Story(usable, e, features.victimLiq, side, refPrice, this.store.lastPrice(now - 3 * MINUTE_MS), now, selection, forced, median(prior.map((r) => r.forced)))
+        : undefined;
       decisions.push({
         symbol: this.symbol, episode: e, features, reference, selection,
         tradable: reason === "SELECTED", reason, evaluatedAt: now, missingMinutes,
-        tradeSide: side, stopPrice, referencePrice: refPrice,
+        tradeSide: side, stopPrice, referencePrice: refPrice, story,
       });
       if (reason === "SELECTED") this.lastTradableAt[e.victim] = now;
       if (features.dir) this.reference.push({ confirmTs: e.confirmTs, clr: features.clr, dirMove: features.dirMove, forced, victimLiq: features.victimLiq });
@@ -339,6 +361,54 @@ export function oiTurnTs(buckets: readonly Bucket[], e: Episode): number | null 
     if (best < 0 || buckets[i].oi >= buckets[best].oi) best = i;
   }
   return best >= 0 ? buckets[best].ts : null;
+}
+
+const TREND_WARN_PCT = 2;      // 24h move against the trade that earns a warning
+const AGAINST_NOW_WARN_PCT = 0.1; // last 3 minutes against the trade
+
+/** The three phases + warnings for the entry message. Only data up to `now`. */
+export function buildV9Story(buckets: readonly Bucket[], e: Episode, victimLiqUsd: number, side: Victim, price: number, price3mAgo: number,
+  now: number, selection: SelectionResult, forced: number, forcedMedian: number): V9Story {
+  const victimOf = (b: Bucket): number => (e.victim === "LONG" ? b.long : b.short);
+  const turnTs = oiTurnTs(buckets, e);
+  const idxOf = (ts: number): number => buckets.findIndex((b) => b.ts === ts);
+  const turnIdx = turnTs === null ? -1 : idxOf(turnTs);
+  const lastBottom = turnIdx >= 0 ? turnIdx : Math.min(buckets.length, e.eIdx);
+  let low = e.sIdx, big = e.sIdx;
+  for (let i = e.sIdx; i < lastBottom; i++) if (buckets[i].oi > 0 && !(buckets[low].oi > 0 && buckets[low].oi <= buckets[i].oi)) low = i;
+  for (let i = e.sIdx; i < Math.min(buckets.length, e.eIdx); i++) if (victimOf(buckets[i]) > victimOf(buckets[big])) big = i;
+  const B = buckets[low];
+  const cleaning = {
+    from: e.start, to: B.ts, liqUsd: victimLiqUsd, biggestTs: buckets[big].ts, biggestUsd: victimOf(buckets[big]),
+    coins: e.startOi - B.oi, oiPct: e.startOi > 0 ? ((B.oi - e.startOi) / e.startOi) * 100 : NaN, priceFrom: e.startPrice, priceTo: B.price,
+  };
+  const T = turnIdx >= 0 ? buckets[turnIdx] : null;
+  const accumulation = T && T.ts > B.ts ? { from: B.ts, to: T.ts, coins: T.oi - B.oi, oiPct: B.oi > 0 ? ((T.oi - B.oi) / B.oi) * 100 : NaN, priceFrom: B.price, priceTo: T.price } : null;
+  const confirmSide: Victim = e.confirmSide ?? (e.victim === "LONG" ? "SHORT" : "LONG");
+  let turn: V9Story["turn"] = null;
+  if (T) {
+    let liq = 0, oiNow = T.oi;
+    for (let i = turnIdx; i < buckets.length && buckets[i].ts <= now; i++) {
+      liq += confirmSide === "LONG" ? buckets[i].long : buckets[i].short;
+      if (buckets[i].oi > 0) oiNow = buckets[i].oi;
+    }
+    turn = { from: T.ts, to: e.confirmTs, coins: T.oi - oiNow, side: confirmSide, liqUsd: liq, priceFrom: T.price, priceTo: price };
+  }
+  const warnings: V9Story["warnings"] = [];
+  const typical = typicalLiquidationMinuteUsd(buckets as Bucket[]);
+  if (turn && Number.isFinite(typical) && turn.liqUsd < typical) warnings.push({ kind: "SMALL_CONFIRM", liqUsd: turn.liqUsd, typicalUsd: typical });
+  if (price > 0 && price3mAgo > 0) {
+    const mv = ((price - price3mAgo) / price3mAgo) * 100;
+    if (side === "LONG" ? mv <= -AGAINST_NOW_WARN_PCT : mv >= AGAINST_NOW_WARN_PCT) warnings.push({ kind: "AGAINST_NOW", movePct: mv });
+  }
+  const dayAgo = buckets.find((b) => b.ts >= now - 24 * 3_600_000 && b.price > 0);
+  if (dayAgo && price > 0 && now - dayAgo.ts >= 20 * 3_600_000) {
+    const ch = ((price - dayAgo.price) / dayAgo.price) * 100;
+    if (side === "LONG" ? ch <= -TREND_WARN_PCT : ch >= TREND_WARN_PCT) warnings.push({ kind: "AGAINST_TREND", changePct: ch });
+  }
+  if (Number.isFinite(forced) && Number.isFinite(forcedMedian) && forced < forcedMedian) warnings.push({ kind: "NOT_FORCED", forcedPct: forced * 100, medianPct: forcedMedian * 100 });
+  const checks = Object.values(selection.checks);
+  return { victim: e.victim, cleaning, accumulation, turn, checksPassed: checks.filter(Boolean).length, checksTotal: checks.length, warnings };
 }
 
 /** Share of the cleaning's closed positions that were FORCED: victim

@@ -10,6 +10,7 @@
 import * as assert from "assert";
 import { buildBuckets, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
 import { V9MinuteStore } from "../src/strategy/v9/v9-minute-store";
+import { formatV9Story } from "../src/strategy/v9/v9-telegram";
 import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, regrowShare, sharpAccumulation, turnDirectionOk, forcedShare, accumulationAgainst } from "../src/strategy/v9/v9-causal-engine";
 
 let passed = 0, failed = 0;
@@ -284,6 +285,23 @@ scenario("accumulationAgainst: during the accumulation the price kept going the 
   const bounce = lower.map((x, i) => (i >= 4 && i <= 6 ? { ...x, price: 97 + (i - 3) } : x));
   assert.strictEqual(accumulationAgainst(bounce, e), false, "price bounced up during the accumulation");
   assert.strictEqual(accumulationAgainst(lower.map((x) => ({ ...x })), { ...e, victim: "SHORT" } as typeof e), false, "mirror: SHORT victims need the price going UP");
+});
+
+scenario("story: every tradable decision carries the 3-phase story; the Armenian message renders it", () => {
+  const { decisions } = replay(5, 2000, { ...DEFAULT_V9_ENGINE_SETTINGS, filters: "NONE", lateSlPct: 0 });
+  const tradable = decisions.filter((x) => x.tradable);
+  assert.ok(tradable.length > 0);
+  for (const x of tradable) {
+    const st = x.story!;
+    assert.ok(st, "story present");
+    assert.ok(st.cleaning.from <= st.cleaning.to, "cleaning ends after it starts");
+    if (st.accumulation) assert.ok(st.accumulation.from === st.cleaning.to && st.accumulation.to <= x.evaluatedAt);
+    assert.strictEqual(st.checksTotal, 5);
+  }
+  assert.ok(decisions.filter((x) => !x.tradable).every((x) => x.story === undefined), "only tradable decisions carry a story");
+  const text = formatV9Story(tradable[0].story!, "TEST").join("\n");
+  assert.ok(text.includes("1️⃣ Մաքրում") && text.includes("Ստուգումներ"), text);
+  console.log("\n--- sample ---\n" + text + "\n--------------");
 });
 
 scenario("oiTurnTs: the highest-OI minute between the episode's last part and the confirmation (known before the confirmation)", () => {
