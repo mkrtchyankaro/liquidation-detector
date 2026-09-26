@@ -5,9 +5,9 @@ import { childLogger } from "../logging/logger";
 const log = childLogger({ mod: "oi-obs-repo" });
 
 /** oi_second_observations: one row per OI poll (~1/s per symbol), written
- *  in small batches every few seconds. Retained 3 days. */
+ *  in small batches every few seconds. Retained 14 days (V9 replays; was 3). */
 export const OI_SECOND_OBSERVATIONS = "oi_second_observations";
-const TTL_SECONDS = 3 * 24 * 3600;
+const TTL_SECONDS = 14 * 24 * 3600;
 const FLUSH_INTERVAL_MS = 5_000;
 const FLUSH_AT_SIZE = 200;
 const MAX_BUFFER_SIZE = 5_000;

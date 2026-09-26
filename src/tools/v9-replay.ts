@@ -19,7 +19,9 @@
  * our way (BRK/DIR/LIQ were tested Sep 26 and rejected). LATE1: OITURN
  * only when the extreme is > 1% away. OIT_MINx: the OITURN stop only if it is
  * >= x% from the entry, else it stays at the extreme; OIT_CLAMP0.6: placed at
- * 0.6% instead. Like live, one trade per symbol at a time (a signal while a trade
+ * 0.6% instead (Sep 26: OIT_MIN0.6 best -> live). M06_FORCED / _SIZE / _ACC:
+ * quality filters on top (forced share, cleaning size, accumulation against us).
+ * Like live, one trade per symbol at a time (a signal while a trade
  * is still open = busy, not traded). Older variants:
  *   A          current live rule (opposite-side liquidation confirms), rr 2.2
  *   _RR2       rr 2 instead of 2.2
@@ -33,6 +35,7 @@
  * `--jobs 2` by default (one per CPU). Usage (use nohup):
  *   npx tsx src/tools/v9-replay.ts
  *   npx tsx src/tools/v9-replay.ts --symbols BTC,ETH --rr 2.2 --details P
+ *   npx tsx src/tools/v9-replay.ts --days 7       (only the last 7 days of the stored raw data)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -46,23 +49,27 @@ const arg = (name: string, fallback: string): string => { const i = process.argv
 const symbols = arg("symbols", DEFAULT_SYMBOLS.join(",")).split(",").map((s) => s.trim().toUpperCase()).map((s) => (s.endsWith("USDT") ? s : `${s}USDT`));
 const RR = Number(arg("rr", "2.2"));
 const DETAILS = arg("details", "");
+const DAYS = Number(arg("days", "0")); // 0 = all stored raw data
 const stamp = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ");
 const time = (v: unknown): number => (v instanceof Date ? v.getTime() : Number(v));
 
 const A: V9EngineSettings = { ...DEFAULT_V9_ENGINE_SETTINGS }; // live today
 const LIVE: V9EngineSettings = { ...A, minSlFraction: 0.0033 };  // exactly what runs live (min SL 0.33%)
+const M06: V9EngineSettings = { ...LIVE, lateSlPct: 0, lateSlMinPct: 0.6 };
 const VARIANTS: Array<{ name: string; settings: V9EngineSettings; rr?: number }> = [
   { name: "LIVE", settings: LIVE },
-  // OITURN: stop where the confirming OI drop started (when closer than the episode extreme) -- live now ("lateSlPct": 0)
-  { name: "LIVE_OITURN", settings: { ...LIVE, lateSlPct: 0 } },
-  // only when the extreme is > 1% away
-  { name: "LATE1", settings: { ...LIVE, lateSlPct: 1 } },
-  // the OITURN stop only if it is >= 0.6% / 0.8% from the entry, else the stop stays at the extreme
-  { name: "OIT_MIN0.6", settings: { ...LIVE, lateSlPct: 0, lateSlMinPct: 0.6 } },
-  { name: "OIT_MIN0.8", settings: { ...LIVE, lateSlPct: 0, lateSlMinPct: 0.8 } },
-  // ... or placed at exactly 0.6% when the turn is closer
-  { name: "OIT_CLAMP0.6", settings: { ...LIVE, lateSlPct: 0, lateSlMinPct: 0.6, lateSlClamp: true } },
-  { name: "LATE1_MIN0.6", settings: { ...LIVE, lateSlPct: 1, lateSlMinPct: 0.6 } },
+  // live now: OITURN stop only when >= 0.6% from the entry ("lateSlPct": 0, "lateSlMinPct": 0.6)
+  { name: "OIT_MIN0.6", settings: M06 },
+  // QUALITY FILTERS on top (Johnny, Sep 26), each vs the coin's own past episodes:
+  //  FORCED  victim liquidations $ / OI drop $ >= median  (the cleaning was forced, not voluntary)
+  //  SIZE    victim liquidations $ >= median              (a big cleaning for this coin)
+  //  ACC     during the accumulation the price kept going the cleaning's way (new positions against us)
+  { name: "M06_FORCED", settings: { ...M06, requireForced: true } },
+  { name: "M06_SIZE", settings: { ...M06, requireSize: true } },
+  { name: "M06_ACC", settings: { ...M06, requireAccAgainst: true } },
+  { name: "M06_FORCED_ACC", settings: { ...M06, requireForced: true, requireAccAgainst: true } },
+  { name: "M06_SIZE_ACC", settings: { ...M06, requireSize: true, requireAccAgainst: true } },
+  { name: "M06_ALL3", settings: { ...M06, requireForced: true, requireSize: true, requireAccAgainst: true } },
 ];
 
 /** same*: trades confirmed by a SAME-side part (only in BREAKOUT variants = the new trades) */
@@ -86,7 +93,8 @@ async function runSymbol(db: import("mongodb").Db, symbol: string, out: (line: s
     oiCol.findOne({ symbol }, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
   ]);
   if (!firstLiq || !lastLiq || !firstOi || !lastOi) { out(`\n${symbol}: no data`); return null; }
-  const from = Math.max(time(firstLiq.timestamp), time(firstOi.timestamp));
+  const until0 = Math.min(time(lastLiq.timestamp), time(lastOi.timestamp));
+  const from = Math.max(time(firstLiq.timestamp), time(firstOi.timestamp), DAYS > 0 ? until0 - DAYS * 86_400_000 : 0);
   const until = Math.min(time(lastLiq.timestamp), time(lastOi.timestamp));
   const liq = (await liqCol.find({ symbol, victim: { $in: ["LONG", "SHORT"] }, timestamp: { $gte: from, $lte: until } })
     .project({ timestamp: 1, victim: 1, quoteQty: 1 }).sort({ timestamp: 1 }).toArray())
@@ -147,7 +155,7 @@ async function main(): Promise<void> {
     const queue = [...symbols];
     const outputs = new Map<string, string>();
     const runOne = (symbol: string): Promise<void> => new Promise((resolve) => {
-      const args = ["tsx", process.argv[1], "--child", "--symbols", symbol, "--rr", String(RR), ...(DETAILS ? ["--details", DETAILS] : [])];
+      const args = ["tsx", process.argv[1], "--child", "--symbols", symbol, "--rr", String(RR), ...(DETAILS ? ["--details", DETAILS] : []), ...(DAYS > 0 ? ["--days", String(DAYS)] : [])];
       const p = spawn("npx", args, { stdio: ["ignore", "pipe", "inherit"], env: process.env });
       let buf = "";
       p.stdout.on("data", (d) => { buf += d.toString(); });

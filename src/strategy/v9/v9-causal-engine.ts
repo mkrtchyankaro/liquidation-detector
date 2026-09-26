@@ -1,6 +1,6 @@
 import {
   MINUTE_MS, buildReference, changePoints, episodeFeatures, mergeEpisodes, selectEpisode, subEpisodes, usableRange,
-  typicalLiquidationMinuteUsd, type Bucket, type Episode, type EpisodeFeatures, type Regime, type SubEpisode, type SelectionReference, type SelectionResult, type Victim,
+  typicalLiquidationMinuteUsd, median, type Bucket, type Episode, type EpisodeFeatures, type Regime, type SubEpisode, type SelectionReference, type SelectionResult, type Victim,
 } from "./v9-core";
 import { V9MinuteStore } from "./v9-minute-store";
 import { priceOiEpisodes, typicalMinuteNoise } from "./v9-price-oi";
@@ -60,6 +60,17 @@ export interface V9EngineSettings {
    *  confirming OI drop started) to the decision, the price must have moved
    *  OUR way (up for a BUY, down for a SELL); otherwise WRONG_DIRECTION. */
   requireTurnDirection: boolean;
+  /** QUALITY FILTERS (Johnny, Sep 26 2026), each vs the medians of this
+   *  coin's previous episodes (same reference window, only the past):
+   *   requireForced     victim liquidations $ / OI drop $ >= median
+   *                     (the cleaning was FORCED, not voluntary closing)
+   *   requireSize       victim liquidations $ >= median (a big cleaning for this coin)
+   *   requireAccAgainst during the accumulation (OI bottom -> OI turn) the
+   *                     price kept going the cleaning's way = the new
+   *                     positions were opened against us = fuel for the reversal */
+  requireForced: boolean;
+  requireSize: boolean;
+  requireAccAgainst: boolean;
   /** Skip a signal whose SL is so close that Binance fees on a stop-out would
    *  exceed this many R (null = never skip). */
   maxSlFeeR: number | null;
@@ -109,6 +120,9 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   oppositeLiqMult: 1,
   breakoutConfirm: false,
   requireTurnDirection: false,
+  requireForced: false,
+  requireSize: false,
+  requireAccAgainst: false,
   maxSlFeeR: null,
   minSlFraction: 0,
   lateSlPct: null,
@@ -126,7 +140,7 @@ export interface V9Decision {
   selection: SelectionResult;
   /** true only when selected AND fresh AND the reference is large enough. */
   tradable: boolean;
-  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "DATA_GAP" | "SL_TOO_TIGHT" | "ACCUM_WEAK" | "WRONG_DIRECTION" | "SYMBOL_BUSY";
+  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "DATA_GAP" | "SL_TOO_TIGHT" | "ACCUM_WEAK" | "WRONG_DIRECTION" | "NOT_FORCED" | "SMALL_CLEANING" | "ACC_NOT_AGAINST" | "SYMBOL_BUSY";
   /** Whole minutes between episode start and the decision with no data at all. */
   missingMinutes: number;
   evaluatedAt: number;
@@ -137,7 +151,7 @@ export interface V9Decision {
   referencePrice: number;
 }
 
-interface ReferenceSample { confirmTs: number; clr: number; dirMove: number }
+interface ReferenceSample { confirmTs: number; clr: number; dirMove: number; forced: number; victimLiq: number }
 
 /** What the engine sees RIGHT NOW for a symbol: the episode that is still
  *  forming (not yet confirmed), or none. Persisted every minute so an
@@ -270,14 +284,18 @@ export class V9CausalEngine {
       const accumWeak = (this.settings.minAccumPercentile !== null && !sharpAccumulation(usable, e, this.settings.minAccumPercentile))
         || (this.settings.minRegrowShare !== null && !(regrow !== null && regrow >= this.settings.minRegrowShare));
       const wrongDirection = this.settings.requireTurnDirection && !turnDirectionOk(usable, e, side, refPrice);
-      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : tooTight ? "SL_TOO_TIGHT" : accumWeak ? "ACCUM_WEAK" : wrongDirection ? "WRONG_DIRECTION" : "SELECTED";
+      const forced = forcedShare(e, features.victimLiq);
+      const notForced = this.settings.requireForced && !(forced >= median(prior.map((r) => r.forced)));
+      const smallCleaning = this.settings.requireSize && !(features.victimLiq >= median(prior.map((r) => r.victimLiq)));
+      const accNotAgainst = this.settings.requireAccAgainst && !accumulationAgainst(usable, e);
+      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : tooTight ? "SL_TOO_TIGHT" : accumWeak ? "ACCUM_WEAK" : wrongDirection ? "WRONG_DIRECTION" : notForced ? "NOT_FORCED" : smallCleaning ? "SMALL_CLEANING" : accNotAgainst ? "ACC_NOT_AGAINST" : "SELECTED";
       decisions.push({
         symbol: this.symbol, episode: e, features, reference, selection,
         tradable: reason === "SELECTED", reason, evaluatedAt: now, missingMinutes,
         tradeSide: side, stopPrice, referencePrice: refPrice,
       });
       if (reason === "SELECTED") this.lastTradableAt[e.victim] = now;
-      if (features.dir) this.reference.push({ confirmTs: e.confirmTs, clr: features.clr, dirMove: features.dirMove });
+      if (features.dir) this.reference.push({ confirmTs: e.confirmTs, clr: features.clr, dirMove: features.dirMove, forced, victimLiq: features.victimLiq });
       this.lastConfirmTs = e.confirmTs;
     }
     const keepFrom = now - this.settings.referenceWindowMs;
@@ -321,6 +339,31 @@ export function oiTurnTs(buckets: readonly Bucket[], e: Episode): number | null 
     if (best < 0 || buckets[i].oi >= buckets[best].oi) best = i;
   }
   return best >= 0 ? buckets[best].ts : null;
+}
+
+/** Share of the cleaning's closed positions that were FORCED: victim
+ *  liquidations $ / (OI drop in coins x price). NaN when not measurable. */
+export function forcedShare(e: Episode, victimLiqUsd: number): number {
+  const dropUsd = (e.startOi - e.minOi) * e.endPrice;
+  return dropUsd > 0 ? victimLiqUsd / dropUsd : NaN;
+}
+
+/** During the accumulation (lowest OI before the turn -> the OI turn) the
+ *  price kept going the cleaning's way: lower for LONG victims, higher for
+ *  SHORT victims -- the new positions were opened AGAINST our coming trade. */
+export function accumulationAgainst(buckets: readonly Bucket[], e: Episode): boolean {
+  const turnTs = oiTurnTs(buckets, e);
+  if (turnTs === null) return false;
+  let low = -1, turn = -1;
+  for (let i = e.sIdx; i < buckets.length && buckets[i].ts <= turnTs; i++) {
+    if (!(buckets[i].oi > 0)) continue;
+    if (buckets[i].ts === turnTs) { turn = i; break; }
+    if (low < 0 || buckets[i].oi < buckets[low].oi) low = i;
+  }
+  if (low < 0 || turn < 0) return false;
+  const a = buckets[low].price, b = buckets[turn].price;
+  if (!(a > 0) || !(b > 0)) return false;
+  return e.victim === "LONG" ? b < a : b > a;
 }
 
 /** Since the OI turn (where the confirming OI drop started) the price moved

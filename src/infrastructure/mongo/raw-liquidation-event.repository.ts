@@ -8,7 +8,7 @@ const log = childLogger({ mod: "liq-raw-repo" });
  *  `timestamp` is epoch ms (research + V9 read it); `eventTimeDate` is the
  *  same instant as a Date, used only for TTL expiry. */
 export const LIQ_RAW_EVENTS = "liq_raw_events";
-const TTL_SECONDS = 4 * 24 * 3600;
+const TTL_SECONDS = 14 * 24 * 3600; // 14 days for V9 replays (was 4)
 
 export interface RawLiquidationEventDoc {
   symbol: string;

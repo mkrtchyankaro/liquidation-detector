@@ -10,7 +10,7 @@
 import * as assert from "assert";
 import { buildBuckets, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
 import { V9MinuteStore } from "../src/strategy/v9/v9-minute-store";
-import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, regrowShare, sharpAccumulation, turnDirectionOk } from "../src/strategy/v9/v9-causal-engine";
+import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, regrowShare, sharpAccumulation, turnDirectionOk, forcedShare, accumulationAgainst } from "../src/strategy/v9/v9-causal-engine";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -267,6 +267,23 @@ scenario("lateSlMinPct: the OITURN stop is used only when >= x% from the entry; 
     }
   });
   assert.ok(kept + moved > 0, "the rule was exercised");
+});
+
+scenario("forcedShare: victim liquidations $ / OI drop $ (coins x price)", () => {
+  const e = { startOi: 1000, minOi: 900, endPrice: 50 } as unknown as Parameters<typeof forcedShare>[0];
+  assert.ok(Math.abs(forcedShare(e, 500) - 0.1) < 1e-12, "100 coins x $50 = $5,000 closed; $500 forced = 10%");
+  assert.ok(Number.isNaN(forcedShare({ ...e, minOi: 1000 } as typeof e, 500)), "no OI drop -> not measurable");
+});
+
+scenario("accumulationAgainst: during the accumulation the price kept going the cleaning's way", () => {
+  const b = (m: number, oi: number, price: number) => ({ ts: m * 60_000, long: 0, short: 0, count: 0, oi, price, oiPoints: 1 });
+  // LONG cleaning: OI 100 -> 95 (bottom at minute 3, price 97), accumulation to the OI turn at minute 6
+  const lower = [b(0, 100, 100), b(1, 98, 99), b(2, 96, 98), b(3, 95, 97), b(4, 97, 96.5), b(5, 99, 96), b(6, 101, 95.5), b(7, 98, 96)];
+  const e = { sIdx: 0, eIdx: 4, victim: "LONG", confirmTs: 8 * 60_000 } as unknown as Parameters<typeof accumulationAgainst>[1];
+  assert.strictEqual(accumulationAgainst(lower, e), true, "price 97 -> 95.5 while OI grew: new shorts opened (against them = our BUY fuel)");
+  const bounce = lower.map((x, i) => (i >= 4 && i <= 6 ? { ...x, price: 97 + (i - 3) } : x));
+  assert.strictEqual(accumulationAgainst(bounce, e), false, "price bounced up during the accumulation");
+  assert.strictEqual(accumulationAgainst(lower.map((x) => ({ ...x })), { ...e, victim: "SHORT" } as typeof e), false, "mirror: SHORT victims need the price going UP");
 });
 
 scenario("oiTurnTs: the highest-OI minute between the episode's last part and the confirmation (known before the confirmation)", () => {

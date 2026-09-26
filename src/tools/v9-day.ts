@@ -35,6 +35,9 @@ const REASON: Record<string, string> = {
   SL_TOO_TIGHT: "stop too tight (fees)",
   ACCUM_WEAK: "OI did not grow back",
   WRONG_DIRECTION: "price moved against the trade since the OI turn",
+  NOT_FORCED: "the cleaning was mostly voluntary closing (few liquidations for the OI drop)",
+  SMALL_CLEANING: "liquidations smaller than this coin's usual episode",
+  ACC_NOT_AGAINST: "during the accumulation the price did not keep going the cleaning's way",
   SYMBOL_BUSY: "a V9 trade on this symbol was still open",
 };
 
