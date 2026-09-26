@@ -91,6 +91,7 @@ export function priceOiEpisodes(buckets: readonly Bucket[], regimes: readonly Re
       startPrice, endPrice: buckets[stop - 1].price, extremePrice,
       priceMovePct: startPrice > 0 ? ((extremePrice - startPrice) / startPrice) * 100 : NaN,
       confirmTs: confirmIdx >= 0 ? buckets[confirmIdx].ts + MINUTE_MS : NaN,
+      confirmSide: confirmIdx >= 0 ? (v === "LONG" ? "SHORT" : "LONG") : null, // the other side closing -> trade side = v
       endReason: confirmIdx >= 0 ? "PRICE_OI_REVERSAL" : "OPEN_AT_DATA_END",
       parts: 1, partRanges: [[start, stop]],
       rightCensored: confirmIdx < 0 || endTs > validUntil,

@@ -101,5 +101,23 @@ scenario("minOppositeLiqUsd: small opposite parts no longer close an episode; hu
   assert.ok(none.length < any.length, "absorbed parts merge episodes");
 });
 
+scenario("breakout: a SAME-side part with an OI drop after the accumulation confirms (trade follows it); classic merges it", () => {
+  // OI: 100 -> 96 (LONG cleaning, min 1-5) -> 99 (growth 6-9) -> 95 (LONG again, 10-14) -> 98 (15-19) -> 94 (SHORT, 20-24) -> 97
+  const oi = [100, 99, 98, 97, 96.5, 96, 97, 98, 99, 99, 98, 97, 96, 95.5, 95, 96, 97, 98, 98, 98, 97, 96, 95, 94.5, 94, 95, 96, 97, 97, 97];
+  const bk = oi.map((v, i) => ({ ts: i * 60_000, long: 0, short: 0, count: 0, oi: v, price: 100 - i * 0.1, oiPoints: 1 }));
+  const sub = (a: number, z: number, victim: "LONG" | "SHORT") => ({ start: a * 60_000, end: z * 60_000, sIdx: a, eIdx: z, victim, long: victim === "LONG" ? 1e5 : 0, short: victim === "SHORT" ? 1e5 : 0, count: 3, oiDropPct: 1, continuations: 0, opposite: 0, rightCensored: false, endReason: "GROWTH_END" });
+  const subs = [sub(1, 10, "LONG"), sub(10, 20, "LONG"), sub(20, 29, "SHORT")];
+  const classic = mergeEpisodes(bk, subs);
+  assert.strictEqual(classic[0].parts, 2, "classic: the second LONG part is merged");
+  assert.strictEqual(classic[0].confirmSide, "SHORT", "classic: confirmed only by the SHORT part");
+  const brk = mergeEpisodes(bk, subs, undefined, true);
+  assert.strictEqual(brk[0].parts, 1);
+  assert.strictEqual(brk[0].confirmSide, "LONG", "breakout: the next LONG part confirms -> SELL");
+  assert.strictEqual(brk[0].endReason, "BREAKOUT_SAME_SIDE");
+  assert.strictEqual(brk[0].confirmTs, 11 * 60_000, "OI fell below the part's base (minute 9 = 99) at minute 10 -> known at 11");
+  assert.strictEqual(brk[1].confirmSide, "SHORT", "breakout: then the SHORT part confirms the second one -> BUY");
+  assert.strictEqual(brk[2].confirmSide, null, "last one not confirmed");
+});
+
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

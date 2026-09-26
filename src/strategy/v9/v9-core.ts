@@ -205,6 +205,10 @@ export interface Episode {
   startPrice: number; endPrice: number; extremePrice: number; priceMovePct: number;
   /** When the end became KNOWN (opposite part showed a real OI drop); NaN if not yet. */
   confirmTs: number;
+  /** Who got liquidated in the CONFIRMING part (null = not confirmed yet).
+   *  The trade goes WITH that move: SHORT liquidations -> BUY, LONG -> SELL.
+   *  Classic V9: always the opposite of `victim`, so the trade side = victim. */
+  confirmSide: Victim | null;
   endReason: string; parts: number; partRanges: Array<[number, number]>;
   rightCensored: boolean;
 }
@@ -214,10 +218,15 @@ export interface Episode {
 /** minOppositeLiqUsd (optional, variant "A_LIQSIG"): an opposite part closes
  *  the group only if its own liquidations reach this size; smaller ones are
  *  absorbed as noise. Undefined = research behaviour (any size). */
-export function mergeEpisodes(buckets: readonly Bucket[], subs: readonly SubEpisode[], minOppositeLiqUsd?: number): Episode[] {
+/** breakout (Johnny, Sep 26 2026): the side of the NEXT part does not
+ *  matter. After a cleaning + accumulation, the first next part WITH an OI
+ *  drop (either side) confirms; the trade follows its liquidations
+ *  (SHORT liq, price up -> BUY; LONG liq, price down -> SELL). Parts without
+ *  an OI drop are absorbed as before. Default false = research behaviour. */
+export function mergeEpisodes(buckets: readonly Bucket[], subs: readonly SubEpisode[], minOppositeLiqUsd?: number, breakout = false): Episode[] {
   const out: Episode[] = [];
   let group: SubEpisode[] | null = null;
-  const finish = (closedBy: string, confirmTs = NaN): void => {
+  const finish = (closedBy: string, confirmTs = NaN, confirmSide: Victim | null = null): void => {
     if (!group) return;
     const first = group[0], last = group[group.length - 1];
     const start = first.sIdx, stop = last.eIdx;
@@ -240,7 +249,7 @@ export function mergeEpisodes(buckets: readonly Bucket[], subs: readonly SubEpis
       startPrice, endPrice: endB.price,
       extremePrice: first.victim === "LONG" ? Math.min(...prices) : Math.max(...prices),
       priceMovePct: startPrice > 0 ? (endB.price - startPrice) / startPrice * 100 : NaN,
-      confirmTs,
+      confirmTs, confirmSide: Number.isFinite(confirmTs) ? confirmSide : null,
       endReason: last.rightCensored ? last.endReason : closedBy,
       parts: group.length, partRanges: group.map((p) => [p.sIdx, p.eIdx] as [number, number]),
       rightCensored: last.rightCensored,
@@ -250,12 +259,13 @@ export function mergeEpisodes(buckets: readonly Bucket[], subs: readonly SubEpis
   for (const sub of subs) {
     if (!group) { group = [sub]; continue; }
     const side = group[0].victim;
-    if (sub.victim === side) group.push(sub);
-    else if (sub.oiDropPct > 0 && (minOppositeLiqUsd === undefined || (sub.victim === "LONG" ? sub.long : sub.short) >= minOppositeLiqUsd)) {
+    const confirms = sub.oiDropPct > 0 && (minOppositeLiqUsd === undefined || (sub.victim === "LONG" ? sub.long : sub.short) >= minOppositeLiqUsd);
+    if (sub.victim === side && !(breakout && confirms)) group.push(sub);
+    else if (confirms) {
       const base = buckets[Math.max(0, sub.sIdx - 1)].oi;
       let k = sub.sIdx;
       while (k < sub.eIdx && !(buckets[k].oi < base)) k++;
-      finish("OPPOSITE_EPISODE", k < sub.eIdx ? buckets[k].ts + MINUTE_MS : NaN);
+      finish(sub.victim === side ? "BREAKOUT_SAME_SIDE" : "OPPOSITE_EPISODE", k < sub.eIdx ? buckets[k].ts + MINUTE_MS : NaN, sub.victim);
       group = [sub];
     }
     // else: opposite part without an OI drop is noise, absorbed

@@ -213,6 +213,23 @@ scenario("lateSlPct: a far extreme stop moves closer (to where the confirming OI
   void moved; // the synthetic market has no late entries; the anchor itself is tested below
 });
 
+scenario("breakoutConfirm: trade side follows the confirming liquidations; classic = the cleaning's victims; stops on the right side", () => {
+  const classic = replay(5, 2000, { ...DEFAULT_V9_ENGINE_SETTINGS, filters: "NONE" }).decisions;
+  assert.ok(classic.length > 3);
+  for (const x of classic) assert.strictEqual(x.tradeSide, x.episode.victim, "classic: trade side = victims");
+  const brk = replay(5, 2000, { ...DEFAULT_V9_ENGINE_SETTINGS, filters: "NONE", breakoutConfirm: true, lateSlPct: 0, minSlFraction: 0.0033 }).decisions;
+  assert.ok(brk.length > 3);
+  let same = 0;
+  for (const x of brk) {
+    assert.ok(x.episode.confirmSide !== null);
+    assert.strictEqual(x.tradeSide, x.episode.confirmSide === "SHORT" ? "LONG" : "SHORT", "SHORT liq -> BUY, LONG liq -> SELL");
+    if (x.episode.confirmSide === x.episode.victim) same++;
+    if (Number.isFinite(x.stopPrice)) assert.ok(x.tradeSide === "LONG" ? x.stopPrice < x.referencePrice : x.stopPrice > x.referencePrice, `stop on the losing side: ${x.tradeSide} stop ${x.stopPrice} ref ${x.referencePrice} victim ${x.episode.victim} confirm ${x.episode.confirmSide} reason ${x.reason}`);
+  }
+  assert.ok(same > 0, "breakout mode also confirms with same-side parts (the new trades)");
+  assert.ok(brk.length >= classic.length, `breakout confirms at least as often (${brk.length} vs ${classic.length})`);
+});
+
 scenario("oiTurnTs: the highest-OI minute between the episode's last part and the confirmation (known before the confirmation)", () => {
   const b = (m: number, oi: number) => ({ ts: m * 60_000, long: 0, short: 0, count: 0, oi, price: 100, oiPoints: 1 });
   const buckets = [b(0, 100), b(1, 99), b(2, 98), b(3, 99), b(4, 101), b(5, 102), b(6, 100), b(7, 97), b(8, 120)];

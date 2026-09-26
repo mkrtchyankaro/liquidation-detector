@@ -10,9 +10,12 @@
  * Variants compared side by side (see VARIANTS below). LIVE = the rule running
  * live today (incl. min SL 0.33%). LIVE_OITURN: the stop moves to where the
  * confirming OI drop started (if closer than the episode extreme; live with
- * "lateSlPct": 0). OITURN_RExx: OITURN + trade only when, after the
- * cleaning, OI grew back by >= xx% of the coins the cleaning closed (from the
- * OI bottom to the OI turn; no time windows). Older variants:
+ * "lateSlPct": 0, live now). _LIQ1/_LIQ3: the confirming liquidations must
+ * be >= 1x / 3x the coin's typical liquidation minute. BRK (Johnny, Sep 26):
+ * the first liquidation part with an OI drop after the cleaning +
+ * accumulation confirms WHICHEVER side, and the trade follows it (SHORT liq
+ * -> BUY, LONG liq -> SELL); "new same-side" = the trades classic V9 never
+ * takes. Older variants:
  *   A          current live rule (opposite-side liquidation confirms), rr 2.2
  *   _RR2       rr 2 instead of 2.2
  *   _MINSL     skip signals whose SL is so tight that stop-out fees > 0.3R
@@ -45,21 +48,25 @@ const A: V9EngineSettings = { ...DEFAULT_V9_ENGINE_SETTINGS }; // live today
 const LIVE: V9EngineSettings = { ...A, minSlFraction: 0.0033 };  // exactly what runs live (min SL 0.33%)
 const VARIANTS: Array<{ name: string; settings: V9EngineSettings; rr?: number }> = [
   { name: "LIVE", settings: LIVE },
-  // OITURN: stop where the confirming OI drop started (when closer than the episode extreme) -- live with "lateSlPct": 0
+  // OITURN: stop where the confirming OI drop started (when closer than the episode extreme) -- live now ("lateSlPct": 0)
   { name: "LIVE_OITURN", settings: { ...LIVE, lateSlPct: 0 } },
-  // OI regrowth (Johnny): at the signal, look back -- did OI grow back after the cleaning?
-  // G = OI rise from the bottom to the OI turn, D = coins closed in the cleaning. Trade only if G >= share x D.
-  { name: "OITURN_RE25", settings: { ...LIVE, lateSlPct: 0, minRegrowShare: 0.25 } },
-  { name: "OITURN_RE50", settings: { ...LIVE, lateSlPct: 0, minRegrowShare: 0.5 } },
-  { name: "OITURN_RE100", settings: { ...LIVE, lateSlPct: 0, minRegrowShare: 1 } },
+  { name: "OITURN_LIQ1", settings: { ...LIVE, lateSlPct: 0, significantOppositeLiq: true, oppositeLiqMult: 1 } },
+  // BREAKOUT (Johnny): after cleaning + accumulation, the first next liquidation part with an OI drop,
+  // WHICHEVER side, gives the direction: SHORT liq (price up) -> BUY, LONG liq (price down) -> SELL.
+  // Same 5 checks on the cleaning, same OITURN stop, TP 2.2R.
+  { name: "BRK", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true } },
+  // ... and the confirming liquidations must be "good": >= 1x / 3x the coin's typical liquidation minute
+  { name: "BRK_LIQ1", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, significantOppositeLiq: true, oppositeLiqMult: 1 } },
+  { name: "BRK_LIQ3", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, significantOppositeLiq: true, oppositeLiqMult: 3 } },
 ];
 
-interface Tally { decisions: number; tradable: number; tp: number; sl: number; open: number; noRisk: number; r: number; netR: number; slPcts: number[] }
-const empty = (): Tally => ({ decisions: 0, tradable: 0, tp: 0, sl: 0, open: 0, noRisk: 0, r: 0, netR: 0, slPcts: [] });
+/** same*: trades confirmed by a SAME-side part (only in BREAKOUT variants = the new trades) */
+interface Tally { decisions: number; tradable: number; tp: number; sl: number; open: number; noRisk: number; r: number; netR: number; slPcts: number[]; sameTp: number; sameSl: number; sameNetR: number }
+const empty = (): Tally => ({ decisions: 0, tradable: 0, tp: 0, sl: 0, open: 0, noRisk: 0, r: 0, netR: 0, slPcts: [], sameTp: 0, sameSl: 0, sameNetR: 0 });
 const median = (v: number[]): number => { const s = [...v].sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : NaN; };
 function line(name: string, t: Tally): string {
   const done = t.tp + t.sl;
-  return `${name.padEnd(14)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}`;
+  return `${name.padEnd(14)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}${t.sameTp + t.sameSl ? `  | new same-side: ${t.sameTp + t.sameSl} (TP ${t.sameTp} SL ${t.sameSl}) netR ${t.sameNetR.toFixed(1)}` : ""}`;
 }
 
 type Tallies = Record<string, Tally>;
@@ -95,6 +102,10 @@ async function runSymbol(db: import("mongodb").Db, symbol: string, out: (line: s
       if (x.result === "TP") t.tp++; else if (x.result === "SL") t.sl++; else if (x.result === "OPEN") t.open++; else t.noRisk++;
       t.r += x.r; t.netR += x.netR ?? 0;
       if (x.slPct !== undefined && (x.result === "TP" || x.result === "SL")) t.slPcts.push(x.slPct);
+      if (d.episode.confirmSide === d.episode.victim && (x.result === "TP" || x.result === "SL")) {
+        if (x.result === "TP") t.sameTp++; else t.sameSl++;
+        t.sameNetR += x.netR ?? 0;
+      }
       if (DETAILS === v.name) {
         out(`   ${v.name} ${stamp(d.evaluatedAt)} ${d.tradeSide === "LONG" ? "BUY " : "SELL"} start ${stamp(d.episode.start)} entry ${x.entry ?? "-"} SL ${x.sl ?? "-"} (${x.slPct?.toFixed(2) ?? "-"}%) ${x.result} ${x.minutes ?? "-"}m netR ${x.netR?.toFixed(2) ?? "-"}`);
       }
@@ -115,7 +126,7 @@ function addInto(totals: Map<string, Tally>, t: Tallies): void {
   for (const v of VARIANTS) {
     const tot = totals.get(v.name)!, x = t[v.name];
     if (!x) continue;
-    for (const k of ["decisions", "tradable", "tp", "sl", "open", "noRisk", "r", "netR"] as const) tot[k] += x[k];
+    for (const k of ["decisions", "tradable", "tp", "sl", "open", "noRisk", "r", "netR", "sameTp", "sameSl", "sameNetR"] as const) tot[k] += x[k] ?? 0;
     tot.slPcts.push(...x.slPcts);
   }
 }
