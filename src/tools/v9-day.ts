@@ -34,6 +34,7 @@ const REASON: Record<string, string> = {
   DATA_GAP: "minutes with no data inside the episode",
   SL_TOO_TIGHT: "stop too tight (fees)",
   ACCUM_WEAK: "OI did not grow back",
+  WRONG_DIRECTION: "price moved against the trade since the OI turn",
   SYMBOL_BUSY: "a V9 trade on this symbol was still open",
 };
 

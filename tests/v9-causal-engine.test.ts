@@ -10,7 +10,7 @@
 import * as assert from "assert";
 import { buildBuckets, type LiqEvent, type OiObservation } from "../src/strategy/v9/v9-core";
 import { V9MinuteStore } from "../src/strategy/v9/v9-minute-store";
-import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, regrowShare, sharpAccumulation } from "../src/strategy/v9/v9-causal-engine";
+import { V9CausalEngine, DEFAULT_V9_ENGINE_SETTINGS, oiTurnTs, regrowShare, sharpAccumulation, turnDirectionOk } from "../src/strategy/v9/v9-causal-engine";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -228,6 +228,24 @@ scenario("breakoutConfirm: trade side follows the confirming liquidations; class
   }
   assert.ok(same > 0, "breakout mode also confirms with same-side parts (the new trades)");
   assert.ok(brk.length >= classic.length, `breakout confirms at least as often (${brk.length} vs ${classic.length})`);
+});
+
+scenario("turnDirectionOk: since the OI turn the price must have moved our way (up for BUY, down for SELL)", () => {
+  const b = (m: number, oi: number, price: number) => ({ ts: m * 60_000, long: 0, short: 0, count: 0, oi, price, oiPoints: 1 });
+  // OI peaks at minute 5 (price 100), then falls into the confirmation at minute 8
+  const buckets = [b(0, 100, 101), b(1, 99, 100), b(2, 98, 99), b(3, 99, 99.5), b(4, 101, 99.8), b(5, 102, 100), b(6, 100, 99), b(7, 97, 98)];
+  const e = { eIdx: 3, confirmTs: 8 * 60_000 } as unknown as Parameters<typeof turnDirectionOk>[1];
+  assert.strictEqual(turnDirectionOk(buckets, e, "SHORT", 98), true, "SELL: price fell 100 -> 98 since the turn");
+  assert.strictEqual(turnDirectionOk(buckets, e, "LONG", 98), false, "BUY while the price fell since the turn = wrong direction");
+  assert.strictEqual(turnDirectionOk(buckets, e, "LONG", 100.5), true);
+  assert.strictEqual(turnDirectionOk(buckets, e, "SHORT", 100), false, "no move = not our way");
+  assert.strictEqual(turnDirectionOk(buckets, { ...e, confirmTs: NaN }, "SHORT", 98), false);
+});
+
+scenario("requireTurnDirection in the engine: some signals become WRONG_DIRECTION", () => {
+  const base = { ...DEFAULT_V9_ENGINE_SETTINGS, filters: "NONE" as const, breakoutConfirm: true, lateSlPct: 0, minSlFraction: 0.0033 };
+  const on = replay(5, 2000, { ...base, requireTurnDirection: true }).decisions;
+  assert.ok(on.some((x) => x.reason === "WRONG_DIRECTION"), "the rule does reject something");
 });
 
 scenario("oiTurnTs: the highest-OI minute between the episode's last part and the confirmation (known before the confirmation)", () => {

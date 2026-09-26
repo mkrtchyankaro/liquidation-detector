@@ -15,7 +15,9 @@
  * the first liquidation part with an OI drop after the cleaning +
  * accumulation confirms WHICHEVER side, and the trade follows it (SHORT liq
  * -> BUY, LONG liq -> SELL); "new same-side" = the trades classic V9 never
- * takes. Older variants:
+ * takes. _DIR: from the OI turn to the decision the price must have moved
+ * our way. Like live, one trade per symbol at a time (a signal while a trade
+ * is still open = busy, not traded). Older variants:
  *   A          current live rule (opposite-side liquidation confirms), rr 2.2
  *   _RR2       rr 2 instead of 2.2
  *   _MINSL     skip signals whose SL is so tight that stop-out fees > 0.3R
@@ -50,23 +52,27 @@ const VARIANTS: Array<{ name: string; settings: V9EngineSettings; rr?: number }>
   { name: "LIVE", settings: LIVE },
   // OITURN: stop where the confirming OI drop started (when closer than the episode extreme) -- live now ("lateSlPct": 0)
   { name: "LIVE_OITURN", settings: { ...LIVE, lateSlPct: 0 } },
+  { name: "OITURN_DIR", settings: { ...LIVE, lateSlPct: 0, requireTurnDirection: true } },
   { name: "OITURN_LIQ1", settings: { ...LIVE, lateSlPct: 0, significantOppositeLiq: true, oppositeLiqMult: 1 } },
   // BREAKOUT (Johnny): after cleaning + accumulation, the first next liquidation part with an OI drop,
   // WHICHEVER side, gives the direction: SHORT liq (price up) -> BUY, LONG liq (price down) -> SELL.
   // Same 5 checks on the cleaning, same OITURN stop, TP 2.2R.
   { name: "BRK", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true } },
+  // _DIR: from the OI turn to the decision the price must have moved OUR way (down for a SELL, up for a BUY)
+  { name: "BRK_DIR", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, requireTurnDirection: true } },
   // ... and the confirming liquidations must be "good": >= 1x / 3x the coin's typical liquidation minute
   { name: "BRK_LIQ1", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, significantOppositeLiq: true, oppositeLiqMult: 1 } },
   { name: "BRK_LIQ3", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, significantOppositeLiq: true, oppositeLiqMult: 3 } },
+  { name: "BRK_DIR_LIQ1", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, requireTurnDirection: true, significantOppositeLiq: true, oppositeLiqMult: 1 } },
 ];
 
 /** same*: trades confirmed by a SAME-side part (only in BREAKOUT variants = the new trades) */
-interface Tally { decisions: number; tradable: number; tp: number; sl: number; open: number; noRisk: number; r: number; netR: number; slPcts: number[]; sameTp: number; sameSl: number; sameNetR: number }
-const empty = (): Tally => ({ decisions: 0, tradable: 0, tp: 0, sl: 0, open: 0, noRisk: 0, r: 0, netR: 0, slPcts: [], sameTp: 0, sameSl: 0, sameNetR: 0 });
+interface Tally { decisions: number; tradable: number; tp: number; sl: number; open: number; noRisk: number; busy: number; r: number; netR: number; slPcts: number[]; sameTp: number; sameSl: number; sameNetR: number }
+const empty = (): Tally => ({ decisions: 0, tradable: 0, tp: 0, sl: 0, open: 0, noRisk: 0, busy: 0, r: 0, netR: 0, slPcts: [], sameTp: 0, sameSl: 0, sameNetR: 0 });
 const median = (v: number[]): number => { const s = [...v].sort((a, b) => a - b); return s.length ? (s.length % 2 ? s[s.length >> 1] : (s[s.length / 2 - 1] + s[s.length / 2]) / 2) : NaN; };
 function line(name: string, t: Tally): string {
   const done = t.tp + t.sl;
-  return `${name.padEnd(14)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}${t.sameTp + t.sameSl ? `  | new same-side: ${t.sameTp + t.sameSl} (TP ${t.sameTp} SL ${t.sameSl}) netR ${t.sameNetR.toFixed(1)}` : ""}`;
+  return `${name.padEnd(14)} trades=${String(done).padStart(3)}  TP=${String(t.tp).padStart(3)}  SL=${String(t.sl).padStart(3)}  open=${t.open}  win=${done ? ((100 * t.tp) / done).toFixed(1).padStart(5) : "  n/a"}%  R=${t.r.toFixed(1).padStart(6)}  netR=${t.netR.toFixed(1).padStart(6)}  avgNetR=${done ? (t.netR / done).toFixed(2).padStart(5) : "  n/a"}  medianSL=${Number.isFinite(median(t.slPcts)) ? median(t.slPcts).toFixed(2) : "n/a"}%  signals=${t.tradable}/${t.decisions}${t.busy ? ` busy=${t.busy}` : ""}${t.sameTp + t.sameSl ? `  | new same-side: ${t.sameTp + t.sameSl} (TP ${t.sameTp} SL ${t.sameSl}) netR ${t.sameNetR.toFixed(1)}` : ""}`;
 }
 
 type Tallies = Record<string, Tally>;
@@ -99,7 +105,7 @@ async function runSymbol(db: import("mongodb").Db, symbol: string, out: (line: s
     const t = empty();
     t.decisions = decisions.length; t.tradable = decisions.filter((d) => d.tradable).length;
     for (const { decision: d, trade: x } of trades) {
-      if (x.result === "TP") t.tp++; else if (x.result === "SL") t.sl++; else if (x.result === "OPEN") t.open++; else t.noRisk++;
+      if (x.result === "TP") t.tp++; else if (x.result === "SL") t.sl++; else if (x.result === "OPEN") t.open++; else if (x.result === "SYMBOL_BUSY") t.busy++; else t.noRisk++;
       t.r += x.r; t.netR += x.netR ?? 0;
       if (x.slPct !== undefined && (x.result === "TP" || x.result === "SL")) t.slPcts.push(x.slPct);
       if (d.episode.confirmSide === d.episode.victim && (x.result === "TP" || x.result === "SL")) {
@@ -126,7 +132,7 @@ function addInto(totals: Map<string, Tally>, t: Tallies): void {
   for (const v of VARIANTS) {
     const tot = totals.get(v.name)!, x = t[v.name];
     if (!x) continue;
-    for (const k of ["decisions", "tradable", "tp", "sl", "open", "noRisk", "r", "netR", "sameTp", "sameSl", "sameNetR"] as const) tot[k] += x[k] ?? 0;
+    for (const k of ["decisions", "tradable", "tp", "sl", "open", "noRisk", "busy", "r", "netR", "sameTp", "sameSl", "sameNetR"] as const) tot[k] += x[k] ?? 0;
     tot.slPcts.push(...x.slPcts);
   }
 }

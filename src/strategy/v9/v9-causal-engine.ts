@@ -56,6 +56,10 @@ export interface V9EngineSettings {
    *  checks still judge the cleaning. false = classic V9 (opposite side only,
    *  trade side = the cleaning's victims). */
   breakoutConfirm: boolean;
+  /** DIRECTION CHECK (Johnny, Sep 26 2026): from the OI turn (where the
+   *  confirming OI drop started) to the decision, the price must have moved
+   *  OUR way (up for a BUY, down for a SELL); otherwise WRONG_DIRECTION. */
+  requireTurnDirection: boolean;
   /** Skip a signal whose SL is so close that Binance fees on a stop-out would
    *  exceed this many R (null = never skip). */
   maxSlFeeR: number | null;
@@ -98,6 +102,7 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   significantOppositeLiq: false,
   oppositeLiqMult: 1,
   breakoutConfirm: false,
+  requireTurnDirection: false,
   maxSlFeeR: null,
   minSlFraction: 0,
   lateSlPct: null,
@@ -113,7 +118,7 @@ export interface V9Decision {
   selection: SelectionResult;
   /** true only when selected AND fresh AND the reference is large enough. */
   tradable: boolean;
-  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "DATA_GAP" | "SL_TOO_TIGHT" | "ACCUM_WEAK" | "SYMBOL_BUSY";
+  reason: "SELECTED" | "NOT_SELECTED" | "REFERENCE_TOO_SMALL" | "STALE_CONFIRMATION" | "DUPLICATE_EPISODE" | "DATA_GAP" | "SL_TOO_TIGHT" | "ACCUM_WEAK" | "WRONG_DIRECTION" | "SYMBOL_BUSY";
   /** Whole minutes between episode start and the decision with no data at all. */
   missingMinutes: number;
   evaluatedAt: number;
@@ -248,7 +253,8 @@ export class V9CausalEngine {
       const regrow = this.settings.minRegrowShare !== null ? regrowShare(usable, e) : null;
       const accumWeak = (this.settings.minAccumPercentile !== null && !sharpAccumulation(usable, e, this.settings.minAccumPercentile))
         || (this.settings.minRegrowShare !== null && !(regrow !== null && regrow >= this.settings.minRegrowShare));
-      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : tooTight ? "SL_TOO_TIGHT" : accumWeak ? "ACCUM_WEAK" : "SELECTED";
+      const wrongDirection = this.settings.requireTurnDirection && !turnDirectionOk(usable, e, side, refPrice);
+      const reason: V9Decision["reason"] = !selection.selected ? "NOT_SELECTED" : small ? "REFERENCE_TOO_SMALL" : stale ? "STALE_CONFIRMATION" : duplicate ? "DUPLICATE_EPISODE" : missingMinutes > 0 ? "DATA_GAP" : tooTight ? "SL_TOO_TIGHT" : accumWeak ? "ACCUM_WEAK" : wrongDirection ? "WRONG_DIRECTION" : "SELECTED";
       decisions.push({
         symbol: this.symbol, episode: e, features, reference, selection,
         tradable: reason === "SELECTED", reason, evaluatedAt: now, missingMinutes,
@@ -299,6 +305,14 @@ export function oiTurnTs(buckets: readonly Bucket[], e: Episode): number | null 
     if (best < 0 || buckets[i].oi >= buckets[best].oi) best = i;
   }
   return best >= 0 ? buckets[best].ts : null;
+}
+
+/** Since the OI turn (where the confirming OI drop started) the price moved
+ *  OUR way: up for a BUY (side LONG), down for a SELL. Unknown turn = false. */
+export function turnDirectionOk(buckets: readonly Bucket[], e: Episode, side: Victim, price: number): boolean {
+  const turnTs = oiTurnTs(buckets, e);
+  const turnPrice = turnTs === null ? NaN : buckets.find((b) => b.ts === turnTs)?.price ?? NaN;
+  return Number.isFinite(turnPrice) && price > 0 && (side === "LONG" ? price > turnPrice : price < turnPrice);
 }
 
 /** Share of the positions closed in the cleaning that were re-opened before

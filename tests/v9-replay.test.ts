@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/v9-replay.test.ts
  */
 import * as assert from "assert";
-import { replaySymbol, replaySymbolMulti, simulateTrade, stopForVariant, typicalMinuteRangeBefore, type Poll } from "../src/strategy/v9/v9-replay";
+import { replaySymbol, replaySymbolMulti, simulateOneAtATime, simulateTrade, stopForVariant, typicalMinuteRangeBefore, type Poll } from "../src/strategy/v9/v9-replay";
 import { DEFAULT_V9_ENGINE_SETTINGS } from "../src/strategy/v9/v9-causal-engine";
 import type { LiqEvent, OiObservation } from "../src/strategy/v9/v9-core";
 
@@ -37,6 +37,13 @@ scenario("entry is the first poll AT/AFTER the decision time (no earlier price)"
 });
 scenario("neither hit -> OPEN", () => {
   assert.strictEqual(simulateTrade(polls([100, 100.2, 99.9]), { evaluatedAt: 1_000, tradeSide: "LONG", stopPrice: 99 }, 2.2).result, "OPEN");
+});
+scenario("one trade per symbol at a time (like live): a signal while a trade is open is SYMBOL_BUSY, not traded", () => {
+  // BUY at 1s: SL 99 hit at 4s. SELL at 2s (still open) -> busy. BUY at 5s -> traded again.
+  const p = polls([100, 100.5, 100.2, 99, 99.5, 99.8, 101.9]);
+  const d = (ts: number, side: "LONG" | "SHORT", stop: number) => ({ evaluatedAt: ts, tradeSide: side, stopPrice: stop }) as unknown as Parameters<typeof simulateOneAtATime>[1][number];
+  const out = simulateOneAtATime(p, [d(1_000, "LONG", 99), d(2_000, "SHORT", 101), d(5_000, "LONG", 99)], 2.2);
+  assert.deepStrictEqual(out.map((x) => x.trade.result), ["SL", "SYMBOL_BUSY", "TP"]);
 });
 scenario("SL sweep: a stop widened x2 survives a dip that hits the current stop, then reaches its own 2.2R TP", () => {
   // entry 100, current SL 99 (1%). Price dips to 98.9 then rallies to 104.5.

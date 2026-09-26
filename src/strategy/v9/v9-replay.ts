@@ -8,7 +8,7 @@ import { MAKER_FEE, TAKER_FEE } from "./v9-fees";
  * schedule), then simulates each tradable decision on the raw poll prices.
  */
 export interface Poll { ts: number; price: number }
-export interface SimulatedTrade { result: "TP" | "SL" | "OPEN" | "NO_RISK" | "NO_DATA"; r: number; netR?: number; slPct?: number; entry?: number; sl?: number; tp?: number; minutes?: number }
+export interface SimulatedTrade { result: "TP" | "SL" | "OPEN" | "NO_RISK" | "NO_DATA" | "SYMBOL_BUSY"; r: number; netR?: number; slPct?: number; entry?: number; sl?: number; tp?: number; minutes?: number; exitTs?: number }
 export interface ReplayResult {
   decisions: V9Decision[];
   trades: Array<{ decision: V9Decision; trade: SimulatedTrade }>;
@@ -41,10 +41,24 @@ export function simulateTrade(polls: readonly Poll[], d: Pick<V9Decision, "evalu
   for (let i = i0 + 1; i < polls.length; i++) {
     const p = polls[i].price;
     const minutes = Math.round((polls[i].ts - polls[i0].ts) / 60_000);
-    if (long ? p <= sl : p >= sl) return { result: "SL", r: -1, netR: -1 - feesInR(entry, risk, "SL"), slPct, entry, sl, tp, minutes };
-    if (long ? p >= tp : p <= tp) return { result: "TP", r: rr, netR: rr - feesInR(entry, risk, "TP"), slPct, entry, sl, tp, minutes };
+    if (long ? p <= sl : p >= sl) return { result: "SL", r: -1, netR: -1 - feesInR(entry, risk, "SL"), slPct, entry, sl, tp, minutes, exitTs: polls[i].ts };
+    if (long ? p >= tp : p <= tp) return { result: "TP", r: rr, netR: rr - feesInR(entry, risk, "TP"), slPct, entry, sl, tp, minutes, exitTs: polls[i].ts };
   }
   return { result: "OPEN", r: 0, slPct, entry, sl, tp };
+}
+
+/** Like live: while a trade on the symbol is still open, a new tradable
+ *  signal is NOT opened (SYMBOL_BUSY) -- one trade per symbol at a time, so
+ *  no BUY / SELL / BUY flip-flop can be counted that live would never take. */
+export function simulateOneAtATime(polls: readonly Poll[], tradable: readonly V9Decision[], rr: number): Array<{ decision: V9Decision; trade: SimulatedTrade }> {
+  let busyUntil = -Infinity;
+  return [...tradable].sort((a, b) => a.evaluatedAt - b.evaluatedAt).map((decision) => {
+    if (decision.evaluatedAt < busyUntil) return { decision, trade: { result: "SYMBOL_BUSY" as const, r: 0 } };
+    const trade = simulateTrade(polls, decision, rr);
+    if (trade.result === "TP" || trade.result === "SL") busyUntil = trade.exitTs!;
+    else if (trade.result === "OPEN") busyUntil = Infinity;
+    return { decision, trade };
+  });
 }
 
 /** Mean per-minute high-low of the poll prices in the hour before `ts`. */
@@ -89,7 +103,7 @@ export function replaySymbol(symbol: string, liq: readonly LiqEvent[], oi: reado
     while (oj < oiSorted.length && oiSorted[oj].ts <= t) { const o = oiSorted[oj++]; engine.store.addOiObservation(o.ts, o.updated, o.oi, o.price); }
     decisions.push(...engine.evaluate(t));
   }
-  const trades = decisions.filter((d) => d.tradable).map((decision) => ({ decision, trade: simulateTrade(polls, decision, rr) }));
+  const trades = simulateOneAtATime(polls, decisions.filter((d) => d.tradable), rr);
 
   const offlineSelected: ReplayResult["offlineSelected"] = [];
   const offline = analyzeWindow(liqSorted, oiSorted, from, until);
@@ -127,6 +141,6 @@ export function replaySymbolMulti(symbol: string, liq: readonly LiqEvent[], oi: 
   }
   return variants.map((v, k) => ({
     decisions: decisions[k],
-    trades: decisions[k].filter((d) => d.tradable).map((decision) => ({ decision, trade: simulateTrade(polls, decision, v.rr) })),
+    trades: simulateOneAtATime(polls, decisions[k].filter((d) => d.tradable), v.rr),
   }));
 }
