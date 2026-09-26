@@ -74,6 +74,12 @@ export interface V9EngineSettings {
    *  price since the OI peak between the episode end and the confirmation.
    *  Used only if it is closer than the extreme stop. 0 = always, null = off. */
   lateSlPct: number | null;
+  /** (Johnny, Sep 26) the OITURN stop is used only if it is at least this %
+   *  from the entry; closer (noise) -> lateSlClamp false: the stop STAYS at
+   *  the episode extreme; true: the stop is placed at exactly this distance.
+   *  null = no minimum. */
+  lateSlMinPct: number | null;
+  lateSlClamp: boolean;
   /** SHARP ACCUMULATION (Johnny, Sep 25 2026): after the cleaning, new
    *  positions must open FAST and in size. Measure: the biggest OI rise in any
    *  30-minute window between the episode's OI bottom and the OI peak before
@@ -106,6 +112,8 @@ export const DEFAULT_V9_ENGINE_SETTINGS: V9EngineSettings = {
   maxSlFeeR: null,
   minSlFraction: 0,
   lateSlPct: null,
+  lateSlMinPct: null,
+  lateSlClamp: false,
   minAccumPercentile: null,
   minRegrowShare: null,
 };
@@ -242,7 +250,15 @@ export class V9CausalEngine {
           const turn = this.store.extremePrice(side === "LONG" ? "LOW" : "HIGH", turnTs, now);
           const t = side === "LONG" ? turn - buffer : turn + buffer;
           const valid = side === "LONG" ? t < refPrice && t > stopPrice : t > refPrice && t < stopPrice;
-          if (Number.isFinite(t) && valid) stopPrice = t;
+          if (Number.isFinite(t) && valid) {
+            const minD = this.settings.lateSlMinPct === null ? 0 : (refPrice * this.settings.lateSlMinPct) / 100;
+            if (Math.abs(refPrice - t) >= minD) stopPrice = t;
+            else if (this.settings.lateSlClamp) {
+              const c = side === "LONG" ? refPrice - minD : refPrice + minD;
+              if (side === "LONG" ? c > stopPrice : c < stopPrice) stopPrice = c; // never farther than the extreme
+            }
+            // else: the turn is too close to the entry (noise) -> the stop stays at the extreme
+          }
         }
       }
       const minDist = refPrice * this.settings.minSlFraction;

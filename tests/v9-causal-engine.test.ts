@@ -248,6 +248,27 @@ scenario("requireTurnDirection in the engine: some signals become WRONG_DIRECTIO
   assert.ok(on.some((x) => x.reason === "WRONG_DIRECTION"), "the rule does reject something");
 });
 
+scenario("lateSlMinPct: the OITURN stop is used only when >= x% from the entry; else it stays at the extreme (or is clamped to x%)", () => {
+  const base = { ...DEFAULT_V9_ENGINE_SETTINGS, filters: "NONE" as const };
+  const ext = replay(5, 2000, base).decisions;
+  const oit = replay(5, 2000, { ...base, lateSlPct: 0 }).decisions;
+  const min = replay(5, 2000, { ...base, lateSlPct: 0, lateSlMinPct: 0.6 }).decisions;
+  const clamp = replay(5, 2000, { ...base, lateSlPct: 0, lateSlMinPct: 0.6, lateSlClamp: true }).decisions;
+  assert.ok(ext.length > 3 && ext.length === oit.length && oit.length === min.length && min.length === clamp.length);
+  let kept = 0, moved = 0;
+  ext.forEach((e, i) => {
+    const ref = e.referencePrice, dOit = Math.abs(ref - oit[i].stopPrice) / ref * 100;
+    if (oit[i].stopPrice === e.stopPrice) { assert.strictEqual(min[i].stopPrice, e.stopPrice); return; }
+    if (dOit >= 0.6) { assert.strictEqual(min[i].stopPrice, oit[i].stopPrice); moved++; }
+    else {
+      assert.strictEqual(min[i].stopPrice, e.stopPrice, "too close -> stays at the extreme"); kept++;
+      const dClamp = Math.abs(ref - clamp[i].stopPrice) / ref * 100;
+      assert.ok(Math.abs(dClamp - 0.6) < 1e-9 || clamp[i].stopPrice === e.stopPrice, `clamped to 0.6% (or the extreme if closer): ${dClamp}`);
+    }
+  });
+  assert.ok(kept + moved > 0, "the rule was exercised");
+});
+
 scenario("oiTurnTs: the highest-OI minute between the episode's last part and the confirmation (known before the confirmation)", () => {
   const b = (m: number, oi: number) => ({ ts: m * 60_000, long: 0, short: 0, count: 0, oi, price: 100, oiPoints: 1 });
   const buckets = [b(0, 100), b(1, 99), b(2, 98), b(3, 99), b(4, 101), b(5, 102), b(6, 100), b(7, 97), b(8, 120)];

@@ -16,7 +16,10 @@
  * accumulation confirms WHICHEVER side, and the trade follows it (SHORT liq
  * -> BUY, LONG liq -> SELL); "new same-side" = the trades classic V9 never
  * takes. _DIR: from the OI turn to the decision the price must have moved
- * our way. Like live, one trade per symbol at a time (a signal while a trade
+ * our way (BRK/DIR/LIQ were tested Sep 26 and rejected). LATE1: OITURN
+ * only when the extreme is > 1% away. OIT_MINx: the OITURN stop only if it is
+ * >= x% from the entry, else it stays at the extreme; OIT_CLAMP0.6: placed at
+ * 0.6% instead. Like live, one trade per symbol at a time (a signal while a trade
  * is still open = busy, not traded). Older variants:
  *   A          current live rule (opposite-side liquidation confirms), rr 2.2
  *   _RR2       rr 2 instead of 2.2
@@ -52,18 +55,14 @@ const VARIANTS: Array<{ name: string; settings: V9EngineSettings; rr?: number }>
   { name: "LIVE", settings: LIVE },
   // OITURN: stop where the confirming OI drop started (when closer than the episode extreme) -- live now ("lateSlPct": 0)
   { name: "LIVE_OITURN", settings: { ...LIVE, lateSlPct: 0 } },
-  { name: "OITURN_DIR", settings: { ...LIVE, lateSlPct: 0, requireTurnDirection: true } },
-  { name: "OITURN_LIQ1", settings: { ...LIVE, lateSlPct: 0, significantOppositeLiq: true, oppositeLiqMult: 1 } },
-  // BREAKOUT (Johnny): after cleaning + accumulation, the first next liquidation part with an OI drop,
-  // WHICHEVER side, gives the direction: SHORT liq (price up) -> BUY, LONG liq (price down) -> SELL.
-  // Same 5 checks on the cleaning, same OITURN stop, TP 2.2R.
-  { name: "BRK", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true } },
-  // _DIR: from the OI turn to the decision the price must have moved OUR way (down for a SELL, up for a BUY)
-  { name: "BRK_DIR", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, requireTurnDirection: true } },
-  // ... and the confirming liquidations must be "good": >= 1x / 3x the coin's typical liquidation minute
-  { name: "BRK_LIQ1", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, significantOppositeLiq: true, oppositeLiqMult: 1 } },
-  { name: "BRK_LIQ3", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, significantOppositeLiq: true, oppositeLiqMult: 3 } },
-  { name: "BRK_DIR_LIQ1", settings: { ...LIVE, lateSlPct: 0, breakoutConfirm: true, requireTurnDirection: true, significantOppositeLiq: true, oppositeLiqMult: 1 } },
+  // only when the extreme is > 1% away
+  { name: "LATE1", settings: { ...LIVE, lateSlPct: 1 } },
+  // the OITURN stop only if it is >= 0.6% / 0.8% from the entry, else the stop stays at the extreme
+  { name: "OIT_MIN0.6", settings: { ...LIVE, lateSlPct: 0, lateSlMinPct: 0.6 } },
+  { name: "OIT_MIN0.8", settings: { ...LIVE, lateSlPct: 0, lateSlMinPct: 0.8 } },
+  // ... or placed at exactly 0.6% when the turn is closer
+  { name: "OIT_CLAMP0.6", settings: { ...LIVE, lateSlPct: 0, lateSlMinPct: 0.6, lateSlClamp: true } },
+  { name: "LATE1_MIN0.6", settings: { ...LIVE, lateSlPct: 1, lateSlMinPct: 0.6 } },
 ];
 
 /** same*: trades confirmed by a SAME-side part (only in BREAKOUT variants = the new trades) */
