@@ -80,7 +80,7 @@ export class V9LiveService {
       this.engines.get(t.symbol)?.markTraded(t.side, t.createdAt);
     }
     this.ready = true;
-    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
+    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
     this.scheduleNextMinute();
     this.monitorTimer = setInterval(() => void this.monitorReal(), REAL_MONITOR_MS);
   }

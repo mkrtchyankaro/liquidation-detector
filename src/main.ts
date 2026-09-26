@@ -97,7 +97,7 @@ async function main(): Promise<void> {
 
   const v9 = config.v9.enabled
     ? new V9LiveService(config.v9, () => v9Users, new V9MongoFeed(mongo.db), new V9Repository(mongo.db),
-        { ...DEFAULT_V9_ENGINE_SETTINGS, minSlFraction: config.v9.minSlPct / 100, lateSlPct: config.v9.lateSlPct })
+        { ...DEFAULT_V9_ENGINE_SETTINGS, minSlFraction: config.v9.minSlPct / 100, lateSlPct: config.v9.lateSlPct, lateSlMinPct: config.v9.lateSlMinPct })
     : null;
   // OI-zigzag strategy: PAPER only, separate from V9 (never places orders).
   const zzUsers: ZzUserRef[] = config.zz.users.map((id) => users.find((u) => u.userId === id)).filter((u): u is UserConfig => !!u)

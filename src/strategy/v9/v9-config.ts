@@ -8,6 +8,8 @@ import * as fs from "fs";
  *     "symbols": ["BTCUSDT", "ETHUSDT"],
  *     "rr": 2.2,
  *     "lateSlPct": 0,          // optional: OITURN late-entry stop (0 = always, absent = off)
+ *     "lateSlMinPct": 0.6,     // optional: use the OITURN stop only if >= 0.6% from the entry
+ *                              //   (closer = noise -> the stop stays at the episode extreme)
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
  *   }
  *
@@ -27,11 +29,14 @@ export interface V9Settings {
    *  farther than this % from the entry, the stop moves to where the
    *  confirming OI drop started (only if closer). 0 = always, null = off. */
   lateSlPct: number | null;
+  /** OITURN stop used only if at least this % from the entry, else the stop
+   *  stays at the episode extreme. null = no minimum. Needs lateSlPct. */
+  lateSlMinPct: number | null;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -63,7 +68,10 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
   }
   const lateSlPct = v.lateSlPct === undefined || v.lateSlPct === null ? null : v.lateSlPct;
   if (lateSlPct !== null && (typeof lateSlPct !== "number" || !(lateSlPct >= 0) || lateSlPct > 10)) throw new Error(`"v9.lateSlPct" must be null (off) or a number between 0 and 10 (percent; 0 = always)`);
-  return { enabled: true, symbols, rr, minSlPct, lateSlPct, userModes };
+  const lateSlMinPct = v.lateSlMinPct === undefined || v.lateSlMinPct === null ? null : v.lateSlMinPct;
+  if (lateSlMinPct !== null && (typeof lateSlMinPct !== "number" || !(lateSlMinPct >= 0) || lateSlMinPct > 5)) throw new Error(`"v9.lateSlMinPct" must be null (off) or a number between 0 and 5 (percent)`);
+  if (lateSlMinPct !== null && lateSlPct === null) throw new Error(`"v9.lateSlMinPct" only works together with "v9.lateSlPct" (set "lateSlPct": 0)`);
+  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {

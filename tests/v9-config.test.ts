@@ -35,6 +35,10 @@ scenario("lateSlPct (OITURN) is off unless set; 0 = always; validated", () => {
   assert.strictEqual(parseV9Settings({ ...ok, lateSlPct: 0.8 }, users, syms).lateSlPct, 0.8);
   assert.throws(() => parseV9Settings({ ...ok, lateSlPct: "0" }, users, syms), /lateSlPct/);
   assert.throws(() => parseV9Settings({ ...ok, lateSlPct: -1 }, users, syms), /lateSlPct/);
+  assert.strictEqual(parseV9Settings(ok, users, syms).lateSlMinPct, null);
+  assert.strictEqual(parseV9Settings({ ...ok, lateSlPct: 0, lateSlMinPct: 0.6 }, users, syms).lateSlMinPct, 0.6);
+  assert.throws(() => parseV9Settings({ ...ok, lateSlMinPct: 0.6 }, users, syms), /only works together/);
+  assert.throws(() => parseV9Settings({ ...ok, lateSlPct: 0, lateSlMinPct: "0.6" }, users, syms), /lateSlMinPct/);
 });
 
 scenario("minSlPct defaults to 0.33 and is validated", () => {
