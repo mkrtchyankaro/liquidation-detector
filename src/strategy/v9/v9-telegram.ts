@@ -108,6 +108,17 @@ export function formatV9Story(st: V9Story, coin: string): string[] {
   return out;
 }
 
+/** A signal this user did not take because the cleaning was not forced enough. */
+export function formatV9ForcedSkip(d: V9Decision, mode: string, signalId: string): string {
+  const q = d.quality!;
+  return [
+    `⚪ V9 ${d.symbol} · ${d.tradeSide === "LONG" ? "LONG (BUY)" : "SHORT (SELL)"} · ${mode} · ԲԱՑ ՉԹՈՂՆՎԵՑ`,
+    `🆔 ${signalId}`,
+    `Պատճառ՝ մաքրումը հիմնականում կամավոր փակումներ էր (FORCED ֆիլտր)`,
+    `Լիկվիդացիա՝ փակված դիրքերի ${q.forcedPct.toFixed(1)}%, այս մետաղադրամի սովորականը՝ ${q.forcedMedianPct.toFixed(1)}%`,
+  ].join("\n");
+}
+
 export function formatV9Close(t: V9TradeDoc): string {
   const label = t.closeReason === "TP_FILLED" ? "✅ TAKE PROFIT" : t.closeReason === "SL_FILLED" ? "❌ STOP LOSS" : t.closeReason === "POSITION_CLOSED_EXTERNALLY" ? "⚪ CLOSED MANUALLY" : `⚪ ${t.closeReason ?? "CLOSED"}`;
   const gross = t.pnlUsd !== null && t.feesUsd !== null ? t.pnlUsd + t.feesUsd : null;

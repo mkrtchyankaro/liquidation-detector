@@ -8,6 +8,8 @@ import * as fs from "fs";
  *     "symbols": ["BTCUSDT", "ETHUSDT"],
  *     "rr": 2.2,
  *     "lateSlPct": 0,          // optional: OITURN late-entry stop (0 = always, absent = off)
+ *     "forcedOnlyUsers": ["karo"], // optional: these users get ONLY signals whose cleaning was
+ *                              //   forced (liquidation share >= the coin's median); others get all
  *     "lateSlMinPct": 0.6,     // optional: use the OITURN stop only if >= 0.6% from the entry
  *                              //   (closer = noise -> the stop stays at the episode extreme)
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
@@ -32,11 +34,13 @@ export interface V9Settings {
   /** OITURN stop used only if at least this % from the entry, else the stop
    *  stays at the episode extreme. null = no minimum. Needs lateSlPct. */
   lateSlMinPct: number | null;
+  /** Users who only take signals with a FORCED cleaning (quality.weak = false). */
+  forcedOnlyUsers: Set<string>;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -71,7 +75,15 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
   const lateSlMinPct = v.lateSlMinPct === undefined || v.lateSlMinPct === null ? null : v.lateSlMinPct;
   if (lateSlMinPct !== null && (typeof lateSlMinPct !== "number" || !(lateSlMinPct >= 0) || lateSlMinPct > 5)) throw new Error(`"v9.lateSlMinPct" must be null (off) or a number between 0 and 5 (percent)`);
   if (lateSlMinPct !== null && lateSlPct === null) throw new Error(`"v9.lateSlMinPct" only works together with "v9.lateSlPct" (set "lateSlPct": 0)`);
-  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, userModes };
+  const forcedOnlyUsers = new Set<string>();
+  if (v.forcedOnlyUsers !== undefined) {
+    if (!Array.isArray(v.forcedOnlyUsers) || !v.forcedOnlyUsers.every((x) => typeof x === "string")) throw new Error(`"v9.forcedOnlyUsers" must be an array of user ids, e.g. ["karo","artak"]`);
+    for (const id of v.forcedOnlyUsers as string[]) {
+      if (!knownUserIds.includes(id)) throw new Error(`"v9.forcedOnlyUsers" has unknown user "${id}" (known: ${knownUserIds.join(", ")})`);
+      forcedOnlyUsers.add(id);
+    }
+  }
+  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {

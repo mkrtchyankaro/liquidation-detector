@@ -6,7 +6,7 @@ import { DEFAULT_V9_ENGINE_SETTINGS, V9CausalEngine, type V9Decision, type V9Eng
 import type { V9Settings } from "./v9-config";
 import type { V9MongoFeed } from "./v9-feed";
 import type { V9DecisionDoc, V9Repository, V9TradeDoc } from "./v9-repository";
-import { formatV9Close, formatV9Entry, formatV9Failure } from "./v9-telegram";
+import { formatV9Close, formatV9Entry, formatV9Failure, formatV9ForcedSkip } from "./v9-telegram";
 import { estimateFeesUsd } from "./v9-fees";
 
 const log = childLogger({ mod: "v9-live" });
@@ -80,7 +80,7 @@ export class V9LiveService {
       this.engines.get(t.symbol)?.markTraded(t.side, t.createdAt);
     }
     this.ready = true;
-    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
+    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
     this.scheduleNextMinute();
     this.monitorTimer = setInterval(() => void this.monitorReal(), REAL_MONITOR_MS);
   }
@@ -170,6 +170,15 @@ export class V9LiveService {
       log.warn({ userId: u.userId, signalId, reason }, `[V9_TRADE_${state}]`);
       await this.notify(u, formatV9Failure(t));
     };
+
+    // FORCED filter (per user): only strong, forced cleanings for these users.
+    if (this.settings.forcedOnlyUsers?.has(u.userId) && d.quality?.weak) {
+      const reason = `FORCED_FILTER: liquidations ${d.quality.forcedPct.toFixed(1)}% of closed OI < coin median ${d.quality.forcedMedianPct.toFixed(1)}%`;
+      if (!(await this.repo.insertTrade({ ...base, state: "SKIPPED", failureReason: reason, entryInProgress: false }))) return;
+      log.warn({ userId: u.userId, signalId, reason }, "[V9_TRADE_SKIPPED_FORCED]");
+      await this.notify(u, formatV9ForcedSkip(d, u.mode, signalId));
+      return;
+    }
 
     // Pre-checks that need no order (both modes).
     if (u.mode === "REAL") {

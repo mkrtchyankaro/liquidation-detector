@@ -77,8 +77,8 @@ function mockRest(opts: { positionAmt?: string; fills?: unknown[]; slStatus?: st
   return rest;
 }
 
-function service(users: V9UserRef[], repo: MemRepo, now: { t: number }) {
-  const svc = new V9LiveService({ enabled: true, symbols: ["DOGEUSDT"], rr: 2.2, minSlPct: 0.33, userModes: new Map() }, () => users, noFeed, repo as unknown as V9Repository, undefined, () => now.t);
+function service(users: V9UserRef[], repo: MemRepo, now: { t: number }, extra: Record<string, unknown> = {}) {
+  const svc = new V9LiveService({ enabled: true, symbols: ["DOGEUSDT"], rr: 2.2, minSlPct: 0.33, userModes: new Map(), ...extra } as never, () => users, noFeed, repo as unknown as V9Repository, undefined, () => now.t);
   (svc as unknown as { ready: boolean }).ready = true;
   return svc as unknown as {
     handleDecision(d: V9Decision): Promise<void>;
@@ -113,6 +113,24 @@ async function run(): Promise<void> {
     assert.ok(Math.abs(closed.feesUsd! - 1) < 1e-9);
     assert.ok(t.msgs[1].includes("STOP LOSS") && t.msgs[1].includes("❌"));
     assert.ok(t.msgs[0].startsWith("🔵"), "entry is blue");
+  });
+
+  await scenario("FORCED filter: a forcedOnly user skips a weak-cleaning signal (Armenian note), others still trade it", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 }, tk = tg(), tm = tg();
+    const svc = service([
+      { userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: tm },
+      { userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: tk },
+    ], repo, now, { forcedOnlyUsers: new Set(["karo"]) });
+    await svc.handleDecision({ ...decision(), quality: { forcedPct: 1.7, forcedMedianPct: 6.3, weak: true } });
+    const byUser = new Map([...repo.trades.values()].map((x) => [x.userId, x]));
+    assert.strictEqual(byUser.get("main")!.state, "OPEN");
+    assert.strictEqual(byUser.get("karo")!.state, "SKIPPED");
+    assert.ok(byUser.get("karo")!.failureReason!.startsWith("FORCED_FILTER"));
+    assert.ok(tk.msgs[0].includes("ԲԱՑ ՉԹՈՂՆՎԵՑ") && tk.msgs[0].includes("1.7%"), tk.msgs[0]);
+    // a strong cleaning is taken by both
+    const repo2 = new MemRepo(), svc2 = service([{ userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }], repo2, now, { forcedOnlyUsers: new Set(["karo"]) });
+    await svc2.handleDecision({ ...decision(), quality: { forcedPct: 9, forcedMedianPct: 6.3, weak: false } });
+    assert.strictEqual([...repo2.trades.values()][0].state, "OPEN");
   });
 
   await scenario("PAPER: a same-minute SL and TP touch counts as SL (conservative)", async () => {
