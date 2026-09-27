@@ -17,6 +17,12 @@
  *   MIN0.6   OITURN only when that stop is >= 0.6% away (live since Sep 26)
  *   +S3/+S5  MIN0.6, but no trade when the TP lies beyond the last 1h swing
  *            (3-candle / 5-candle rule) -- the 1h structure would have to break
+ * Filters on top of OLD (Johnny, Sep 27 -- "weak signals should not come at all"):
+ *   TINY     skip when the NATURAL stop (episode extreme, before the 0.33%
+ *            minimum) is closer than 0.5% -- a tiny move; fees eat 0.2-0.3R
+ *   SIZE     skip when the victims' liquidations $ are below the median of
+ *            this coin's previous V9 decisions (last 3 days, only the past)
+ *   FORCED   skip when liquidations $ / closed OI $ is below that median
  * "LIVE" = what really happened to the user's trade (validation: OLD should
  * match it for signals that ran with the old rule).
  * Result on 1-minute high/low; when SL and TP are both inside one minute, SL first.
@@ -108,6 +114,10 @@ async function main(): Promise<void> {
       "MIN0.6",
       "MIN0.6+S3",
       "MIN0.6+S5",
+      "OLD+TINY",
+      "OLD+SIZE",
+      "OLD+FORCED",
+      "OLD+TINY+SIZE",
     ] as const;
     const tot = new Map<
       string,
@@ -142,7 +152,7 @@ async function main(): Promise<void> {
       `\n=== WHAT-IF on the ${trades.length} real live V9 signals (fills of "${user}") ===`,
     );
     console.log(
-      "ENTRY UTC    SYMBOL    SIDE  LIVE              | OLD                 OITURN              MIN0.6              MIN0.6+S3           MIN0.6+S5",
+      "ENTRY UTC    SYMBOL    SIDE  LIVE              | OLD                 OITURN              MIN0.6              MIN0.6+S3           MIN0.6+S5           | natSL  liq$     med$     forced% med%  -> skipped by",
     );
     for (const t of trades) {
       const d = await db
@@ -247,14 +257,82 @@ async function main(): Promise<void> {
               }
             : null;
 
+      // quality numbers, each vs this coin's previous decisions (last 3 days, before this one)
+      const natSlPct =
+        (100 * Math.abs(entry - ext(num(d.episodeStart)))) / entry;
+      const victimLiq = Number(d.features?.victimLiq ?? 0);
+      const startBar = bars.find(
+        (b) => b.ts >= Math.floor(num(d.episodeStart) / MIN) * MIN,
+      );
+      const forcedOf = (
+        liq: number,
+        dropPct: number,
+        oi: number,
+        px: number,
+      ): number =>
+        oi > 0 && px > 0 && dropPct > 0
+          ? liq / ((dropPct / 100) * oi * px)
+          : NaN;
+      const forced = startBar
+        ? forcedOf(victimLiq, Number(d.episode?.oiDropPct), startBar.oi, entry)
+        : NaN;
+      const prior = await db
+        .collection("v9_decisions")
+        .find({
+          symbol: t.symbol,
+          confirmTs: {
+            $lt: num(d.confirmTs),
+            $gte: num(d.confirmTs) - 3 * 86_400_000,
+          },
+        })
+        .project({ features: 1, episode: 1, episodeStart: 1 })
+        .toArray();
+      const med = (v: number[]): number => {
+        const a = v.filter(Number.isFinite).sort((x, y) => x - y);
+        return a.length ? a[a.length >> 1] : NaN;
+      };
+      const medLiq = med(prior.map((p) => Number(p.features?.victimLiq)));
+      // forced share of earlier episodes: OI$ from their own start bar when we have it, else this one's
+      const medForced = med(
+        prior.map((p) => {
+          const sb = bars.find(
+            (b) => b.ts >= Math.floor(num(p.episodeStart) / MIN) * MIN,
+          );
+          return forcedOf(
+            Number(p.features?.victimLiq),
+            Number(p.episode?.oiDropPct),
+            sb?.oi ?? startBar?.oi ?? NaN,
+            entry,
+          );
+        }),
+      );
+      const tiny = natSlPct < 0.5,
+        small = Number.isFinite(medLiq) && victimLiq < medLiq,
+        notForced = Number.isFinite(medForced) && forced < medForced;
+      const skipIf = (b: boolean): Res => ({ ...rOld, blocked: b });
+
       add("OLD", rOld);
       add("OITURN", rOit);
       add("MIN0.6", rMin);
       add("MIN0.6+S3", rS3);
       add("MIN0.6+S5", rS5);
       add("LIVE", live);
+      add("OLD+TINY", skipIf(tiny));
+      add("OLD+SIZE", skipIf(small));
+      add("OLD+FORCED", skipIf(notForced));
+      add("OLD+TINY+SIZE", skipIf(tiny || small));
+      const why =
+        [tiny ? "TINY" : "", small ? "SIZE" : "", notForced ? "FORCED" : ""]
+          .filter(Boolean)
+          .join(",") || "-";
+      const k = (v: number): string =>
+        v >= 1e6
+          ? `${(v / 1e6).toFixed(2)}M`
+          : v >= 1e3
+            ? `${(v / 1e3).toFixed(1)}K`
+            : v.toFixed(0);
       console.log(
-        `${stamp(entryTs)}  ${String(t.symbol).padEnd(9)} ${long ? "BUY " : "SELL"}  ${cell(live).slice(0, 18).padEnd(18)}| ${cell(rOld)}${cell(rOit)}${cell(rMin)}${cell(rS3)}${cell(rS5)}`,
+        `${stamp(entryTs)}  ${String(t.symbol).padEnd(9)} ${long ? "BUY " : "SELL"}  ${cell(live).slice(0, 18).padEnd(18)}| ${cell(rOld)}${cell(rOit)}${cell(rMin)}${cell(rS3)}${cell(rS5)}| ${natSlPct.toFixed(2).padStart(5)}% ${k(victimLiq).padStart(7)} ${Number.isFinite(medLiq) ? k(medLiq).padStart(7) : "    n/a"}  ${Number.isFinite(forced) ? (100 * forced).toFixed(1).padStart(5) : "  n/a"}  ${Number.isFinite(medForced) ? (100 * medForced).toFixed(1).padStart(4) : " n/a"}  -> ${why}`,
       );
     }
     console.log("\n=== TOTAL (net R after fees; SKIP = no trade) ===");
