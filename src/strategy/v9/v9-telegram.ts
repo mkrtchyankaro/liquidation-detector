@@ -120,7 +120,7 @@ export function formatV9ForcedSkip(d: V9Decision, mode: string, signalId: string
 }
 
 export function formatV9Close(t: V9TradeDoc): string {
-  const label = t.closeReason === "TP_FILLED" ? "✅ TAKE PROFIT" : t.closeReason === "SL_FILLED" ? "❌ STOP LOSS" : t.closeReason === "POSITION_CLOSED_EXTERNALLY" ? "⚪ CLOSED MANUALLY" : `⚪ ${t.closeReason ?? "CLOSED"}`;
+  const label = t.closeReason === "TP_FILLED" ? "✅ TAKE PROFIT" : t.closeReason === "SL_FILLED" ? "❌ STOP LOSS" : t.closeReason === "TIME_STOP" ? "⏱ TIME STOP (closed at market)" : t.closeReason === "POSITION_CLOSED_EXTERNALLY" ? "⚪ CLOSED MANUALLY" : `⚪ ${t.closeReason ?? "CLOSED"}`;
   const gross = t.pnlUsd !== null && t.feesUsd !== null ? t.pnlUsd + t.feesUsd : null;
   return [
     `${label} · V9 ${t.symbol} · ${t.side} · ${t.mode}`,

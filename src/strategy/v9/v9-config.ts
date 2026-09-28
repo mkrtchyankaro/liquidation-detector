@@ -8,6 +8,7 @@ import * as fs from "fs";
  *     "symbols": ["BTCUSDT", "ETHUSDT"],
  *     "rr": 2.2,
  *     "lateSlPct": 0,          // optional: OITURN late-entry stop (0 = always, absent = off)
+ *     "timeStopHours": 24,     // optional: a trade still open after 24h is closed at market (absent = off)
  *     "forcedOnlyUsers": ["karo"], // optional: these users get ONLY signals whose cleaning was
  *                              //   forced (liquidation share >= the coin's median); others get all
  *     "lateSlMinPct": 0.6,     // optional: use the OITURN stop only if >= 0.6% from the entry
@@ -36,11 +37,13 @@ export interface V9Settings {
   lateSlMinPct: number | null;
   /** Users who only take signals with a FORCED cleaning (quality.weak = false). */
   forcedOnlyUsers: Set<string>;
+  /** Close a still-open trade at market after this many hours (null = off). */
+  timeStopHours: number | null;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), timeStopHours: null, userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -83,7 +86,9 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
       forcedOnlyUsers.add(id);
     }
   }
-  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, userModes };
+  const timeStopHours = v.timeStopHours === undefined || v.timeStopHours === null ? null : v.timeStopHours;
+  if (timeStopHours !== null && (typeof timeStopHours !== "number" || !(timeStopHours >= 1) || timeStopHours > 240)) throw new Error(`"v9.timeStopHours" must be null (off) or a number of hours between 1 and 240`);
+  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, timeStopHours, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {

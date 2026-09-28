@@ -39,6 +39,9 @@ scenario("lateSlPct (OITURN) is off unless set; 0 = always; validated", () => {
   assert.strictEqual(parseV9Settings(ok, users, syms).forcedOnlyUsers.size, 0);
   assert.deepStrictEqual([...parseV9Settings({ ...ok, forcedOnlyUsers: [users[0]] }, users, syms).forcedOnlyUsers], [users[0]]);
   assert.throws(() => parseV9Settings({ ...ok, forcedOnlyUsers: ["nobody"] }, users, syms), /unknown user/);
+  assert.strictEqual(parseV9Settings(ok, users, syms).timeStopHours, null);
+  assert.strictEqual(parseV9Settings({ ...ok, timeStopHours: 24 }, users, syms).timeStopHours, 24);
+  assert.throws(() => parseV9Settings({ ...ok, timeStopHours: 0 }, users, syms), /timeStopHours/);
   assert.strictEqual(parseV9Settings({ ...ok, lateSlPct: 0, lateSlMinPct: 0.6 }, users, syms).lateSlMinPct, 0.6);
   assert.throws(() => parseV9Settings({ ...ok, lateSlMinPct: 0.6 }, users, syms), /only works together/);
   assert.throws(() => parseV9Settings({ ...ok, lateSlPct: 0, lateSlMinPct: "0.6" }, users, syms), /lateSlMinPct/);

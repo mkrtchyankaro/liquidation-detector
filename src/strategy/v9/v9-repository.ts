@@ -25,6 +25,8 @@ export interface V9DecisionDoc {
   stopPrice: number;
   referencePrice: number;
   missingMinutes: number;
+  /** FORCED quality as the live engine computed it (see V9Decision.quality). */
+  quality?: { forcedPct: number; forcedMedianPct: number; weak: boolean } | null;
   createdAt: Date;
 }
 
@@ -59,6 +61,8 @@ export interface V9TradeDoc {
   closeReason: string | null;
   failureReason: string | null;
   closeAttempts: number;
+  /** REAL: when the time-stop market close was sent (the close is then reported as TIME_STOP). */
+  timeStopSentAt?: number | null;
   /** true while the entry sequence runs; the monitor never touches such a
    *  trade unless it is stuck (crash mid-entry) for several minutes. */
   entryInProgress: boolean;

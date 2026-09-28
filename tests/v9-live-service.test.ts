@@ -133,6 +133,53 @@ async function run(): Promise<void> {
     assert.strictEqual([...repo2.trades.values()][0].state, "OPEN");
   });
 
+  await scenario("TIME STOP (PAPER): no SL/TP after timeStopHours -> closed at the last price, TIME_STOP, taker fees", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 }, t = tg();
+    const svc = service([{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: t }], repo, now, { timeStopHours: 24 });
+    await svc.handleDecision(decision());
+    const store = svc.engines.get("DOGEUSDT")!.store;
+    store.addOiObservation(T0 + 70_000, T0 + 70_000, 1, 0.1003);          // inside SL/TP
+    now.t = T0 + 23 * 3_600_000;
+    await svc.monitorPaper("DOGEUSDT", svc.engines.get("DOGEUSDT"), now.t);
+    assert.strictEqual([...repo.trades.values()][0].state, "OPEN", "not yet 24h");
+    now.t = T0 + 24 * 3_600_000 + 20_000;
+    store.addOiObservation(now.t - 5_000, now.t - 5_000, 1, 0.1005);
+    await svc.monitorPaper("DOGEUSDT", svc.engines.get("DOGEUSDT"), now.t);
+    const c = [...repo.trades.values()][0];
+    assert.strictEqual(c.closeReason, "TIME_STOP");
+    assert.strictEqual(c.exitPrice, 0.1005);
+    // qty 10000 x +0.0005 = +$5, minus taker+taker on $1000 = $1
+    assert.ok(Math.abs(c.pnlUsd! - 4) < 1e-9, `pnl ${c.pnlUsd}`);
+    assert.ok(t.msgs.at(-1)!.includes("TIME STOP"));
+  });
+
+  await scenario("TIME STOP (REAL): reduce-only MARKET close with the MARKET_EXIT id after 24h; reported as TIME_STOP", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 }, t = tg();
+    const fills: unknown[] = [{ orderId: 1, side: "BUY", price: "0.1", qty: "1000", realizedPnl: "0", commission: "0.04", commissionAsset: "USDT", time: T0 + 11_000 }];
+    const rest = mockRest({ fills: fills as never });
+    const svc = service([{ userId: "karo", mode: "REAL", riskUsd: 1, binanceRest: rest as never, telegram: t, leverage: 20, marginMode: "ISOLATED" }], repo, now, { timeStopHours: 24 });
+    await svc.handleDecision(decision());
+    now.t = T0 + 2 * 3_600_000;
+    await svc.monitorReal();
+    assert.ok(!rest.calls.some((c) => c.fn === "createOrder" && (c.p as Record<string, unknown>).reduceOnly === "true" && (c.p as Record<string, unknown>).type === "MARKET"), "no close before 24h");
+    now.t = T0 + 24 * 3_600_000 + 60_000;
+    await svc.monitorReal();
+    const close = rest.calls.find((c) => c.fn === "createOrder" && (c.p as Record<string, unknown>).type === "MARKET" && (c.p as Record<string, unknown>).reduceOnly === "true");
+    assert.ok(close, "market reduce-only close sent");
+    assert.strictEqual((close!.p as Record<string, unknown>).side, "SELL");
+    assert.ok(String((close!.p as Record<string, unknown>).newClientOrderId).startsWith("v9"));
+    assert.ok([...repo.trades.values()][0].timeStopSentAt! > 0);
+    // Binance: flat now, closing fill from the market order
+    rest.setPosition("0");
+    fills.push({ orderId: 555, side: "SELL", price: "0.1004", qty: "1000", realizedPnl: "0.4", commission: "0.04", commissionAsset: "USDT", time: now.t + 1_000 });
+    now.t += 30_000;
+    await svc.monitorReal();
+    const c = [...repo.trades.values()][0];
+    assert.strictEqual(c.state, "CLOSED");
+    assert.strictEqual(c.closeReason, "TIME_STOP");
+    assert.ok(t.msgs.at(-1)!.includes("TIME STOP"));
+  });
+
   await scenario("PAPER: a same-minute SL and TP touch counts as SL (conservative)", async () => {
     const repo = new MemRepo(), now = { t: T0 + 10_000 };
     const svc = service([{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }], repo, now);

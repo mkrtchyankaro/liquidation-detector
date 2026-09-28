@@ -1,4 +1,5 @@
-import { runEntrySequence, type BinanceRestLike } from "../../execution/entry-sequence";
+import { getSymbolFilters, runEntrySequence, type BinanceRestLike } from "../../execution/entry-sequence";
+import { strategyClientOrderId } from "../../execution/client-order-id";
 import { buildRealCloseReport, type UserTradeFill } from "../../execution/close-report";
 import { childLogger } from "../../infrastructure/logging/logger";
 import { MINUTE_MS, type Victim } from "./v9-core";
@@ -80,7 +81,7 @@ export class V9LiveService {
       this.engines.get(t.symbol)?.markTraded(t.side, t.createdAt);
     }
     this.ready = true;
-    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
+    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
     this.scheduleNextMinute();
     this.monitorTimer = setInterval(() => void this.monitorReal(), REAL_MONITOR_MS);
   }
@@ -144,7 +145,7 @@ export class V9LiveService {
       features: { dom: d.features.dom, dir: d.features.dir, exh: d.features.exh, dirMove: d.features.dirMove, clr: d.features.clr, victimLiq: d.features.victimLiq, oppLiq: d.features.oppLiq, preEff: d.features.preEff, postEff: d.features.postEff },
       reference: d.reference,
       episode: { longUsd: d.episode.long, shortUsd: d.episode.short, oiDropPct: d.episode.oiDropPct, priceMovePct: d.episode.priceMovePct, parts: d.episode.parts },
-      stopPrice: d.stopPrice, referencePrice: d.referencePrice, missingMinutes: d.missingMinutes, createdAt: new Date(),
+      stopPrice: d.stopPrice, referencePrice: d.referencePrice, missingMinutes: d.missingMinutes, quality: d.quality ?? null, createdAt: new Date(),
     };
     await this.repo.insertDecision(doc);
     log.info({ signalId, reason: d.reason, checks: d.selection.checks }, "[V9_DECISION]");
@@ -237,6 +238,7 @@ export class V9LiveService {
     const open = (await this.repo.findOpenTrades()).filter((t) => t.mode === "PAPER" && t.symbol === symbol && !t.entryInProgress && t.entryPrice !== null && t.tpPrice !== null && t.quantity !== null);
     for (const t of open) {
       const long = t.side === "LONG";
+      let closed = false;
       for (const m of engine.store.minuteRange(t.createdAt + MINUTE_MS, now - MINUTE_MS)) {
         const hitSl = long ? m.low <= t.slPrice : m.high >= t.slPrice;
         const hitTp = long ? m.high >= t.tpPrice! : m.low <= t.tpPrice!;
@@ -250,7 +252,17 @@ export class V9LiveService {
         const feesUsd = hitSl ? fees.sl : fees.tp;
         const pnlUsd = (hitSl ? -risk : t.rr * risk) - feesUsd;
         await this.closeTrade(t, { closedAt: m.ts + MINUTE_MS, exitPrice: exit, pnlUsd, pnlR: pnlUsd / risk, feesUsd, closeReason: reason });
+        closed = true;
         break;
+      }
+      // TIME STOP: neither SL nor TP after timeStopHours -> closed at the last price (taker both ways)
+      if (!closed && this.settings.timeStopHours && now - t.createdAt >= this.settings.timeStopHours * 3_600_000) {
+        const exit = engine.store.lastPrice(now);
+        if (!(exit > 0)) continue;
+        const risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+        const feesUsd = estimateFeesUsd(t.entryPrice! * t.quantity!).sl;
+        const pnlUsd = (long ? exit - t.entryPrice! : t.entryPrice! - exit) * t.quantity! - feesUsd;
+        await this.closeTrade(t, { closedAt: now, exitPrice: exit, pnlUsd, pnlR: pnlUsd / risk, feesUsd, closeReason: "TIME_STOP" });
       }
     }
   }
@@ -280,7 +292,26 @@ export class V9LiveService {
 
   private async checkRealTrade(t: V9TradeDoc, u: V9UserRef, rest: NonNullable<V9UserRef["binanceRest"]>): Promise<void> {
     const pos = ((await rest.getPositionRisk(t.symbol)) as Array<{ symbol: string; positionAmt: string }>).find((p) => p.symbol === t.symbol);
-    if (pos && Number(pos.positionAmt) !== 0) return; // still open
+    if (pos && Number(pos.positionAmt) !== 0) {
+      // TIME STOP: still open after timeStopHours -> market close (reduce-only, deterministic id = sent once);
+      // the next cycle sees the position flat, cancels TP/SL and reports the close from Binance fills.
+      if (this.settings.timeStopHours && !t.entryInProgress && this.now() - t.createdAt >= this.settings.timeStopHours * 3_600_000) {
+        const filters = await getSymbolFilters(rest, t.symbol);
+        if (!filters) return;
+        const qty = Math.abs(Number(pos.positionAmt));
+        try {
+          await rest.createOrder({
+            symbol: t.symbol, side: t.side === "LONG" ? "SELL" : "BUY", type: "MARKET", quantity: qty.toFixed(filters.qtyPrecision),
+            reduceOnly: "true", newClientOrderId: strategyClientOrderId(t.userId, t.signalId, "MARKET_EXIT", 0),
+          });
+          if (!t.timeStopSentAt) await this.repo.updateTrade(t.tradeId, { timeStopSentAt: this.now() });
+          log.warn({ tradeId: t.tradeId, hours: this.settings.timeStopHours }, "[V9_TIME_STOP_SENT]");
+        } catch (err) {
+          log.error({ tradeId: t.tradeId, err: err instanceof Error ? err.message : String(err) }, "[V9_TIME_STOP_FAILED] -- retried next cycle");
+        }
+      }
+      return; // still open (until Binance reports it flat)
+    }
     // Flat: remove whatever of ours is still resting (reduce-only, harmless but must not linger).
     if (t.binance?.tpOrderId) await rest.cancelOrder(t.symbol, t.binance.tpOrderId).catch(() => undefined);
     let slActualOrderId: number | null = null;
@@ -303,9 +334,10 @@ export class V9LiveService {
       return;
     }
     const risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+    const reason = report.reason === "POSITION_CLOSED_EXTERNALLY" && t.timeStopSentAt ? "TIME_STOP" : report.reason;
     await this.closeTrade(t, {
       closedAt: this.now(), exitPrice: report.exitPrice, pnlUsd: report.realizedPnlUsd,
-      pnlR: risk > 0 ? report.realizedPnlUsd / risk : null, feesUsd: report.feesUsd, closeReason: report.reason,
+      pnlR: risk > 0 ? report.realizedPnlUsd / risk : null, feesUsd: report.feesUsd, closeReason: reason,
     }, u);
   }
 
