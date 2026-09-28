@@ -8,6 +8,8 @@
  *   usd    = (peak OI - start OI) * price    -- new positions opened in the run
  *   price  = the price where the OI was added (weighted by each minute's OI increase)
  *   dir    = what the price did during the run (UP: new longs pushed it, DOWN: new shorts) -- info only
+ *   at     = the minute with the biggest OI increase (the circle goes on the candle that holds it)
+ *   rank   = its place among the runs of the same UTC day by $ (1 = the largest of that day)
  */
 export interface OiRow {
   ts: number;
@@ -27,8 +29,9 @@ export interface OiRun {
   hi: number;
   dir: "UP" | "DOWN";
   movePct: number;
-  top: boolean;
-  big: boolean;
+  at: number;
+  atPrice: number;
+  rank: number;
   xNormal: number;
 }
 
@@ -53,12 +56,18 @@ export function findRuns(
     let w = 0,
       wp = 0,
       lo = Infinity,
-      hi = -Infinity;
+      hi = -Infinity,
+      best = s + 1,
+      bestD = -Infinity;
     for (let i = s + 1; i <= peakI; i++) {
       const d = r[i].oi - r[i - 1].oi;
       if (d > 0) {
         w += d;
         wp += d * r[i].close;
+      }
+      if (d > bestD) {
+        bestD = d;
+        best = i;
       }
       lo = Math.min(lo, r[i].low > 0 ? r[i].low : r[i].close);
       hi = Math.max(hi, r[i].high > 0 ? r[i].high : r[i].close);
@@ -75,8 +84,9 @@ export function findRuns(
       hi,
       dir: r[peakI].close >= r[s].close ? "UP" : "DOWN",
       movePct: (100 * (r[peakI].close - r[s].close)) / r[s].close,
-      top: false,
-      big: false,
+      at: r[best].ts,
+      atPrice: r[best].close,
+      rank: 0,
       xNormal: 0,
     });
     s = -1;
@@ -111,17 +121,22 @@ export function findRuns(
   return out;
 }
 
-/** Marks the two ways to pick the big ones: the `topN` largest, and every run >= `times` x the median run. */
-export function markRuns(runs: OiRun[], topN = 15, times = 3): OiRun[] {
+/** Ranks the runs inside each UTC day by $ (1 = the largest of that day). */
+export function rankRuns(runs: OiRun[]): OiRun[] {
   const sizes = runs.map((x) => x.usd).sort((a, b) => a - b);
   const med = sizes.length ? sizes[sizes.length >> 1] : 0;
-  const cut =
-    [...sizes].reverse()[Math.min(topN, sizes.length) - 1] ?? Infinity;
+  const byDay = new Map<number, OiRun[]>();
   for (const x of runs) {
     x.xNormal = med > 0 ? x.usd / med : 0;
-    x.top = x.usd >= cut;
-    x.big = med > 0 && x.usd >= times * med;
+    const d = Math.floor(x.at / 86_400_000);
+    byDay.set(d, [...(byDay.get(d) ?? []), x]);
   }
+  for (const day of byDay.values())
+    day
+      .sort((a, b) => b.usd - a.usd)
+      .forEach((x, i) => {
+        x.rank = i + 1;
+      });
   return runs;
 }
 
@@ -136,49 +151,51 @@ const usd = (v: number): string =>
 const hm = (ms: number): string =>
   new Date(ms + 4 * 3_600_000).toISOString().slice(5, 16).replace("T", " ");
 
-/** Pine v6: one circle per run at (the middle of the run, the price where the OI was added). Hover = details. */
+/** Pine v6: one circle per run, on the candle that holds its strongest minute, at the price where the OI was added. */
 export function runsPine(
   coins: ReadonlyArray<{ symbol: string; runs: readonly OiRun[] }>,
   madeAt: number,
-  times = 3,
-  topN = 15,
+  maxPerDay = 10,
 ): string {
   const p = (v: number): number => +v.toPrecision(7);
   const L: string[] = [
     "//@version=6",
     `indicator("liquidation-detector: OI accumulations", overlay=true, max_labels_count=500, max_lines_count=500)`,
-    "// Circle = the open interest grew minute after minute (new positions). Placed at the middle of that time and",
-    "// at the price where the OI was added. Bigger circle = more $. Green: price went up meanwhile, red: down. Hover a circle.",
+    "// Circle = the open interest grew minute after minute (new positions), at the price where the OI was added.",
+    "// Darker = more $ (compared with the largest of that day). Green: the price went up meanwhile, red: down. Hover a circle.",
     `// made ${new Date(madeAt).toISOString().slice(0, 16)} UTC -- a snapshot`,
-    `mode = input.string("top ${topN}", "show", options=["top ${topN}", "${times}x normal", "both"])`,
+    `perDay = input.int(${maxPerDay}, "largest per day (UTC)", minval=1, maxval=${maxPerDay})`,
     `lines = input.bool(false, "price line to the right")`,
-    "// drawn once, on the last finished bar (no long if-blocks: TradingView limits their size)",
-    "dot(on, t, y, sz, col, tip, isTop, isBig) =>",
-    `    show = on and barstate.islastconfirmedhistory and ((mode == "top ${topN}" and isTop) or (mode == "${times}x normal" and isBig) or (mode == "both" and (isTop or isBig)))`,
+    "// put the circle on the candle that holds the time (TradingView would move it to the NEXT candle otherwise)",
+    "barOf(t) =>",
+    "    ms = timeframe.in_seconds() * 1000",
+    "    t - t % ms",
+    "dot(on, t, y, tr, col, tip, rank) =>",
+    "    show = on and barstate.islastconfirmedhistory and rank <= perDay",
     "    if show",
-    '        label.new(t, y, "", xloc=xloc.bar_time, style=label.style_circle, size=sz, color=color.new(col, 35), textcolor=col, tooltip=tip)',
+    '        label.new(barOf(t), y, "", xloc=xloc.bar_time, style=label.style_circle, size=size.small, color=color.new(col, tr), textcolor=col, tooltip=tip)',
     "        if lines",
-    "            line.new(t, y, t + 60000, y, xloc=xloc.bar_time, extend=extend.right, color=color.new(col, 60), style=line.style_dotted)",
+    "            line.new(barOf(t), y, barOf(t) + 60000, y, xloc=xloc.bar_time, extend=extend.right, color=color.new(col, 60), style=line.style_dotted)",
     "    show",
   ];
   coins.forEach((c, k) => {
-    // the largest first; at most 80 circles per coin
-    const shown = c.runs
-      .filter((x) => x.top || x.big)
-      .sort((a, b) => b.usd - a.usd)
-      .slice(0, 80);
+    const shown = c.runs.filter((x) => x.rank >= 1 && x.rank <= maxPerDay);
     if (!shown.length) return;
     L.push(
       `c${k} = str.startswith(syminfo.ticker, "${c.symbol.toUpperCase()}")`,
     );
-    const max = shown[0].usd;
+    const dayMax = new Map<number, number>();
     for (const x of shown) {
-      const f = x.usd / max,
-        sz = f > 0.66 ? "size.large" : f > 0.33 ? "size.normal" : "size.small";
+      const d = Math.floor(x.at / 86_400_000);
+      dayMax.set(d, Math.max(dayMax.get(d) ?? 0, x.usd));
+    }
+    for (const x of shown) {
+      const f = x.usd / (dayMax.get(Math.floor(x.at / 86_400_000)) ?? x.usd);
+      const tr = f > 0.66 ? 0 : f > 0.33 ? 35 : 65;
       const col = x.dir === "UP" ? "color.green" : "color.red";
-      const tip = `+${usd(x.usd)} OI (+${x.oiPct.toFixed(2)}%, ${x.xNormal.toFixed(1)}x normal) | ${hm(x.from)}-${hm(x.to).slice(6)} Yerevan, ${x.minutes} min | at ${p(x.price)}, price ${x.movePct >= 0 ? "+" : ""}${x.movePct.toFixed(2)}%`;
+      const tip = `#${x.rank} of the day: +${usd(x.usd)} OI (+${x.oiPct.toFixed(2)}%) | ${hm(x.from)}-${hm(x.to).slice(6)} Yerevan, ${x.minutes} min | at ${p(x.price)}, price ${x.movePct >= 0 ? "+" : ""}${x.movePct.toFixed(2)}%`;
       L.push(
-        `dot(c${k}, ${Math.round((x.from + x.to) / 2)}, ${p(x.price)}, ${sz}, ${col}, "${tip}", ${x.top}, ${x.big})`,
+        `dot(c${k}, ${x.at}, ${p(x.price)}, ${tr}, ${col}, "${tip}", ${x.rank})`,
       );
     }
   });
