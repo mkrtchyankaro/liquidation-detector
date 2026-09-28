@@ -152,36 +152,35 @@ export function runsPine(
     `// made ${new Date(madeAt).toISOString().slice(0, 16)} UTC -- a snapshot`,
     `mode = input.string("top ${topN}", "show", options=["top ${topN}", "${times}x normal", "both"])`,
     `lines = input.bool(false, "price line to the right")`,
-    "dot(t, y, sz, col, tip, isTop, isBig) =>",
-    `    show = (mode == "top ${topN}" and isTop) or (mode == "${times}x normal" and isBig) or (mode == "both" and (isTop or isBig))`,
+    "// drawn once, on the last finished bar (no long if-blocks: TradingView limits their size)",
+    "dot(on, t, y, sz, col, tip, isTop, isBig) =>",
+    `    show = on and barstate.islastconfirmedhistory and ((mode == "top ${topN}" and isTop) or (mode == "${times}x normal" and isBig) or (mode == "both" and (isTop or isBig)))`,
     "    if show",
     '        label.new(t, y, "", xloc=xloc.bar_time, style=label.style_circle, size=sz, color=color.new(col, 35), textcolor=col, tooltip=tip)',
     "        if lines",
     "            line.new(t, y, t + 60000, y, xloc=xloc.bar_time, extend=extend.right, color=color.new(col, 60), style=line.style_dotted)",
     "    show",
-    "var bool drawn = false",
-    "if barstate.islast and not drawn",
-    "    drawn := true",
   ];
-  for (const c of coins) {
-    const shown = c.runs.filter((x) => x.top || x.big);
+  coins.forEach((c, k) => {
+    // the largest first; at most 80 circles per coin
+    const shown = c.runs
+      .filter((x) => x.top || x.big)
+      .sort((a, b) => b.usd - a.usd)
+      .slice(0, 80);
+    if (!shown.length) return;
     L.push(
-      `    if str.startswith(syminfo.ticker, "${c.symbol.toUpperCase()}")`,
+      `c${k} = str.startswith(syminfo.ticker, "${c.symbol.toUpperCase()}")`,
     );
-    if (!shown.length) {
-      L.push("        na");
-      continue;
-    }
-    const max = Math.max(...shown.map((x) => x.usd));
+    const max = shown[0].usd;
     for (const x of shown) {
       const f = x.usd / max,
         sz = f > 0.66 ? "size.large" : f > 0.33 ? "size.normal" : "size.small";
       const col = x.dir === "UP" ? "color.green" : "color.red";
       const tip = `+${usd(x.usd)} OI (+${x.oiPct.toFixed(2)}%, ${x.xNormal.toFixed(1)}x normal) | ${hm(x.from)}-${hm(x.to).slice(6)} Yerevan, ${x.minutes} min | at ${p(x.price)}, price ${x.movePct >= 0 ? "+" : ""}${x.movePct.toFixed(2)}%`;
       L.push(
-        `        dot(${Math.round((x.from + x.to) / 2)}, ${p(x.price)}, ${sz}, ${col}, "${tip}", ${x.top}, ${x.big})`,
+        `dot(c${k}, ${Math.round((x.from + x.to) / 2)}, ${p(x.price)}, ${sz}, ${col}, "${tip}", ${x.top}, ${x.big})`,
       );
     }
-  }
+  });
   return L.join("\n") + "\n";
 }
