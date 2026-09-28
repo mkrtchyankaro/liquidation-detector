@@ -28,6 +28,7 @@
  *   CHG12    skip when the 12h before the entry moved >= 1% against the trade
  *   ACC15/30 skip when the new-positions phase (lowest OI -> OI turn) lasted < 15/30 min
  *   SHARE25  skip when < 25% of the closed OI was re-opened
+ *   ACCREL   skip when the accumulation OI % is below this coin's median of its previous episodes (ACCREL2: below 2x)
  *   CONF     skip when the confirming liquidations < the coin's typical liquidation minute
  * "LIVE" = what really happened to the user's trade (validation: OLD should
  * match it for signals that ran with the old rule).
@@ -194,6 +195,10 @@ async function main(): Promise<void> {
       "OLD+FORCED+ACC15",
       "OLD+FORCED+CONF",
       "OLD+FORCED+ACC15+CONF",
+      "OLD+ACCREL",
+      "OLD+ACCREL2",
+      "OLD+FORCED+ACCREL",
+      "OLD+FORCED+ACCREL2",
     ] as const;
     const tot = new Map<
       string,
@@ -236,7 +241,7 @@ async function main(): Promise<void> {
       `\n=== WHAT-IF on the ${trades.length} real live V9 signals (fills of "${user}") ===`,
     );
     console.log(
-      "ENTRY UTC    SYMBOL    SIDE  LIVE            | OLD             OLD+T24         | chg12h 1h-struct | forced% med%  | acc min  acc%   share | conf$    typ$    -> flags",
+      "ENTRY UTC    SYMBOL    SIDE  LIVE            | OLD             OLD+T24         | chg12h 1h-struct | forced% med%  | acc min  acc%  med(n)    x  share | conf$    typ$    -> flags",
     );
     for (const t of trades) {
       const d = await db
@@ -251,7 +256,7 @@ async function main(): Promise<void> {
         .collection(MINUTE_BARS)
         .find({
           symbol: t.symbol,
-          ts: { $gte: new Date(now - 48 * 3_600_000) },
+          ts: { $gte: new Date(now - 100 * 3_600_000) },
         })
         .project({
           ts: 1,
@@ -442,6 +447,52 @@ async function main(): Promise<void> {
         accPct = NaN,
         share = NaN,
         conf = NaN;
+      // accumulation OI % of any episode (start / end / confirm), same way as below: lowest OI -> OI turn
+      const accOf = (start: number, end: number, confirm: number): number => {
+        let tTs: number | null = null,
+          top = -Infinity;
+        for (const b of bars)
+          if (b.ts >= end - MIN && b.ts < confirm && b.oi > 0 && b.oi >= top) {
+            top = b.oi;
+            tTs = b.ts;
+          }
+        if (tTs === null) return NaN;
+        let lo = Infinity;
+        for (const b of bars)
+          if (
+            b.ts >= Math.floor(start / MIN) * MIN &&
+            b.ts < tTs &&
+            b.oi > 0 &&
+            b.oi < lo
+          )
+            lo = b.oi;
+        return Number.isFinite(lo) && top > 0 ? (100 * (top - lo)) / lo : NaN;
+      };
+      // this coin's previous episodes (last 3 days, confirmed before this one): their accumulation sizes
+      const priorAcc = await db
+        .collection("v9_decisions")
+        .find({
+          symbol: t.symbol,
+          confirmTs: {
+            $lt: num(d.confirmTs),
+            $gte: num(d.confirmTs) - 3 * 86_400_000,
+          },
+        })
+        .project({ episodeStart: 1, episodeEnd: 1, confirmTs: 1 })
+        .toArray();
+      const seen = new Set<string>();
+      const accPrev = priorAcc
+        .filter((p) => {
+          const k = String(p.episodeStart);
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        })
+        .map((p) =>
+          accOf(num(p.episodeStart), num(p.episodeEnd), num(p.confirmTs)),
+        )
+        .filter(Number.isFinite);
+      const accMed = med(accPrev);
       if (turnTs !== null) {
         let low: Bar | null = null;
         for (const b of bars) {
@@ -464,12 +515,17 @@ async function main(): Promise<void> {
           .reduce((a, b) => a + (long ? b.liqS : b.liqL), 0);
       }
       const liqMinutes = bars
-        .filter((b) => b.ts < now && b.liqL + b.liqS > 0)
+        .filter(
+          (b) =>
+            b.ts < now && b.ts >= now - 48 * 3_600_000 && b.liqL + b.liqS > 0,
+        )
         .map((b) => b.liqL + b.liqS)
         .sort((a, b) => a - b);
       const typical = liqMinutes.length
         ? liqMinutes[liqMinutes.length >> 1]
         : NaN;
+      const accRelLow = accPrev.length >= 3 && !(accPct >= accMed),
+        accRelLow2 = accPrev.length >= 3 && !(accPct >= 2 * accMed);
       const accShort15 = !(accMin >= 15),
         accShort30 = !(accMin >= 30),
         share25 = !(share >= 0.25),
@@ -500,10 +556,15 @@ async function main(): Promise<void> {
         "OLD+FORCED+ACC15+CONF",
         skipIf(notForced || accShort15 || confSmall),
       );
+      add("OLD+ACCREL", skipIf(accRelLow));
+      add("OLD+ACCREL2", skipIf(accRelLow2));
+      add("OLD+FORCED+ACCREL", skipIf(notForced || accRelLow));
+      add("OLD+FORCED+ACCREL2", skipIf(notForced || accRelLow2));
       const why =
         [
           notForced ? "FORCED" : "",
           accShort15 ? "ACC<15m" : "",
+          accRelLow ? "ACC<med" : "",
           share25 ? "SHARE<25%" : "",
           confSmall ? "CONF" : "",
         ]
@@ -523,7 +584,7 @@ async function main(): Promise<void> {
               ? `${(v / 1e3).toFixed(1)}K`
               : v.toFixed(0);
       console.log(
-        `${stamp(entryTs)}  ${String(t.symbol).padEnd(9)} ${long ? "BUY " : "SELL"}  ${cell(live, 16)}| ${cell(rOld, 16)}${cell(rT24, 16)}| ${sp(c12)} ${st.padStart(5)}${against ? "(vs)" : "    "} | ${Number.isFinite(forcedShown) ? (100 * forcedShown).toFixed(1).padStart(5) : "  n/a"}  ${Number.isFinite(medShown) ? (100 * medShown).toFixed(1).padStart(4) : " n/a"}${q ? "*" : " "} | ${Number.isFinite(accMin) ? String(Math.round(accMin)).padStart(6) : "   n/a"} ${Number.isFinite(accPct) ? accPct.toFixed(2).padStart(6) : "   n/a"} ${Number.isFinite(share) ? `${Math.round(100 * share)}%`.padStart(6) : "   n/a"} | ${k$(conf).padStart(7)} ${k$(typical).padStart(7)} -> ${why}`,
+        `${stamp(entryTs)}  ${String(t.symbol).padEnd(9)} ${long ? "BUY " : "SELL"}  ${cell(live, 16)}| ${cell(rOld, 16)}${cell(rT24, 16)}| ${sp(c12)} ${st.padStart(5)}${against ? "(vs)" : "    "} | ${Number.isFinite(forcedShown) ? (100 * forcedShown).toFixed(1).padStart(5) : "  n/a"}  ${Number.isFinite(medShown) ? (100 * medShown).toFixed(1).padStart(4) : " n/a"}${q ? "*" : " "} | ${Number.isFinite(accMin) ? String(Math.round(accMin)).padStart(6) : "   n/a"} ${Number.isFinite(accPct) ? accPct.toFixed(2).padStart(6) : "   n/a"} ${Number.isFinite(accMed) ? accMed.toFixed(2).padStart(5) : "  n/a"}(${String(accPrev.length).padStart(2)}) ${Number.isFinite(accMed) && accMed > 0 && Number.isFinite(accPct) ? (accPct / accMed).toFixed(1).padStart(4) : " n/a"} ${Number.isFinite(share) ? `${Math.round(100 * share)}%`.padStart(6) : "   n/a"} | ${k$(conf).padStart(7)} ${k$(typical).padStart(7)} -> ${why}`,
       );
     }
     console.log("\n=== TOTAL (net R after fees; SKIP = no trade) ===");
@@ -544,6 +605,9 @@ async function main(): Promise<void> {
     );
     console.log(
       "ACC15/ACC30 = skip if the accumulation lasted < 15/30 min; SHARE25 = skip if < 25% re-opened; CONF = skip if conf$ < typ$.",
+    );
+    console.log(
+      "med(n) = median acc% of this coin's previous episodes (last 3 days, n of them); x = this acc% / that median. ACCREL = skip if x < 1 (smaller than usual); ACCREL2 = skip if x < 2. Needs n >= 3.",
     );
     console.log(
       "forced% with * = the live engine's own numbers (what REAL users were filtered with); without * = recomputed here.",
