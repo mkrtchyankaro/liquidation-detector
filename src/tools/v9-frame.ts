@@ -74,6 +74,7 @@ export interface Zone {
   lo: number;
   hi: number;
   ts: number;
+  touches?: number;
 }
 export interface Frame {
   last: "PEAK" | "BOTTOM";
@@ -132,6 +133,58 @@ export function frameOf(c: readonly K[]): Frame | null {
   };
 }
 
+/**
+ * Johnny's zone width (Sep 28): the first wick is the zone; every later 4h candle whose wick comes INTO the
+ * zone (and does not close through it) adds its wick -- higher/lower tip or a body edge beyond the zone
+ * widens it. The zone = the whole field where buyers and sellers fought. Candles after the frame's first
+ * extreme only; repeated until nothing changes.
+ */
+export function widenZone(
+  c: readonly K[],
+  z: Zone,
+  side: "TOP" | "BOTTOM",
+  fromTs: number,
+): Zone {
+  let lo = z.lo,
+    hi = z.hi,
+    changed = true;
+  const used = new Set<number>([z.ts]);
+  while (changed) {
+    changed = false;
+    for (const k of c) {
+      if (k.ts <= fromTs || used.has(k.ts)) continue;
+      const bodyTop = Math.max(k.open, k.close),
+        bodyBot = Math.min(k.open, k.close);
+      const touches =
+        side === "TOP"
+          ? k.high >= lo && bodyTop <= hi
+          : k.low <= hi && bodyBot >= lo;
+      if (!touches) continue;
+      used.add(k.ts);
+      changed = true;
+      if (side === "TOP") {
+        lo = Math.min(lo, bodyTop);
+        hi = Math.max(hi, k.high);
+      } else {
+        lo = Math.min(lo, k.low);
+        hi = Math.max(hi, bodyBot);
+      }
+    }
+  }
+  return { lo, hi, ts: z.ts, touches: used.size };
+}
+
+/** The frame with both zones widened by the later wicks. */
+export function widenFrame(c: readonly K[], f: Frame | null): Frame | null {
+  if (!f) return null;
+  const from = f.last === "PEAK" ? f.top!.ts - 1 : f.bottom!.ts - 1;
+  return {
+    last: f.last,
+    top: f.top ? widenZone(c, f.top, "TOP", from) : null,
+    bottom: f.bottom ? widenZone(c, f.bottom, "BOTTOM", from) : null,
+  };
+}
+
 export type Verdict = "IN_ZONE" | "MIDDLE" | "NO_FRAME";
 /** Where the cleaning pushed the price (tested = episode low for a BUY, high for a SELL) vs the frame. */
 export function verdictOf(
@@ -149,6 +202,20 @@ export function verdictOf(
   return tested >= f.top.lo
     ? { verdict: "IN_ZONE", pierced: tested > f.top.hi, pos }
     : { verdict: "MIDDLE", pierced: false, pos };
+}
+
+/** Did not reach our zone, but stopped within one zone-height of it (the zone's own size, no %). */
+export function nearZone(
+  f: Frame | null,
+  long: boolean,
+  tested: number,
+): boolean {
+  const z = f ? (long ? f.bottom : f.top) : null;
+  if (!z || !Number.isFinite(tested)) return false;
+  const h = z.hi - z.lo;
+  return long
+    ? tested > z.hi && tested <= z.hi + h
+    : tested < z.lo && tested >= z.lo - h;
 }
 
 /** 1h swing lows (highs for SELL), 2 candles each side, since `from`, inside the zone. */
@@ -321,7 +388,7 @@ export function frameSvg(
     );
   }
   const badge = o.good === null ? "" : o.good ? " ✅" : " ❌";
-  return `<div class="card"><h3>${o.title}${badge} — <span class="${o.verdict === "IN_ZONE" ? "ok" : "bad"}">${o.verdict}</span></h3><svg viewBox="0 0 ${W} ${Hh}" width="100%">${parts.join("")}</svg></div>`;
+  return `<div class="card"><h3>${o.title}${badge} — <span class="${o.verdict.startsWith("IN_ZONE") ? "ok" : "bad"}">${o.verdict}</span></h3><svg viewBox="0 0 ${W} ${Hh}" width="100%">${parts.join("")}</svg></div>`;
 }
 
 export function frameHtml(cards: string[]): string {
@@ -341,6 +408,7 @@ interface Case {
   symbol: string;
   long: boolean;
   episodeStart: number;
+  confirmTs: number;
   at: number;
   entry: number;
   selected: boolean;
@@ -356,6 +424,11 @@ interface Row {
   v: ReturnType<typeof verdictOf>;
   t1h: number;
   sim: Res;
+  wide: Frame | null;
+  vw: ReturnType<typeof verdictOf>;
+  near: boolean;
+  confirmPx: number;
+  left: boolean | null;
 }
 
 async function main(): Promise<void> {
@@ -458,6 +531,7 @@ async function main(): Promise<void> {
       symbol: String(d.symbol),
       long: d.victim === "LONG",
       episodeStart: num(d.episodeStart),
+      confirmTs: num(d.confirmTs),
       at: num(d.evaluatedAt),
       entry: Number(d.referencePrice),
       selected: d.reason === "SELECTED",
@@ -480,6 +554,7 @@ async function main(): Promise<void> {
         symbol: String(t.symbol),
         long: t.side === "LONG",
         episodeStart: num(d.episodeStart),
+        confirmTs: num(d.confirmTs),
         at: num(t.createdAt),
         entry: Number(t.entryPrice),
         selected: true,
@@ -541,14 +616,30 @@ async function main(): Promise<void> {
       const sim = Number.isFinite(sl)
         ? simulate(m1, c.at, c.long, c.entry, sl)
         : { result: "OPEN" as const, netR: 0 };
-      return { c, frame, tested, v, t1h, sim };
+      const wide = widenFrame(w4, frame);
+      const vw = verdictOf(wide, c.long, tested);
+      // the moment the other side's liquidations confirmed: is the price still in our zone, or already out of it?
+      let confirmPx = NaN;
+      for (const k of m1) {
+        if (k.ts > c.confirmTs) break;
+        confirmPx = k.close;
+      }
+      const wz = wide ? (c.long ? wide.bottom : wide.top) : null;
+      const left =
+        wz && Number.isFinite(confirmPx)
+          ? c.long
+            ? confirmPx > wz.hi
+            : confirmPx < wz.lo
+          : null;
+      const near = vw.verdict === "MIDDLE" && nearZone(wide, c.long, tested);
+      return { c, frame, tested, v, t1h, sim, wide, vw, near, confirmPx, left };
     };
     const z = (zn: Zone | null | undefined): string =>
       (zn ? `${fp(zn.lo)}-${fp(zn.hi)}` : "none").padStart(17);
     const line = (r: Row, res: string, netR: number): string =>
-      `${stamp(r.c.at)}  ${r.c.symbol.padEnd(9)} ${r.c.long ? "BUY " : "SELL"}  ${`${res} ${netR >= 0 ? "+" : ""}${netR.toFixed(2)}`.padEnd(11)} ${(r.frame?.last ?? "-").padEnd(6)} top ${z(r.frame?.top)}  bottom ${z(r.frame?.bottom)}  tested ${fp(r.tested).padStart(8)}  ${(Number.isFinite(r.v.pos) ? `${Math.round(r.v.pos)}` : "-").padStart(4)}  ${String(r.t1h).padStart(3)}  ${r.c.weak ? "weak" : "ok  "}  ${r.v.verdict}${r.v.pierced ? " (pierced)" : ""}`;
+      `${stamp(r.c.at)}  ${r.c.symbol.padEnd(9)} ${r.c.long ? "BUY " : "SELL"}  ${`${res} ${netR >= 0 ? "+" : ""}${netR.toFixed(2)}`.padEnd(11)} ${(r.frame?.last ?? "-").padEnd(6)} top ${z(r.wide?.top)} x${r.wide?.top?.touches ?? 0}  bottom ${z(r.wide?.bottom)} x${r.wide?.bottom?.touches ?? 0}  tested ${fp(r.tested).padStart(8)}  ${(Number.isFinite(r.vw.pos) ? `${Math.round(r.vw.pos)}` : "-").padStart(4)}  ${r.c.weak ? "weak" : "ok  "}  ${r.v.verdict.padEnd(8)} ${r.vw.verdict}${r.near ? " but NEAR" : ""}${r.vw.pierced ? " (pierced)" : ""}${r.vw.verdict === "IN_ZONE" ? (r.left ? ", LEFT zone at confirm" : ", still in zone at confirm") : ""}`;
     const head =
-      "ENTRY UTC    SYMBOL    SIDE  RESULT      LAST   top zone (4h wick)         bottom zone (4h wick)        tested       pos  1h   FORCED FRAME";
+      "ENTRY UTC    SYMBOL    SIDE  RESULT      LAST   top zone (all wicks)  xN       bottom zone (all wicks)  xN     tested       pos  FORCED 1st-wick  ALL WICKS (FRAME+)";
 
     type Sum = { n: number; tp: number; sl: number; time: number; net: number };
     const RULES: Array<[string, (r: Row) => boolean]> = [
@@ -556,8 +647,17 @@ async function main(): Promise<void> {
       ["FORCED", (r) => !r.c.weak],
       ["FRAME (in zone)", (r) => r.v.verdict === "IN_ZONE"],
       ["FORCED + FRAME", (r) => !r.c.weak && r.v.verdict === "IN_ZONE"],
-      ["-- middle", (r) => r.v.verdict === "MIDDLE"],
-      ["-- no frame", (r) => r.v.verdict === "NO_FRAME"],
+      ["FRAME+ (wicks)", (r) => r.vw.verdict === "IN_ZONE"],
+      ["FORCED + FRAME+", (r) => !r.c.weak && r.vw.verdict === "IN_ZONE"],
+      ["FRAME+ in@conf", (r) => r.vw.verdict === "IN_ZONE" && r.left === false],
+      [
+        "FRAME+ left@conf",
+        (r) => r.vw.verdict === "IN_ZONE" && r.left === true,
+      ],
+      ["FRAME+ or NEAR", (r) => r.vw.verdict === "IN_ZONE" || r.near],
+      ["-- NEAR only", (r) => r.near],
+      ["-- middle (+)", (r) => r.vw.verdict === "MIDDLE" && !r.near],
+      ["-- no frame", (r) => r.vw.verdict === "NO_FRAME"],
     ];
     const tally = (rows: Array<{ r: Row; res: Res }>, name: string): void => {
       const span = rows.length
@@ -606,14 +706,22 @@ async function main(): Promise<void> {
               k.ts >= r.c.episodeStart - LOOK_DAYS * DAY &&
               k.ts <= r.c.at + 2 * DAY,
           );
-        return frameSvg(c4, r.frame, {
+        return frameSvg(c4, r.wide, {
           title: `${stamp(r.c.at)} UTC  ${r.c.symbol} ${r.c.long ? "BUY" : "SELL"}  ${r.c.real!.label} ${r.c.real!.netR.toFixed(2)}R  FORCED ${r.c.weak ? "weak" : "ok"}`,
           long: r.c.long,
           episodeStart: r.c.episodeStart,
           at: r.c.at,
           tested: r.tested,
           entry: r.c.entry,
-          verdict: r.v.verdict + (r.v.pierced ? " (pierced)" : ""),
+          verdict:
+            r.vw.verdict +
+            (r.near ? " but NEAR" : "") +
+            (r.vw.pierced ? " (pierced)" : "") +
+            (r.vw.verdict === "IN_ZONE"
+              ? r.left
+                ? ", left the zone at confirm"
+                : ", still in the zone at confirm"
+              : ""),
           good:
             r.c.real!.result === "TP"
               ? true
@@ -653,6 +761,15 @@ async function main(): Promise<void> {
     );
     console.log(
       "LAST: PEAK = the last extreme was the top (went up then down), BOTTOM = the last extreme was the low.",
+    );
+    console.log(
+      "FRAME = zone from the first wick only; FRAME+ = widened by every later 4h wick that came into it (xN = candles in the zone).",
+    );
+    console.log(
+      "NEAR = did not reach the zone but stopped within one zone-height of it.",
+    );
+    console.log(
+      "in@conf / left@conf: FRAME+ signals where, when the other side's liquidations confirmed, the price was still in our zone / already out of it.",
     );
     console.log(
       "IN_ZONE: BUY with the episode low in the bottom zone, SELL with the high in the top zone. MIDDLE: inside the frame but not at our edge. NO_FRAME: the other side not formed yet.",
