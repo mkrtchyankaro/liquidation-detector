@@ -8,7 +8,7 @@
 import "dotenv/config";
 import * as fs from "fs";
 import { MongoClient } from "mongodb";
-import { findRuns, rankRuns, runsPine, type OiRow, type OiRun } from "../research/oi-runs";
+import { findLiqBursts, findRuns, rankRuns, runsPine, type LiqBurst, type OiRow, type OiRun } from "../research/oi-runs";
 
 const argv = process.argv.slice(2);
 const arg = (name: string, fallback: string): string => { const i = argv.indexOf(`--${name}`); return i >= 0 ? argv[i + 1] : fallback; };
@@ -35,13 +35,13 @@ async function main(): Promise<void> {
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   const now = Date.now();
-  const pine: Array<{ symbol: string; runs: OiRun[] }> = [];
+  const pine: Array<{ symbol: string; runs: OiRun[]; liqs: LiqBurst[] }> = [];
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     for (const s of symbols()) {
       const raw = await db.collection("minute_bars").find({ symbol: s, ts: { $gte: new Date(now - days * DAY) } })
-        .project({ ts: 1, high: 1, low: 1, close: 1, oiLast: 1 }).sort({ ts: 1 }).toArray();
-      const rows: OiRow[] = raw.map((r) => ({ ts: num(r.ts), high: Number(r.high ?? 0), low: Number(r.low ?? 0), close: Number(r.close ?? 0), oi: Number(r.oiLast ?? 0) }));
+        .project({ ts: 1, high: 1, low: 1, close: 1, oiLast: 1, longLiqUsd: 1, shortLiqUsd: 1 }).sort({ ts: 1 }).toArray();
+      const rows: OiRow[] = raw.map((r) => ({ ts: num(r.ts), high: Number(r.high ?? 0), low: Number(r.low ?? 0), close: Number(r.close ?? 0), oi: Number(r.oiLast ?? 0), liqLong: Number(r.longLiqUsd ?? 0), liqShort: Number(r.shortLiqUsd ?? 0) }));
       const coin = s.replace("USDT", "");
       if (rows.length < 300) { console.log(`\n${coin}: not enough data`); continue; }
       const runs = rankRuns(findRuns(rows, pause));
@@ -56,7 +56,16 @@ async function main(): Promise<void> {
         const vs = x.price > price ? "above" : "below";
         console.log(`                          ${String(x.rank).padStart(2)}  ${yvn(x.from)}  ${yvn(x.to).slice(6)}  ${String(x.minutes).padStart(3)}  ${fp(x.price).padEnd(12)}      ${vs.padEnd(6)} ${`+${usd(x.usd)}`.padEnd(9)} (${x.xNormal.toFixed(0)}x normal)  ${x.movePct >= 0 ? "+" : ""}${x.movePct.toFixed(2)}% ${x.dir}`);
       }
-      pine.push({ symbol: s, runs });
+      const liqs = [...findLiqBursts(rows, "LONG"), ...findLiqBursts(rows, "SHORT")];
+      const top = liqs.filter((b) => b.rank <= perDay).sort((a, b) => a.at - b.at);
+      console.log(`  LIQUIDATIONS: the ${perDay} largest bursts of every UTC day, each side`);
+      day = "";
+      for (const b of top) {
+        const d = new Date(b.at).toISOString().slice(0, 10);
+        if (d !== day) { day = d; console.log(`  --- ${d} (UTC day) ---   #  start (Yerevan)  end    min  price            vs now  liquidated`); }
+        console.log(`                          ${String(b.rank).padStart(2)}  ${yvn(b.from)}  ${yvn(b.to).slice(6)}  ${String(b.minutes).padStart(3)}  ${fp(b.price).padEnd(12)}     ${(b.price > price ? "above" : "below").padEnd(6)}  ${b.side === "LONG" ? "LONGS " : "SHORTS"} ${usd(b.usd)}`);
+      }
+      pine.push({ symbol: s, runs, liqs });
     }
   } finally {
     await client.close();
@@ -64,6 +73,7 @@ async function main(): Promise<void> {
   fs.writeFileSync(pineOut, runsPine(pine, now, perDay));
   console.log(`\nRun = the OI grew minute after minute (pauses up to ${pause} min allowed; ends when 30% of the gain is given back).`);
   console.log(`Every UTC day its ${perDay} largest (#1 = the largest). In TradingView you can show fewer per day (settings). The circle sits on the candle of the run's strongest minute.`);
+  console.log(`Liquidations: orange = longs liquidated, blue = shorts liquidated; darker = more $ that day.`);
   console.log(`TradingView script: ${pineOut}`);
 }
 
