@@ -411,8 +411,8 @@ async function run(): Promise<void> {
         "no Telegram message for a filtered signal",
       );
       assert.ok(
-        tm.msgs[0].includes("📦 Շրջանակ (4h)"),
-        "main's entry shows the frame",
+        !tm.msgs[0].includes("📦"),
+        "the frame is not shown in Telegram any more",
       );
       assert.strictEqual(
         repo.decisions[0].frame!.verdict,
@@ -443,10 +443,7 @@ async function run(): Promise<void> {
         { frameOnlyUsers: new Set(["karo"]), frameSource: frame("IN_ZONE") },
       ).handleDecision(decision());
       assert.strictEqual([...repo.trades.values()][0].state, "OPEN");
-      assert.ok(
-        tk.msgs[0].includes("ներքևի զոնային") && tk.msgs[0].includes("✅"),
-        tk.msgs[0],
-      );
+      assert.ok(!tk.msgs[0].includes("📦"), tk.msgs[0]);
       const repo2 = new MemRepo();
       await service(
         [

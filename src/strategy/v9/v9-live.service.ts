@@ -200,8 +200,12 @@ export class V9LiveService {
         );
       }
     }
-    // The 4h frame (tradable signals only): where did the cleaning push the price? Never blocks the round.
-    if (d.tradable && this.frameSource) {
+    // The 4h frame (tradable signals only, and only while some user trades with the FRAME filter). Never blocks the round.
+    if (
+      d.tradable &&
+      this.frameSource &&
+      (this.settings.frameOnlyUsers?.size ?? 0) > 0
+    ) {
       try {
         d = {
           ...d,
