@@ -4,7 +4,7 @@
  * SL behind the level >= 20% ATR, TP 3R, fees).
  *
  *   npx tsx src/tools/gerchik-backtest.ts                   (last 1 month, 9 coins)
- *   npx tsx src/tools/gerchik-backtest.ts --months 6
+ *   npx tsx src/tools/gerchik-backtest.ts --months 6 --rr 2.2
  *   npx tsx src/tools/gerchik-backtest.ts --months 1 --symbols ADA,ETH --list
  */
 import "dotenv/config";
@@ -40,6 +40,8 @@ const symbols = arg("symbols", DEFAULT_SYMBOLS.join(","))
   .map((s) => s.trim().toUpperCase())
   .map((s) => (s.endsWith("USDT") ? s : `${s}USDT`));
 const months = Number(arg("months", "1"));
+const RR = Number(arg("rr", String(DEFAULT_G.rr)));
+const SETTINGS = { ...DEFAULT_G, rr: RR };
 const LIST = argv.includes("--list");
 const DAY = 86_400_000;
 const http = axios.create({
@@ -110,7 +112,7 @@ async function main(): Promise<void> {
       continue;
     }
     for (const k of KINDS) {
-      const r = backtestCoin(d1, h1, k, tradeFrom);
+      const r = backtestCoin(d1, h1, k, tradeFrom, SETTINGS);
       all.push(...r.trades.map((t) => ({ ...t, symbol: s })));
       skips.next += r.skippedNextLevel;
       skips.atr += r.skippedAtr;
@@ -121,7 +123,7 @@ async function main(): Promise<void> {
     `\n=== GERCHIK-STYLE BACKTEST  ${yerevan(tradeFrom)} -> now (${days.toFixed(0)} days, ${symbols.length} coins) ===`,
   );
   console.log(
-    "D1 levels (turning points, >= 2 touches or mirror), 1h entries, no entry after 70% of the daily ATR, SL behind the level >= 20% ATR, TP 3R, net of fees\n",
+    `D1 levels (turning points, >= 2 touches or mirror), 1h entries, no entry after 70% of the daily ATR, SL behind the level >= 20% ATR, TP ${RR}R, net of fees\n`,
   );
   console.log(
     "entry kind     trades  TP   SL  open  win    netR     avg/trade  per day   worst SL run  max drawdown",
@@ -138,7 +140,7 @@ async function main(): Promise<void> {
       all.filter((t) => t.kind === k),
     );
   console.log(
-    `\n(skipped: ${skips.atr} signals after 70% of the daily ATR, ${skips.next} with another level before the 3R target)`,
+    `\n(skipped: ${skips.atr} signals after 70% of the daily ATR, ${skips.next} with another level before the ${RR}R target)`,
   );
   console.log("\nper coin (all three kinds):");
   for (const s of symbols) {
