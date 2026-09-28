@@ -134,10 +134,11 @@ export function frameOf(c: readonly K[]): Frame | null {
 }
 
 /**
- * Johnny's zone width (Sep 28): the first wick is the zone; every later 4h candle whose wick comes INTO the
- * zone (and does not close through it) adds its wick -- higher/lower tip or a body edge beyond the zone
- * widens it. The zone = the whole field where buyers and sellers fought. Candles after the frame's first
- * extreme only; repeated until nothing changes.
+ * Johnny's zone width (Sep 28): the first wick is the zone. Then, in time order, every later 4h candle that
+ * COMES UP to the zone and turns there (a swing high: higher than the candle before and after it; for the
+ * bottom zone a swing low) with its wick tip reaching the zone adds its wick: union of the wick ranges
+ * (top: body top -> high; bottom: low -> body bottom). One pass, in order -- candles drifting sideways under
+ * the zone are not turns and do not stretch it.
  */
 export function widenZone(
   c: readonly K[],
@@ -147,31 +148,27 @@ export function widenZone(
 ): Zone {
   let lo = z.lo,
     hi = z.hi,
-    changed = true;
-  const used = new Set<number>([z.ts]);
-  while (changed) {
-    changed = false;
-    for (const k of c) {
-      if (k.ts <= fromTs || used.has(k.ts)) continue;
-      const bodyTop = Math.max(k.open, k.close),
-        bodyBot = Math.min(k.open, k.close);
-      const touches =
-        side === "TOP"
-          ? k.high >= lo && bodyTop <= hi
-          : k.low <= hi && bodyBot >= lo;
-      if (!touches) continue;
-      used.add(k.ts);
-      changed = true;
+    n = 1;
+  for (let i = 1; i < c.length - 1; i++) {
+    const k = c[i];
+    if (k.ts <= fromTs || k.ts === z.ts) continue;
+    const turn =
+      side === "TOP"
+        ? k.high > c[i - 1].high && k.high > c[i + 1].high
+        : k.low < c[i - 1].low && k.low < c[i + 1].low;
+    if (!turn) continue;
+    if (side === "TOP" ? k.high >= lo : k.low <= hi) {
+      n++;
       if (side === "TOP") {
-        lo = Math.min(lo, bodyTop);
+        lo = Math.min(lo, Math.max(k.open, k.close));
         hi = Math.max(hi, k.high);
       } else {
         lo = Math.min(lo, k.low);
-        hi = Math.max(hi, bodyBot);
+        hi = Math.max(hi, Math.min(k.open, k.close));
       }
     }
   }
-  return { lo, hi, ts: z.ts, touches: used.size };
+  return { lo, hi, ts: z.ts, touches: n };
 }
 
 /** The frame with both zones widened by the later wicks. */
@@ -763,7 +760,7 @@ async function main(): Promise<void> {
       "LAST: PEAK = the last extreme was the top (went up then down), BOTTOM = the last extreme was the low.",
     );
     console.log(
-      "FRAME = zone from the first wick only; FRAME+ = widened by every later 4h wick that came into it (xN = candles in the zone).",
+      "FRAME = zone from the first wick only; FRAME+ = widened by the wicks of later 4h turns (swing high/low) that came into it, in time order (xN = wicks in the zone).",
     );
     console.log(
       "NEAR = did not reach the zone but stopped within one zone-height of it.",
