@@ -134,51 +134,70 @@ export function frameOf(c: readonly K[]): Frame | null {
 }
 
 /**
- * Johnny's zone width (Sep 28): the first wick is the zone. Then, in time order, every later 4h candle that
- * COMES UP to the zone and turns there (a swing high: higher than the candle before and after it; for the
- * bottom zone a swing low) with its wick tip reaching the zone adds its wick: union of the wick ranges
- * (top: body top -> high; bottom: low -> body bottom). One pass, in order -- candles drifting sideways under
- * the zone are not turns and do not stretch it.
+ * Johnny's zone (Sep 28): union of wicks, in time order. A candle leaves a wick at the edge -> that wick is
+ * the zone. The next candle touches the zone with its WICK -> its wick is joined (union), a bit higher or a
+ * bit lower. The next one touches the JOINED zone -> joined too, and so on.
+ * Top zone: wick = body top -> high; a candle touches when its high reaches the zone and its body does not
+ * close above it (a body through the zone is a move, not a wick). Bottom zone mirrored (low -> body bottom).
+ * Start: the FIRST candle whose chain of touching wicks reaches the extreme candle (`seed`); the search does
+ * not go back past `floor` (the other extreme of the frame).
  */
 export function widenZone(
   c: readonly K[],
-  z: Zone,
+  seed: number,
   side: "TOP" | "BOTTOM",
-  fromTs: number,
+  floor = -1,
 ): Zone {
-  let lo = z.lo,
-    hi = z.hi,
-    n = 1;
-  for (let i = 1; i < c.length - 1; i++) {
-    const k = c[i];
-    if (k.ts <= fromTs || k.ts === z.ts) continue;
-    const turn =
-      side === "TOP"
-        ? k.high > c[i - 1].high && k.high > c[i + 1].high
-        : k.low < c[i - 1].low && k.low < c[i + 1].low;
-    if (!turn) continue;
-    if (side === "TOP" ? k.high >= lo : k.low <= hi) {
+  const wickLo = (k: K): number =>
+    side === "TOP" ? Math.max(k.open, k.close) : k.low;
+  const wickHi = (k: K): number =>
+    side === "TOP" ? k.high : Math.min(k.open, k.close);
+  const chain = (
+    start: number,
+  ): { lo: number; hi: number; n: number; hasSeed: boolean } => {
+    let lo = wickLo(c[start]),
+      hi = wickHi(c[start]),
+      n = 1,
+      hasSeed = start === seed;
+    for (let i = start + 1; i < c.length; i++) {
+      const k = c[i];
+      const touches =
+        side === "TOP"
+          ? k.high >= lo && Math.max(k.open, k.close) <= hi
+          : k.low <= hi && Math.min(k.open, k.close) >= lo;
+      if (!touches) continue;
+      lo = Math.min(lo, wickLo(k));
+      hi = Math.max(hi, wickHi(k));
       n++;
-      if (side === "TOP") {
-        lo = Math.min(lo, Math.max(k.open, k.close));
-        hi = Math.max(hi, k.high);
-      } else {
-        lo = Math.min(lo, k.low);
-        hi = Math.max(hi, Math.min(k.open, k.close));
-      }
+      if (i === seed) hasSeed = true;
     }
+    return { lo, hi, n, hasSeed };
+  };
+  for (let s = Math.max(0, floor + 1); s <= seed; s++) {
+    const r = chain(s);
+    if (r.hasSeed) return { lo: r.lo, hi: r.hi, ts: c[s].ts, touches: r.n };
   }
-  return { lo, hi, ts: z.ts, touches: n };
+  const r = chain(seed);
+  return { lo: r.lo, hi: r.hi, ts: c[seed].ts, touches: r.n };
 }
 
-/** The frame with both zones widened by the later wicks. */
+/** The frame with both zones built from the joined wicks. */
 export function widenFrame(c: readonly K[], f: Frame | null): Frame | null {
   if (!f) return null;
-  const from = f.last === "PEAK" ? f.top!.ts - 1 : f.bottom!.ts - 1;
+  const idx = (z: Zone | null): number =>
+    z ? c.findIndex((k) => k.ts === z.ts) : -1;
+  const iTop = idx(f.top),
+    iBot = idx(f.bottom);
+  if (f.last === "PEAK")
+    return {
+      last: f.last,
+      top: iTop >= 0 ? widenZone(c, iTop, "TOP", -1) : null,
+      bottom: iBot >= 0 ? widenZone(c, iBot, "BOTTOM", iTop) : null,
+    };
   return {
     last: f.last,
-    top: f.top ? widenZone(c, f.top, "TOP", from) : null,
-    bottom: f.bottom ? widenZone(c, f.bottom, "BOTTOM", from) : null,
+    bottom: iBot >= 0 ? widenZone(c, iBot, "BOTTOM", -1) : null,
+    top: iTop >= 0 ? widenZone(c, iTop, "TOP", iBot) : null,
   };
 }
 
@@ -760,7 +779,7 @@ async function main(): Promise<void> {
       "LAST: PEAK = the last extreme was the top (went up then down), BOTTOM = the last extreme was the low.",
     );
     console.log(
-      "FRAME = zone from the first wick only; FRAME+ = widened by the wicks of later 4h turns (swing high/low) that came into it, in time order (xN = wicks in the zone).",
+      "FRAME = zone from the first wick only; FRAME+ = union of the 4h wicks that touched the zone, in time order, from the first candle that reached it (xN = wicks joined).",
     );
     console.log(
       "NEAR = did not reach the zone but stopped within one zone-height of it.",

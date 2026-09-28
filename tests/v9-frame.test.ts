@@ -126,48 +126,53 @@ scenario(
 );
 
 scenario(
-  "wicks widen the zone: a later TURN whose wick reaches the zone adds its wick (union)",
+  "top zone = union of touching wicks, from the first candle that reached it",
   () => {
     t = 0;
     const c = [
-      k(10, 11.0, 9.9, 10.9),
-      k(10.9, 11.8, 10.8, 11.4),
-      k(11.4, 11.45, 10.9, 11.0),
+      k(9, 9.6, 8.9, 9.5),
+      k(9.5, 11.5, 9.4, 11.3),
+      k(11.3, 11.8, 11.1, 11.2),
+      k(11.2, 11.35, 10.9, 11.0),
       k(11.0, 11.1, 10.5, 10.6),
-      k(10.6, 11.5, 10.5, 11.2),
-      k(11.2, 11.3, 10.7, 10.8),
-      k(10.8, 11.35, 10.7, 11.3),
+      k(10.6, 11.25, 10.5, 11.15),
     ];
-    const z = widenZone(
-      c,
-      { lo: 11.4, hi: 11.8, ts: c[1].ts },
-      "TOP",
-      c[1].ts - 1,
+    const z = widenZone(c, 2, "TOP", -1);
+    // candle 1 (the rise) leaves the wick 11.3-11.5 -> the peak candle touches it (body top 11.3) -> 11.3-11.8;
+    // candle 3 wick 11.2-11.35 touches -> 11.2; candle 4 (11.1) no; candle 5 wick 11.15-11.25 touches the joined zone -> 11.15
+    assert.deepStrictEqual(
+      [z.lo, z.hi, z.touches, z.ts],
+      [11.15, 11.8, 4, c[1].ts],
     );
-    // 11.45 right after the peak is not a turn (lower than the peak candle); 11.5 is a turn with its wick in the
-    // zone -> its wick 11.2-11.5 joins; 11.35 is the last candle (not confirmed yet)
-    assert.deepStrictEqual([z.lo, z.hi, z.touches], [11.2, 11.8, 2]);
   },
 );
 
-scenario("candles drifting sideways under the zone do not stretch it", () => {
+scenario(
+  "bottom zone starts at the first wick there, even when a later candle is the lowest (AVAX Sep 23-24)",
+  () => {
+    t = 0;
+    const c = [
+      k(11.2, 11.25, 10.3, 10.35),
+      k(10.35, 10.4, 10.07, 10.2),
+      k(10.2, 10.3, 10.12, 10.25),
+      k(10.25, 10.28, 9.97, 10.1),
+      k(10.1, 10.5, 10.05, 10.45),
+    ];
+    const z = widenZone(c, 3, "BOTTOM", -1);
+    // the big red candle's body goes through (not a wick); candle 1 leaves 10.07-10.2, candle 2 touches (10.12-10.2),
+    // candle 3 (the lowest) touches -> 9.97; candle 4 touches (10.05-10.1)
+    assert.deepStrictEqual(
+      [z.lo, z.hi, z.touches, z.ts],
+      [9.97, 10.2, 4, c[1].ts],
+    );
+  },
+);
+
+scenario("a candle whose body goes through the zone is not a wick", () => {
   t = 0;
-  const c = [
-    k(11, 11.2, 10.9, 11.1),
-    k(11.1, 12.0, 11.0, 11.5),
-    k(11.5, 11.55, 11.3, 11.35),
-    k(11.35, 11.4, 11.2, 11.25),
-    k(11.25, 11.3, 11.1, 11.15),
-    k(11.15, 11.2, 11.0, 11.05),
-    k(11.05, 11.1, 10.9, 10.95),
-  ];
-  const z = widenZone(
-    c,
-    { lo: 11.5, hi: 12.0, ts: c[1].ts },
-    "TOP",
-    c[1].ts - 1,
-  );
-  assert.deepStrictEqual([z.lo, z.hi, z.touches], [11.5, 12.0, 1]);
+  const c = [k(10.5, 10.6, 10.0, 10.1), k(10.1, 10.2, 9.8, 9.85)];
+  const z = widenZone(c, 0, "BOTTOM", -1);
+  assert.deepStrictEqual([z.lo, z.hi, z.touches], [10.0, 10.1, 1]);
 });
 
 scenario("widenFrame keeps the frame, NEAR = within one zone height", () => {
