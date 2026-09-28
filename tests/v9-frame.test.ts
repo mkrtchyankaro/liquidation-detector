@@ -9,6 +9,8 @@ import {
   widenZone,
   widenFrame,
   nearZone,
+  pivotZones,
+  pivotFrame,
   K,
 } from "../src/tools/v9-frame";
 
@@ -181,6 +183,71 @@ scenario("widenFrame keeps the frame, NEAR = within one zone height", () => {
   const h = f.bottom!.hi - f.bottom!.lo;
   assert.ok(nearZone(f, true, f.bottom!.hi + h / 2));
   assert.ok(!nearZone(f, true, f.bottom!.hi + 2 * h));
+});
+
+// AVAX-like 4h: spike 11.79, tops back at ~11.4 and 11.28 (Sep 27), lows ~9.97-10.07, a small low at 10.4 in between
+const range = (): K[] => {
+  t = 0;
+  return [
+    k(10.0, 10.2, 9.9, 10.1),
+    k(10.1, 10.6, 10.0, 10.5),
+    k(10.5, 11.0, 10.4, 10.9),
+    k(10.9, 11.79, 10.8, 11.3),
+    k(11.3, 11.35, 10.9, 11.0),
+    k(11.0, 11.1, 10.7, 10.8),
+    k(10.8, 11.0, 10.6, 10.9),
+    k(10.9, 11.4, 10.85, 11.2),
+    k(11.2, 11.25, 10.8, 10.9),
+    k(10.9, 10.95, 10.3, 10.4),
+    k(10.4, 10.5, 10.07, 10.2),
+    k(10.2, 10.35, 10.1, 10.3),
+    k(10.3, 10.6, 10.25, 10.5),
+    k(10.5, 10.55, 10.2, 10.25),
+    k(10.25, 10.3, 9.972, 10.1),
+    k(10.1, 10.45, 10.05, 10.4),
+    k(10.4, 10.8, 10.35, 10.7),
+    k(10.7, 11.0, 10.6, 10.9),
+    k(10.9, 11.281, 10.85, 11.2),
+    k(11.2, 11.22, 10.9, 10.95),
+    k(10.95, 11.0, 10.6, 10.65),
+    k(10.65, 10.7, 10.4, 10.45),
+    k(10.45, 10.5, 10.3, 10.4),
+  ];
+};
+
+scenario(
+  "pivot zones: top = the spike + the later tops whose wicks overlap it; edges = extreme wick .. nearest body/tip",
+  () => {
+    const tops = pivotZones(range(), "TOP");
+    const top = tops.reduce((a, b) => (b.hi > a.hi ? b : a));
+    assert.strictEqual(top.hi, 11.79);
+    assert.ok(top.touches >= 2, JSON.stringify(tops));
+    assert.ok(top.lo >= 11.2 && top.lo <= 11.3, String(top.lo));
+  },
+);
+
+scenario(
+  "pivot zones: bottom = the lowest turns, narrow (tips), not the candles drifting in between",
+  () => {
+    const f = pivotFrame(range())!;
+    assert.strictEqual(f.bottom!.lo, 9.972);
+    assert.ok(f.bottom!.hi <= 10.1, String(f.bottom!.hi));
+  },
+);
+
+scenario("neighbouring candles are never two pivots", () => {
+  t = 0;
+  const c = [
+    k(10, 10.5, 9.9, 10.4),
+    k(10.4, 10.6, 10.3, 10.5),
+    k(10.5, 10.7, 10.4, 10.6),
+    k(10.6, 11.0, 10.5, 10.9),
+    k(10.9, 10.99, 10.6, 10.7),
+    k(10.7, 10.8, 10.4, 10.5),
+    k(10.5, 10.6, 10.2, 10.3),
+    k(10.3, 10.4, 10.1, 10.2),
+  ];
+  assert.strictEqual(pivotZones(c, "TOP").length, 1);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

@@ -99,6 +99,55 @@ export function widenZone(c: readonly K[], seed: number, side: "TOP" | "BOTTOM",
   return { lo: r.lo, hi: r.hi, ts: c[seed].ts, touches: r.n };
 }
 
+/**
+ * PIVOT ZONES (Johnny + the usual swing-zone method, Sep 28): a zone starts only at a real turn -- a 4h
+ * pivot: its high is above the N candles on each side (N = 3), so the price really went away from it
+ * (neighbouring candles cannot both be pivots). Its zone is the rejection wick (body -> tip). Pivots whose
+ * wicks overlap are the same zone (the price came back and turned there again). Edges: the outer edge
+ * through the most extreme wick, the inner edge through the nearest body -- but never past the lowest tip
+ * (top zone) / highest tip (bottom zone), so every wick of the zone reaches into it.
+ * Top zone = the highest group of pivot highs, bottom zone = the lowest group of pivot lows. Only finished
+ * candles; a pivot needs its N candles after it (confirmed 12h later on 4h).
+ */
+export interface PivotZone extends Zone { pivots: number[] }
+export function pivotZones(c: readonly K[], side: "TOP" | "BOTTOM", n = 3): PivotZone[] {
+  const piv: K[] = [];
+  for (let i = n; i < c.length - n; i++) {
+    let ok = true;
+    for (let j = i - n; j <= i + n && ok; j++) if (j !== i && (side === "TOP" ? !(c[i].high > c[j].high) : !(c[i].low < c[j].low))) ok = false;
+    if (ok) piv.push(c[i]);
+  }
+  const wick = (k: K): [number, number] => (side === "TOP" ? [Math.max(k.open, k.close), k.high] : [k.low, Math.min(k.open, k.close)]);
+  const sorted = [...piv].sort((a, b) => wick(a)[0] - wick(b)[0]);
+  const groups: K[][] = [];
+  let cur: K[] = [], curHi = -Infinity;
+  for (const k of sorted) {
+    const [lo, hi] = wick(k);
+    if (cur.length && lo <= curHi) { cur.push(k); curHi = Math.max(curHi, hi); }
+    else { if (cur.length) groups.push(cur); cur = [k]; curHi = hi; }
+  }
+  if (cur.length) groups.push(cur);
+  return groups.map((g) => {
+    const tips = g.map((k) => (side === "TOP" ? k.high : k.low));
+    const bodies = g.map((k) => (side === "TOP" ? Math.max(k.open, k.close) : Math.min(k.open, k.close)));
+    const zone = side === "TOP"
+      ? { lo: Math.min(Math.max(...bodies), Math.min(...tips)), hi: Math.max(...tips) }
+      : { lo: Math.min(...tips), hi: Math.max(Math.min(...bodies), Math.max(...tips)) };
+    const ts = g.map((k) => k.ts).sort((a, b) => a - b);
+    return { ...zone, ts: ts[0], touches: g.length, pivots: ts };
+  });
+}
+
+/** The frame from pivot zones: the top = the highest group, the bottom = the lowest group. */
+export function pivotFrame(c: readonly K[], n = 3): Frame | null {
+  const tops = pivotZones(c, "TOP", n), bots = pivotZones(c, "BOTTOM", n);
+  if (!tops.length && !bots.length) return null;
+  const top = tops.length ? tops.reduce((a, b) => (b.hi > a.hi ? b : a)) : null;
+  const bottom = bots.length ? bots.reduce((a, b) => (b.lo < a.lo ? b : a)) : null;
+  const last = top && bottom ? (Math.max(...(top as PivotZone).pivots) >= Math.max(...(bottom as PivotZone).pivots) ? "PEAK" : "BOTTOM") : top ? "PEAK" : "BOTTOM";
+  return { last, top, bottom };
+}
+
 /** The frame with both zones built from the joined wicks. */
 export function widenFrame(c: readonly K[], f: Frame | null): Frame | null {
   if (!f) return null;
@@ -305,7 +354,7 @@ async function main(): Promise<void> {
       let sl = tested;
       if (Math.abs(c.entry - sl) < c.entry * MIN_SL) sl = c.long ? c.entry * (1 - MIN_SL) : c.entry * (1 + MIN_SL);
       const sim = Number.isFinite(sl) ? simulate(m1, c.at, c.long, c.entry, sl) : { result: "OPEN" as const, netR: 0 };
-      const wide = widenFrame(w4, frame);
+      const wide = pivotFrame(w4);
       const vw = verdictOf(wide, c.long, tested);
       // the moment the other side's liquidations confirmed: is the price still in our zone, or already out of it?
       let confirmPx = NaN;
@@ -326,7 +375,7 @@ async function main(): Promise<void> {
       ["FORCED", (r) => !r.c.weak],
       ["FRAME (in zone)", (r) => r.v.verdict === "IN_ZONE"],
       ["FORCED + FRAME", (r) => !r.c.weak && r.v.verdict === "IN_ZONE"],
-      ["FRAME+ (wicks)", (r) => r.vw.verdict === "IN_ZONE"],
+      ["FRAME+ (pivots)", (r) => r.vw.verdict === "IN_ZONE"],
       ["FORCED + FRAME+", (r) => !r.c.weak && r.vw.verdict === "IN_ZONE"],
       ["FRAME+ in@conf", (r) => r.vw.verdict === "IN_ZONE" && r.left === false],
       ["FRAME+ left@conf", (r) => r.vw.verdict === "IN_ZONE" && r.left === true],
@@ -378,7 +427,7 @@ async function main(): Promise<void> {
     const open = all.filter((r) => r.sim.result === "OPEN").length;
     console.log(`\n(${open} still open, counted as 0R.) pos: 0 = frame bottom, 100 = frame top. 1h = 1h swings that touched the zone.`);
     console.log("LAST: PEAK = the last extreme was the top (went up then down), BOTTOM = the last extreme was the low.");
-    console.log("FRAME = zone from the first wick only; FRAME+ = union of the 4h wicks that touched the zone, in time order, from the first candle that reached it (xN = wicks joined).");
+    console.log("FRAME = zone from the first wick only; FRAME+ = pivot zones: 4h pivots (3 candles each side), overlapping wicks grouped; outer edge = extreme wick, inner = nearest body/tip (xN = pivots in the zone).");
     console.log("NEAR = did not reach the zone but stopped within one zone-height of it.");
     console.log("in@conf / left@conf: FRAME+ signals where, when the other side's liquidations confirmed, the price was still in our zone / already out of it.");
     console.log("IN_ZONE: BUY with the episode low in the bottom zone, SELL with the high in the top zone. MIDDLE: inside the frame but not at our edge. NO_FRAME: the other side not formed yet.");
