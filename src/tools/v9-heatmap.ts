@@ -1,20 +1,27 @@
 /**
- * LIQUIDATION / OI HEATMAP (Johnny, Sep 28 2026): the main zones of every V9 coin from OUR data --
- * where longs/shorts were liquidated, where new positions were opened, where they were closed.
+ * OPEN-POSITION / LIQUIDATION HEATMAP (Johnny, Sep 28 2026): the zones of every V9 coin from OUR data --
+ * FUEL = positions still open (longs waiting below the price, shorts above; a model, see liq-heatmap.ts),
+ * CLEANED = where the liquidations already happened.
  * Read-only (minute_bars). Writes an HTML page with one heatmap per coin and prints the zones.
  *
  *   npx tsx src/tools/v9-heatmap.ts                      (all V9 coins, last 5 days, layers of 0.2%)
- *   npx tsx src/tools/v9-heatmap.ts --days 3 --bin 0.3 --out heatmap.html BTC AVAX
+ *   npx tsx src/tools/v9-heatmap.ts --days 3 --bin 0.3 --out heatmap.html --pine zones.pine BTC AVAX
+ * The ledger of open positions starts at the LAST MARKET BREAK (a 4h impulse >= 3x the coin's normal 4h
+ * candle): after a break the old positions are mostly gone, a new structure starts.
  */
 import "dotenv/config";
 import * as fs from "fs";
 import { MongoClient } from "mongodb";
 import {
   buildHeat,
-  findZones,
+  fromNow,
+  fuelZones,
   heatHtml,
   heatPanel,
+  liquidationZones,
+  pineScript,
   usd,
+  type HeatZone,
   type MinuteRow,
 } from "../research/liq-heatmap";
 
@@ -68,11 +75,20 @@ async function main(): Promise<void> {
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   const panels: string[] = [];
+  const pine: Array<{
+    symbol: string;
+    fuel: HeatZone[];
+    cleaned: HeatZone[];
+    breakTs: number | null;
+    madeAt: number;
+  }> = [];
+  const yvn = (ms: number): string =>
+    new Date(ms + 4 * 3_600_000).toISOString().slice(5, 16).replace("T", " ");
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     const now = Date.now();
     console.log(
-      `\n=== MAIN ZONES FROM LIQUIDATIONS + OPEN INTEREST (last ${days} days, layers of ${bin}%) ===`,
+      `\n=== ZONES FROM OUR LIQUIDATIONS + OPEN INTEREST (last ${days} days, layers of ${bin}%) ===`,
     );
     for (const s of symbols()) {
       const raw = await db
@@ -103,37 +119,58 @@ async function main(): Promise<void> {
         console.log(`${s}: not enough data`);
         continue;
       }
-      const zones = findZones(heat, 5);
-      const price = heat.closes[heat.closes.length - 1].close;
+      const fuel = fuelZones(heat, 3),
+        liqZ = liquidationZones(heat, 3);
+      const price = heat.price;
       console.log(`\n${s.replace("USDT", "")}  now ${fp(price)}`);
-      zones.forEach((z, i) => {
-        const where =
-          price > z.hi
-            ? `${(((price - z.hi) / price) * 100).toFixed(2)}% below`
-            : price < z.lo
-              ? `${(((z.lo - price) / price) * 100).toFixed(2)}% above`
-              : "price is IN it";
+      const b = heat.lastBreak;
+      console.log(
+        b
+          ? `  last market break ${yvn(b.from)} -> ${yvn(b.to)}: ${b.up ? "UP" : "DOWN"} ${b.movePct.toFixed(2)}% (${b.timesMedian.toFixed(1)}x a normal 4h candle), OI ${b.oiPct.toFixed(2)}%, liquidations ${usd(b.liqUsd)} -- positions counted from here`
+          : "  no market break in this period -- positions counted from the first stored minute",
+      );
+      fuel.forEach((z, i) =>
         console.log(
-          `  Z${i + 1}  ${fp(z.lo)} - ${fp(z.hi)}  ${where.padEnd(14)}  ${z.kind.padEnd(16)}  longs liq ${usd(z.liqLong).padStart(7)}  shorts liq ${usd(z.liqShort).padStart(7)}  new pos ${usd(z.opened).padStart(7)}  closed ${usd(z.closed).padStart(7)}`,
-        );
+          `  F${i + 1} ${z.side.padEnd(14)} ${`${fp(z.lo)} - ${fp(z.hi)}`.padEnd(22)} ${fromNow(z, price).padEnd(14)}  still open ${usd(z.usd)}`,
+        ),
+      );
+      liqZ.forEach((z, i) =>
+        console.log(
+          `  L${i + 1} CLEANED        ${`${fp(z.lo)} - ${fp(z.hi)}`.padEnd(22)} ${fromNow(z, price).padEnd(14)}  longs liq ${usd(z.liqLong)}, shorts liq ${usd(z.liqShort)}`,
+        ),
+      );
+      panels.push(heatPanel(s, heat, liqZ, fuel));
+      pine.push({
+        symbol: s,
+        fuel,
+        cleaned: liqZ,
+        breakTs: b?.to ?? null,
+        madeAt: now,
       });
-      panels.push(heatPanel(s, heat, zones, price));
     }
   } finally {
     await client.close();
   }
+  const pineOut = arg("pine", "zones.pine");
+  fs.writeFileSync(pineOut, pineScript(pine));
   fs.writeFileSync(
     out,
     heatHtml(
       panels,
-      `Liquidation & open-interest heatmap — last ${days} days (Yerevan time)`,
+      `Open positions & liquidations — last ${days} days (Yerevan time)`,
     ),
   );
   console.log(
-    `\nZ1 = the strongest. LIQUIDATIONS = cleaned there; NEW POSITIONS = fuel (their stops/liquidations are near); CLOSED = positions left there.`,
+    `\nF = FUEL: positions still open (model). LONGS WAITING below the price -- their stops/liquidations are under them, the next long cleaning; SHORTS WAITING above.`,
+  );
+  console.log(
+    `L = CLEANED: where the liquidations already happened. F1/L1 = the strongest.`,
   );
   console.log(
     `heatmap written to ${out} -- copy it to your computer and open it in the browser.`,
+  );
+  console.log(
+    `TradingView script written to ${pineOut} -- tradingview.com > Pine Editor > paste > Add to chart (e.g. BINANCE:BTCUSDT.P).`,
   );
 }
 
