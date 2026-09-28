@@ -1,13 +1,25 @@
-import { getSymbolFilters, runEntrySequence, type BinanceRestLike } from "../../execution/entry-sequence";
+import {
+  getSymbolFilters,
+  runEntrySequence,
+  type BinanceRestLike,
+} from "../../execution/entry-sequence";
 import { strategyClientOrderId } from "../../execution/client-order-id";
-import { buildRealCloseReport, type UserTradeFill } from "../../execution/close-report";
+import {
+  buildRealCloseReport,
+  type UserTradeFill,
+} from "../../execution/close-report";
 import { childLogger } from "../../infrastructure/logging/logger";
 import { MINUTE_MS, type Victim } from "./v9-core";
-import { DEFAULT_V9_ENGINE_SETTINGS, V9CausalEngine, type V9Decision, type V9EngineSettings } from "./v9-causal-engine";
+import {
+  DEFAULT_V9_ENGINE_SETTINGS,
+  V9CausalEngine,
+  type V9Decision,
+  type V9EngineSettings,
+} from "./v9-causal-engine";
 import type { V9Settings } from "./v9-config";
 import type { V9MongoFeed } from "./v9-feed";
 import type { V9DecisionDoc, V9Repository, V9TradeDoc } from "./v9-repository";
-import { formatV9Close, formatV9Entry, formatV9Failure, formatV9ForcedSkip, formatV9FrameSkip } from "./v9-telegram";
+import { formatV9Close, formatV9Entry, formatV9Failure } from "./v9-telegram";
 import type { V9FrameSource } from "./v9-frame-source";
 import { estimateFeesUsd } from "./v9-fees";
 
@@ -30,7 +42,11 @@ export interface V9UserRef {
   userId: string;
   mode: "PAPER" | "REAL";
   riskUsd: number;
-  binanceRest: (BinanceRestLike & { getUserTrades(symbol: string, startTime: number): Promise<unknown> }) | null;
+  binanceRest:
+    | (BinanceRestLike & {
+        getUserTrades(symbol: string, startTime: number): Promise<unknown>;
+      })
+    | null;
   leverage?: number;
   marginMode?: "ISOLATED" | "CROSSED";
   telegram: { sendMessage(text: string): Promise<unknown> } | null;
@@ -61,7 +77,8 @@ export class V9LiveService {
     /** 4h frame check for tradable signals (null = off; frameOnly users then skip every signal). */
     private readonly frameSource: V9FrameSource | null = null,
   ) {
-    for (const s of settings.symbols) this.engines.set(s, new V9CausalEngine(s, engineSettings));
+    for (const s of settings.symbols)
+      this.engines.set(s, new V9CausalEngine(s, engineSettings));
   }
 
   /** Warm-up (history -> reference medians) then start both schedules.
@@ -70,23 +87,42 @@ export class V9LiveService {
     await this.repo.ensureIndexes();
     const t0 = this.now();
     for (const [symbol, engine] of this.engines) {
-      const loaded = await this.feed.warmUp(symbol, engine.store, t0 - WARMUP_HISTORY_MS);
+      const loaded = await this.feed.warmUp(
+        symbol,
+        engine.store,
+        t0 - WARMUP_HISTORY_MS,
+      );
       let decided = 0;
-      for (let t = t0 - this.engineSettings.windowMs; t <= t0; t += WARMUP_STEP_MS) {
+      for (
+        let t = t0 - this.engineSettings.windowMs;
+        t <= t0;
+        t += WARMUP_STEP_MS
+      ) {
         decided += engine.evaluate(t).length;
         await new Promise((r) => setImmediate(r)); // keep the event loop (WS, LOX) responsive
       }
-      log.info(`[V9_WARMUP] ${symbol} rows liq=${loaded.liq} oi=${loaded.oi} historicalDecisions=${decided}`);
+      log.info(
+        `[V9_WARMUP] ${symbol} rows liq=${loaded.liq} oi=${loaded.oi} historicalDecisions=${decided}`,
+      );
     }
     // Restore which episodes were already traded (exact, from the database)
     // so a re-confirmed episode is never traded twice across restarts.
-    for (const t of await this.repo.findTradesSince(t0 - this.engineSettings.windowMs)) {
+    for (const t of await this.repo.findTradesSince(
+      t0 - this.engineSettings.windowMs,
+    )) {
       this.engines.get(t.symbol)?.markTraded(t.side, t.createdAt);
     }
     this.ready = true;
-    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} frameOnly=${[...(this.settings.frameOnlyUsers ?? [])].join("+") || "none"} frameCheck=${this.frameSource ? "on" : "off"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
+    log.warn(
+      `[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} frameOnly=${[...(this.settings.frameOnlyUsers ?? [])].join("+") || "none"} frameCheck=${this.frameSource ? "on" : "off"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users()
+        .map((u) => `${u.userId}:${u.mode}`)
+        .join(",")}`,
+    );
     this.scheduleNextMinute();
-    this.monitorTimer = setInterval(() => void this.monitorReal(), REAL_MONITOR_MS);
+    this.monitorTimer = setInterval(
+      () => void this.monitorReal(),
+      REAL_MONITOR_MS,
+    );
   }
 
   stop(): void {
@@ -97,10 +133,14 @@ export class V9LiveService {
 
   private scheduleNextMinute(): void {
     const now = this.now();
-    const next = Math.floor(now / MINUTE_MS) * MINUTE_MS + MINUTE_MS + EVAL_OFFSET_MS;
-    this.minuteTimer = setTimeout(() => {
-      void this.onMinute().finally(() => this.scheduleNextMinute());
-    }, Math.max(1_000, next - now));
+    const next =
+      Math.floor(now / MINUTE_MS) * MINUTE_MS + MINUTE_MS + EVAL_OFFSET_MS;
+    this.minuteTimer = setTimeout(
+      () => {
+        void this.onMinute().finally(() => this.scheduleNextMinute());
+      },
+      Math.max(1_000, next - now),
+    );
   }
 
   /** One evaluation round. Public for tests and the replay harness. */
@@ -114,14 +154,24 @@ export class V9LiveService {
         try {
           await this.feed.poll(symbol, engine.store);
           for (const d of engine.evaluate(now)) await this.handleDecision(d);
-          if (engine.lastSnapshot?.ts === now) snapshots.push(engine.lastSnapshot);
+          if (engine.lastSnapshot?.ts === now)
+            snapshots.push(engine.lastSnapshot);
           await this.monitorPaper(symbol, engine, now);
         } catch (err) {
-          log.error({ symbol, err: err instanceof Error ? err.message : String(err) }, "[V9_SYMBOL_ROUND_FAILED] -- isolated, other symbols continue");
+          log.error(
+            { symbol, err: err instanceof Error ? err.message : String(err) },
+            "[V9_SYMBOL_ROUND_FAILED] -- isolated, other symbols continue",
+          );
         }
       }
-      await this.repo.insertTimeline(snapshots).catch((err) =>
-        log.error({ err: err instanceof Error ? err.message : String(err) }, "[V9_TIMELINE_WRITE_FAILED] -- trading unaffected"));
+      await this.repo
+        .insertTimeline(snapshots)
+        .catch((err) =>
+          log.error(
+            { err: err instanceof Error ? err.message : String(err) },
+            "[V9_TIMELINE_WRITE_FAILED] -- trading unaffected",
+          ),
+        );
     } finally {
       this.minuteBusy = false;
     }
@@ -135,50 +185,152 @@ export class V9LiveService {
     // be opened on the symbol, for any user, in either direction.
     let d = d0;
     if (d0.tradable) {
-      const busy = (await this.repo.findOpenTrades()).filter((t) => t.symbol === d0.symbol);
+      const busy = (await this.repo.findOpenTrades()).filter(
+        (t) => t.symbol === d0.symbol,
+      );
       if (busy.length > 0) {
-        d = { ...d0, tradable: false, reason: "SYMBOL_BUSY" as V9Decision["reason"] };
-        log.warn({ signalId, openSignals: [...new Set(busy.map((t) => t.signalId))] }, "[V9_SYMBOL_BUSY] previous signal still has open trades -- new signal not opened");
+        d = {
+          ...d0,
+          tradable: false,
+          reason: "SYMBOL_BUSY" as V9Decision["reason"],
+        };
+        log.warn(
+          { signalId, openSignals: [...new Set(busy.map((t) => t.signalId))] },
+          "[V9_SYMBOL_BUSY] previous signal still has open trades -- new signal not opened",
+        );
       }
     }
     // The 4h frame (tradable signals only): where did the cleaning push the price? Never blocks the round.
     if (d.tradable && this.frameSource) {
       try {
-        d = { ...d, frame: await this.frameSource(d.symbol, d.tradeSide === "LONG", d.episode.start, d.evaluatedAt) };
+        d = {
+          ...d,
+          frame: await this.frameSource(
+            d.symbol,
+            d.tradeSide === "LONG",
+            d.episode.start,
+            d.evaluatedAt,
+          ),
+        };
       } catch (err) {
-        log.error({ signalId, err: err instanceof Error ? err.message : String(err) }, "[V9_FRAME_CHECK_FAILED] -- frameOnly users skip this signal");
+        log.error(
+          { signalId, err: err instanceof Error ? err.message : String(err) },
+          "[V9_FRAME_CHECK_FAILED] -- frameOnly users skip this signal",
+        );
       }
     }
     const doc: V9DecisionDoc = {
-      signalId, symbol: d.symbol, victim: d.episode.victim, reason: d.reason, tradable: d.tradable,
-      episodeStart: d.episode.start, episodeEnd: d.episode.end, confirmTs: d.episode.confirmTs, evaluatedAt: d.evaluatedAt,
+      signalId,
+      symbol: d.symbol,
+      victim: d.episode.victim,
+      reason: d.reason,
+      tradable: d.tradable,
+      episodeStart: d.episode.start,
+      episodeEnd: d.episode.end,
+      confirmTs: d.episode.confirmTs,
+      evaluatedAt: d.evaluatedAt,
       checks: d.selection.checks,
-      features: { dom: d.features.dom, dir: d.features.dir, exh: d.features.exh, dirMove: d.features.dirMove, clr: d.features.clr, victimLiq: d.features.victimLiq, oppLiq: d.features.oppLiq, preEff: d.features.preEff, postEff: d.features.postEff },
+      features: {
+        dom: d.features.dom,
+        dir: d.features.dir,
+        exh: d.features.exh,
+        dirMove: d.features.dirMove,
+        clr: d.features.clr,
+        victimLiq: d.features.victimLiq,
+        oppLiq: d.features.oppLiq,
+        preEff: d.features.preEff,
+        postEff: d.features.postEff,
+      },
       reference: d.reference,
-      episode: { longUsd: d.episode.long, shortUsd: d.episode.short, oiDropPct: d.episode.oiDropPct, priceMovePct: d.episode.priceMovePct, parts: d.episode.parts },
-      stopPrice: d.stopPrice, referencePrice: d.referencePrice, missingMinutes: d.missingMinutes, quality: d.quality ?? null, frame: d.frame ?? null, createdAt: new Date(),
+      episode: {
+        longUsd: d.episode.long,
+        shortUsd: d.episode.short,
+        oiDropPct: d.episode.oiDropPct,
+        priceMovePct: d.episode.priceMovePct,
+        parts: d.episode.parts,
+      },
+      stopPrice: d.stopPrice,
+      referencePrice: d.referencePrice,
+      missingMinutes: d.missingMinutes,
+      quality: d.quality ?? null,
+      frame: d.frame ?? null,
+      createdAt: new Date(),
     };
     await this.repo.insertDecision(doc);
-    log.info({ signalId, reason: d.reason, checks: d.selection.checks }, "[V9_DECISION]");
+    log.info(
+      { signalId, reason: d.reason, checks: d.selection.checks },
+      "[V9_DECISION]",
+    );
     if (!d.tradable) return;
-    log.warn({ signalId, side: d.tradeSide, stop: d.stopPrice, ref: d.referencePrice }, "[V9_SIGNAL]");
-    await Promise.all(this.users().map((u) => this.openTrade(u, d, signalId).catch((err) =>
-      log.error({ userId: u.userId, signalId, err: err instanceof Error ? err.message : String(err) }, "[V9_OPEN_TRADE_UNEXPECTED] -- isolated"))));
+    log.warn(
+      { signalId, side: d.tradeSide, stop: d.stopPrice, ref: d.referencePrice },
+      "[V9_SIGNAL]",
+    );
+    await Promise.all(
+      this.users().map((u) =>
+        this.openTrade(u, d, signalId).catch((err) =>
+          log.error(
+            {
+              userId: u.userId,
+              signalId,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            "[V9_OPEN_TRADE_UNEXPECTED] -- isolated",
+          ),
+        ),
+      ),
+    );
   }
 
-  private async openTrade(u: V9UserRef, d: V9Decision, signalId: string): Promise<void> {
+  private async openTrade(
+    u: V9UserRef,
+    d: V9Decision,
+    signalId: string,
+  ): Promise<void> {
     const side: Victim = d.tradeSide;
     const long = side === "LONG";
     const base: V9TradeDoc = {
-      tradeId: `${signalId}:${u.userId}`, signalId, userId: u.userId, mode: u.mode, symbol: d.symbol, side,
-      state: "OPEN", createdAt: this.now(), entryPrice: null, slPrice: d.stopPrice, tpPrice: null, quantity: null,
-      plannedRiskUsd: u.riskUsd, actualRiskUsd: null, rr: this.settings.rr, binance: null,
-      closedAt: null, exitPrice: null, pnlUsd: null, pnlR: null, feesUsd: null, closeReason: null, failureReason: null,
-      closeAttempts: 0, entryInProgress: true,
+      tradeId: `${signalId}:${u.userId}`,
+      signalId,
+      userId: u.userId,
+      mode: u.mode,
+      symbol: d.symbol,
+      side,
+      state: "OPEN",
+      createdAt: this.now(),
+      entryPrice: null,
+      slPrice: d.stopPrice,
+      tpPrice: null,
+      quantity: null,
+      plannedRiskUsd: u.riskUsd,
+      actualRiskUsd: null,
+      rr: this.settings.rr,
+      binance: null,
+      closedAt: null,
+      exitPrice: null,
+      pnlUsd: null,
+      pnlR: null,
+      feesUsd: null,
+      closeReason: null,
+      failureReason: null,
+      closeAttempts: 0,
+      entryInProgress: true,
     };
-    const fail = async (reason: string, state: "FAILED" | "SKIPPED" = "FAILED"): Promise<void> => {
-      const t = { ...base, state, failureReason: reason, entryInProgress: false };
-      await this.repo.updateTrade(base.tradeId, { state, failureReason: reason, entryInProgress: false });
+    const fail = async (
+      reason: string,
+      state: "FAILED" | "SKIPPED" = "FAILED",
+    ): Promise<void> => {
+      const t = {
+        ...base,
+        state,
+        failureReason: reason,
+        entryInProgress: false,
+      };
+      await this.repo.updateTrade(base.tradeId, {
+        state,
+        failureReason: reason,
+        entryInProgress: false,
+      });
       log.warn({ userId: u.userId, signalId, reason }, `[V9_TRADE_${state}]`);
       await this.notify(u, formatV9Failure(t));
     };
@@ -186,27 +338,57 @@ export class V9LiveService {
     // FORCED filter (per user): only strong, forced cleanings for these users.
     if (this.settings.forcedOnlyUsers?.has(u.userId) && d.quality?.weak) {
       const reason = `FORCED_FILTER: liquidations ${d.quality.forcedPct.toFixed(1)}% of closed OI < coin median ${d.quality.forcedMedianPct.toFixed(1)}%`;
-      if (!(await this.repo.insertTrade({ ...base, state: "SKIPPED", failureReason: reason, entryInProgress: false }))) return;
-      log.warn({ userId: u.userId, signalId, reason }, "[V9_TRADE_SKIPPED_FORCED]");
-      await this.notify(u, formatV9ForcedSkip(d, u.mode, signalId));
-      return;
+      if (
+        !(await this.repo.insertTrade({
+          ...base,
+          state: "SKIPPED",
+          failureReason: reason,
+          entryInProgress: false,
+        }))
+      )
+        return;
+      log.warn(
+        { userId: u.userId, signalId, reason },
+        "[V9_TRADE_SKIPPED_FORCED]",
+      );
+      return; // silent: a filtered user only hears about the signals of its own strategy (Johnny, Sep 28)
     }
 
     // FRAME filter (per user): only signals whose cleaning reached the edge of the 4h frame.
-    if (this.settings.frameOnlyUsers?.has(u.userId) && d.frame?.verdict !== "IN_ZONE") {
+    if (
+      this.settings.frameOnlyUsers?.has(u.userId) &&
+      d.frame?.verdict !== "IN_ZONE"
+    ) {
       const f = d.frame;
-      const reason = !f ? "FRAME_FILTER: frame check unavailable" : f.verdict === "NO_FRAME" ? "FRAME_FILTER: no 4h frame yet" : `FRAME_FILTER: middle of the frame (pos ${Math.round(f.pos)}%)`;
-      if (!(await this.repo.insertTrade({ ...base, state: "SKIPPED", failureReason: reason, entryInProgress: false }))) return;
-      log.warn({ userId: u.userId, signalId, reason }, "[V9_TRADE_SKIPPED_FRAME]");
-      await this.notify(u, formatV9FrameSkip(d, u.mode, signalId));
-      return;
+      const reason = !f
+        ? "FRAME_FILTER: frame check unavailable"
+        : f.verdict === "NO_FRAME"
+          ? "FRAME_FILTER: no 4h frame yet"
+          : `FRAME_FILTER: middle of the frame (pos ${Math.round(f.pos)}%)`;
+      if (
+        !(await this.repo.insertTrade({
+          ...base,
+          state: "SKIPPED",
+          failureReason: reason,
+          entryInProgress: false,
+        }))
+      )
+        return;
+      log.warn(
+        { userId: u.userId, signalId, reason },
+        "[V9_TRADE_SKIPPED_FRAME]",
+      );
+      return; // silent: a filtered user only hears about the signals of its own strategy (Johnny, Sep 28)
     }
 
     // Pre-checks that need no order (both modes).
     if (u.mode === "REAL") {
       if (!u.binanceRest) return; // not REAL-capable (main.ts already downgrades such users)
       if (await this.repo.hasOpenTrade(u.userId, d.symbol)) {
-        log.warn({ userId: u.userId, signalId }, "[V9_SKIP] an open V9 trade already exists on this symbol");
+        log.warn(
+          { userId: u.userId, signalId },
+          "[V9_SKIP] an open V9 trade already exists on this symbol",
+        );
         return;
       }
     }
@@ -215,11 +397,27 @@ export class V9LiveService {
     if (u.mode === "PAPER") {
       const entry = d.referencePrice;
       const risk = long ? entry - d.stopPrice : d.stopPrice - entry;
-      if (!(entry > 0) || !(risk > 0)) return fail(`price ${entry} already beyond SL ${d.stopPrice}`);
+      if (!(entry > 0) || !(risk > 0))
+        return fail(`price ${entry} already beyond SL ${d.stopPrice}`);
       const qty = u.riskUsd / risk;
-      const tp = long ? entry + this.settings.rr * risk : entry - this.settings.rr * risk;
-      const t: V9TradeDoc = { ...base, entryPrice: entry, tpPrice: tp, quantity: qty, actualRiskUsd: u.riskUsd, entryInProgress: false };
-      await this.repo.updateTrade(base.tradeId, { entryPrice: entry, tpPrice: tp, quantity: qty, actualRiskUsd: u.riskUsd, entryInProgress: false });
+      const tp = long
+        ? entry + this.settings.rr * risk
+        : entry - this.settings.rr * risk;
+      const t: V9TradeDoc = {
+        ...base,
+        entryPrice: entry,
+        tpPrice: tp,
+        quantity: qty,
+        actualRiskUsd: u.riskUsd,
+        entryInProgress: false,
+      };
+      await this.repo.updateTrade(base.tradeId, {
+        entryPrice: entry,
+        tpPrice: tp,
+        quantity: qty,
+        actualRiskUsd: u.riskUsd,
+        entryInProgress: false,
+      });
       await this.notify(u, formatV9Entry(d, t));
       return;
     }
@@ -227,40 +425,88 @@ export class V9LiveService {
     // REAL
     const rest = u.binanceRest!;
     try {
-      const pos = ((await rest.getPositionRisk(d.symbol)) as Array<{ symbol: string; positionAmt: string }>).find((p) => p.symbol === d.symbol);
-      if (pos && Number(pos.positionAmt) !== 0) return fail(`an existing ${d.symbol} position (${pos.positionAmt}) is open on this account -- V9 never trades on top of it`, "SKIPPED");
+      const pos = (
+        (await rest.getPositionRisk(d.symbol)) as Array<{
+          symbol: string;
+          positionAmt: string;
+        }>
+      ).find((p) => p.symbol === d.symbol);
+      if (pos && Number(pos.positionAmt) !== 0)
+        return fail(
+          `an existing ${d.symbol} position (${pos.positionAmt}) is open on this account -- V9 never trades on top of it`,
+          "SKIPPED",
+        );
     } catch (err) {
-      return fail(`could not read positions: ${err instanceof Error ? err.message : String(err)}`);
+      return fail(
+        `could not read positions: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
     const riskEst = Math.abs(d.referencePrice - d.stopPrice);
     const out = await runEntrySequence(rest, {
-      userId: u.userId, globalSignalId: signalId, symbol: d.symbol, side,
-      quantity: riskEst > 0 ? u.riskUsd / riskEst : 0, entryPriceEstimate: d.referencePrice,
-      slPrice: d.stopPrice, initialTpPrice: d.referencePrice, tpRMultiple: this.settings.rr,
-      riskUsd: u.riskUsd, leverage: u.leverage, marginMode: u.marginMode,
+      userId: u.userId,
+      globalSignalId: signalId,
+      symbol: d.symbol,
+      side,
+      quantity: riskEst > 0 ? u.riskUsd / riskEst : 0,
+      entryPriceEstimate: d.referencePrice,
+      slPrice: d.stopPrice,
+      initialTpPrice: d.referencePrice,
+      tpRMultiple: this.settings.rr,
+      riskUsd: u.riskUsd,
+      leverage: u.leverage,
+      marginMode: u.marginMode,
     });
     if (out.outcome === "ENTRY_FAILED") return fail(out.reason);
     if (out.outcome === "PROTECTION_FAILED_CLOSED") return fail(out.reason);
     const binance = {
-      entryClientOrderId: out.entryClientOrderId, slAlgoId: out.slBinanceAlgoId, slClientAlgoId: out.slClientAlgoId,
-      ...(out.outcome === "ENTRY_ACTIVE_WITH_TP" ? { tpOrderId: out.tpBinanceOrderId, tpClientOrderId: out.tpClientOrderId } : { tpFailureReason: out.tpFailureReason }),
+      entryClientOrderId: out.entryClientOrderId,
+      slAlgoId: out.slBinanceAlgoId,
+      slClientAlgoId: out.slClientAlgoId,
+      ...(out.outcome === "ENTRY_ACTIVE_WITH_TP"
+        ? {
+            tpOrderId: out.tpBinanceOrderId,
+            tpClientOrderId: out.tpClientOrderId,
+          }
+        : { tpFailureReason: out.tpFailureReason }),
     };
     const fields: Partial<V9TradeDoc> = {
-      entryPrice: out.entryPrice, quantity: out.quantity, tpPrice: out.tpPrice ?? null,
-      actualRiskUsd: out.actualRiskUsd ?? null, binance, entryInProgress: false,
+      entryPrice: out.entryPrice,
+      quantity: out.quantity,
+      tpPrice: out.tpPrice ?? null,
+      actualRiskUsd: out.actualRiskUsd ?? null,
+      binance,
+      entryInProgress: false,
     };
     await this.repo.updateTrade(base.tradeId, fields);
-    await this.notify(u, formatV9Entry(d, { ...base, ...fields } as V9TradeDoc));
+    await this.notify(
+      u,
+      formatV9Entry(d, { ...base, ...fields } as V9TradeDoc),
+    );
   }
 
   /** PAPER: first minute (after the entry minute) whose low/high crosses SL
    *  or TP decides; SL wins a same-minute tie (conservative). */
-  private async monitorPaper(symbol: string, engine: V9CausalEngine, now: number): Promise<void> {
-    const open = (await this.repo.findOpenTrades()).filter((t) => t.mode === "PAPER" && t.symbol === symbol && !t.entryInProgress && t.entryPrice !== null && t.tpPrice !== null && t.quantity !== null);
+  private async monitorPaper(
+    symbol: string,
+    engine: V9CausalEngine,
+    now: number,
+  ): Promise<void> {
+    const open = (await this.repo.findOpenTrades()).filter(
+      (t) =>
+        t.mode === "PAPER" &&
+        t.symbol === symbol &&
+        !t.entryInProgress &&
+        t.entryPrice !== null &&
+        t.tpPrice !== null &&
+        t.quantity !== null,
+    );
     for (const t of open) {
       const long = t.side === "LONG";
       let closed = false;
-      for (const m of engine.store.minuteRange(t.createdAt + MINUTE_MS, now - MINUTE_MS)) {
+      for (const m of engine.store.minuteRange(
+        t.createdAt + MINUTE_MS,
+        now - MINUTE_MS,
+      )) {
         const hitSl = long ? m.low <= t.slPrice : m.high >= t.slPrice;
         const hitTp = long ? m.high >= t.tpPrice! : m.low <= t.tpPrice!;
         if (!hitSl && !hitTp) continue;
@@ -272,18 +518,38 @@ export class V9LiveService {
         const fees = estimateFeesUsd(t.entryPrice! * t.quantity!);
         const feesUsd = hitSl ? fees.sl : fees.tp;
         const pnlUsd = (hitSl ? -risk : t.rr * risk) - feesUsd;
-        await this.closeTrade(t, { closedAt: m.ts + MINUTE_MS, exitPrice: exit, pnlUsd, pnlR: pnlUsd / risk, feesUsd, closeReason: reason });
+        await this.closeTrade(t, {
+          closedAt: m.ts + MINUTE_MS,
+          exitPrice: exit,
+          pnlUsd,
+          pnlR: pnlUsd / risk,
+          feesUsd,
+          closeReason: reason,
+        });
         closed = true;
         break;
       }
       // TIME STOP: neither SL nor TP after timeStopHours -> closed at the last price (taker both ways)
-      if (!closed && this.settings.timeStopHours && now - t.createdAt >= this.settings.timeStopHours * 3_600_000) {
+      if (
+        !closed &&
+        this.settings.timeStopHours &&
+        now - t.createdAt >= this.settings.timeStopHours * 3_600_000
+      ) {
         const exit = engine.store.lastPrice(now);
         if (!(exit > 0)) continue;
         const risk = t.actualRiskUsd ?? t.plannedRiskUsd;
         const feesUsd = estimateFeesUsd(t.entryPrice! * t.quantity!).sl;
-        const pnlUsd = (long ? exit - t.entryPrice! : t.entryPrice! - exit) * t.quantity! - feesUsd;
-        await this.closeTrade(t, { closedAt: now, exitPrice: exit, pnlUsd, pnlR: pnlUsd / risk, feesUsd, closeReason: "TIME_STOP" });
+        const pnlUsd =
+          (long ? exit - t.entryPrice! : t.entryPrice! - exit) * t.quantity! -
+          feesUsd;
+        await this.closeTrade(t, {
+          closedAt: now,
+          exitPrice: exit,
+          pnlUsd,
+          pnlR: pnlUsd / risk,
+          feesUsd,
+          closeReason: "TIME_STOP",
+        });
       }
     }
   }
@@ -299,11 +565,18 @@ export class V9LiveService {
         if (t.mode !== "REAL") continue;
         const u = users.get(t.userId);
         if (!u?.binanceRest) continue;
-        if (t.entryInProgress && this.now() - t.createdAt < STUCK_ENTRY_MS) continue;
+        if (t.entryInProgress && this.now() - t.createdAt < STUCK_ENTRY_MS)
+          continue;
         try {
           await this.checkRealTrade(t, u, u.binanceRest);
         } catch (err) {
-          log.error({ tradeId: t.tradeId, err: err instanceof Error ? err.message : String(err) }, "[V9_REAL_MONITOR_FAILED] -- retried next cycle");
+          log.error(
+            {
+              tradeId: t.tradeId,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            "[V9_REAL_MONITOR_FAILED] -- retried next cycle",
+          );
         }
       }
     } finally {
@@ -311,58 +584,146 @@ export class V9LiveService {
     }
   }
 
-  private async checkRealTrade(t: V9TradeDoc, u: V9UserRef, rest: NonNullable<V9UserRef["binanceRest"]>): Promise<void> {
-    const pos = ((await rest.getPositionRisk(t.symbol)) as Array<{ symbol: string; positionAmt: string }>).find((p) => p.symbol === t.symbol);
+  private async checkRealTrade(
+    t: V9TradeDoc,
+    u: V9UserRef,
+    rest: NonNullable<V9UserRef["binanceRest"]>,
+  ): Promise<void> {
+    const pos = (
+      (await rest.getPositionRisk(t.symbol)) as Array<{
+        symbol: string;
+        positionAmt: string;
+      }>
+    ).find((p) => p.symbol === t.symbol);
     if (pos && Number(pos.positionAmt) !== 0) {
       // TIME STOP: still open after timeStopHours -> market close (reduce-only, deterministic id = sent once);
       // the next cycle sees the position flat, cancels TP/SL and reports the close from Binance fills.
-      if (this.settings.timeStopHours && !t.entryInProgress && this.now() - t.createdAt >= this.settings.timeStopHours * 3_600_000) {
+      if (
+        this.settings.timeStopHours &&
+        !t.entryInProgress &&
+        this.now() - t.createdAt >= this.settings.timeStopHours * 3_600_000
+      ) {
         const filters = await getSymbolFilters(rest, t.symbol);
         if (!filters) return;
         const qty = Math.abs(Number(pos.positionAmt));
         try {
           await rest.createOrder({
-            symbol: t.symbol, side: t.side === "LONG" ? "SELL" : "BUY", type: "MARKET", quantity: qty.toFixed(filters.qtyPrecision),
-            reduceOnly: "true", newClientOrderId: strategyClientOrderId(t.userId, t.signalId, "MARKET_EXIT", 0),
+            symbol: t.symbol,
+            side: t.side === "LONG" ? "SELL" : "BUY",
+            type: "MARKET",
+            quantity: qty.toFixed(filters.qtyPrecision),
+            reduceOnly: "true",
+            newClientOrderId: strategyClientOrderId(
+              t.userId,
+              t.signalId,
+              "MARKET_EXIT",
+              0,
+            ),
           });
-          if (!t.timeStopSentAt) await this.repo.updateTrade(t.tradeId, { timeStopSentAt: this.now() });
-          log.warn({ tradeId: t.tradeId, hours: this.settings.timeStopHours }, "[V9_TIME_STOP_SENT]");
+          if (!t.timeStopSentAt)
+            await this.repo.updateTrade(t.tradeId, {
+              timeStopSentAt: this.now(),
+            });
+          log.warn(
+            { tradeId: t.tradeId, hours: this.settings.timeStopHours },
+            "[V9_TIME_STOP_SENT]",
+          );
         } catch (err) {
-          log.error({ tradeId: t.tradeId, err: err instanceof Error ? err.message : String(err) }, "[V9_TIME_STOP_FAILED] -- retried next cycle");
+          log.error(
+            {
+              tradeId: t.tradeId,
+              err: err instanceof Error ? err.message : String(err),
+            },
+            "[V9_TIME_STOP_FAILED] -- retried next cycle",
+          );
         }
       }
       return; // still open (until Binance reports it flat)
     }
     // Flat: remove whatever of ours is still resting (reduce-only, harmless but must not linger).
-    if (t.binance?.tpOrderId) await rest.cancelOrder(t.symbol, t.binance.tpOrderId).catch(() => undefined);
+    if (t.binance?.tpOrderId)
+      await rest
+        .cancelOrder(t.symbol, t.binance.tpOrderId)
+        .catch(() => undefined);
     let slActualOrderId: number | null = null;
     if (t.binance?.slAlgoId) {
-      const stop = (await rest.getAlgoOrder(t.binance.slAlgoId).catch(() => null)) as { actualOrderId?: string | number; algoStatus?: string } | null;
+      const stop = (await rest
+        .getAlgoOrder(t.binance.slAlgoId)
+        .catch(() => null)) as {
+        actualOrderId?: string | number;
+        algoStatus?: string;
+      } | null;
       const id = Number(stop?.actualOrderId);
       if (id > 0) slActualOrderId = id;
-      if (stop && (stop.algoStatus === "NEW" || stop.algoStatus === "WORKING")) await rest.cancelAlgoOrder(t.binance.slAlgoId).catch(() => undefined);
+      if (stop && (stop.algoStatus === "NEW" || stop.algoStatus === "WORKING"))
+        await rest.cancelAlgoOrder(t.binance.slAlgoId).catch(() => undefined);
     }
-    const fills = (await rest.getUserTrades(t.symbol, t.createdAt - 60_000)) as UserTradeFill[];
-    const report = buildRealCloseReport({ side: t.side, fills: Array.isArray(fills) ? fills : [], sinceMs: t.createdAt - 60_000, tpOrderId: t.binance?.tpOrderId ?? null, slActualOrderId });
+    const fills = (await rest.getUserTrades(
+      t.symbol,
+      t.createdAt - 60_000,
+    )) as UserTradeFill[];
+    const report = buildRealCloseReport({
+      side: t.side,
+      fills: Array.isArray(fills) ? fills : [],
+      sinceMs: t.createdAt - 60_000,
+      tpOrderId: t.binance?.tpOrderId ?? null,
+      slActualOrderId,
+    });
     if (report === null) {
       if (t.entryPrice === null && this.now() - t.createdAt >= STUCK_ENTRY_MS) {
-        await this.repo.updateTrade(t.tradeId, { state: "FAILED", failureReason: "entry never completed (no fill found)", entryInProgress: false });
+        await this.repo.updateTrade(t.tradeId, {
+          state: "FAILED",
+          failureReason: "entry never completed (no fill found)",
+          entryInProgress: false,
+        });
         return;
       }
       const attempts = t.closeAttempts + 1;
-      if (attempts < MAX_CLOSE_REPORT_ATTEMPTS) { await this.repo.updateTrade(t.tradeId, { closeAttempts: attempts }); return; }
-      await this.closeTrade(t, { closedAt: this.now(), exitPrice: null, pnlUsd: null, pnlR: null, feesUsd: null, closeReason: "CLOSED_NO_FILLS_FOUND" }, u);
+      if (attempts < MAX_CLOSE_REPORT_ATTEMPTS) {
+        await this.repo.updateTrade(t.tradeId, { closeAttempts: attempts });
+        return;
+      }
+      await this.closeTrade(
+        t,
+        {
+          closedAt: this.now(),
+          exitPrice: null,
+          pnlUsd: null,
+          pnlR: null,
+          feesUsd: null,
+          closeReason: "CLOSED_NO_FILLS_FOUND",
+        },
+        u,
+      );
       return;
     }
     const risk = t.actualRiskUsd ?? t.plannedRiskUsd;
-    const reason = report.reason === "POSITION_CLOSED_EXTERNALLY" && t.timeStopSentAt ? "TIME_STOP" : report.reason;
-    await this.closeTrade(t, {
-      closedAt: this.now(), exitPrice: report.exitPrice, pnlUsd: report.realizedPnlUsd,
-      pnlR: risk > 0 ? report.realizedPnlUsd / risk : null, feesUsd: report.feesUsd, closeReason: reason,
-    }, u);
+    const reason =
+      report.reason === "POSITION_CLOSED_EXTERNALLY" && t.timeStopSentAt
+        ? "TIME_STOP"
+        : report.reason;
+    await this.closeTrade(
+      t,
+      {
+        closedAt: this.now(),
+        exitPrice: report.exitPrice,
+        pnlUsd: report.realizedPnlUsd,
+        pnlR: risk > 0 ? report.realizedPnlUsd / risk : null,
+        feesUsd: report.feesUsd,
+        closeReason: reason,
+      },
+      u,
+    );
   }
 
-  private async closeTrade(t: V9TradeDoc, c: Pick<V9TradeDoc, "closedAt" | "exitPrice" | "pnlUsd" | "pnlR" | "feesUsd" | "closeReason">, user?: V9UserRef): Promise<void> {
+  private async closeTrade(
+    t: V9TradeDoc,
+    c: Pick<
+      V9TradeDoc,
+      "closedAt" | "exitPrice" | "pnlUsd" | "pnlR" | "feesUsd" | "closeReason"
+    >,
+    user?: V9UserRef,
+  ): Promise<void> {
     await this.repo.updateTrade(t.tradeId, { state: "CLOSED", ...c });
     log.warn({ tradeId: t.tradeId, ...c }, "[V9_TRADE_CLOSED]");
     const u = user ?? this.users().find((x) => x.userId === t.userId);
@@ -371,8 +732,16 @@ export class V9LiveService {
 
   private async notify(u: V9UserRef, text: string): Promise<void> {
     if (!u.telegram) return;
-    try { await u.telegram.sendMessage(text); } catch (err) {
-      log.error({ userId: u.userId, err: err instanceof Error ? err.message : String(err) }, "[V9_TELEGRAM_FAILED] -- isolated");
+    try {
+      await u.telegram.sendMessage(text);
+    } catch (err) {
+      log.error(
+        {
+          userId: u.userId,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "[V9_TELEGRAM_FAILED] -- isolated",
+      );
     }
   }
 }
