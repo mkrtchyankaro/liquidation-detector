@@ -348,7 +348,7 @@ async function main(): Promise<void> {
   for (const v of listed) {
     console.log(`\n--- ${v} signals ---`);
     console.log(
-      "DECISION (Yerevan)  COIN   SIDE  entry        SL           FRAME                          live?  result",
+      "DECISION (Yerevan)  COIN   SIDE  entry        SL           FRAME                          our zone (4h)            cleaning reached  live?  result",
     );
     for (const r of rows
       .filter((x) => x.v === v)
@@ -362,7 +362,10 @@ async function main(): Promise<void> {
             ? `middle ${Math.round(f.pos)}%`
             : "no frame";
       console.log(
-        `${yerevan(r.d.evaluatedAt)}         ${r.symbol.replace("USDT", "").padEnd(6)} ${r.d.tradeSide === "LONG" ? "BUY " : "SELL"}  ${fp(r.entry).padEnd(12)} ${fp(r.sl).padEnd(12)} ${fr.padEnd(30)} ${r.live ? "yes" : "no "}    ${r.result}${r.result === "TP" || r.result === "SL" ? ` ${r.netR >= 0 ? "+" : ""}${r.netR.toFixed(2)}R` : ""}`,
+        `${yerevan(r.d.evaluatedAt)}         ${r.symbol.replace("USDT", "").padEnd(6)} ${r.d.tradeSide === "LONG" ? "BUY " : "SELL"}  ${fp(r.entry).padEnd(12)} ${fp(r.sl).padEnd(12)} ${fr.padEnd(30)} ${(() => {
+          const z = f ? (r.d.tradeSide === "LONG" ? f.bottom : f.top) : null;
+          return (z ? `${fp(z.lo)} - ${fp(z.hi)}` : "-").padEnd(24);
+        })()} ${fp(f?.tested).padEnd(17)} ${r.live ? "yes" : "no "}    ${r.result}${r.result === "TP" || r.result === "SL" ? ` ${r.netR >= 0 ? "+" : ""}${r.netR.toFixed(2)}R` : ""}`,
       );
     }
   }
