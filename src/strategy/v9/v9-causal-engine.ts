@@ -1,3 +1,4 @@
+import type { V9FrameInfo } from "./v9-frame-core";
 import {
   MINUTE_MS, buildReference, changePoints, episodeFeatures, mergeEpisodes, selectEpisode, subEpisodes, usableRange,
   typicalLiquidationMinuteUsd, median, type Bucket, type Episode, type EpisodeFeatures, type Regime, type SubEpisode, type SelectionReference, type SelectionResult, type Victim,
@@ -165,6 +166,8 @@ export interface V9Decision {
    *  the median of this coin's previous episodes. weak = below that median
    *  (false when there is no history yet). */
   quality?: { forcedPct: number; forcedMedianPct: number; weak: boolean };
+  /** The 4h frame check (set by the live service for tradable decisions; see v9-frame-core). */
+  frame?: V9FrameInfo;
   /** 1h structure level the TP was checked against (when tpStructureSwing is on). */
   structure?: { level: number | null; levelTs: number | null; tp: number; blocked: boolean };
 }

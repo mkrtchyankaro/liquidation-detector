@@ -1,5 +1,6 @@
 import type { V9Decision, V9Story } from "./v9-causal-engine";
 import type { V9TradeDoc } from "./v9-repository";
+import type { V9FrameInfo } from "./v9-frame-core";
 import { estimateFeesUsd } from "./v9-fees";
 
 /**
@@ -50,6 +51,7 @@ export function formatV9Entry(d: V9Decision, t: V9TradeDoc): string {
     `Position  ${fmtQty(t.quantity)} ${d.symbol.replace(/USDT$/, "")}  (${Number.isFinite(notional) ? compact(notional) : "n/a"})`,
     `Fees est  TP ${fmtUsd(fees.tp, false)} (${(fees.tp / risk).toFixed(2)}R)  ·  SL ${fmtUsd(fees.sl, false)} (${(fees.sl / risk).toFixed(2)}R)`,
     "",
+    ...(d.frame ? [...formatV9Frame(d.frame, t.side === "LONG"), ""] : []),
     ...(d.story ? formatV9Story(d.story, d.symbol.replace(/USDT$/, "")) : [
       `⚡ ${e.victim} liq ${compact(e.victim === "LONG" ? e.long : e.short)} vs ${compact(e.victim === "LONG" ? e.short : e.long)}`,
       `Episode   ${utc(e.start)} -> ${utc(e.confirmTs)} (${e.parts} part${e.parts > 1 ? "s" : ""})`,
@@ -106,6 +108,28 @@ export function formatV9Story(st: V9Story, coin: string): string[] {
     }
   }
   return out;
+}
+
+/** The 4h frame in Armenian (Johnny, Sep 28): both zones and whether the cleaning reached ours. */
+export function formatV9Frame(f: V9FrameInfo, long: boolean): string[] {
+  const zone = (z: { lo: number; hi: number } | null): string => (z ? `${fmtPrice(z.lo)} – ${fmtPrice(z.hi)}` : "դեռ չկա");
+  const ours = long ? "ներքևի" : "վերևի";
+  const verdict = f.verdict === "IN_ZONE"
+    ? `Մաքրումը հասավ ${ours} զոնային (${fmtPrice(f.tested)})${f.pierced ? ", մի քիչ ծակեց" : ""} ✅`
+    : f.verdict === "MIDDLE"
+      ? `Մաքրումը ${ours} զոնային չհասավ (${fmtPrice(f.tested)}) · շրջանակի մեջտեղում է (${Math.round(f.pos)}%) ⚠️`
+      : `Շրջանակ դեռ չկա. ${f.last === "PEAK" ? "պիկից հետո ներքևում շրջադարձ չի եղել" : "ներքևից հետո վերևում շրջադարձ չի եղել"} ⚠️`;
+  return ["📦 Շրջանակ (4h)", `Վերև՝ ${zone(f.top)}`, `Ներքև՝ ${zone(f.bottom)}`, verdict];
+}
+
+/** A signal this user did not take because it was not at the edge of the 4h frame. */
+export function formatV9FrameSkip(d: V9Decision, mode: string, signalId: string): string {
+  return [
+    `⚪ V9 ${d.symbol} · ${d.tradeSide === "LONG" ? "LONG (BUY)" : "SHORT (SELL)"} · ${mode} · ԲԱՑ ՉԹՈՂՆՎԵՑ`,
+    `🆔 ${signalId}`,
+    `Պատճառ՝ սիգնալը շրջանակի եզրին չէ (FRAME ֆիլտր)`,
+    ...(d.frame ? ["", ...formatV9Frame(d.frame, d.tradeSide === "LONG")] : ["Շրջանակը ստուգել չհաջողվեց (Binance)"]),
+  ].join("\n");
 }
 
 /** A signal this user did not take because the cleaning was not forced enough. */

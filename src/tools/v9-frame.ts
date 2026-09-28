@@ -43,30 +43,9 @@ const stamp = (ms: number): string => new Date(ms).toISOString().slice(5, 16).re
 const num = (v: unknown): number => (v instanceof Date ? v.getTime() : Number(v));
 const fp = (v: number): string => (!Number.isFinite(v) ? "n/a" : v >= 1000 ? v.toFixed(1) : v >= 1 ? v.toFixed(3) : v.toFixed(4));
 
-export interface K { ts: number; open: number; high: number; low: number; close: number }
-export interface Zone { lo: number; hi: number; ts: number; touches?: number }
-export interface Frame { last: "PEAK" | "BOTTOM"; top: Zone | null; bottom: Zone | null }
-
-const topZone = (c: K): Zone => ({ lo: Math.max(c.open, c.close), hi: c.high, ts: c.ts });
-const bottomZone = (c: K): Zone => ({ lo: c.low, hi: Math.min(c.open, c.close), ts: c.ts });
-
-/** The frame from 4h candles (oldest first, all finished). null = too few candles. */
-export function frameOf(c: readonly K[]): Frame | null {
-  if (c.length < 3) return null;
-  let iH = 0, iL = 0;
-  for (let i = 0; i < c.length; i++) { if (c[i].high >= c[iH].high) iH = i; if (c[i].low <= c[iL].low) iL = i; }
-  if (iH > iL) {
-    // went up to the peak, then down: the bottom = the lowest candle after the peak, once the price turned up from it
-    let j = -1;
-    for (let i = iH + 1; i < c.length; i++) if (j < 0 || c[i].low <= c[j].low) j = i;
-    const turned = j > 0 && j < c.length - 1 && c[j + 1].low > c[j].low && c[j - 1].low > c[j].low;
-    return { last: "PEAK", top: topZone(c[iH]), bottom: turned ? bottomZone(c[j]) : null };
-  }
-  let j = -1;
-  for (let i = iL + 1; i < c.length; i++) if (j < 0 || c[i].high >= c[j].high) j = i;
-  const turned = j > 0 && j < c.length - 1 && c[j + 1].high < c[j].high && c[j - 1].high < c[j].high;
-  return { last: "BOTTOM", bottom: bottomZone(c[iL]), top: turned ? topZone(c[j]) : null };
-}
+import { frameOf, verdictOf, type K, type Zone, type Frame, type Verdict } from "../strategy/v9/v9-frame-core";
+export { frameOf, verdictOf };
+export type { K, Zone, Frame, Verdict };
 
 /**
  * Johnny's zone (Sep 28): union of wicks, in time order. A candle leaves a wick at the edge -> that wick is
@@ -155,15 +134,6 @@ export function widenFrame(c: readonly K[], f: Frame | null): Frame | null {
   const iTop = idx(f.top), iBot = idx(f.bottom);
   if (f.last === "PEAK") return { last: f.last, top: iTop >= 0 ? widenZone(c, iTop, "TOP", -1) : null, bottom: iBot >= 0 ? widenZone(c, iBot, "BOTTOM", iTop) : null };
   return { last: f.last, bottom: iBot >= 0 ? widenZone(c, iBot, "BOTTOM", -1) : null, top: iTop >= 0 ? widenZone(c, iTop, "TOP", iBot) : null };
-}
-
-export type Verdict = "IN_ZONE" | "MIDDLE" | "NO_FRAME";
-/** Where the cleaning pushed the price (tested = episode low for a BUY, high for a SELL) vs the frame. */
-export function verdictOf(f: Frame | null, long: boolean, tested: number): { verdict: Verdict; pierced: boolean; pos: number } {
-  if (!f || !f.top || !f.bottom) return { verdict: "NO_FRAME", pierced: false, pos: NaN };
-  const pos = (100 * (tested - f.bottom.lo)) / (f.top.hi - f.bottom.lo);
-  if (long) return tested <= f.bottom.hi ? { verdict: "IN_ZONE", pierced: tested < f.bottom.lo, pos } : { verdict: "MIDDLE", pierced: false, pos };
-  return tested >= f.top.lo ? { verdict: "IN_ZONE", pierced: tested > f.top.hi, pos } : { verdict: "MIDDLE", pierced: false, pos };
 }
 
 /** Did not reach our zone, but stopped within one zone-height of it (the zone's own size, no %). */

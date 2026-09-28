@@ -11,6 +11,8 @@ import * as fs from "fs";
  *     "timeStopHours": 24,     // optional: a trade still open after 24h is closed at market (absent = off)
  *     "forcedOnlyUsers": ["karo"], // optional: these users get ONLY signals whose cleaning was
  *                              //   forced (liquidation share >= the coin's median); others get all
+ *     "frameOnlyUsers": ["karo"], // optional: these users get ONLY signals whose cleaning reached the
+ *                              //   edge of the 4h frame (bottom zone for BUY, top zone for SELL)
  *     "lateSlMinPct": 0.6,     // optional: use the OITURN stop only if >= 0.6% from the entry
  *                              //   (closer = noise -> the stop stays at the episode extreme)
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
@@ -37,13 +39,15 @@ export interface V9Settings {
   lateSlMinPct: number | null;
   /** Users who only take signals with a FORCED cleaning (quality.weak = false). */
   forcedOnlyUsers: Set<string>;
+  /** Users who only take signals at the edge of the 4h frame (frame.verdict = IN_ZONE). */
+  frameOnlyUsers: Set<string>;
   /** Close a still-open trade at market after this many hours (null = off). */
   timeStopHours: number | null;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), timeStopHours: null, userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), frameOnlyUsers: new Set(), timeStopHours: null, userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -86,9 +90,17 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
       forcedOnlyUsers.add(id);
     }
   }
+  const frameOnlyUsers = new Set<string>();
+  if (v.frameOnlyUsers !== undefined) {
+    if (!Array.isArray(v.frameOnlyUsers) || !v.frameOnlyUsers.every((x) => typeof x === "string")) throw new Error(`"v9.frameOnlyUsers" must be an array of user ids, e.g. ["karo","artak"]`);
+    for (const id of v.frameOnlyUsers as string[]) {
+      if (!knownUserIds.includes(id)) throw new Error(`"v9.frameOnlyUsers" has unknown user "${id}" (known: ${knownUserIds.join(", ")})`);
+      frameOnlyUsers.add(id);
+    }
+  }
   const timeStopHours = v.timeStopHours === undefined || v.timeStopHours === null ? null : v.timeStopHours;
   if (timeStopHours !== null && (typeof timeStopHours !== "number" || !(timeStopHours >= 1) || timeStopHours > 240)) throw new Error(`"v9.timeStopHours" must be null (off) or a number of hours between 1 and 240`);
-  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, timeStopHours, userModes };
+  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, frameOnlyUsers, timeStopHours, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {

@@ -1,3 +1,4 @@
+import type { V9FrameInfo } from "./v9-frame-core";
 import type { Collection, Db } from "mongodb";
 import type { Victim } from "./v9-core";
 import type { V9UserMode } from "./v9-config";
@@ -27,6 +28,8 @@ export interface V9DecisionDoc {
   missingMinutes: number;
   /** FORCED quality as the live engine computed it (see V9Decision.quality). */
   quality?: { forcedPct: number; forcedMedianPct: number; weak: boolean } | null;
+  /** The 4h frame check (tradable decisions, from Sep 28). */
+  frame?: V9FrameInfo | null;
   createdAt: Date;
 }
 

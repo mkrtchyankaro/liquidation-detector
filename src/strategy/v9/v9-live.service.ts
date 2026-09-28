@@ -7,7 +7,8 @@ import { DEFAULT_V9_ENGINE_SETTINGS, V9CausalEngine, type V9Decision, type V9Eng
 import type { V9Settings } from "./v9-config";
 import type { V9MongoFeed } from "./v9-feed";
 import type { V9DecisionDoc, V9Repository, V9TradeDoc } from "./v9-repository";
-import { formatV9Close, formatV9Entry, formatV9Failure, formatV9ForcedSkip } from "./v9-telegram";
+import { formatV9Close, formatV9Entry, formatV9Failure, formatV9ForcedSkip, formatV9FrameSkip } from "./v9-telegram";
+import type { V9FrameSource } from "./v9-frame-source";
 import { estimateFeesUsd } from "./v9-fees";
 
 const log = childLogger({ mod: "v9-live" });
@@ -57,6 +58,8 @@ export class V9LiveService {
     private readonly repo: V9Repository,
     private readonly engineSettings: V9EngineSettings = DEFAULT_V9_ENGINE_SETTINGS,
     private readonly now: () => number = Date.now,
+    /** 4h frame check for tradable signals (null = off; frameOnly users then skip every signal). */
+    private readonly frameSource: V9FrameSource | null = null,
   ) {
     for (const s of settings.symbols) this.engines.set(s, new V9CausalEngine(s, engineSettings));
   }
@@ -81,7 +84,7 @@ export class V9LiveService {
       this.engines.get(t.symbol)?.markTraded(t.side, t.createdAt);
     }
     this.ready = true;
-    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
+    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} frameOnly=${[...(this.settings.frameOnlyUsers ?? [])].join("+") || "none"} frameCheck=${this.frameSource ? "on" : "off"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
     this.scheduleNextMinute();
     this.monitorTimer = setInterval(() => void this.monitorReal(), REAL_MONITOR_MS);
   }
@@ -138,6 +141,14 @@ export class V9LiveService {
         log.warn({ signalId, openSignals: [...new Set(busy.map((t) => t.signalId))] }, "[V9_SYMBOL_BUSY] previous signal still has open trades -- new signal not opened");
       }
     }
+    // The 4h frame (tradable signals only): where did the cleaning push the price? Never blocks the round.
+    if (d.tradable && this.frameSource) {
+      try {
+        d = { ...d, frame: await this.frameSource(d.symbol, d.tradeSide === "LONG", d.episode.start, d.evaluatedAt) };
+      } catch (err) {
+        log.error({ signalId, err: err instanceof Error ? err.message : String(err) }, "[V9_FRAME_CHECK_FAILED] -- frameOnly users skip this signal");
+      }
+    }
     const doc: V9DecisionDoc = {
       signalId, symbol: d.symbol, victim: d.episode.victim, reason: d.reason, tradable: d.tradable,
       episodeStart: d.episode.start, episodeEnd: d.episode.end, confirmTs: d.episode.confirmTs, evaluatedAt: d.evaluatedAt,
@@ -145,7 +156,7 @@ export class V9LiveService {
       features: { dom: d.features.dom, dir: d.features.dir, exh: d.features.exh, dirMove: d.features.dirMove, clr: d.features.clr, victimLiq: d.features.victimLiq, oppLiq: d.features.oppLiq, preEff: d.features.preEff, postEff: d.features.postEff },
       reference: d.reference,
       episode: { longUsd: d.episode.long, shortUsd: d.episode.short, oiDropPct: d.episode.oiDropPct, priceMovePct: d.episode.priceMovePct, parts: d.episode.parts },
-      stopPrice: d.stopPrice, referencePrice: d.referencePrice, missingMinutes: d.missingMinutes, quality: d.quality ?? null, createdAt: new Date(),
+      stopPrice: d.stopPrice, referencePrice: d.referencePrice, missingMinutes: d.missingMinutes, quality: d.quality ?? null, frame: d.frame ?? null, createdAt: new Date(),
     };
     await this.repo.insertDecision(doc);
     log.info({ signalId, reason: d.reason, checks: d.selection.checks }, "[V9_DECISION]");
@@ -178,6 +189,16 @@ export class V9LiveService {
       if (!(await this.repo.insertTrade({ ...base, state: "SKIPPED", failureReason: reason, entryInProgress: false }))) return;
       log.warn({ userId: u.userId, signalId, reason }, "[V9_TRADE_SKIPPED_FORCED]");
       await this.notify(u, formatV9ForcedSkip(d, u.mode, signalId));
+      return;
+    }
+
+    // FRAME filter (per user): only signals whose cleaning reached the edge of the 4h frame.
+    if (this.settings.frameOnlyUsers?.has(u.userId) && d.frame?.verdict !== "IN_ZONE") {
+      const f = d.frame;
+      const reason = !f ? "FRAME_FILTER: frame check unavailable" : f.verdict === "NO_FRAME" ? "FRAME_FILTER: no 4h frame yet" : `FRAME_FILTER: middle of the frame (pos ${Math.round(f.pos)}%)`;
+      if (!(await this.repo.insertTrade({ ...base, state: "SKIPPED", failureReason: reason, entryInProgress: false }))) return;
+      log.warn({ userId: u.userId, signalId, reason }, "[V9_TRADE_SKIPPED_FRAME]");
+      await this.notify(u, formatV9FrameSkip(d, u.mode, signalId));
       return;
     }
 

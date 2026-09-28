@@ -78,7 +78,8 @@ function mockRest(opts: { positionAmt?: string; fills?: unknown[]; slStatus?: st
 }
 
 function service(users: V9UserRef[], repo: MemRepo, now: { t: number }, extra: Record<string, unknown> = {}) {
-  const svc = new V9LiveService({ enabled: true, symbols: ["DOGEUSDT"], rr: 2.2, minSlPct: 0.33, userModes: new Map(), ...extra } as never, () => users, noFeed, repo as unknown as V9Repository, undefined, () => now.t);
+  const { frameSource, ...settings } = extra;
+  const svc = new V9LiveService({ enabled: true, symbols: ["DOGEUSDT"], rr: 2.2, minSlPct: 0.33, userModes: new Map(), ...settings } as never, () => users, noFeed, repo as unknown as V9Repository, undefined, () => now.t, (frameSource ?? null) as never);
   (svc as unknown as { ready: boolean }).ready = true;
   return svc as unknown as {
     handleDecision(d: V9Decision): Promise<void>;
@@ -131,6 +132,46 @@ async function run(): Promise<void> {
     const repo2 = new MemRepo(), svc2 = service([{ userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }], repo2, now, { forcedOnlyUsers: new Set(["karo"]) });
     await svc2.handleDecision({ ...decision(), quality: { forcedPct: 9, forcedMedianPct: 6.3, weak: false } });
     assert.strictEqual([...repo2.trades.values()][0].state, "OPEN");
+  });
+
+  const frame = (verdict: "IN_ZONE" | "MIDDLE" | "NO_FRAME") => async () => ({
+    verdict, pierced: false, pos: verdict === "MIDDLE" ? 44 : 5, tested: 0.0985, last: "PEAK" as const,
+    top: { lo: 0.11, hi: 0.112 }, bottom: verdict === "NO_FRAME" ? null : { lo: 0.098, hi: 0.099 },
+  });
+
+  await scenario("FRAME filter: a frameOnly user skips a signal in the middle of the frame (Armenian note), main still trades it", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 }, tk = tg(), tm = tg();
+    const svc = service([
+      { userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: tm },
+      { userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: tk },
+    ], repo, now, { frameOnlyUsers: new Set(["karo"]), frameSource: frame("MIDDLE") });
+    await svc.handleDecision(decision());
+    const byUser = new Map([...repo.trades.values()].map((x) => [x.userId, x]));
+    assert.strictEqual(byUser.get("main")!.state, "OPEN");
+    assert.strictEqual(byUser.get("karo")!.state, "SKIPPED");
+    assert.ok(byUser.get("karo")!.failureReason!.startsWith("FRAME_FILTER: middle"), byUser.get("karo")!.failureReason!);
+    assert.ok(tk.msgs[0].includes("ԲԱՑ ՉԹՈՂՆՎԵՑ") && tk.msgs[0].includes("մեջտեղում") && tk.msgs[0].includes("44%"), tk.msgs[0]);
+    assert.ok(tm.msgs[0].includes("📦 Շրջանակ (4h)"), "main's entry shows the frame");
+    assert.strictEqual(repo.decisions[0].frame!.verdict, "MIDDLE", "the frame is stored with the decision");
+  });
+
+  await scenario("FRAME filter: in the zone -> taken by the frameOnly user; no frame / Binance down -> skipped", async () => {
+    const now = { t: T0 + 10_000 };
+    const repo = new MemRepo(), tk = tg();
+    await service([{ userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: tk }], repo, now, { frameOnlyUsers: new Set(["karo"]), frameSource: frame("IN_ZONE") }).handleDecision(decision());
+    assert.strictEqual([...repo.trades.values()][0].state, "OPEN");
+    assert.ok(tk.msgs[0].includes("ներքևի զոնային") && tk.msgs[0].includes("✅"), tk.msgs[0]);
+    const repo2 = new MemRepo();
+    await service([{ userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }], repo2, now, { frameOnlyUsers: new Set(["karo"]), frameSource: frame("NO_FRAME") }).handleDecision(decision());
+    assert.strictEqual([...repo2.trades.values()][0].failureReason, "FRAME_FILTER: no 4h frame yet");
+    const repo3 = new MemRepo(), tm = tg();
+    await service([
+      { userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null },
+      { userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: tm },
+    ], repo3, now, { frameOnlyUsers: new Set(["karo"]), frameSource: async () => { throw new Error("binance down"); } }).handleDecision(decision());
+    const by = new Map([...repo3.trades.values()].map((x) => [x.userId, x]));
+    assert.strictEqual(by.get("karo")!.failureReason, "FRAME_FILTER: frame check unavailable");
+    assert.strictEqual(by.get("main")!.state, "OPEN", "a failed frame check never blocks the others");
   });
 
   await scenario("TIME STOP (PAPER): no SL/TP after timeStopHours -> closed at the last price, TIME_STOP, taker fees", async () => {
