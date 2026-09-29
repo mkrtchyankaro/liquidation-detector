@@ -6,6 +6,7 @@
  *   npx tsx src/tools/pairs-backtest.ts --months 3
  *   npx tsx src/tools/pairs-backtest.ts --months 1 --list     (every trade with its time, to check on the chart)
  *   npx tsx src/tools/pairs-backtest.ts --now                 (only the last day: which pairs are stretched NOW)
+ *   npx tsx src/tools/pairs-backtest.ts --tf 1h --months 6    (the same rules on 1h candles: window 120h = 5 days, hold <= 240h)
  */
 import "dotenv/config";
 import axios from "axios";
@@ -22,8 +23,18 @@ const COINS = arg("coins", "BTC,ETH,SOL,XRP,BNB,DOGE,ADA,LINK,AVAX,SUI")
 const NOW_MODE = argv.includes("--now"),
   LIST = argv.includes("--list");
 const months = NOW_MODE ? 1 / 30 : Number(arg("months", "1"));
-const DAY = 86_400_000,
-  M = 60_000;
+const DAY = 86_400_000;
+const TF = arg("tf", "1m");
+const TF_MS: Record<string, number> = {
+  "1m": 60_000,
+  "5m": 300_000,
+  "15m": 900_000,
+  "1h": 3_600_000,
+  "4h": 14_400_000,
+};
+if (!TF_MS[TF])
+  throw new Error(`--tf must be one of ${Object.keys(TF_MS).join(", ")}`);
+const M = TF_MS[TF]; // one bar
 const http = axios.create({
   baseURL: process.env.BINANCE_FAPI_URL ?? "https://fapi.binance.com",
   timeout: 20_000,
@@ -31,6 +42,14 @@ const http = axios.create({
 const yvn = (ms: number): string =>
   new Date(ms + 4 * 3_600_000).toISOString().slice(5, 16).replace("T", " ");
 const utc = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
+const hold = (bars: number): string => {
+  const m = (bars * M) / 60_000;
+  return m >= 1440
+    ? `${(m / 1440).toFixed(1)} days`
+    : m >= 60
+      ? `${(m / 60).toFixed(1)} h`
+      : `${Math.round(m)} min`;
+};
 const sp = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 const fp = (v: number): string =>
   v >= 1000 ? v.toFixed(1) : v >= 1 ? v.toFixed(4) : v.toFixed(5);
@@ -47,7 +66,7 @@ async function closes(
       {
         params: {
           symbol,
-          interval: "1m",
+          interval: TF,
           startTime: start,
           endTime: to,
           limit: 1500,
@@ -65,9 +84,9 @@ async function closes(
 }
 
 async function main(): Promise<void> {
-  const now = Math.floor(Date.now() / M) * M; // the current (unfinished) minute is left out
+  const now = Math.floor(Date.now() / M) * M; // the current (unfinished) bar is left out
   const tradeFrom = now - months * 30 * DAY;
-  const from = tradeFrom - 6 * 3_600_000; // warm-up for the 120-minute windows
+  const from = tradeFrom - 3 * DEFAULT_PAIRS.window * M; // warm-up for the windows (beta, spread, its mean)
   const data: Record<string, Map<number, number>> = {};
   for (const c of COINS) {
     process.stderr.write(`${c} ...\n`);
@@ -95,7 +114,7 @@ async function main(): Promise<void> {
 
   if (NOW_MODE) {
     console.log(
-      `\n=== PAIRS NOW  ${yvn(now)} Yerevan (${utc(now)} UTC) -- residual spreads (BTC removed), last 120 min ===`,
+      `\n=== PAIRS NOW  ${yvn(now)} Yerevan (${utc(now)} UTC) -- residual spreads (BTC removed), last ${DEFAULT_PAIRS.window} x ${TF} ===`,
     );
     console.log("pair           Z      corr   ");
     for (const p of [...state]
@@ -121,10 +140,10 @@ async function main(): Promise<void> {
   const sum = (a: readonly PairTrade[], f: (t: PairTrade) => number): number =>
     a.reduce((x, t) => x + f(t), 0);
   console.log(
-    `\n=== PAIR TRADING  ${yvn(tradeFrom)} -> ${yvn(now)} Yerevan (${days.toFixed(0)} days, ${COINS.length - 1} coins vs BTC, ${((COINS.length - 1) * (COINS.length - 2)) / 2} pairs) ===`,
+    `\n=== PAIR TRADING ${TF}  ${yvn(tradeFrom)} -> ${yvn(now)} Yerevan (${days.toFixed(0)} days, ${COINS.length - 1} coins vs BTC, ${((COINS.length - 1) * (COINS.length - 2)) / 2} pairs) ===`,
   );
   console.log(
-    `window ${DEFAULT_PAIRS.window}m, corr >= ${DEFAULT_PAIRS.corrMin}, in |Z| >= ${DEFAULT_PAIRS.zIn} (turning), out |Z| <= ${DEFAULT_PAIRS.zOut}, stop |Z| >= ${DEFAULT_PAIRS.zStop} / corr < ${DEFAULT_PAIRS.corrBreak} / ${DEFAULT_PAIRS.maxHold} min; fees 4 x 0.05%\n`,
+    `window ${DEFAULT_PAIRS.window} x ${TF}, corr >= ${DEFAULT_PAIRS.corrMin}, in |Z| >= ${DEFAULT_PAIRS.zIn} (turning), out |Z| <= ${DEFAULT_PAIRS.zOut}, stop |Z| >= ${DEFAULT_PAIRS.zStop} / corr < ${DEFAULT_PAIRS.corrBreak} / ${DEFAULT_PAIRS.maxHold} bars; fees 4 x 0.05%\n`,
   );
   const win = done.filter((t) => t.netPct > 0).length;
   console.log(
@@ -144,7 +163,7 @@ async function main(): Promise<void> {
     const a = done.filter((t) => t.exit === e);
     if (a.length)
       console.log(
-        `  ${e.padEnd(7)} ${String(a.length).padStart(5)}  avg ${sp(sum(a, (t) => t.netPct) / a.length)} after fees, ${sp(sum(a, (t) => t.grossPct) / a.length)} before, avg ${Math.round(sum(a, (t) => t.minutes) / a.length)} min`,
+        `  ${e.padEnd(7)} ${String(a.length).padStart(5)}  avg ${sp(sum(a, (t) => t.netPct) / a.length)} after fees, ${sp(sum(a, (t) => t.grossPct) / a.length)} before, held avg ${hold(sum(a, (t) => t.minutes) / a.length)}`,
       );
   }
   console.log("\nbest / worst pairs (after fees):");
@@ -180,14 +199,14 @@ async function main(): Promise<void> {
     console.log("  " + line.slice(r * 4, r * 4 + 4).join("   "));
   if (LIST) {
     console.log(
-      "\nENTRY (Yerevan)  EXIT         min  SHORT        LONG         Z in   Z out  corr  exit     before   after",
+      "\nENTRY (Yerevan)  EXIT        held  SHORT        LONG         Z in   Z out  corr  exit     before   after",
     );
     for (const t of [...trades].sort((a, b) => a.entryTs - b.entryTs)) {
       const sa =
           t.shortLeg === t.a ? `${t.a} ${fp(t.pa0)}` : `${t.b} ${fp(t.pb0)}`,
         lb = t.longLeg === t.a ? `${t.a} ${fp(t.pa0)}` : `${t.b} ${fp(t.pb0)}`;
       console.log(
-        `${yvn(t.entryTs)}      ${yvn(t.exitTs).slice(6)}  ${String(t.minutes).padStart(4)}  ${sa.padEnd(12)} ${lb.padEnd(12)} ${(t.zIn >= 0 ? "+" : "") + t.zIn.toFixed(2)}  ${Number.isFinite(t.zOut) ? (t.zOut >= 0 ? "+" : "") + t.zOut.toFixed(2) : "  -  "}  ${t.corr.toFixed(2)}  ${t.exit.padEnd(7)} ${sp(t.grossPct).padStart(7)}  ${sp(t.netPct).padStart(7)}`,
+        `${yvn(t.entryTs)}      ${yvn(t.exitTs).slice(6)}  ${hold(t.minutes).padStart(9)}  ${sa.padEnd(12)} ${lb.padEnd(12)} ${(t.zIn >= 0 ? "+" : "") + t.zIn.toFixed(2)}  ${Number.isFinite(t.zOut) ? (t.zOut >= 0 ? "+" : "") + t.zOut.toFixed(2) : "  -  "}  ${t.corr.toFixed(2)}  ${t.exit.padEnd(7)} ${sp(t.grossPct).padStart(7)}  ${sp(t.netPct).padStart(7)}`,
       );
     }
   }
