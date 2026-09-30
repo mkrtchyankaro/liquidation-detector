@@ -11,9 +11,9 @@
  *     while the price really moved; the move ENDS where the OI stops growing (its peak), whatever the price does after
  *   - amounts in COINS (ETH for ETHUSDT, BTC for BTCUSDT ...), from 5-minute OI + price:
  *       short stops/liquidations = OI falling while the price rises (the OI "tails" of an up move), longs mirror
- *   - LIVE REVERSAL SIGNALS (src/research/oi-reversal.ts), never looking ahead: at every 15m close, with a move running
- *     on the closed 1h candles, a 15m candle whose OI fell and that is a strong candle against the move -> entry at its
- *     close, SL at the move's extreme, TP 2R (checked on 1-minute candles, SL first). Summary at the end.
+ *   - 1H SIGNALS (src/research/oi-reversal.ts hourSignals), live, never looking ahead: a move is running on the closed
+ *     hours and the next 1h candle is the FIRST whose OI falls -> at its close: red -> SHORT, green -> LONG; TP 2R;
+ *     SL two variants side by side: that candle's extreme / the previous candle's extreme (1-minute candles, SL first).
  */
 import "dotenv/config";
 import {
@@ -26,10 +26,9 @@ import {
 } from "../research/oi-moves";
 import { klines, oiAt, oiSnapshots } from "../research/binance-history";
 import {
-  liveReversals,
-  type LiveSignal,
+  hourSignals,
+  type HourSignal,
   type Minute,
-  type Q15,
 } from "../research/oi-reversal";
 
 const argv = process.argv.slice(2);
@@ -53,7 +52,7 @@ const px = (x: number): string =>
   x >= 100 ? x.toFixed(2) : x >= 1 ? x.toFixed(4) : x.toFixed(6);
 
 const n0 = (x: number): string => Math.round(x).toLocaleString("en-US");
-const trades: Array<{ coin: string; dir: "UP" | "DOWN"; t: LiveSignal }> = [];
+const trades: Array<{ coin: string; x: HourSignal }> = [];
 
 function print(
   m: Move,
@@ -101,11 +100,6 @@ async function run(symbol: string, to: number, winFrom: number): Promise<void> {
     close: c.close,
     oi: oiAt(snap, c.t + 5 * 60_000, 5 * 60_000),
   }));
-  const q15: Q15[] = (await klines(symbol, "15m", from, to)).map((c) => ({
-    ...c,
-    oiOpen: oiAt(snap, c.t, 5 * 60_000),
-    oiClose: oiAt(snap, c.t + 15 * 60_000, 5 * 60_000),
-  }));
   const path: Minute[] = (await klines(symbol, "1m", from, to)).map((c) => ({
     t: c.t,
     high: c.high,
@@ -128,19 +122,25 @@ async function run(symbol: string, to: number, winFrom: number): Promise<void> {
     }
     print(m, h, bars, coin);
   }
-  // live signals: evaluated 15m by 15m on what was known at that moment (the moves list above is hindsight)
-  const sigs = liveReversals(h, q15, path).filter((x) => x.entryTs > winFrom);
+  // 1h signals: decided at each 1h close on what was known then (the moves list above is hindsight)
+  const sigs = hourSignals(h, path).filter((x) => x.entryTs > winFrom);
   console.log(
-    `\n   LIVE REVERSAL SIGNALS (${coin}, 15m by 15m, nothing from the future):`,
+    `\n   1H SIGNALS (${coin}): first 1h candle whose OI falls after a move -> red = SHORT, green = LONG, TP 2R`,
   );
   if (!sigs.length) console.log("   none");
+  const res = (v: HourSignal["bySl"]["candle"]): string =>
+    v
+      ? `SL ${px(v.sl)} (${v.riskPct.toFixed(2)}%) TP ${px(v.tp)} => ${v.result}${v.exitTs ? ` ${t(v.exitTs).slice(5)}` : ""}`
+      : "SL not possible";
   for (const x of sigs) {
-    const q = x.signal;
+    const c = x.candle;
     console.log(
-      `   ${t(q.t)} 15m ${q.close < q.open ? "red  " : "green"} OI ${n0(q.oiClose - q.oiOpen)} ${coin}, body ${px(Math.abs(q.close - q.open))} > avg ${px(x.avgBody)} | move ${x.dir} since ${t(x.moveStart)} (${x.moveHours}h closed)` +
-        ` -> ${x.side} ${px(x.entry)} SL ${px(x.sl)} (${x.riskPct.toFixed(2)}%) TP ${px(x.tp)} => ${x.result}${x.exitTs ? ` ${t(x.exitTs)} (${x.r > 0 ? "+" : ""}${x.r}R)` : " (still open)"}`,
+      `   ${t(c.t)} ${c.close > c.open ? "green" : "red  "} OI ${n0(c.oi - x.prev.oi)} ${coin} | move ${x.dir} since ${t(x.moveStart)} (${x.moveHours}h) -> ${x.side} ${px(x.entry)} at ${t(x.entryTs).slice(11)}`,
     );
-    trades.push({ coin, dir: x.dir, t: x });
+    console.log(
+      `        SL at this candle: ${res(x.bySl.candle)}   |   SL at previous candle: ${res(x.bySl.prev)}`,
+    );
+    trades.push({ coin, x });
   }
   console.log(
     `\n${symbol}: ${moves.length} moves (${moves.filter((m) => m.dir === "UP").length} price up, ${moves.filter((m) => m.dir === "DOWN").length} price down); amounts are estimates from 5-minute OI`,
@@ -148,29 +148,28 @@ async function run(symbol: string, to: number, winFrom: number): Promise<void> {
 }
 
 function summary(): void {
-  const closed = trades.filter((x) => x.t.result !== "OPEN");
-  const line = (name: string, v: typeof closed): string => {
-    const r = v.reduce((a, x) => a + x.t.r, 0),
-      fees = v.reduce((a, x) => a + 0.1 / x.t.riskPct, 0);
-    return `${name.padEnd(22)} ${String(v.length).padStart(3)} trades | TP ${v.filter((x) => x.t.result === "TP").length}, SL ${v.filter((x) => x.t.result === "SL").length} | ${r >= 0 ? "+" : ""}${r.toFixed(0)}R (after fees 0.1%: ${(r - fees).toFixed(2)}R)`;
-  };
-  console.log(
-    `\n=== LIVE REVERSAL SIGNALS, all coins (TP 2R / SL at the move's extreme) ===`,
-  );
-  console.log(line("ALL", closed));
-  console.log(
+  console.log(`\n=== 1H SIGNALS, all coins (TP 2R) ===`);
+  for (const k of ["candle", "prev"] as const) {
+    const line = (name: string, v: typeof trades): void => {
+      const c = v
+        .map((x) => x.x.bySl[k])
+        .filter((y): y is NonNullable<typeof y> => !!y && y.result !== "OPEN");
+      const r = c.reduce((a, y) => a + y.r, 0),
+        fees = c.reduce((a, y) => a + 0.1 / y.riskPct, 0);
+      console.log(
+        `SL at ${k === "candle" ? "this candle " : "prev candle "} ${name.padEnd(8)} ${String(c.length).padStart(3)} trades | TP ${c.filter((y) => y.result === "TP").length}, SL ${c.filter((y) => y.result === "SL").length} | ${r >= 0 ? "+" : ""}${r}R (after fees 0.1%: ${(r - fees).toFixed(2)}R)`,
+      );
+    };
+    line("ALL", trades);
     line(
-      "SHORT (after a rise)",
-      closed.filter((x) => x.dir === "UP"),
-    ),
-  );
-  console.log(
+      "LONG",
+      trades.filter((x) => x.x.side === "LONG"),
+    );
     line(
-      "LONG (after a fall)",
-      closed.filter((x) => x.dir === "DOWN"),
-    ),
-  );
-  console.log(`still open: ${trades.length - closed.length}`);
+      "SHORT",
+      trades.filter((x) => x.x.side === "SHORT"),
+    );
+  }
 }
 
 async function main(): Promise<void> {

@@ -77,6 +77,7 @@ export function liveReversals(
   h: readonly MvHour[],
   q15: readonly Q15[],
   path: readonly Minute[],
+  oiRule: "any" | "maxDrop" | "avgMove" = "any",
 ): LiveSignal[] {
   const hourIdx = new Map(h.map((c, i) => [c.t, i]));
   const active = new Map<number, Move[]>(); // last closed hour index -> moves running at its close
@@ -116,6 +117,21 @@ export function liveReversals(
         moveQ.reduce((a, x) => a + Math.abs(x.close - x.open), 0) /
         moveQ.length;
       if (!(Math.abs(q.close - q.open) > avgBody)) continue; // a strong candle
+      const drop = q.oiOpen - q.oiClose;
+      if (
+        oiRule === "maxDrop" &&
+        !(drop > Math.max(0, ...moveQ.map((x) => x.oiOpen - x.oiClose)))
+      )
+        continue;
+      if (
+        oiRule === "avgMove" &&
+        !(
+          drop >
+          moveQ.reduce((a, x) => a + Math.abs(x.oiClose - x.oiOpen), 0) /
+            moveQ.length
+        )
+      )
+        continue;
       const sl = up
         ? Math.max(q.high, ...moveQ.map((x) => x.high))
         : Math.min(q.low, ...moveQ.map((x) => x.low));
@@ -139,6 +155,85 @@ export function liveReversals(
         tp,
         riskPct: (100 * risk) / entry,
         ...exitOf(path, entryTs, !up, sl, tp),
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 1H RULE (Johnny, Sep 30 2026, final wording) -- live, decided at the close of each 1h candle:
+ *   a move is running on the closed hours (price + OI together, oi-moves.ts rules) and the NEXT 1h candle is the
+ *   first one whose OI FALLS -> at its close:  red candle -> SHORT,  green candle -> LONG  (whatever the move's direction).
+ *   Only that first OI-drop candle counts. TP = 2R. SL, two variants reported side by side:
+ *     "candle": that candle's own extreme (SHORT: its high, LONG: its low)
+ *     "prev":   the previous candle's extreme (SHORT: its high, LONG: its low)
+ */
+export interface HourSignal {
+  dir: "UP" | "DOWN";
+  side: "LONG" | "SHORT";
+  moveStart: number;
+  moveHours: number;
+  candle: MvHour;
+  prev: MvHour;
+  entryTs: number;
+  entry: number;
+  bySl: Record<
+    "candle" | "prev",
+    {
+      sl: number;
+      tp: number;
+      riskPct: number;
+      result: "TP" | "SL" | "OPEN";
+      exitTs: number | null;
+      r: number;
+    } | null
+  >;
+}
+export function hourSignals(
+  h: readonly MvHour[],
+  path: readonly Minute[],
+): HourSignal[] {
+  const out: HourSignal[] = [],
+    used = new Set<string>();
+  for (let k = 1; k < h.length; k++) {
+    const c = h[k],
+      p = h[k - 1];
+    if (!(c.oi > 0 && p.oi > 0 && c.oi < p.oi) || c.close === c.open) continue;
+    const hs = h.slice(0, k);
+    for (const m of findMoves(hs).filter(
+      (x) => x.e === k - 1 && accumulation(hs, x).ok,
+    )) {
+      const key = `${m.dir}-${h[m.s].t}`;
+      if (used.has(key)) continue;
+      used.add(key);
+      const long = c.close > c.open,
+        entry = c.close,
+        entryTs = c.t + H;
+      const mk = (sl: number): HourSignal["bySl"]["candle"] => {
+        const risk = long ? entry - sl : sl - entry;
+        if (!(risk > 0)) return null;
+        const tp = long ? entry + 2 * risk : entry - 2 * risk;
+        return {
+          sl,
+          tp,
+          riskPct: (100 * risk) / entry,
+          ...exitOf(path, entryTs, long, sl, tp),
+        };
+      };
+      out.push({
+        dir: m.dir,
+        side: long ? "LONG" : "SHORT",
+        moveStart: h[m.s].t,
+        moveHours: m.e - m.s + 1,
+        candle: c,
+        prev: p,
+        entryTs,
+        entry,
+        bySl: {
+          candle: mk(long ? c.low : c.high),
+          prev: mk(long ? p.low : p.high),
+        },
       });
     }
   }

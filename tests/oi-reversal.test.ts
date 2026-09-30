@@ -1,9 +1,10 @@
-/**
+x; /**
  * Reversal after an OI accumulation (15m inside the OI-drop hour). Usage: npx tsx tests/oi-reversal.test.ts
  */
 import * as assert from "assert";
 import type { MvHour } from "../src/research/oi-moves";
 import {
+  hourSignals,
   liveReversals,
   type Minute,
   type Q15,
@@ -167,6 +168,34 @@ scenario(
     assert.deepStrictEqual(
       [b.signal.t, b.entry, b.sl, b.side],
       [a.signal.t, a.entry, a.sl, a.side],
+    );
+  },
+);
+
+scenario(
+  "1H: the first 1h candle whose OI falls after a move -> green = LONG (SL its low / prev low), red = SHORT; only the first",
+  () => {
+    const { h, q } = build(fall); // hour 15: OI 1040 -> 1030, green 97 -> 97.5; hour 16: OI falls again (ignored)
+    const s = hourSignals(h, path(q));
+    assert.strictEqual(s.length, 1);
+    const x = s[0];
+    assert.deepStrictEqual(
+      [x.dir, x.side, x.candle.t, x.entry, x.entryTs],
+      ["DOWN", "LONG", T0 + 15 * H, 97.5, T0 + 16 * H],
+    );
+    assert.strictEqual(x.bySl.candle!.sl, h[15].low);
+    assert.strictEqual(x.bySl.prev!.sl, h[14].low);
+    const red = build([
+      ...fall.slice(0, 15),
+      [97, 96.5, 1030],
+      [96.5, 95, 1020],
+      [95, 94, 1020],
+      [94, 94, 1020],
+    ]);
+    const r = hourSignals(red.h, path(red.q))[0];
+    assert.deepStrictEqual(
+      [r.side, r.bySl.candle!.sl],
+      ["SHORT", red.h[15].high],
     );
   },
 );
