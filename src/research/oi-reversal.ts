@@ -178,6 +178,8 @@ export interface HourSignal {
   prev: MvHour;
   entryTs: number;
   entry: number;
+  built: number;
+  dropPct: number; // OI built by the move (start -> previous close) and how much of it this candle took away, %
   bySl: Record<
     "candle" | "prev",
     {
@@ -230,6 +232,11 @@ export function hourSignals(
         prev: p,
         entryTs,
         entry,
+        built: p.oi - h[m.s].oiOpen,
+        dropPct:
+          p.oi - h[m.s].oiOpen > 0
+            ? (100 * (p.oi - c.oi)) / (p.oi - h[m.s].oiOpen)
+            : NaN,
         bySl: {
           candle: mk(long ? c.low : c.high),
           prev: mk(long ? p.low : p.high),

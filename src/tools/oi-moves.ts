@@ -14,6 +14,7 @@
  *   - 1H SIGNALS (src/research/oi-reversal.ts hourSignals), live, never looking ahead: a move is running on the closed
  *     hours and the next 1h candle is the FIRST whose OI falls -> at its close: red -> SHORT, green -> LONG; TP 2R;
  *     SL two variants side by side: that candle's extreme / the previous candle's extreme (1-minute candles, SL first).
+ *     --maxdrop 30: the summary also splits by how much of the move's OI that candle took away (<=30% = power left)
  */
 import "dotenv/config";
 import {
@@ -41,7 +42,8 @@ const COINS = arg("coins", arg("coin", "ETH"))
   .map((x) => x.trim().toUpperCase())
   .filter(Boolean)
   .map((x) => (x.endsWith("USDT") ? x : `${x}USDT`));
-const DAYS = Number(arg("days", "7"));
+const DAYS = Number(arg("days", "7")),
+  MAX_DROP = Number(arg("maxdrop", "30")); // % of the move's OI the signal candle may take away
 const H = 3_600_000,
   D = 24 * H,
   LOOKBACK = 2 * D; // extra history before the window, for "the range before the move"
@@ -135,7 +137,7 @@ async function run(symbol: string, to: number, winFrom: number): Promise<void> {
   for (const x of sigs) {
     const c = x.candle;
     console.log(
-      `   ${t(c.t)} ${c.close > c.open ? "green" : "red  "} OI ${n0(c.oi - x.prev.oi)} ${coin} | move ${x.dir} since ${t(x.moveStart)} (${x.moveHours}h) -> ${x.side} ${px(x.entry)} at ${t(x.entryTs).slice(11)}`,
+      `   ${t(c.t)} ${c.close > c.open ? "green" : "red  "} OI ${n0(c.oi - x.prev.oi)} ${coin} = ${x.dropPct.toFixed(0)}% of the ${n0(x.built)} built ${x.dropPct <= MAX_DROP ? "(power left)" : "(too much gone)"} | move ${x.dir} since ${t(x.moveStart)} (${x.moveHours}h) -> ${x.side} ${px(x.entry)} at ${t(x.entryTs).slice(11)}`,
     );
     console.log(
       `        SL at this candle: ${res(x.bySl.candle)}   |   SL at previous candle: ${res(x.bySl.prev)}`,
@@ -157,7 +159,7 @@ function summary(): void {
       const r = c.reduce((a, y) => a + y.r, 0),
         fees = c.reduce((a, y) => a + 0.1 / y.riskPct, 0);
       console.log(
-        `SL at ${k === "candle" ? "this candle " : "prev candle "} ${name.padEnd(8)} ${String(c.length).padStart(3)} trades | TP ${c.filter((y) => y.result === "TP").length}, SL ${c.filter((y) => y.result === "SL").length} | ${r >= 0 ? "+" : ""}${r}R (after fees 0.1%: ${(r - fees).toFixed(2)}R)`,
+        `SL at ${k === "candle" ? "this candle " : "prev candle "} ${name.padEnd(14)} ${String(c.length).padStart(3)} trades | TP ${c.filter((y) => y.result === "TP").length}, SL ${c.filter((y) => y.result === "SL").length} | ${r >= 0 ? "+" : ""}${r}R (after fees 0.1%: ${(r - fees).toFixed(2)}R)`,
       );
     };
     line("ALL", trades);
@@ -168,6 +170,22 @@ function summary(): void {
     line(
       "SHORT",
       trades.filter((x) => x.x.side === "SHORT"),
+    );
+    line(
+      `<=${MAX_DROP}%`,
+      trades.filter((x) => x.x.dropPct <= MAX_DROP),
+    );
+    line(
+      `>${MAX_DROP}%`,
+      trades.filter((x) => !(x.x.dropPct <= MAX_DROP)),
+    );
+    line(
+      `<=${MAX_DROP}% LONG`,
+      trades.filter((x) => x.x.dropPct <= MAX_DROP && x.x.side === "LONG"),
+    );
+    line(
+      `<=${MAX_DROP}% SHORT`,
+      trades.filter((x) => x.x.dropPct <= MAX_DROP && x.x.side === "SHORT"),
     );
   }
 }
