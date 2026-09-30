@@ -7,6 +7,7 @@
  *   npx tsx src/tools/oi-cleanup.ts                                   (ETH, 180 days, accumulation >= 1%)
  *   npx tsx src/tools/oi-cleanup.ts --coins ETH,BTC,SOL --days 30
  *   npx tsx src/tools/oi-cleanup.ts --coins SUI --days 365 --minacc 2 --all   (--all: also the unconfirmed ones)
+ *   --tp 1.5: the simple exit used for comparing (1, 1.5 or 2): +tp% when reached within 48h, else the close after 48h
  *   --maxh 48: the accumulation is measured over at most 48h before its peak, and must be cleaned within 48h
  * Rules: src/research/oi-cleanup.ts. Times are UTC, candle OPEN times (as on the Binance chart).
  */
@@ -17,7 +18,9 @@ import * as zlib from "zlib";
 import axios from "axios";
 import {
   CU_TARGETS,
+  cuBaseline,
   findCleanups,
+  tpOr48,
   type CuEvent,
   type CuHour,
 } from "../research/oi-cleanup";
@@ -36,7 +39,9 @@ let SYMBOL = SYMBOLS[0];
 const DAYS = Number(arg("days", "180")),
   MIN_ACC = Number(arg("minacc", "1")),
   MAX_H = Number(arg("maxh", "48")),
-  SHOW_ALL = argv.includes("--all");
+  SHOW_ALL = argv.includes("--all"),
+  TP = Number(arg("tp", "1.5")),
+  FEE = 0.1; // round trip, taker 0.05% x2
 const H = 3_600_000,
   D = 24 * H;
 const fapi = axios.create({
@@ -177,6 +182,25 @@ function summary(title: string, ev: CuEvent[]): void {
   console.log(
     `${title.padEnd(26)} events ${ev.length}, confirmed ${c.length} | within 48h ${hits.join(" | ")}`,
   );
+  const r = c
+    .map((e) => tpOr48(e.after, TP))
+    .filter((x): x is number => x !== null)
+    .map((x) => x - FEE);
+  if (r.length)
+    console.log(
+      `${"".padEnd(26)} exit at +${TP}% or after 48h (fees ${FEE}% in): ${r.length} trades, avg ${f2(r.reduce((a, b) => a + b, 0) / r.length)}%, total ${f2(r.reduce((a, b) => a + b, 0))}%, winners ${r.filter((x) => x > 0).length}, worst ${Math.min(...r).toFixed(2)}%`,
+    );
+}
+
+const baseAll = { LONG: [] as number[], SHORT: [] as number[] };
+function baselineLine(b: { LONG: number[]; SHORT: number[] }): void {
+  const one = (v: number[]): string => {
+    const r = v.map((x) => x - FEE);
+    return `avg ${f2(r.reduce((a, x) => a + x, 0) / Math.max(1, r.length))}%, reached +${TP}% ${((100 * v.filter((x) => x === TP).length) / Math.max(1, v.length)).toFixed(0)}%`;
+  };
+  console.log(
+    `${"NO SIGNAL (every hour)".padEnd(26)} same exit, LONG: ${one(b.LONG)} | SHORT: ${one(b.SHORT)}   <- the signal must beat this`,
+  );
 }
 
 async function runSymbol(to: number, from: number): Promise<CuEvent[]> {
@@ -240,6 +264,10 @@ async function runSymbol(to: number, from: number): Promise<CuEvent[]> {
         `OI growth ${lo}-${hi === 1e9 ? "..." : hi}%`,
         ev.filter((e) => e.accPct >= lo && e.accPct < hi),
       );
+  const b = cuBaseline(hours, TP);
+  baseAll.LONG.push(...b.LONG);
+  baseAll.SHORT.push(...b.SHORT);
+  baselineLine(b);
 
   const csv = path.join("data", `oi-cleanup-${SYMBOL}-${day(to)}.csv`);
   fs.writeFileSync(
@@ -310,6 +338,7 @@ async function main(): Promise<void> {
       "CONTINUATION",
       all.filter((e) => e.kind === "CONTINUATION"),
     );
+    baselineLine(baseAll);
   }
 }
 

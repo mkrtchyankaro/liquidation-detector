@@ -25,6 +25,7 @@ export interface CuAfter {
   mae24: number;
   mfe48: number;
   mae48: number;
+  close48: number;
   hit: Record<string, { hours: number; maeBefore: number } | null>;
 }
 export interface CuEvent {
@@ -54,7 +55,7 @@ export const CU_TARGETS = [1, 1.5, 2];
 const H = 3_600_000;
 const pct = (a: number, b: number): number => (100 * (b - a)) / a;
 
-function after(
+export function cuAfter(
   h: readonly CuHour[],
   i0: number,
   side: "LONG" | "SHORT",
@@ -65,7 +66,14 @@ function after(
     side === "LONG" ? pct(entry, k.high) : -pct(entry, k.low);
   const adv = (k: CuHour): number =>
     side === "LONG" ? -pct(entry, k.low) : pct(entry, k.high);
-  const res: CuAfter = { mfe24: 0, mae24: 0, mfe48: 0, mae48: 0, hit: {} };
+  const res: CuAfter = {
+    mfe24: 0,
+    mae24: 0,
+    mfe48: 0,
+    mae48: 0,
+    close48: NaN,
+    hit: {},
+  };
   let mae = 0;
   for (let j = i0; j < Math.min(h.length, i0 + 48); j++) {
     const n = j - i0 + 1;
@@ -82,7 +90,35 @@ function after(
   }
   for (const x of CU_TARGETS)
     if (!(String(x) in res.hit)) res.hit[String(x)] = null;
+  if (i0 + 47 < h.length)
+    res.close48 =
+      side === "LONG"
+        ? pct(entry, h[i0 + 47].close)
+        : -pct(entry, h[i0 + 47].close);
   return res;
+}
+
+/** simple exit for comparing: +tp% when reached within 48h, else the 48h close (null = not 48h old yet) */
+export function tpOr48(a: CuAfter | null, tp: number): number | null {
+  if (!a) return null;
+  if (!CU_TARGETS.includes(tp))
+    throw new Error(`tp must be one of ${CU_TARGETS.join(", ")}`);
+  if (a.hit[String(tp)]) return tp;
+  return Number.isFinite(a.close48) ? a.close48 : null;
+}
+
+/** the same exit from EVERY hour's close, both sides -- what "no signal at all" gives on this coin */
+export function cuBaseline(
+  h: readonly CuHour[],
+  tp: number,
+): { LONG: number[]; SHORT: number[] } {
+  const out = { LONG: [] as number[], SHORT: [] as number[] };
+  for (let j = 0; j + 48 < h.length; j++)
+    for (const side of ["LONG", "SHORT"] as const) {
+      const r = tpOr48(cuAfter(h, j + 1, side, h[j].close), tp);
+      if (r !== null) out[side].push(r);
+    }
+  return out;
 }
 
 /**
@@ -154,7 +190,7 @@ export function findCleanups(
         confirmed,
         entryTs: confirmed ? k.t + H : null,
         entry: confirmed ? k.close : null,
-        after: confirmed ? after(h, i + 2, side, k.close) : null,
+        after: confirmed ? cuAfter(h, i + 2, side, k.close) : null,
       });
     }
     // 2. this hour as a new peak

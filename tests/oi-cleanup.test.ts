@@ -2,7 +2,13 @@
  * OI accumulation -> full cleanup (research rules). Usage: npx tsx tests/oi-cleanup.test.ts
  */
 import * as assert from "assert";
-import { findCleanups, type CuHour } from "../src/research/oi-cleanup";
+import {
+  cuAfter,
+  cuBaseline,
+  findCleanups,
+  tpOr48,
+  type CuHour,
+} from "../src/research/oi-cleanup";
 
 let passed = 0,
   failed = 0;
@@ -201,6 +207,27 @@ scenario(
     assert.strictEqual(e.length, 1);
     assert.strictEqual(e[0].peakTs, T0 + H);
     assert.strictEqual(e[0].startTs, T0);
+  },
+);
+
+scenario(
+  "comparison exit: +tp when reached, else the close 48h later; baseline covers every hour, both sides",
+  () => {
+    const up: Array<[number, number]> = Array.from({ length: 60 }, (_, i) => [
+      100 + i * 0.1,
+      1000,
+    ]); // slow rise, +0.1 per hour
+    const h = hours(up);
+    const long = cuAfter(h, 1, "LONG", 100)!,
+      short = cuAfter(h, 1, "SHORT", 100)!;
+    assert.strictEqual(tpOr48(long, 1.5), 1.5); // 101.5 reached at hour 15
+    assert.ok(Math.abs(tpOr48(short, 1.5)! - -4.8) < 1e-9); // never +1.5% down -> 48h close 104.8
+    assert.strictEqual(tpOr48(cuAfter(h, 50, "LONG", 105), 1.5), null); // not 48h old yet and no hit
+    const b = cuBaseline(h, 1.5);
+    assert.strictEqual(b.LONG.length, 12);
+    assert.strictEqual(b.SHORT.length, 12);
+    assert.ok(b.LONG.every((x) => x === 1.5));
+    assert.ok(b.SHORT.every((x) => x < 0));
   },
 );
 
