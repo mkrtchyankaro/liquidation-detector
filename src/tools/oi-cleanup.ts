@@ -4,9 +4,9 @@
  *           the last days that are not archived yet come from /futures/data/openInterestHist (1h).
  *   Price:  /fapi/v1/klines 1h.
  *
- *   npx tsx src/tools/oi-cleanup.ts                         (ETHUSDT, 180 days, accumulation >= 1%)
- *   npx tsx src/tools/oi-cleanup.ts --days 365 --minacc 2
- *   npx tsx src/tools/oi-cleanup.ts --symbol BTCUSDT --all  (also the unconfirmed ones)
+ *   npx tsx src/tools/oi-cleanup.ts                                   (ETH, 180 days, accumulation >= 1%)
+ *   npx tsx src/tools/oi-cleanup.ts --coins ETH,BTC,SOL --days 30
+ *   npx tsx src/tools/oi-cleanup.ts --coins SUI --days 365 --minacc 2 --all   (--all: also the unconfirmed ones)
  * Rules: src/research/oi-cleanup.ts. Times are UTC, candle OPEN times (as on the Binance chart).
  */
 import "dotenv/config";
@@ -26,7 +26,12 @@ const arg = (n: string, d: string): string => {
   const i = argv.indexOf(`--${n}`);
   return i >= 0 ? argv[i + 1] : d;
 };
-const SYMBOL = arg("symbol", "ETHUSDT").toUpperCase();
+const SYMBOLS = arg("coins", arg("symbols", arg("symbol", "ETH")))
+  .split(",")
+  .map((x) => x.trim().toUpperCase())
+  .filter(Boolean)
+  .map((x) => (x.endsWith("USDT") ? x : `${x}USDT`));
+let SYMBOL = SYMBOLS[0];
 const DAYS = Number(arg("days", "180")),
   MIN_ACC = Number(arg("minacc", "1")),
   SHOW_ALL = argv.includes("--all");
@@ -172,9 +177,7 @@ function summary(title: string, ev: CuEvent[]): void {
   );
 }
 
-async function main(): Promise<void> {
-  const to = Math.floor(Date.now() / H) * H,
-    from = Math.floor((to - DAYS * D) / D) * D;
+async function runSymbol(to: number, from: number): Promise<CuEvent[]> {
   const [snap, kl] = await Promise.all([
     oiSnapshots(from, to),
     klines1h(from, to),
@@ -275,6 +278,37 @@ async function main(): Promise<void> {
   console.log(
     `\nfile: ${csv}   (no SL/TP: "best" = furthest the price went our way, "worst" = furthest against us, from 1h highs/lows)`,
   );
+  return ev;
+}
+
+async function main(): Promise<void> {
+  const to = Math.floor(Date.now() / H) * H,
+    from = Math.floor((to - DAYS * D) / D) * D;
+  const all: CuEvent[] = [];
+  for (const s of SYMBOLS) {
+    SYMBOL = s;
+    try {
+      all.push(...(await runSymbol(to, from)));
+    } catch (err) {
+      console.log(
+        `\n${s}: FAILED -- ${err instanceof Error ? err.message : String(err)} (wrong coin name?)`,
+      );
+    }
+  }
+  if (SYMBOLS.length > 1) {
+    console.log(
+      `\n=== ALL COINS TOGETHER (${SYMBOLS.map((x) => x.replace("USDT", "")).join(", ")}) ===`,
+    );
+    summary("ALL", all);
+    summary(
+      "REVERSAL",
+      all.filter((e) => e.kind === "REVERSAL"),
+    );
+    summary(
+      "CONTINUATION",
+      all.filter((e) => e.kind === "CONTINUATION"),
+    );
+  }
 }
 
 main().catch((err) => {
