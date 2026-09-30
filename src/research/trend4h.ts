@@ -5,7 +5,8 @@
  *   1C     last closed candle vs the one before: higher high AND higher low -> UP; lower high AND lower low -> DOWN; else FLAT
  *   3C     the last 3 closed candles: both steps HH+HL -> UP; both steps LH+LL -> DOWN; else FLAT
  *   SWING  Phase 1 structure (src/research/structure4h.ts, defaults): BULL -> UP, BEAR -> DOWN, NEUTRAL -> FLAT
- *   24H    close of the last closed candle vs the close 6 candles (24h) earlier: higher -> UP, lower -> DOWN
+ *   24H    close of the last closed candle vs the close 24h earlier (6 candles on 4h, 24 on 1h): higher -> UP, lower -> DOWN
+ * Works on any candle size (4h or 1h); SWING uses only the pivots/trend part of the engine (zones are not used here).
  */
 import { runStructure, DEFAULT_STRUCTURE, type Candle4h } from "./structure4h";
 
@@ -37,6 +38,7 @@ const step = (a: Candle4h, b: Candle4h): Dir =>
 export function directionsAt(
   c: readonly Candle4h[],
   t: number,
+  back24 = 6,
 ): { k: number; dir: Record<Definition, Dir | null> } {
   const k = lastClosed(c, t);
   const dir: Record<Definition, Dir | null> = {
@@ -51,11 +53,11 @@ export function directionsAt(
       b = step(c[k - 1], c[k]);
     dir["3C"] = a === b && a !== "FLAT" ? a : "FLAT";
   }
-  if (k >= 6)
+  if (k >= back24)
     dir["24H"] =
-      c[k].close > c[k - 6].close
+      c[k].close > c[k - back24].close
         ? "UP"
-        : c[k].close < c[k - 6].close
+        : c[k].close < c[k - back24].close
           ? "DOWN"
           : "FLAT";
   if (k >= 40) {

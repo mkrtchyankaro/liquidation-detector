@@ -8,6 +8,7 @@
  *
  *   npx tsx src/tools/v9-trend4h.ts               (all stored signals, last 14 days)
  *   npx tsx src/tools/v9-trend4h.ts --days 30
+ *   npx tsx src/tools/v9-trend4h.ts --tf 1h         (the same with 1-hour candles)
  */
 import "dotenv/config";
 import axios from "axios";
@@ -33,6 +34,9 @@ const arg = (name: string, fallback: string): string => {
   const i = argv.indexOf(`--${name}`);
   return i >= 0 ? argv[i + 1] : fallback;
 };
+const TF = arg("tf", "4h") === "1h" ? "1h" : "4h",
+  TFMS = TF === "1h" ? 3_600_000 : H4,
+  BACK24 = TF === "1h" ? 24 : 6;
 const DAYS = Number(arg("days", "14")),
   RR = 2.2,
   DAY = 86_400_000,
@@ -59,7 +63,7 @@ async function klines4h(
       {
         params: {
           symbol,
-          interval: "4h",
+          interval: TF,
           startTime: start,
           endTime: to,
           limit: 1500,
@@ -70,7 +74,7 @@ async function klines4h(
     for (const k of res.data)
       out.push({
         openTime: k[0],
-        closeTime: k[0] + H4,
+        closeTime: k[0] + TFMS,
         open: Number(k[1]),
         high: Number(k[2]),
         low: Number(k[3]),
@@ -140,11 +144,11 @@ async function main(): Promise<void> {
       const first = time(list[0].evaluatedAt);
       const candles = await klines4h(
         symbol,
-        Math.floor((first - 60 * DAY) / H4) * H4,
+        Math.floor((first - 60 * DAY) / TFMS) * TFMS,
         Date.now(),
       );
       process.stderr.write(
-        `${symbol}: ${list.length} signals, ${candles.length} 4h candles\n`,
+        `${symbol}: ${list.length} signals, ${candles.length} ${TF} candles\n`,
       );
       for (const d of list) {
         const sig: Sig = {
@@ -172,7 +176,7 @@ async function main(): Promise<void> {
           .map((x) => ({ ts: time(x.timestamp), price: Number(x.price) }))
           .filter((x) => x.price > 0);
         const t = simulateExit(polls, sig, RR, []);
-        const { k, dir } = directionsAt(candles, sig.evaluatedAt);
+        const { k, dir } = directionsAt(candles, sig.evaluatedAt, BACK24);
         rows.push({
           symbol,
           sig,
@@ -191,7 +195,7 @@ async function main(): Promise<void> {
   const open = rows.filter((r) => r.t.result === "OPEN").length,
     nodata = rows.length - done.length - open;
   console.log(
-    `\n=== V9 SIGNALS vs 4h DIRECTION  (last ${DAYS} days, all times UTC) ===`,
+    `\n=== V9 SIGNALS vs ${TF} DIRECTION  (last ${DAYS} days, all times UTC) ===`,
   );
   console.log(
     `signals ${rows.length}: finished ${done.length} (TP/SL), still open ${open}, no stored prices ${nodata}`,
@@ -217,17 +221,17 @@ async function main(): Promise<void> {
     console.log("");
   }
   console.log(
-    "1C = last closed 4h candle vs the previous (HH+HL up, LH+LL down, else flat); 3C = 2 such steps in a row;",
+    `1C = last closed ${TF} candle vs the previous (HH+HL up, LH+LL down, else flat); 3C = 2 such steps in a row;`,
   );
   console.log(
-    "SWING = Phase 1 structure (pivots); 24H = close vs close 6 candles earlier. WITH = LONG in UP / SHORT in DOWN.",
+    `SWING = Phase 1 structure (pivots); 24H = close vs close 24h earlier (${BACK24} candles). WITH = LONG in UP / SHORT in DOWN.`,
   );
   console.log(
     "Break-even win rate at 2.2R with fees: about 34-37% (depends on the SL size). Fewer than ~20 trades in a group = only a hint, not a result.",
   );
   {
     console.log(
-      "\nSIGNAL (UTC)  COIN   SIDE   status       result          last closed 4h candle (open UTC)   1C    3C    SWING 24H",
+      `\nSIGNAL (UTC)  COIN   SIDE   status       result          last closed ${TF} candle (open UTC)   1C    3C    SWING 24H`,
     );
     for (const r of rows) {
       const res =
