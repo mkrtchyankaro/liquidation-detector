@@ -4,7 +4,7 @@
  *
  *   npx tsx src/tools/oa-backtest.ts               (configured symbols, all stored days up to 14)
  *   npx tsx src/tools/oa-backtest.ts --days 7 --symbols SUI,AVAX
- *   npx tsx src/tools/oa-backtest.ts --rr 3          (TP = 3R instead of 2.5R)
+ *   npx tsx src/tools/oa-backtest.ts --rr 3 --minsl 0.5 --reversal    (override the config values)
  */
 import "dotenv/config";
 import * as fs from "fs";
@@ -15,6 +15,7 @@ import {
   runOa,
   type OaTrade,
 } from "../research/oi-accumulation";
+import { oaParamsOf } from "../strategy/oa/oa-config";
 import { mongoMinuteLoader } from "../strategy/oa/oa-paper.service";
 
 const argv = process.argv.slice(2);
@@ -23,8 +24,35 @@ const arg = (name: string, fallback: string): string => {
   return i >= 0 ? argv[i + 1] : fallback;
 };
 const DAYS = Math.min(30, Number(arg("days", "14"))),
-  RR = Number(arg("rr", "2.5")),
   H = 3_600_000;
+// defaults = the "oa" block of users.config.json; flags override: --rr 3 --minsl 0.5 --reversal --no-continuation
+let cfg: {
+  rr?: number;
+  minSlPct?: number;
+  continuation?: boolean;
+  reversal?: boolean;
+} = {};
+try {
+  cfg =
+    (
+      JSON.parse(
+        fs.readFileSync(
+          process.env.USERS_CONFIG ?? "users.config.json",
+          "utf8",
+        ),
+      ) as { oa?: typeof cfg }
+    ).oa ?? {};
+} catch {
+  /* built-in defaults */
+}
+const S = {
+  rr: Number(arg("rr", String(cfg.rr ?? 2.5))),
+  minSlPct: Number(arg("minsl", String(cfg.minSlPct ?? 0.3))),
+  continuation: argv.includes("--no-continuation")
+    ? false
+    : (cfg.continuation ?? true),
+  reversal: argv.includes("--reversal") ? true : (cfg.reversal ?? false),
+};
 const t = (ms: number | null): string =>
   ms === null ? "-" : new Date(ms).toISOString().slice(5, 16).replace("T", " ");
 const money = (v: number): string =>
@@ -85,7 +113,7 @@ async function main(): Promise<void> {
         }));
       const { trades, episode } = runOa(s, hours, path, {
         ...OA_DEFAULTS,
-        rr: RR,
+        ...oaParamsOf(S),
       });
       all.push(...trades);
       process.stderr.write(
@@ -97,7 +125,7 @@ async function main(): Promise<void> {
   }
   all.sort((a, b) => a.entryTs - b.entryTs);
   console.log(
-    `\n=== OA (OI accumulation, 1h) on the stored data, last ${DAYS} days, TP ${RR}R, times UTC ===`,
+    `\n=== OA (OI accumulation, 1h) on the stored data, last ${DAYS} days, TP ${S.rr}R, min SL ${S.minSlPct}%, continuation ${S.continuation}, reversal ${S.reversal}, times UTC ===`,
   );
   console.log(
     "ENTRY        COIN   SIDE   TYPE  episode since (move, OI)      OI-drop hour  OI     liq      entry        SL%    result  netR    exit",
