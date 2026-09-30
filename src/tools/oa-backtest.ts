@@ -4,7 +4,7 @@
  *
  *   npx tsx src/tools/oa-backtest.ts               (configured symbols, all stored days up to 14)
  *   npx tsx src/tools/oa-backtest.ts --days 7 --symbols SUI,AVAX
- *   npx tsx src/tools/oa-backtest.ts --rr 3          (TP = 3R instead of 2R)
+ *   npx tsx src/tools/oa-backtest.ts --rr 3          (TP = 3R instead of 2.5R)
  */
 import "dotenv/config";
 import * as fs from "fs";
@@ -23,7 +23,7 @@ const arg = (name: string, fallback: string): string => {
   return i >= 0 ? argv[i + 1] : fallback;
 };
 const DAYS = Math.min(30, Number(arg("days", "14"))),
-  RR = Number(arg("rr", "2")),
+  RR = Number(arg("rr", "2.5")),
   H = 3_600_000;
 const t = (ms: number | null): string =>
   ms === null ? "-" : new Date(ms).toISOString().slice(5, 16).replace("T", " ");

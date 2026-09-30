@@ -77,7 +77,7 @@ function fakeDb() {
 async function run(): Promise<void> {
   console.log("OA (OI accumulation, 1h)");
 
-  await scenario("B continuation: flush against the move + green confirmation -> LONG at the confirmation close, SL = confirmation low, TP 2R", () => {
+  await scenario("B continuation: flush against the move + green confirmation -> LONG at the confirmation close, SL = confirmation low, TP 2.5R", () => {
     const s = scenarioB();
     const { trades } = runOa("XUSDT", hoursOf(s), pathOf(s));
     assert.strictEqual(trades.length, 1, JSON.stringify(trades));
@@ -85,10 +85,10 @@ async function run(): Promise<void> {
     assert.strictEqual(t.side, "LONG"); assert.strictEqual(t.variant, "B");
     assert.strictEqual(t.oiDropHour, T0 + 36 * H); assert.strictEqual(t.entryTs, T0 + 38 * H); assert.strictEqual(t.entry, 104.2);
     assert.ok(Math.abs(t.slPrice - 103.4 * 0.9995) < 1e-9, `sl ${t.slPrice}`);
-    assert.ok(Math.abs(t.tpPrice - (104.2 + 2 * (104.2 - 103.4 * 0.9995))) < 1e-9);
+    assert.ok(Math.abs(t.tpPrice - (104.2 + 2.5 * (104.2 - 103.4 * 0.9995))) < 1e-9);
     assert.strictEqual(t.result, "TP");
     const risk = 104.2 - 103.4 * 0.9995;
-    assert.ok(Math.abs(t.netR - (2 - ((0.05 + 0.02) / 100) * 104.2 / risk)) < 1e-9, "net R = 2 minus taker+maker fees in R");
+    assert.ok(Math.abs(t.netR - (2.5 - ((0.05 + 0.02) / 100) * 104.2 / risk)) < 1e-9, "net R = 2.5 minus taker+maker fees in R");
   });
 
   await scenario("no trade when the next hour does not confirm", () => {
@@ -96,9 +96,14 @@ async function run(): Promise<void> {
     assert.strictEqual(runOa("XUSDT", hoursOf(s), pathOf(s)).trades.length, 0);
   });
 
-  await scenario("A reversal: new high + shorts liquidated + OI down, red confirmation -> SHORT, SL above the confirmation high", () => {
+  await scenario("A reversal is NOT traded live (variants B only)", () => {
     const s = scenarioA();
-    const { trades } = runOa("XUSDT", hoursOf(s), pathOf(s));
+    assert.strictEqual(runOa("XUSDT", hoursOf(s), pathOf(s)).trades.length, 0);
+  });
+
+  await scenario("A reversal (research switch): new high + shorts liquidated + OI down, red confirmation -> SHORT, SL above the confirmation high", () => {
+    const s = scenarioA();
+    const { trades } = runOa("XUSDT", hoursOf(s), pathOf(s), { ...OA_DEFAULTS, variants: ["A", "B"] });
     assert.strictEqual(trades.length, 1, JSON.stringify(trades));
     const t = trades[0];
     assert.strictEqual(t.side, "SHORT"); assert.strictEqual(t.variant, "A"); assert.strictEqual(t.entry, 104.3);
@@ -139,7 +144,7 @@ async function run(): Promise<void> {
   await scenario("live service: opens the SAME trade right after the confirmation hour closes, once, with an OA message", async () => {
     const s = scenarioB(), all = minutesOf(s), f = fakeDb(), sent: string[] = [];
     let now = T0 + 38 * H + 100_000;
-    const svc = new OaPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], rr: 2 },
+    const svc = new OaPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], rr: 2.5 },
       () => [{ userId: "main", riskUsd: 10, telegram: { sendMessage: async (m: string) => { sent.push(m); } } }],
       async (_s, from) => all.filter((r) => r.ts >= from && r.ts < now - 20_000), f.getDb, () => now);
     await svc.onMinute();
@@ -159,7 +164,7 @@ async function run(): Promise<void> {
   await scenario("live service: never replays an old signal (started 40 min after the hour)", async () => {
     const s = scenarioB(), all = minutesOf(s), f = fakeDb();
     const now = T0 + 38 * H + 40 * M;
-    const svc = new OaPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], rr: 2 }, () => [], async (_s, from) => all.filter((r) => r.ts >= from && r.ts < now), f.getDb, () => now);
+    const svc = new OaPaperService({ enabled: true, users: ["main"], symbols: ["XUSDT"], rr: 2.5 }, () => [], async (_s, from) => all.filter((r) => r.ts >= from && r.ts < now), f.getDb, () => now);
     await svc.onMinute();
     assert.strictEqual(f.docs.length, 0);
   });
@@ -168,12 +173,12 @@ async function run(): Promise<void> {
     assert.strictEqual(parseOaSettings(undefined, ["main"], ["BTCUSDT"]).enabled, false);
     assert.throws(() => parseOaSettings({ enabled: true, users: ["bob"] }, ["main"], ["BTCUSDT"]));
     const s = parseOaSettings({ enabled: true, users: ["main"], mode: "REAL" }, ["main"], ["BTCUSDT"]);
-    assert.ok(!("mode" in s) && s.users[0] === "main" && s.symbols[0] === "BTCUSDT" && s.rr === 2);
+    assert.ok(!("mode" in s) && s.users[0] === "main" && s.symbols[0] === "BTCUSDT" && s.rr === 2.5);
     assert.strictEqual(parseOaSettings({ enabled: true, users: ["main"], rr: 3 }, ["main"], ["BTCUSDT"]).rr, 3);
     assert.throws(() => parseOaSettings({ enabled: true, users: ["main"], rr: 0.5 }, ["main"], ["BTCUSDT"]));
   });
 
-  assert.ok(OA_DEFAULTS.rr === 2);
+  assert.ok(OA_DEFAULTS.rr === 2.5 && OA_DEFAULTS.minSlPct === 0.3 && OA_DEFAULTS.variants.join() === "B");
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

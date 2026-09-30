@@ -1,23 +1,20 @@
 /**
- * OA -- OI ACCUMULATION strategy (Johnny, Sep 30 2026). Pure, no I/O. Rules FROZEN as tested on 23-30 Sep 2026
- * (1h, 9 coins -- in-sample only, not yet confirmed on new data; see step 4 for the current numbers).
+ * OA -- OI ACCUMULATION strategy (Johnny, Sep 30 2026). Pure, no I/O. Final rules as agreed on Sep 30 (in-sample
+ * on 23-30 Sep 2026: 21 trades, 11 TP / 8 SL / 2 time exits, +18.6R after fees -- not yet confirmed on new data).
  *
  * Per coin, walking forward over CLOSED 1h candles:
- *  1. ACCUMULATION: over the last 3..12 closed hours the price moved >= MOVE% (alts 3, ETH/BNB 2, BTC 1.5) and OI
- *     grew >= OIACC% (BTC 0.5, others 1). This opens an EPISODE (direction UP/DOWN) that lives 48h; a new accumulation
- *     the same way refreshes it, the opposite way replaces it.
- *  2. OI-DROP HOUR ("new high/low" = beyond the episode extreme known BEFORE this hour): an hour whose OI fell >= 0.2% with big liquidations (>= 80th percentile of this coin's hourly
- *     liquidations of that side over the trailing window). For an UP episode:
- *       A  REVERSAL      the hour made a NEW HIGH above the episode's extreme and SHORTS were liquidated -> SHORT
- *       B  CONTINUATION  the hour closed RED and LONGS were liquidated (flush against the move)          -> LONG
- *     A DOWN episode is the mirror (A: new low + long liq -> LONG; B: green hour + short liq -> SHORT).
- *  3. CONFIRMATION: the NEXT hour must go the new way (LONG: green and closes above the OI-drop hour's close;
- *     SHORT: red and closes below). Entry = its close.
- *  4. SL: the CONFIRMATION hour's extreme (LONG: its low, SHORT: its high), 0.05% beyond. Skip if the SL is closer
- *     than 0.2%. TP = 2R. Exit: SL first if both are touched in one bar; after 48h at market (TIME).
- *     (Sep 30: SL moved from the episode / 4h extreme to the confirmation candle -- median SL 1.9% -> 1.15%;
- *      same week: 25 trades, 14 TP / 10 SL, +15.5R after fees at 2R. Still in-sample.)
- *     After the trade ends the episode is deleted and the coin starts fresh; nothing new while a trade is open.
+ *  1. ACCUMULATION: over the last 3..12 closed hours the price moved one way (any size) and OI grew (any size).
+ *     This opens an EPISODE (UP/DOWN) that lives 48h; the same way again refreshes it, the opposite way replaces it.
+ *  2. OI-DROP HOUR: an hour whose OI fell with a BIG liquidation of one side -- big = at least the 80th percentile of
+ *     this coin's hourly liquidations of that side over the previous 7 days (the only threshold that matters).
+ *       B  CONTINUATION  (traded) UP episode: the hour closed RED and LONGS were liquidated -> LONG
+ *                                 DOWN episode: the hour closed GREEN and SHORTS were liquidated -> SHORT
+ *       A  REVERSAL      (not traded, variants: ["B"]) new extreme beyond the episode's + the other side liquidated
+ *  3. CONFIRMATION: the NEXT hour goes the trade's way (LONG: green, closes above the OI-drop hour's close; SHORT:
+ *     red, closes below). Entry = its close.
+ *  4. SL = that CONFIRMATION hour's extreme (LONG: its low, SHORT: its high) 0.05% beyond; skip if closer than 0.3%.
+ *     TP = 2.5R. Exit: SL first if both are touched in one bar; after 48h at market (TIME). After the trade the
+ *     episode is deleted and the coin starts fresh; nothing new on a coin while its trade is open.
  */
 export interface OaHour {
   openTime: number;
@@ -95,25 +92,27 @@ export interface OaParams {
   maxHoldH: number;
   takerPct: number;
   makerPct: number;
+  variants: readonly OaVariant[];
 }
 export const OA_DEFAULTS: OaParams = {
-  moveBySymbol: { BTCUSDT: 1.5, ETHUSDT: 2.0, BNBUSDT: 2.0 },
-  moveDefault: 3.0,
-  oiAccBySymbol: { BTCUSDT: 0.5 },
-  oiAccDefault: 1.0,
+  moveBySymbol: {},
+  moveDefault: 0,
+  oiAccBySymbol: {},
+  oiAccDefault: 0,
   lookMin: 3,
   lookMax: 12,
   keepH: 48,
-  oiDropPct: 0.2,
+  oiDropPct: 0,
   liqQ: 0.8,
   liqMinHours: 24,
   liqWindowH: 168,
-  rr: 2.0,
-  minSlPct: 0.2,
+  rr: 2.5,
+  minSlPct: 0.3,
   slBufferPct: 0.05,
   maxHoldH: 48,
   takerPct: 0.05,
   makerPct: 0.02,
+  variants: ["B"],
 };
 const H = 3_600_000;
 
@@ -166,8 +165,9 @@ export function runOa(
       if (a < 0) break;
       const pr = (k.close / h[a].open - 1) * 100,
         oi = (k.oiClose / h[a].oiOpen - 1) * 100;
-      const dir = pr >= mv ? "UP" : pr <= -mv ? "DOWN" : null;
-      if (dir && oi >= oa) {
+      const dir =
+        pr >= mv && pr > 0 ? "UP" : pr <= -mv && pr < 0 ? "DOWN" : null;
+      if (dir && oi >= oa && oi > 0) {
         let ext = dir === "UP" ? -Infinity : Infinity;
         for (let x = a; x <= i; x++)
           ext =
@@ -211,7 +211,7 @@ export function runOa(
       pending = null;
     }
     // 2. the OI-drop hour
-    if (!sig && k.oiChgPct <= -p.oiDropPct) {
+    if (!sig && k.oiChgPct <= -p.oiDropPct && k.oiChgPct < 0) {
       const up = ep.dir === "UP";
       const refExt = prevExt !== null && prevDir === ep.dir ? prevExt : ep.ext;
       const newExt = up ? k.high > refExt : k.low < refExt;
@@ -229,6 +229,7 @@ export function runOa(
         else if (k.close > k.open && k.liqShortUsd >= tS && k.liqShortUsd > 0)
           s = { side: "SHORT", variant: "B" };
       }
+      if (s && !p.variants.includes(s.variant)) s = null; // only the enabled types (live: B only)
       if (s) pending = { ...s, k: i };
       ep.ext = up ? Math.max(ep.ext, k.high) : Math.min(ep.ext, k.low);
     }

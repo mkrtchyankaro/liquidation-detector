@@ -1,7 +1,7 @@
 /**
  * OA (OI accumulation) PAPER settings -- users.config.json, top-level "oa" block:
  *
- *   "oa": { "enabled": true, "users": ["main"], "rr": 2 }   // optional: "symbols": [...], "rr" (TP = rr x risk, default 2)
+ *   "oa": { "enabled": true, "users": ["main"], "rr": 2.5 }   // optional: "symbols": [...], "rr" (TP = rr x risk, default 2.5)
  *
  * PAPER ONLY by design: there is no REAL option at all -- this strategy never places a Binance order.
  * Absent block -> disabled. Malformed values fail startup with a clear message.
@@ -9,7 +9,7 @@
 export interface OaSettings { enabled: boolean; users: string[]; symbols: string[]; rr: number }
 
 export function parseOaSettings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): OaSettings {
-  const off: OaSettings = { enabled: false, users: [], symbols: [], rr: 2 };
+  const off: OaSettings = { enabled: false, users: [], symbols: [], rr: 2.5 };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"oa" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -26,7 +26,7 @@ export function parseOaSettings(raw: unknown, knownUserIds: readonly string[], c
     const missing = symbols.filter((s) => !collectedSymbols.includes(s));
     if (missing.length) throw new Error(`"oa.symbols" contains ${missing.join(", ")} which this bot does not collect data for`);
   }
-  const rr = v.rr === undefined ? 2 : v.rr;
+  const rr = v.rr === undefined ? 2.5 : v.rr;
   if (typeof rr !== "number" || !(rr >= 1) || rr > 5) throw new Error(`"oa.rr" must be a number between 1 and 5`);
   return { enabled: true, users, symbols, rr };
 }
