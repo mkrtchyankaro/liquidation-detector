@@ -52,7 +52,7 @@ export function formatOaEntry(t: OaTradeDoc, riskUsd: number): string {
     `TP        ${fmtPrice(t.tpPrice)}  (${long ? "+" : "-"}${((100 * Math.abs(t.tpPrice - t.entry)) / t.entry).toFixed(2)}%)  ${fmtUsd(riskUsd * t.rr)}`,
     `SL        ${fmtPrice(t.slPrice)}  (${long ? "-" : "+"}${t.slPct.toFixed(2)}%)  ${fmtUsd(-riskUsd)}`,
     ``,
-    `Risk      ${fmtUsd(riskUsd, false)}  ·  RR ${t.rr.toFixed(1)}`,
+    `Risk      ${fmtUsd(riskUsd, false)}  ·  RR ${t.rr}`,
     `Position  ${fmtQty(qty)} ${t.symbol.replace("USDT", "")} (${fmtUsd(qty * t.entry, false)})`,
     ``,
     ...story(t),

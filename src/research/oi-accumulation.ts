@@ -1,6 +1,6 @@
 /**
  * OA -- OI ACCUMULATION strategy (Johnny, Sep 30 2026). Pure, no I/O. Rules FROZEN as tested on 23-30 Sep 2026
- * (1h, 9 coins: 20 trades, 9 TP / 10 SL, +9.1R after fees -- in-sample only, not yet confirmed on new data).
+ * (1h, 9 coins -- in-sample only, not yet confirmed on new data; see step 4 for the current numbers).
  *
  * Per coin, walking forward over CLOSED 1h candles:
  *  1. ACCUMULATION: over the last 3..12 closed hours the price moved >= MOVE% (alts 3, ETH/BNB 2, BTC 1.5) and OI
@@ -13,8 +13,10 @@
  *     A DOWN episode is the mirror (A: new low + long liq -> LONG; B: green hour + short liq -> SHORT).
  *  3. CONFIRMATION: the NEXT hour must go the new way (LONG: green and closes above the OI-drop hour's close;
  *     SHORT: red and closes below). Entry = its close.
- *  4. SL: A -> the extreme of the whole episode; B -> the extreme of the last 4 hours. 0.05% beyond. Skip if the SL is
- *     closer than 0.2%. TP = 2.2R. Exit: SL first if both are touched in one bar; after 48h at market (TIME).
+ *  4. SL: the CONFIRMATION hour's extreme (LONG: its low, SHORT: its high), 0.05% beyond. Skip if the SL is closer
+ *     than 0.2%. TP = 2R. Exit: SL first if both are touched in one bar; after 48h at market (TIME).
+ *     (Sep 30: SL moved from the episode / 4h extreme to the confirmation candle -- median SL 1.9% -> 1.15%;
+ *      same week: 25 trades, 14 TP / 10 SL, +15.5R after fees at 2R. Still in-sample.)
  *     After the trade ends the episode is deleted and the coin starts fresh; nothing new while a trade is open.
  */
 export interface OaHour {
@@ -106,7 +108,7 @@ export const OA_DEFAULTS: OaParams = {
   liqQ: 0.8,
   liqMinHours: 24,
   liqWindowH: 168,
-  rr: 2.2,
+  rr: 2.0,
   minSlPct: 0.2,
   slBufferPct: 0.05,
   maxHoldH: 48,
@@ -234,10 +236,7 @@ export function runOa(
     // 4. the trade
     const long = sig.side === "LONG",
       entry = k.close;
-    let ext = long ? Infinity : -Infinity;
-    const from = sig.variant === "A" ? ep.i0 : Math.max(ep.i0, i - 3);
-    for (let x = from; x <= i; x++)
-      ext = long ? Math.min(ext, h[x].low) : Math.max(ext, h[x].high);
+    const ext = long ? k.low : k.high; // SL at the CONFIRMATION hour's extreme
     const sl = ext * (long ? 1 - p.slBufferPct / 100 : 1 + p.slBufferPct / 100);
     const risk = long ? entry - sl : sl - entry;
     if (!(risk / entry >= p.minSlPct / 100)) continue;

@@ -740,17 +740,51 @@ export function safeLeverage(
   );
   return Math.max(1, Math.min(configured, maxByLiquidation));
 }
+/**
+ * The TP limit order is confirmed open. Binance can answer "Order does not exist" for a moment right after an
+ * order is created (ETH, Sep 29 2026: "TP order placed but could not be verified open"), so: several attempts,
+ * and the open-orders list as a second source. FILLED also counts (price jumped straight to the TP).
+ */
 async function verifyOrderOpen(
   rest: BinanceRestLike,
   symbol: string,
   orderId: number,
+  attempts = 5,
+  delayMs = 400,
 ): Promise<boolean> {
-  try {
-    const res = (await rest.getOrder(symbol, orderId)) as { status?: string };
-    return res.status === "NEW" || res.status === "PARTIALLY_FILLED";
-  } catch {
-    return false;
+  for (let i = 0; i < attempts; i++) {
+    if (i > 0) await sleep(delayMs);
+    try {
+      const res = (await rest.getOrder(symbol, orderId)) as { status?: string };
+      if (
+        res.status === "NEW" ||
+        res.status === "PARTIALLY_FILLED" ||
+        res.status === "FILLED"
+      )
+        return true;
+      if (
+        res.status === "CANCELED" ||
+        res.status === "EXPIRED" ||
+        res.status === "REJECTED"
+      )
+        return false;
+    } catch {
+      /* not visible yet -- try the open-orders list */
+    }
+    try {
+      const open = (await rest.getOpenOrders(symbol)) as Array<{
+        orderId?: number | string;
+      }>;
+      if (
+        Array.isArray(open) &&
+        open.some((o) => Number(o.orderId) === orderId)
+      )
+        return true;
+    } catch {
+      /* next attempt */
+    }
   }
+  return false;
 }
 async function failSafeMarketClose(
   rest: BinanceRestLike,
