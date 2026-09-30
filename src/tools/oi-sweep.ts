@@ -95,13 +95,67 @@ function report(name: string, trades: SweepTrade[]): void {
   console.log(
     `result: ${gross >= 0 ? "+" : ""}${gross.toFixed(1)}% gross, ${net >= 0 ? "+" : ""}${net.toFixed(1)}% after fees  (each trade risks ${SL}% of its size; at 1 R = ${SL}%: ${(net / SL).toFixed(1)}R)`,
   );
+  for (const side of ["LONG", "SHORT"] as const)
+    for (const sw of ["TOP", "BOTTOM"] as const) {
+      const v = closed.filter((x) => x.side === side && x.sweep === sw),
+        w = v.filter((x) => x.result === "TP").length;
+      if (v.length)
+        console.log(
+          `   ${side} after a ${sw} sweep: ${v.length} closed, TP ${w} (${((100 * w) / v.length).toFixed(0)}%), SL ${v.length - w}, ${(v.reduce((a, x) => a + x.pnlPct, 0) - FEE * v.length).toFixed(1)}% after fees`,
+        );
+    }
+}
+
+/** the same TP/SL from EVERY hour's close on the same coins and days, no signal at all -- the signal must beat this */
+function baseline(
+  hoursBy: Map<string, number[]>,
+  paths: Map<string, Minute[]>,
+): void {
+  console.log(
+    `\n=== NO SIGNAL: entering at every 1h close on the same coins and days (TP +${TP}% / SL -${SL}%) ===`,
+  );
   for (const side of ["LONG", "SHORT"] as const) {
-    const v = closed.filter((x) => x.side === side),
-      w = v.filter((x) => x.result === "TP").length;
-    if (v.length)
-      console.log(
-        `   ${side}: ${v.length} closed, TP ${w}, SL ${v.length - w}, ${(v.reduce((a, x) => a + x.pnlPct, 0) - FEE * v.length).toFixed(1)}% after fees`,
-      );
+    let n = 0,
+      w = 0;
+    for (const [s, hs] of hoursBy) {
+      const path = paths.get(s)!;
+      for (const ts of hs) {
+        let lo = 0,
+          hi = path.length;
+        while (lo < hi) {
+          const m = (lo + hi) >> 1;
+          if (path[m].t < ts) lo = m + 1;
+          else hi = m;
+        }
+        const i = lo;
+        if (i <= 0 || i >= path.length) continue;
+        const entry = path[i - 1].close;
+        const r = tradeOf(
+          {
+            symbol: s,
+            dir: "UP",
+            moveStart: ts,
+            moveHours: 0,
+            candle: undefined as never,
+            prev: undefined as never,
+            sweep: "TOP",
+            entryTs: ts,
+            entry,
+            oiDrop: 0,
+          },
+          side,
+          path,
+          TP,
+          SL,
+        );
+        if (r.result === "OPEN") continue;
+        n++;
+        if (r.result === "TP") w++;
+      }
+    }
+    console.log(
+      `   ${side} every hour: ${n} trades, TP ${w} (${n ? ((100 * w) / n).toFixed(0) : 0}%), ${(w * TP - (n - w) * SL - FEE * n).toFixed(0)}% after fees  (${n ? ((w * TP - (n - w) * SL - FEE * n) / n).toFixed(3) : 0}% per trade)`,
+    );
   }
 }
 
@@ -110,7 +164,8 @@ async function main(): Promise<void> {
     winFrom = to - DAYS * D,
     from = Math.floor((winFrom - 2 * D) / D) * D;
   const sigs: SweepSignal[] = [],
-    paths = new Map<string, Minute[]>();
+    paths = new Map<string, Minute[]>(),
+    hoursBy = new Map<string, number[]>();
   for (const s of coins()) {
     try {
       const snap = await oiSnapshots(s, from, to);
@@ -127,6 +182,10 @@ async function main(): Promise<void> {
           low: c.low,
           close: c.close,
         })),
+      );
+      hoursBy.set(
+        s,
+        h.filter((c) => c.t + H > winFrom).map((c) => c.t + H),
       );
       const v = sweepSignals(s, h).filter((x) => x.entryTs > winFrom);
       sigs.push(...v);
@@ -157,6 +216,7 @@ async function main(): Promise<void> {
     portfolio(sweepSide, MAX),
   );
   report("B. ALWAYS LONG (as first written)", portfolio(allLong, MAX));
+  if (!argv.includes("--no-baseline")) baseline(hoursBy, paths);
 }
 
 main().catch((err) => {
