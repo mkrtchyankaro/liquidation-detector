@@ -4,6 +4,7 @@
  *
  *   npx tsx src/tools/oi-story.ts                       (the bot's coins, last 7 days)
  *   npx tsx src/tools/oi-story.ts --coins ETH,SOL --days 3
+ *   npx tsx src/tools/oi-story.ts --days 13 --minsl 0.5          (SL at least 0.5% away; default 0.3)
  *   npx tsx src/tools/oi-story.ts --coins ETH --days 3 --detail   (the OI drop in 15-minute candles + 1h after,
  *                                                                  and its biggest-liquidation 15m split in 5-minute candles)
  * Rules: src/research/oi-story.ts (moves: src/research/oi-moves.ts -- no % thresholds).
@@ -28,7 +29,8 @@ const arg = (n: string, d: string): string => {
   return i >= 0 ? argv[i + 1] : d;
 };
 const DAYS = Number(arg("days", "7")),
-  DETAIL = argv.includes("--detail");
+  DETAIL = argv.includes("--detail"),
+  MIN_SL = Number(arg("minsl", "0.3"));
 const H = 3_600_000,
   D = 24 * H;
 const t = (ms: number): string =>
@@ -154,7 +156,7 @@ function print(s: Story, rows: readonly MinuteRow[]): void {
     );
     return;
   }
-  const tr = tradeAtMoment(rows, s, b.verdict);
+  const tr = tradeAtMoment(rows, s, b.verdict, 0.1, MIN_SL);
   if (tr) {
     if (tr.result !== "OPEN") trades.push({ s, t: tr });
     console.log(
@@ -223,7 +225,7 @@ async function main(): Promise<void> {
     );
   }
   console.log(
-    "\n=== TRADING THE VERDICT AT THAT MOMENT (entry = the drop's last close, SL beyond the drop's extreme, TP 2R, else closed after 24h, fees 0.1% in) ===",
+    `\n=== TRADING THE VERDICT AT THAT MOMENT (entry = the drop's last close, SL beyond the drop's extreme but at least ${MIN_SL}% away, TP 2R, else closed after 24h, fees 0.1% in) ===`,
   );
   const line = (name: string, v: typeof trades): void => {
     if (!v.length) {
