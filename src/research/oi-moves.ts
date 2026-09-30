@@ -97,8 +97,10 @@ export interface MvFlow { newLong: number; newShort: number; longOut: number; sh
  *   OI down + price up -> shorts out (short stops / liquidations = the OI "tails" while the price rises)
  *   OI down + price down -> longs out (long stops / liquidations)
  * An estimate: OI does not say who closed, the price direction of that step does.
+ * With `moveDir` (Johnny): inside a move the OI can only fall by the side the move is hurting -- while the price
+ * RISES every OI drop is SHORTS closing (whatever the wick of that minute), while it FALLS every OI drop is LONGS.
  */
-export function flowBetween(bars: readonly MvBar[], from: number, to: number): MvFlow {
+export function flowBetween(bars: readonly MvBar[], from: number, to: number, moveDir?: "UP" | "DOWN"): MvFlow {
   const f: MvFlow = { newLong: 0, newShort: 0, longOut: 0, shortOut: 0 };
   let prev = NaN;
   for (const b of bars) {
@@ -106,7 +108,7 @@ export function flowBetween(bars: readonly MvBar[], from: number, to: number): M
     if (b.t >= from && prev > 0 && b.oi > 0) {
       const d = b.oi - prev, up = b.close >= b.open;
       if (d > 0) { if (up) f.newLong += d; else f.newShort += d; }
-      else if (d < 0) { if (up) f.shortOut -= d; else f.longOut -= d; }
+      else if (d < 0) { if ((moveDir ?? (up ? "UP" : "DOWN")) === "UP") f.shortOut -= d; else f.longOut -= d; }
     }
     if (b.oi > 0) prev = b.oi;
   }

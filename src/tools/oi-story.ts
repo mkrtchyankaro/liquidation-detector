@@ -11,7 +11,14 @@
 import "dotenv/config";
 import * as fs from "fs";
 import { MongoClient } from "mongodb";
-import { smallCandles, stories, type Story } from "../research/oi-story";
+import {
+  balance,
+  smallCandles,
+  stories,
+  tradeAtMoment,
+  type MomentTrade,
+  type Story,
+} from "../research/oi-story";
 import type { MinuteRow } from "../research/oi-accumulation";
 import { mongoMinuteLoader } from "../strategy/oa/oa-paper.service";
 
@@ -109,7 +116,9 @@ function detail(s: Story, rows: readonly MinuteRow[]): void {
   console.log("");
 }
 
-function print(s: Story): void {
+const trades: Array<{ s: Story; t: MomentTrade }> = [];
+
+function print(s: Story, rows: readonly MinuteRow[]): void {
   const coin = s.symbol.replace(/USDT$/, ""),
     a = s.acc,
     up = s.dir === "UP";
@@ -135,9 +144,23 @@ function print(s: Story): void {
   console.log(
     `      REAL liquidations: longs ${usd(d.liq.longUsd)} (${n0(d.liq.longCoin)} ${coin}), shorts ${usd(d.liq.shortUsd)} (${n0(d.liq.shortCoin)} ${coin})  -> ${d.cleaned} cleaned | OI split: longs out ${n0(d.flow.longOut)}, shorts out ${n0(d.flow.shortOut)} ${coin}`,
   );
+  const b = balance(s)!;
+  console.log(
+    `   => WHO IS LEFT (opened - closed, accumulation + drop): longs ${n0(b.longsLeft)} ${coin}, shorts ${n0(b.shortsLeft)} ${coin}   | real liq: shorts ${n0(a.liq.shortCoin)} in the accumulation, longs ${n0(d.liq.longCoin)} in the drop`,
+  );
   if (!s.after) {
-    console.log(`   3. the OI is still falling -- not finished\n`);
+    console.log(
+      `   => more ${b.verdict === "LONG" ? "SHORTS" : "LONGS"} left -> the market should go ${b.verdict === "LONG" ? "UP" : "DOWN"} -> ${b.verdict}   (the OI is still falling -- not finished)\n`,
+    );
     return;
+  }
+  const tr = tradeAtMoment(rows, s, b.verdict);
+  if (tr) {
+    if (tr.result !== "OPEN") trades.push({ s, t: tr });
+    console.log(
+      `   => more ${b.verdict === "LONG" ? "SHORTS" : "LONGS"} left -> the market should go ${b.verdict === "LONG" ? "UP" : "DOWN"} -> ${b.verdict} at ${px(tr.entry)} (${t(tr.entryTs)}), SL ${px(tr.sl)} (${tr.riskPct.toFixed(2)}%), TP 2R ${px(tr.side === "LONG" ? tr.entry + 2 * (tr.entry - tr.sl) : tr.entry - 2 * (tr.sl - tr.entry))}` +
+        `  ->  ${tr.result}${tr.result === "OPEN" ? "" : ` ${tr.r >= 0 ? "+" : ""}${tr.r.toFixed(2)}R after ${Math.floor(tr.minutes / 60)}h${String(tr.minutes % 60).padStart(2, "0")}m`}${tr.hit1R ? " (reached 1R)" : ""}`,
+    );
   }
   const x = s.after;
   console.log(
@@ -160,7 +183,7 @@ async function main(): Promise<void> {
     for (const sym of symbols()) {
       const rows = await load(sym, winFrom - 2 * D);
       const st = stories(sym, rows, until).filter((s) => s.acc.to > winFrom);
-      if (DETAIL) rowsBy.set(sym, rows);
+      rowsBy.set(sym, rows);
       all.push(...st);
       process.stderr.write(
         `${sym}: ${rows.length} minutes, ${st.length} accumulations\n`,
@@ -174,7 +197,7 @@ async function main(): Promise<void> {
     `\n=== OI ACCUMULATION STORIES, last ${DAYS} days, ${t(winFrom)} .. ${t(until)} UTC -- our data: 1-minute OI + REAL liquidations ===\n`,
   );
   for (const s of all) {
-    print(s);
+    print(s, rowsBy.get(s.symbol)!);
     if (DETAIL) detail(s, rowsBy.get(s.symbol)!);
   }
 
@@ -199,6 +222,36 @@ async function main(): Promise<void> {
       `${name.padEnd(42)} ${String(v.length).padStart(3)} cases | ${col("h4")}  ${col("h12")}  ${col("h24")}`,
     );
   }
+  console.log(
+    "\n=== TRADING THE VERDICT AT THAT MOMENT (entry = the drop's last close, SL beyond the drop's extreme, TP 2R, else closed after 24h, fees 0.1% in) ===",
+  );
+  const line = (name: string, v: typeof trades): void => {
+    if (!v.length) {
+      console.log(`${name.padEnd(30)} no trades`);
+      return;
+    }
+    const sum = v.reduce((x, y) => x + y.t.r, 0);
+    console.log(
+      `${name.padEnd(30)} ${String(v.length).padStart(3)} trades | 2R ${v.filter((x) => x.t.result === "2R").length}, SL ${v.filter((x) => x.t.result === "SL").length}, 24h ${v.filter((x) => x.t.result === "24h").length} | reached 1R ${v.filter((x) => x.t.hit1R).length} | total ${sum >= 0 ? "+" : ""}${sum.toFixed(2)}R, avg ${(sum / v.length).toFixed(2)}R | SL median ${[...v.map((x) => x.t.riskPct)].sort((p, q) => p - q)[v.length >> 1].toFixed(2)}%`,
+    );
+  };
+  line("ALL", trades);
+  line(
+    "LONG verdicts",
+    trades.filter((x) => x.t.side === "LONG"),
+  );
+  line(
+    "SHORT verdicts",
+    trades.filter((x) => x.t.side === "SHORT"),
+  );
+  line(
+    "after price UP + OI up",
+    trades.filter((x) => x.s.dir === "UP"),
+  );
+  line(
+    "after price DOWN + OI up",
+    trades.filter((x) => x.s.dir === "DOWN"),
+  );
   console.log(
     `\nnot finished yet: ${all.filter((s) => !s.after).length} (OI still growing or still falling)`,
   );

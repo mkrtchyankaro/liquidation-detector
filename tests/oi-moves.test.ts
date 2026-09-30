@@ -58,6 +58,9 @@ scenario("flow: OI up/down split by the price direction of each small step, only
   const b = [[100, 100, 1000], [100, 101, 1010], [101, 100.5, 1015], [100.5, 101, 1012], [101, 100, 1008], [100, 101, 1020]].map(([o, c, oi], i) => ({ t: T0 + i * M, open: o, close: c, oi }));
   assert.deepStrictEqual(flowBetween(b, T0, T0 + 5 * M), { newLong: 10, newShort: 5, longOut: 4, shortOut: 3 });
   assert.deepStrictEqual(flowBetween(b, T0 + 2 * M, T0 + 4 * M), { newLong: 0, newShort: 5, longOut: 0, shortOut: 3 });
+  // inside a RISE every OI drop is shorts closing, inside a FALL longs -- whatever the minute's colour
+  assert.deepStrictEqual(flowBetween(b, T0, T0 + 5 * M, "UP"), { newLong: 10, newShort: 5, longOut: 0, shortOut: 7 });
+  assert.deepStrictEqual(flowBetween(b, T0, T0 + 5 * M, "DOWN"), { newLong: 10, newShort: 5, longOut: 7, shortOut: 0 });
 });
 
 scenario("accumulation: OI must grow more than it was swinging before; a 1-candle OI peak where the price went nowhere does not count", () => {
