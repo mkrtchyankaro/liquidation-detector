@@ -2,8 +2,12 @@
  * Reversal after an OI accumulation (15m inside the OI-drop hour). Usage: npx tsx tests/oi-reversal.test.ts
  */
 import * as assert from "assert";
-import { findMoves, type MvHour } from "../src/research/oi-moves";
-import { reversal, type Minute, type Q15 } from "../src/research/oi-reversal";
+import type { MvHour } from "../src/research/oi-moves";
+import {
+  liveReversals,
+  type Minute,
+  type Q15,
+} from "../src/research/oi-reversal";
 
 let passed = 0,
   failed = 0;
@@ -75,7 +79,7 @@ function build(
 const path = (q: readonly Q15[]): Minute[] =>
   q.map((x) => ({ t: x.t, high: x.high, low: x.low, close: x.close }));
 
-// a fall with OI up (12..15), then the OI-drop hour 16
+// a fall with OI up over the closed hours 11..14; hour 15 is watched 15m by 15m
 const fall: Array<[number, number, number]> = [
   ...swing,
   ...swing,
@@ -84,11 +88,13 @@ const fall: Array<[number, number, number]> = [
   [98, 97, 1040],
   [97, 97.5, 1030],
   [97.5, 99.5, 1020],
-  [99.5, 100, 1020],
+  ...Array.from({ length: 8 }, (): [number, number, number] => [
+    99.5, 99.5, 1020,
+  ]),
 ];
 
 scenario(
-  "after a fall: the first 15m in the OI-drop hour with OI down and a GREEN close -> LONG, SL = lowest low, TP 2R",
+  "LIVE: in the hour after the closed move, the first 15m with OI down + a strong GREEN candle -> LONG; SL = lowest low so far",
   () => {
     const { h, q } = build(fall, {
       15: [
@@ -98,62 +104,72 @@ scenario(
         [97.2, 97.5, 1035, 1030],
       ],
     });
-    const m = findMoves(h)[0];
-    assert.strictEqual(m.dir, "DOWN");
-    const r = reversal(m, h, q, path(q));
-    assert.ok(r.trade, r.note);
-    const t = r.trade!;
-    assert.strictEqual(t.side, "LONG");
-    assert.strictEqual(t.signal.t, T0 + 15 * H + 2 * M15); // 1st quarter OI up (no), 2nd red (no), 3rd green + OI down (yes)
-    assert.strictEqual(t.entry, 97.2);
+    const s = liveReversals(h, q, path(q));
+    assert.strictEqual(s.length, 1);
+    const x = s[0];
+    assert.deepStrictEqual(
+      [x.dir, x.side, x.signal.t, x.entry],
+      ["DOWN", "LONG", T0 + 15 * H + 2 * M15, 97.2],
+    ); // 1st: OI up, 2nd: red
     assert.ok(
       Math.abs(
-        t.sl -
+        x.sl -
           Math.min(
             ...q
-              .filter((x) => x.t >= T0 + 11 * H && x.t <= t.signal.t)
-              .map((x) => x.low),
+              .filter((y) => y.t >= x.moveStart && y.t <= x.signal.t)
+              .map((y) => y.low),
           ),
       ) < 1e-9,
     );
-    assert.strictEqual(t.result, "TP");
+    assert.strictEqual(x.result, "TP");
   },
 );
 
 scenario(
-  "no 15m that both lost OI and turned (the OI grows again the next hour) -> no trade",
+  "LIVE: a green 15m that is WEAK (body not bigger than the move's average) is not a signal",
   () => {
-    const noMore: Array<[number, number, number]> = [
-      ...fall.slice(0, 16),
-      [97.5, 99.5, 1045],
-      [99.5, 100, 1050],
-    ];
-    const { h, q } = build(noMore, {
+    const { h, q } = build(fall, {
       15: [
-        [97, 96.8, 1040, 1045],
-        [96.8, 96.6, 1045, 1041],
-        [96.6, 96.5, 1041, 1035],
-        [96.5, 97.5, 1035, 1036],
+        [97, 96.8, 1040, 1041],
+        [96.8, 96.85, 1041, 1038],
+        [96.85, 96.7, 1038, 1036],
+        [96.7, 96.72, 1036, 1035],
+      ],
+      16: [
+        [96.72, 96.7, 1035, 1036],
+        [96.7, 96.69, 1036, 1037],
+        [96.69, 96.7, 1037, 1037],
+        [96.7, 96.7, 1037, 1037],
       ],
     });
-    const r = reversal(findMoves(h)[0], h, q, path(q));
-    assert.strictEqual(r.trade, null);
-    assert.match(r.note, /no reversal/);
+    assert.strictEqual(liveReversals(h, q, path(q)).length, 0);
   },
 );
 
-scenario("OI still growing at the last hour -> waiting, no trade", () => {
-  const { h, q } = build([
-    ...swing,
-    ...swing,
-    [100, 99, 1010],
-    [99, 98, 1020],
-    [98, 97, 1040],
-  ]);
-  const r = reversal(findMoves(h)[0], h, q, path(q));
-  assert.strictEqual(r.trade, null);
-  assert.match(r.note, /still growing/);
-});
+scenario(
+  "LIVE: nothing is used from the future -- cutting the data right after the signal gives the same signal",
+  () => {
+    const { h, q } = build(fall, {
+      15: [
+        [97, 96.8, 1040, 1045],
+        [96.8, 96.6, 1045, 1041],
+        [96.6, 97.2, 1041, 1035],
+        [97.2, 97.5, 1035, 1030],
+      ],
+    });
+    const cut = T0 + 15 * H + 3 * M15;
+    const a = liveReversals(h, q, path(q))[0],
+      b = liveReversals(
+        h.filter((k) => k.t + H <= cut),
+        q.filter((y) => y.t < cut),
+        path(q),
+      )[0];
+    assert.deepStrictEqual(
+      [b.signal.t, b.entry, b.sl, b.side],
+      [a.signal.t, a.entry, a.sl, a.side],
+    );
+  },
+);
 
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exitCode = 1;

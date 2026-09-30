@@ -11,9 +11,9 @@
  *     while the price really moved; the move ENDS where the OI stops growing (its peak), whatever the price does after
  *   - amounts in COINS (ETH for ETHUSDT, BTC for BTCUSDT ...), from 5-minute OI + price:
  *       short stops/liquidations = OI falling while the price rises (the OI "tails" of an up move), longs mirror
- *   - REVERSAL (src/research/oi-reversal.ts): the 1h candle(s) where the OI falls after the end, split in 15m candles;
- *     the first 15m whose OI fell and that turned against the move -> entry at its close, SL at the move's extreme,
- *     TP 2R (checked on 1-minute candles, SL first). Summary at the end.
+ *   - LIVE REVERSAL SIGNALS (src/research/oi-reversal.ts), never looking ahead: at every 15m close, with a move running
+ *     on the closed 1h candles, a 15m candle whose OI fell and that is a strong candle against the move -> entry at its
+ *     close, SL at the move's extreme, TP 2R (checked on 1-minute candles, SL first). Summary at the end.
  */
 import "dotenv/config";
 import {
@@ -26,10 +26,10 @@ import {
 } from "../research/oi-moves";
 import { klines, oiAt, oiSnapshots } from "../research/binance-history";
 import {
-  reversal,
+  liveReversals,
+  type LiveSignal,
   type Minute,
   type Q15,
-  type RevTrade,
 } from "../research/oi-reversal";
 
 const argv = process.argv.slice(2);
@@ -53,7 +53,7 @@ const px = (x: number): string =>
   x >= 100 ? x.toFixed(2) : x >= 1 ? x.toFixed(4) : x.toFixed(6);
 
 const n0 = (x: number): string => Math.round(x).toLocaleString("en-US");
-const trades: Array<{ coin: string; dir: "UP" | "DOWN"; t: RevTrade }> = [];
+const trades: Array<{ coin: string; dir: "UP" | "DOWN"; t: LiveSignal }> = [];
 
 function print(
   m: Move,
@@ -127,20 +127,20 @@ async function run(symbol: string, to: number, winFrom: number): Promise<void> {
       lastDay = d;
     }
     print(m, h, bars, coin);
-    const r = reversal(m, h, q15, path),
-      tr = r.trade;
-    const drop = r.dropFrom
-      ? `OI falls ${t(r.dropFrom).slice(5)} -> ${t(r.dropTo!).slice(5)}`
-      : "";
-    if (!tr) {
-      console.log(`   REVERSAL: ${drop}${drop ? " -- " : ""}${r.note}`);
-      continue;
-    }
-    const q = tr.signal;
+  }
+  // live signals: evaluated 15m by 15m on what was known at that moment (the moves list above is hindsight)
+  const sigs = liveReversals(h, q15, path).filter((x) => x.entryTs > winFrom);
+  console.log(
+    `\n   LIVE REVERSAL SIGNALS (${coin}, 15m by 15m, nothing from the future):`,
+  );
+  if (!sigs.length) console.log("   none");
+  for (const x of sigs) {
+    const q = x.signal;
     console.log(
-      `   REVERSAL: ${drop}; 15m ${t(q.t).slice(11)} ${q.close < q.open ? "red" : "green"} (OI ${n0(q.oiClose - q.oiOpen)} ${coin}) -> ${tr.side} at ${px(tr.entry)} (${t(tr.entryTs)}), SL ${px(tr.sl)} (${tr.riskPct.toFixed(2)}%), TP ${px(tr.tp)}  =>  ${tr.result}${tr.exitTs ? ` ${t(tr.exitTs)} (${tr.r > 0 ? "+" : ""}${tr.r}R)` : " (still open)"}`,
+      `   ${t(q.t)} 15m ${q.close < q.open ? "red  " : "green"} OI ${n0(q.oiClose - q.oiOpen)} ${coin}, body ${px(Math.abs(q.close - q.open))} > avg ${px(x.avgBody)} | move ${x.dir} since ${t(x.moveStart)} (${x.moveHours}h closed)` +
+        ` -> ${x.side} ${px(x.entry)} SL ${px(x.sl)} (${x.riskPct.toFixed(2)}%) TP ${px(x.tp)} => ${x.result}${x.exitTs ? ` ${t(x.exitTs)} (${x.r > 0 ? "+" : ""}${x.r}R)` : " (still open)"}`,
     );
-    trades.push({ coin, dir: m.dir, t: tr });
+    trades.push({ coin, dir: x.dir, t: x });
   }
   console.log(
     `\n${symbol}: ${moves.length} moves (${moves.filter((m) => m.dir === "UP").length} price up, ${moves.filter((m) => m.dir === "DOWN").length} price down); amounts are estimates from 5-minute OI`,
@@ -155,7 +155,7 @@ function summary(): void {
     return `${name.padEnd(22)} ${String(v.length).padStart(3)} trades | TP ${v.filter((x) => x.t.result === "TP").length}, SL ${v.filter((x) => x.t.result === "SL").length} | ${r >= 0 ? "+" : ""}${r.toFixed(0)}R (after fees 0.1%: ${(r - fees).toFixed(2)}R)`;
   };
   console.log(
-    `\n=== REVERSAL SIGNALS, all coins (TP 2R / SL at the move's extreme) ===`,
+    `\n=== LIVE REVERSAL SIGNALS, all coins (TP 2R / SL at the move's extreme) ===`,
   );
   console.log(line("ALL", closed));
   console.log(
