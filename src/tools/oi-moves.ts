@@ -7,12 +7,14 @@
  * Rules (no % thresholds): src/research/oi-moves.ts
  *   - price move = 1h candle bodies stepping one way (at least 3 candles), bigger than the range the market was
  *     swinging in just before, and ending outside it
- *   - only moves where the OI grew; the move ENDS where the OI stops growing (its peak), whatever the price does after
+ *   - only moves where the OI grew MORE than the range it was swinging in during the same number of hours before,
+ *     while the price really moved; the move ENDS where the OI stops growing (its peak), whatever the price does after
  *   - amounts in COINS (ETH for ETHUSDT, BTC for BTCUSDT ...), from 5-minute OI + price:
  *       short stops/liquidations = OI falling while the price rises (the OI "tails" of an up move), longs mirror
  */
 import "dotenv/config";
 import {
+  accumulation,
   findMoves,
   flowBetween,
   type Move,
@@ -61,14 +63,13 @@ function print(
     `   start ${t(p.from)} UTC   price ${px(p.priceFrom)}   OI ${n0(p.oiFrom)} ${coin}`,
   );
   console.log(
-    `   end   ${t(p.to)} UTC   price ${px(p.priceTo)} (${f2(p.pricePct)}%, ${up ? `high ${px(hi)}` : `low ${px(lo)}`})   OI ${n0(p.oiTo)} ${coin}  = +${n0(p.oiTo - p.oiFrom)} ${coin} (${f2(p.oiPct)}%)   <- after this the OI falls`,
+    `   end   ${t(p.to)} UTC   price ${px(p.priceTo)} (${f2(p.pricePct)}%, ${up ? `high ${px(hi)}` : `low ${px(lo)}`})   OI ${n0(p.oiTo)} ${coin}  = +${n0(p.oiTo - p.oiFrom)} ${coin} (${f2(p.oiPct)}%)   ${accumulation(h, m).ongoing ? "<- STILL GROWING, not ended yet" : "<- after this the OI falls"}`,
   );
   console.log(
     up
       ? `   SHORT stops/liquidations during the rise: ${n0(f.shortOut)} ${coin}   (longs out ${n0(f.longOut)})   | opened: longs +${n0(f.newLong)}, shorts +${n0(f.newShort)} ${coin}`
       : `   LONG stops/liquidations during the fall:  ${n0(f.longOut)} ${coin}   (shorts out ${n0(f.shortOut)})   | opened: longs +${n0(f.newLong)}, shorts +${n0(f.newShort)} ${coin}`,
   );
-  void h;
 }
 
 async function run(symbol: string, to: number, winFrom: number): Promise<void> {
@@ -91,7 +92,7 @@ async function run(symbol: string, to: number, winFrom: number): Promise<void> {
     oi: oiAt(snap, c.t + 5 * 60_000, 5 * 60_000),
   }));
   const moves = findMoves(h).filter(
-    (m) => m.phases[0].kind.endsWith("OI UP") && m.phases[0].to > winFrom,
+    (m) => accumulation(h, m).ok && m.phases[0].to > winFrom,
   );
   console.log(
     `\n=== ${symbol}  last ${DAYS} day(s): ${t(winFrom)} .. ${t(to)} UTC  -- price + OI growing together, ends where the OI starts to fall ===`,

@@ -2,7 +2,12 @@
  * Price + OI moves (step 1, finding only). Usage: npx tsx tests/oi-moves.test.ts
  */
 import * as assert from "assert";
-import { findMoves, flowBetween, type MvHour } from "../src/research/oi-moves";
+import {
+  accumulation,
+  findMoves,
+  flowBetween,
+  type MvHour,
+} from "../src/research/oi-moves";
 
 let passed = 0,
   failed = 0;
@@ -154,6 +159,47 @@ scenario(
       newShort: 5,
       longOut: 0,
       shortOut: 3,
+    });
+  },
+);
+
+scenario(
+  "accumulation: OI must grow more than it was swinging before; a 1-candle OI peak where the price went nowhere does not count",
+  () => {
+    const big = hours([
+      ...flat,
+      [100, 101, 1010],
+      [101, 102, 1025],
+      [102, 102.5, 1030],
+      [102.5, 103, 1020],
+      [103, 102, 1015],
+    ]);
+    assert.deepStrictEqual(accumulation(big, findMoves(big)[0]), {
+      ok: true,
+      ongoing: false,
+    });
+    const noisyOi = hours([
+      ...flat.map(([o, c], i): [number, number, number] => [
+        o,
+        c,
+        i % 2 ? 1040 : 1000,
+      ]),
+      [100, 101, 1010],
+      [101, 102, 1025],
+      [102, 102.5, 1030],
+      [102.5, 103, 1020],
+      [103, 102, 1015],
+    ]);
+    assert.strictEqual(accumulation(noisyOi, findMoves(noisyOi)[0]).ok, false); // +30 while it swung 40 before
+    const still = hours([
+      ...flat,
+      [100, 101, 1010],
+      [101, 102, 1025],
+      [102, 103, 1030],
+    ]);
+    assert.deepStrictEqual(accumulation(still, findMoves(still)[0]), {
+      ok: true,
+      ongoing: true,
     });
   },
 );
