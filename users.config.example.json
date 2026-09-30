@@ -20,6 +20,7 @@
     "userModes": { "main": "PAPER", "karo": "PAPER" }
   },
   "zz": { "enabled": false },
+  "oa": { "enabled": true, "users": ["main"] },
   "users": [
     {
       "userId": "main",

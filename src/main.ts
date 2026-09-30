@@ -25,6 +25,10 @@ import {
   ZzPaperService,
   type ZzUserRef,
 } from "./strategy/zz/zz-paper.service";
+import {
+  mongoMinuteLoader,
+  OaPaperService,
+} from "./strategy/oa/oa-paper.service";
 
 const log = childLogger({ mod: "main" });
 
@@ -34,6 +38,7 @@ const log = childLogger({ mod: "main" });
  *   MarketCollector   Binance liquidations + OI (1/s) -> MongoDB
  *   ContextCollector  long/short ratios (5m) + funding/premium (1m) -> MongoDB (research only)
  *   ZzPaperService    OI-zigzag strategy, PAPER only: Telegram messages to the "zz" users, never orders
+ *   OaPaperService    OI-accumulation strategy (1h), PAPER only: Telegram messages to the "oa" users, never orders
  *   MinuteBarWriter   1 row per symbol per minute (price, OI, liquidations), kept 365 days (research only)
  *   V9LiveService     every minute: V9 engine -> signals -> PAPER / REAL trades
  *                     -> Binance orders -> close detection -> Telegram
@@ -194,6 +199,31 @@ async function main(): Promise<void> {
           `[ZZ_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- ZZ PAPER not running, V9 unaffected`,
         ),
       );
+  // OI-accumulation strategy (1h): PAPER only, separate from V9 and ZZ (never places orders).
+  const oaUsers: ZzUserRef[] = config.oa.users
+    .map((id) => users.find((u) => u.userId === id))
+    .filter((u): u is UserConfig => !!u)
+    .map((u) => ({
+      userId: u.userId,
+      riskUsd: u.riskUsd,
+      telegram: telegramOf(u),
+    }));
+  const oa = config.oa.enabled
+    ? new OaPaperService(
+        config.oa,
+        () => oaUsers,
+        mongoMinuteLoader(mongo.db),
+        mongo.db,
+      )
+    : null;
+  if (oa)
+    void oa
+      .start()
+      .catch((err) =>
+        log.error(
+          `[OA_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- OA PAPER not running, V9 unaffected`,
+        ),
+      );
 
   if (v9)
     void v9
@@ -219,6 +249,7 @@ async function main(): Promise<void> {
     log.info(`shutting down (${signal})`);
     v9?.stop();
     zz?.stop();
+    oa?.stop();
     context.stop();
     minuteBars.stop();
     await collector.stop();

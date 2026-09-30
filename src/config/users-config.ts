@@ -1,6 +1,7 @@
 import * as fs from "fs";
 import { parseV9Settings, type V9Settings } from "../strategy/v9/v9-config";
 import { parseZzSettings, type ZzSettings } from "../strategy/zz/zz-config";
+import { parseOaSettings, type OaSettings } from "../strategy/oa/oa-config";
 
 /**
  * users.config.json -- the ONE file that decides who trades what.
@@ -10,6 +11,7 @@ import { parseZzSettings, type ZzSettings } from "../strategy/zz/zz-config";
  *   "v9": { "enabled": true, "symbols": [...], "rr": 2.2,
  *           "userModes": { "main": "PAPER", "karo": "REAL" } },
  *   "zz": { "enabled": true, "users": ["main"] },   // OI-zigzag, PAPER only
+ *   "oa": { "enabled": true, "users": ["main"] },   // OI accumulation (1h), PAPER only
  *   "users": [
  *     { "userId": "karo", "enabled": true,
  *       "telegram": { "enabled": true, "botToken": "...", "chatIds": ["123"] },
@@ -41,6 +43,8 @@ export interface AppConfig {
   v9: V9Settings;
   /** OI-zigzag strategy, PAPER only (Telegram messages, never orders). */
   zz: ZzSettings;
+  /** OI-accumulation strategy (1h), PAPER only (Telegram messages, never orders). */
+  oa: OaSettings;
 }
 
 const USER_ID = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -171,7 +175,17 @@ export function parseAppConfig(
   } catch (err) {
     fail(path, err instanceof Error ? err.message : String(err));
   }
-  return { realOrdersEnabled: r.realOrdersEnabled === true, users, v9, zz };
+  let oa: OaSettings;
+  try {
+    oa = parseOaSettings(
+      r.oa,
+      users.map((u) => u.userId),
+      collectedSymbols,
+    );
+  } catch (err) {
+    fail(path, err instanceof Error ? err.message : String(err));
+  }
+  return { realOrdersEnabled: r.realOrdersEnabled === true, users, v9, zz, oa };
 }
 
 export function loadAppConfig(
