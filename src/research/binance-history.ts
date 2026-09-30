@@ -14,6 +14,19 @@ const fapi = axios.create({ baseURL: process.env.BINANCE_FAPI_URL ?? "https://fa
 const vision = axios.create({ baseURL: "https://data.binance.vision", timeout: 30_000, responseType: "arraybuffer", validateStatus: (s) => s === 200 || s === 404 });
 const day = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
 
+/** Binance throttles long downloads (429/418/timeouts): wait and try again, up to 6 times */
+async function retry<T>(what: string, fn: () => Promise<T>): Promise<T> {
+  for (let i = 0; ; i++) {
+    try { return await fn(); }
+    catch (err) {
+      if (i >= 5) throw err;
+      const wait = 2000 * 2 ** i;
+      process.stderr.write(`\n${what}: ${err instanceof Error ? err.message : String(err)} -- retry in ${wait / 1000}s\n`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+}
+
 /** the one file inside a zip (central directory -> local header -> inflate) */
 export function unzipFirst(buf: Buffer): string {
   let e = buf.length - 22;
@@ -35,7 +48,7 @@ export async function oiSnapshots(symbol: string, from: number, to: number): Pro
     const f = path.join(dir, `${day(d)}.csv`);
     let csv: string | null = fs.existsSync(f) ? fs.readFileSync(f, "utf8") : null;
     if (csv === null) {
-      const r = await vision.get(`/data/futures/um/daily/metrics/${symbol}/${symbol}-metrics-${day(d)}.zip`);
+      const r = await retry(`${symbol} OI ${day(d)}`, () => vision.get(`/data/futures/um/daily/metrics/${symbol}/${symbol}-metrics-${day(d)}.zip`));
       if (r.status === 404) continue;
       csv = unzipFirst(Buffer.from(r.data));
       fs.writeFileSync(f, csv);
@@ -50,7 +63,7 @@ export async function oiSnapshots(symbol: string, from: number, to: number): Pro
   }
   process.stderr.write("\n");
   for (let s = Math.max(lastArchived + D, to - 29 * D); s < to; s += 400 * H) {
-    const r = await fapi.get<Array<{ sumOpenInterest: string; timestamp: number }>>("/futures/data/openInterestHist", { params: { symbol, period: "1h", startTime: s, endTime: Math.min(to, s + 400 * H), limit: 500 } });
+    const r = await retry(`${symbol} OI hist`, () => fapi.get<Array<{ sumOpenInterest: string; timestamp: number }>>("/futures/data/openInterestHist", { params: { symbol, period: "1h", startTime: s, endTime: Math.min(to, s + 400 * H), limit: 500 } }));
     for (const x of r.data) if (!m.has(x.timestamp)) m.set(x.timestamp, Number(x.sumOpenInterest));
   }
   return m;
@@ -61,7 +74,7 @@ export async function klines(symbol: string, interval: "1m" | "5m" | "15m" | "1h
   const step = interval === "1m" ? 60_000 : interval === "5m" ? 5 * 60_000 : interval === "15m" ? 15 * 60_000 : H;
   const out: Kline[] = [];
   for (let s = from; s < to;) {
-    const r = await fapi.get<Array<[number, string, string, string, string]>>("/fapi/v1/klines", { params: { symbol, interval, startTime: s, endTime: to - 1, limit: 1500 } });
+    const r = await retry(`${symbol} ${interval} klines`, () => fapi.get<Array<[number, string, string, string, string]>>("/fapi/v1/klines", { params: { symbol, interval, startTime: s, endTime: to - 1, limit: 1500 } }));
     if (!r.data.length) break;
     for (const k of r.data) if (k[0] + step <= to) out.push({ t: k[0], open: +k[1], high: +k[2], low: +k[3], close: +k[4] });
     s = r.data[r.data.length - 1][0] + step;

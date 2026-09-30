@@ -4,6 +4,8 @@
 import * as assert from "assert";
 import type { MvHour } from "../src/research/oi-moves";
 import {
+  candleDir,
+  confirmSignals,
   portfolio,
   sweepOf,
   tradeOf,
@@ -113,6 +115,60 @@ scenario(
         ["C", false],
         ["D", true],
       ],
+    );
+  },
+);
+
+scenario(
+  "confirming candle: LONG = green, close above the previous close, higher high; SHORT = red, close below, lower low",
+  () => {
+    const p = k(100, 101, 99, 100.5);
+    assert.strictEqual(candleDir(k(100.5, 101.5, 100.2, 101.2), p), "LONG");
+    assert.strictEqual(candleDir(k(100.5, 100.8, 98.5, 99), p), "SHORT");
+    assert.strictEqual(candleDir(k(100.5, 100.9, 99.5, 100.8), p), null); // green but no higher high
+  },
+);
+
+scenario(
+  "confirmSignals: skip the OI-drop candle; 1 = first direction of the next two, 2 = two in a row",
+  () => {
+    const swing: Array<[number, number, number]> = [
+      [100, 100.3, 1000],
+      [100.3, 99.9, 1000],
+      [99.9, 100.4, 1000],
+      [100.4, 99.8, 1000],
+      [99.8, 100.5, 1000],
+      [100.5, 99.7, 1000],
+    ];
+    const hs: Array<[number, number, number]> = [
+      ...swing,
+      ...swing,
+      [100, 101, 1010],
+      [101, 102, 1025],
+      [102, 103, 1040],
+      [103, 102.8, 1030], // OI drop (skipped)
+      [102.8, 103.6, 1030], // green, above, higher high -> LONG
+      [103.6, 104.4, 1030],
+      [104.4, 104.4, 1030],
+    ];
+    const h: MvHour[] = hs.map(([o, c, oi], i) => ({
+      t: T0 + i * H,
+      open: o,
+      close: c,
+      high: Math.max(o, c) + 0.1,
+      low: Math.min(o, c) - 0.1,
+      oi,
+      oiOpen: i ? hs[i - 1][2] : oi,
+    }));
+    const one = confirmSignals("X", h, 1),
+      two = confirmSignals("X", h, 2);
+    assert.deepStrictEqual(
+      [one.length, one[0].side, one[0].entryTs, one[0].entry],
+      [1, "LONG", T0 + 17 * H, 103.6],
+    );
+    assert.deepStrictEqual(
+      [two.length, two[0].side, two[0].entryTs, two[0].entry],
+      [1, "LONG", T0 + 18 * H, 104.4],
     );
   },
 );
