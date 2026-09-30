@@ -216,6 +216,19 @@ async function main(): Promise<void> {
     portfolio(sweepSide, MAX),
   );
   report("B. ALWAYS LONG (as first written)", portfolio(allLong, MAX));
+  const opposite = sigs.map((x) =>
+    tradeOf(
+      x,
+      x.sweep === "TOP" ? "LONG" : "SHORT",
+      paths.get(x.symbol)!,
+      TP,
+      SL,
+    ),
+  );
+  report(
+    "C. OPPOSITE: top sweep (shorts liquidated) -> LONG, bottom sweep (longs liquidated) -> SHORT",
+    portfolio(opposite, MAX),
+  );
   if (!argv.includes("--no-baseline")) baseline(hoursBy, paths);
 }
 

@@ -11,7 +11,9 @@
  *   3. entry at that candle's close, TP +1%, SL -1% (Johnny's numbers). Checked on 1-minute candles, SL first
  *      when both are hit in the same minute.
  *   Side: "sweep" reading = a top sweep -> SHORT, a bottom sweep -> LONG (the market turns after taking the stops);
- *         "long"  reading = both -> LONG (as first written). Both are reported.
+ *         "long"  reading = both -> LONG (as first written);
+ *         "opposite" = a top sweep -> LONG, a bottom sweep -> SHORT (the move goes on after the stops are taken).
+ *         All three are reported.
  *   4. portfolio: at most `maxOpen` trades open at the same time across all coins (Johnny: 2); a signal that comes
  *      while that many are open is skipped, good or bad.
  */
