@@ -3,7 +3,7 @@
  */
 import * as assert from "assert";
 import type { MinuteRow } from "../src/research/oi-accumulation";
-import { liqBetween, stories } from "../src/research/oi-story";
+import { liqBetween, smallCandles, stories } from "../src/research/oi-story";
 
 let passed = 0,
   failed = 0;
@@ -157,6 +157,29 @@ scenario(
     assert.deepStrictEqual(
       [l.longUsd, l.shortUsd, Math.round(l.longCoin), Math.round(l.shortCoin)],
       [1000, 500, 10, 5],
+    );
+  },
+);
+
+scenario(
+  "15m candles of an hour: price, OI change and real liquidations per quarter",
+  () => {
+    const rows = minutes([[100, 104, 1000, 1040, 800, 0]]); // liquidation at minute 30 -> 3rd quarter
+    const q = smallCandles(rows, T0, T0 + H, 15 * M);
+    assert.strictEqual(q.length, 4);
+    assert.deepStrictEqual(
+      q.map((c) => [c.open, c.close]),
+      [
+        [100, 101],
+        [101, 102],
+        [102, 103],
+        [103, 104],
+      ],
+    );
+    assert.ok(Math.abs(q[0].oiTo - q[0].oiFrom - 10) < 1e-9);
+    assert.deepStrictEqual(
+      q.map((c) => c.liq.longUsd),
+      [0, 0, 800, 0],
     );
   },
 );

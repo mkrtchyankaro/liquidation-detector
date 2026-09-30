@@ -214,3 +214,48 @@ export function stories(
   }
   return out;
 }
+
+/** small candles (15m / 5m) between from and to: price, OI change, real liquidations and the OI split */
+export interface SmallCandle {
+  t: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  oiFrom: number;
+  oiTo: number;
+  liq: Liq;
+  flow: MvFlow;
+}
+export function smallCandles(
+  rows: readonly MinuteRow[],
+  from: number,
+  to: number,
+  step: number,
+): SmallCandle[] {
+  const bars = mvBars(rows),
+    out: SmallCandle[] = [];
+  for (let t0 = from; t0 < to; t0 += step) {
+    const m = rows.filter(
+      (r) => r.ts >= t0 && r.ts < t0 + step && r.close! > 0,
+    );
+    if (!m.length) continue;
+    const withOi = m.filter((r) => r.oiLast! > 0);
+    out.push({
+      t: t0,
+      open: m[0].open ?? m[0].close!,
+      high: Math.max(...m.map((r) => r.high ?? r.close!)),
+      low: Math.min(...m.map((r) => r.low ?? r.close!)),
+      close: m[m.length - 1].close!,
+      oiFrom: withOi.length
+        ? withOi[0].oiFirst! > 0
+          ? withOi[0].oiFirst!
+          : withOi[0].oiLast!
+        : NaN,
+      oiTo: withOi.length ? withOi[withOi.length - 1].oiLast! : NaN,
+      liq: liqBetween(m, t0, t0 + step),
+      flow: flowBetween(bars, t0, t0 + step),
+    });
+  }
+  return out;
+}

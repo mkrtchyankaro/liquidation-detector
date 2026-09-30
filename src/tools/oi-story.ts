@@ -4,12 +4,15 @@
  *
  *   npx tsx src/tools/oi-story.ts                       (the bot's coins, last 7 days)
  *   npx tsx src/tools/oi-story.ts --coins ETH,SOL --days 3
+ *   npx tsx src/tools/oi-story.ts --coins ETH --days 3 --detail   (the OI drop in 15-minute candles + 1h after,
+ *                                                                  and its biggest-liquidation 15m split in 5-minute candles)
  * Rules: src/research/oi-story.ts (moves: src/research/oi-moves.ts -- no % thresholds).
  */
 import "dotenv/config";
 import * as fs from "fs";
 import { MongoClient } from "mongodb";
-import { stories, type Story } from "../research/oi-story";
+import { smallCandles, stories, type Story } from "../research/oi-story";
+import type { MinuteRow } from "../research/oi-accumulation";
 import { mongoMinuteLoader } from "../strategy/oa/oa-paper.service";
 
 const argv = process.argv.slice(2);
@@ -17,7 +20,8 @@ const arg = (n: string, d: string): string => {
   const i = argv.indexOf(`--${n}`);
   return i >= 0 ? argv[i + 1] : d;
 };
-const DAYS = Number(arg("days", "7"));
+const DAYS = Number(arg("days", "7")),
+  DETAIL = argv.includes("--detail");
 const H = 3_600_000,
   D = 24 * H;
 const t = (ms: number): string =>
@@ -61,6 +65,48 @@ function symbols(): string[] {
     "AVAXUSDT",
     "SUIUSDT",
   ];
+}
+
+function detail(s: Story, rows: readonly MinuteRow[]): void {
+  if (!s.drop) return;
+  const coin = s.symbol.replace(/USDT$/, ""),
+    M15 = 15 * 60_000,
+    M5 = 5 * 60_000;
+  const row = (
+    c: ReturnType<typeof smallCandles>[number],
+    mark: string,
+  ): string => {
+    const d = c.oiTo - c.oiFrom,
+      col = c.close >= c.open ? "green" : "red  ";
+    return `      ${mark}${t(c.t).slice(11)} ${col} O ${px(c.open)} H ${px(c.high)} L ${px(c.low)} C ${px(c.close)} | OI ${d >= 0 ? "+" : ""}${n0(d)} ${coin} | liq L ${usd(c.liq.longUsd)} (${n0(c.liq.longCoin)}) S ${usd(c.liq.shortUsd)} (${n0(c.liq.shortCoin)}) | out L ${n0(c.flow.longOut)} S ${n0(c.flow.shortOut)}`;
+  };
+  const q = smallCandles(rows, s.drop.from - H, s.drop.to + H, M15);
+  let big = -1,
+    bigLiq = 0;
+  q.forEach((c, i) => {
+    const x = c.liq.longUsd + c.liq.shortUsd;
+    if (c.t >= s.drop!.from && c.t < s.drop!.to && x > bigLiq) {
+      bigLiq = x;
+      big = i;
+    }
+  });
+  console.log(
+    `      15m candles: last hour of the accumulation | the OI drop (>) | 1h after   (${coin} amounts; * = biggest liquidation 15m)`,
+  );
+  q.forEach((c, i) =>
+    console.log(
+      row(
+        c,
+        i === big ? "*" : c.t >= s.drop!.from && c.t < s.drop!.to ? ">" : " ",
+      ),
+    ),
+  );
+  if (big >= 0) {
+    console.log(`      5m candles of the * 15m:`);
+    for (const c of smallCandles(rows, q[big].t, q[big].t + M15, M5))
+      console.log(row(c, " "));
+  }
+  console.log("");
 }
 
 function print(s: Story): void {
@@ -109,10 +155,12 @@ async function main(): Promise<void> {
   const until = Math.floor(Date.now() / H) * H,
     winFrom = until - DAYS * D;
   const all: Story[] = [];
+  const rowsBy = new Map<string, MinuteRow[]>();
   try {
     for (const sym of symbols()) {
       const rows = await load(sym, winFrom - 2 * D);
       const st = stories(sym, rows, until).filter((s) => s.acc.to > winFrom);
+      if (DETAIL) rowsBy.set(sym, rows);
       all.push(...st);
       process.stderr.write(
         `${sym}: ${rows.length} minutes, ${st.length} accumulations\n`,
@@ -125,7 +173,10 @@ async function main(): Promise<void> {
   console.log(
     `\n=== OI ACCUMULATION STORIES, last ${DAYS} days, ${t(winFrom)} .. ${t(until)} UTC -- our data: 1-minute OI + REAL liquidations ===\n`,
   );
-  for (const s of all) print(s);
+  for (const s of all) {
+    print(s);
+    if (DETAIL) detail(s, rowsBy.get(s.symbol)!);
+  }
 
   console.log(
     "=== SUMMARY: after the OI drop, where did the price go (median; 'up' = how many went up) ===",
