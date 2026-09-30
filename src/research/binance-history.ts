@@ -57,8 +57,8 @@ export async function oiSnapshots(symbol: string, from: number, to: number): Pro
 }
 
 export interface Kline { t: number; open: number; high: number; low: number; close: number }
-export async function klines(symbol: string, interval: "5m" | "15m" | "1h", from: number, to: number): Promise<Kline[]> {
-  const step = interval === "5m" ? 5 * 60_000 : interval === "15m" ? 15 * 60_000 : H;
+export async function klines(symbol: string, interval: "1m" | "5m" | "15m" | "1h", from: number, to: number): Promise<Kline[]> {
+  const step = interval === "1m" ? 60_000 : interval === "5m" ? 5 * 60_000 : interval === "15m" ? 15 * 60_000 : H;
   const out: Kline[] = [];
   for (let s = from; s < to;) {
     const r = await fapi.get<Array<[number, string, string, string, string]>>("/fapi/v1/klines", { params: { symbol, interval, startTime: s, endTime: to - 1, limit: 1500 } });
