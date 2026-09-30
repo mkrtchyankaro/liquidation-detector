@@ -18,6 +18,9 @@ import * as fs from "fs";
  *     "maxOpenPerUser": { "karo": 2, "artak": 2 }, // optional: at most N V9 trades open at once for
  *                              //   that user (all coins together); a new signal while N are open is
  *                              //   skipped for that user only. Users not listed: no limit.
+ *     "rrPerUser": { "karo": 1.5, "artak": 1.5 }, // optional: this user's TP in R (absent user = "rr")
+ *     "minStopPerUser": { "karo": 0.7 }, // optional: skip (silently) a signal whose SL is this % from the
+ *                              //   entry or closer -- tiny stops = fees + noise (absent user = no filter)
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
  *   }
  *
@@ -48,11 +51,15 @@ export interface V9Settings {
   timeStopHours: number | null;
   /** at most N open V9 trades per user (all symbols together); absent user = no limit */
   maxOpenPerUser: Map<string, number>;
+  /** per-user TP in R (absent user = rr) */
+  rrPerUser: Map<string, number>;
+  /** per-user filter: skip a signal whose SL is <= this % from the entry (absent user = no filter) */
+  minStopPerUser: Map<string, number>;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), frameOnlyUsers: new Set(), timeStopHours: null, maxOpenPerUser: new Map(), userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), frameOnlyUsers: new Set(), timeStopHours: null, maxOpenPerUser: new Map(), rrPerUser: new Map(), minStopPerUser: new Map(), userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -105,16 +112,21 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
   }
   const timeStopHours = v.timeStopHours === undefined || v.timeStopHours === null ? null : v.timeStopHours;
   if (timeStopHours !== null && (typeof timeStopHours !== "number" || !(timeStopHours >= 1) || timeStopHours > 240)) throw new Error(`"v9.timeStopHours" must be null (off) or a number of hours between 1 and 240`);
-  const maxOpenPerUser = new Map<string, number>();
-  if (v.maxOpenPerUser !== undefined && v.maxOpenPerUser !== null) {
-    if (typeof v.maxOpenPerUser !== "object" || Array.isArray(v.maxOpenPerUser)) throw new Error(`"v9.maxOpenPerUser" must be an object like {"karo":2,"artak":2}`);
-    for (const [userId, n] of Object.entries(v.maxOpenPerUser as Record<string, unknown>)) {
-      if (!knownUserIds.includes(userId)) throw new Error(`"v9.maxOpenPerUser" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`);
-      if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 50) throw new Error(`"v9.maxOpenPerUser.${userId}" must be a whole number between 1 and 50 (got ${JSON.stringify(n)})`);
-      maxOpenPerUser.set(userId, n);
+  const perUser = (key: string, ok: (n: number) => boolean, what: string, example: string): Map<string, number> => {
+    const out = new Map<string, number>(), raw = v[key];
+    if (raw === undefined || raw === null) return out;
+    if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`"v9.${key}" must be an object like ${example}`);
+    for (const [userId, n] of Object.entries(raw as Record<string, unknown>)) {
+      if (!knownUserIds.includes(userId)) throw new Error(`"v9.${key}" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`);
+      if (typeof n !== "number" || !Number.isFinite(n) || !ok(n)) throw new Error(`"v9.${key}.${userId}" must be ${what} (got ${JSON.stringify(n)})`);
+      out.set(userId, n);
     }
-  }
-  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, frameOnlyUsers, timeStopHours, maxOpenPerUser, userModes };
+    return out;
+  };
+  const maxOpenPerUser = perUser("maxOpenPerUser", (n) => Number.isInteger(n) && n >= 1 && n <= 50, "a whole number between 1 and 50", `{"karo":2,"artak":2}`);
+  const rrPerUser = perUser("rrPerUser", (n) => n >= 0.5 && n <= 20, "a number of R between 0.5 and 20", `{"karo":1.5}`);
+  const minStopPerUser = perUser("minStopPerUser", (n) => n >= 0 && n <= 10, "a percent between 0 and 10", `{"karo":0.7}`);
+  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, frameOnlyUsers, timeStopHours, maxOpenPerUser, rrPerUser, minStopPerUser, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {

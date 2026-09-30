@@ -36,6 +36,7 @@ export interface V9UserRef {
   telegram: { sendMessage(text: string): Promise<unknown> } | null;
 }
 
+const fmtPer = (m: Map<string, number> | undefined, unit = ""): string => [...(m ?? new Map<string, number>())].map(([k, n]) => `${k}:${n}${unit}`).join(",") || "none";
 const REAL_MONITOR_MS = 15_000;
 const EVAL_OFFSET_MS = 10_000; // run at hh:mm:10 -- DB batches of the previous minute are flushed by then
 const WARMUP_STEP_MS = 5 * MINUTE_MS;
@@ -84,7 +85,7 @@ export class V9LiveService {
       this.engines.get(t.symbol)?.markTraded(t.side, t.createdAt);
     }
     this.ready = true;
-    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} frameOnly=${[...(this.settings.frameOnlyUsers ?? [])].join("+") || "none"} frameCheck=${this.frameSource ? "on" : "off"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} maxOpen=${[...(this.settings.maxOpenPerUser ?? new Map<string, number>())].map(([k, n]) => `${k}:${n}`).join(",") || "none"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
+    log.warn(`[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} frameOnly=${[...(this.settings.frameOnlyUsers ?? [])].join("+") || "none"} frameCheck=${this.frameSource ? "on" : "off"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} maxOpen=${fmtPer(this.settings.maxOpenPerUser)} rrPerUser=${fmtPer(this.settings.rrPerUser)} minStop=${fmtPer(this.settings.minStopPerUser, "%")} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users().map((u) => `${u.userId}:${u.mode}`).join(",")}`);
     this.scheduleNextMinute();
     this.monitorTimer = setInterval(() => void this.monitorReal(), REAL_MONITOR_MS);
   }
@@ -169,10 +170,11 @@ export class V9LiveService {
   private async openTrade(u: V9UserRef, d: V9Decision, signalId: string): Promise<void> {
     const side: Victim = d.tradeSide;
     const long = side === "LONG";
+    const rr = this.settings.rrPerUser?.get(u.userId) ?? this.settings.rr; // this user's TP in R
     const base: V9TradeDoc = {
       tradeId: `${signalId}:${u.userId}`, signalId, userId: u.userId, mode: u.mode, symbol: d.symbol, side,
       state: "OPEN", createdAt: this.now(), entryPrice: null, slPrice: d.stopPrice, tpPrice: null, quantity: null,
-      plannedRiskUsd: u.riskUsd, actualRiskUsd: null, rr: this.settings.rr, binance: null,
+      plannedRiskUsd: u.riskUsd, actualRiskUsd: null, rr, binance: null,
       closedAt: null, exitPrice: null, pnlUsd: null, pnlR: null, feesUsd: null, closeReason: null, failureReason: null,
       closeAttempts: 0, entryInProgress: true,
     };
@@ -198,6 +200,19 @@ export class V9LiveService {
       if (!(await this.repo.insertTrade({ ...base, state: "SKIPPED", failureReason: reason, entryInProgress: false }))) return;
       log.warn({ userId: u.userId, signalId, reason }, "[V9_TRADE_SKIPPED_FRAME]");
       return; // silent: a filtered user only hears about the signals of its own strategy (Johnny, Sep 28)
+    }
+
+    // MIN STOP (per user, Johnny Sep 30): a signal whose SL is this % from the entry or closer is skipped -- silent,
+    // like the other strategy filters; checked before MAX OPEN so a filtered signal never takes a slot.
+    const minStop = this.settings.minStopPerUser?.get(u.userId);
+    if (minStop !== undefined) {
+      const slPct = (100 * Math.abs(d.referencePrice - d.stopPrice)) / d.referencePrice;
+      if (!(slPct > minStop)) {
+        const reason = `MIN_STOP: SL ${slPct.toFixed(2)}% from the entry <= ${minStop}%`;
+        if (!(await this.repo.insertTrade({ ...base, state: "SKIPPED", failureReason: reason, entryInProgress: false }))) return;
+        log.warn({ userId: u.userId, signalId, reason }, "[V9_TRADE_SKIPPED_MIN_STOP]");
+        return;
+      }
     }
 
     // MAX OPEN (per user, Johnny Sep 30): at most N V9 trades open at once for this user, all coins together.
@@ -229,7 +244,7 @@ export class V9LiveService {
       const risk = long ? entry - d.stopPrice : d.stopPrice - entry;
       if (!(entry > 0) || !(risk > 0)) return fail(`price ${entry} already beyond SL ${d.stopPrice}`);
       const qty = u.riskUsd / risk;
-      const tp = long ? entry + this.settings.rr * risk : entry - this.settings.rr * risk;
+      const tp = long ? entry + rr * risk : entry - rr * risk;
       const t: V9TradeDoc = { ...base, entryPrice: entry, tpPrice: tp, quantity: qty, actualRiskUsd: u.riskUsd, entryInProgress: false };
       await this.repo.updateTrade(base.tradeId, { entryPrice: entry, tpPrice: tp, quantity: qty, actualRiskUsd: u.riskUsd, entryInProgress: false });
       await this.notify(u, formatV9Entry(d, t));
@@ -248,7 +263,7 @@ export class V9LiveService {
     const out = await runEntrySequence(rest, {
       userId: u.userId, globalSignalId: signalId, symbol: d.symbol, side,
       quantity: riskEst > 0 ? u.riskUsd / riskEst : 0, entryPriceEstimate: d.referencePrice,
-      slPrice: d.stopPrice, initialTpPrice: d.referencePrice, tpRMultiple: this.settings.rr,
+      slPrice: d.stopPrice, initialTpPrice: d.referencePrice, tpRMultiple: rr,
       riskUsd: u.riskUsd, leverage: u.leverage, marginMode: u.marginMode,
     });
     if (out.outcome === "ENTRY_FAILED") return fail(out.reason);

@@ -18,6 +18,8 @@
     "timeStopHours": 24,
     "frameOnlyUsers": ["karo"],
     "maxOpenPerUser": { "karo": 2 },
+    "rrPerUser": { "karo": 1.5 },
+    "minStopPerUser": { "karo": 0.7 },
     "userModes": { "main": "PAPER", "karo": "PAPER" }
   },
   "zz": { "enabled": false },

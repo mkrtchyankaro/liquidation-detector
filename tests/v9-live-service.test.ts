@@ -347,6 +347,30 @@ async function run(): Promise<void> {
     assert.strictEqual(of("karo").filter((t) => t.state === "OPEN").length, 2);
   });
 
+  await scenario("PER USER: karo TP 1.5R, main keeps 2.2R; karo's min stop skips a signal with a closer SL silently (no slot, no Telegram)", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const kt = tg();
+    const users: V9UserRef[] = [
+      { userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null },
+      { userId: "karo", mode: "PAPER", riskUsd: 1, binanceRest: null, telegram: kt },
+    ];
+    const svc = service(users, repo, now, { rrPerUser: new Map([["karo", 1.5]]), minStopPerUser: new Map([["karo", 0.7]]), maxOpenPerUser: new Map([["karo", 1]]) });
+    await svc.handleDecision(decision({ symbol: "ETHUSDT", stopPrice: 0.0995 })); // SL 0.5% -> karo skips
+    const karoEth = [...repo.trades.values()].find((t) => t.userId === "karo" && t.symbol === "ETHUSDT")!;
+    assert.strictEqual(karoEth.state, "SKIPPED");
+    assert.match(karoEth.failureReason!, /^MIN_STOP: SL 0\.50%/);
+    assert.strictEqual(kt.msgs.length, 0, "min-stop skip is silent");
+    await svc.handleDecision(decision()); // SL 1% -> taken, and the skipped ETH did not use karo's only slot
+    const karo = [...repo.trades.values()].find((t) => t.userId === "karo" && t.symbol === "DOGEUSDT")!;
+    const main = [...repo.trades.values()].find((t) => t.userId === "main" && t.symbol === "DOGEUSDT")!;
+    assert.strictEqual(karo.state, "OPEN");
+    assert.strictEqual(karo.rr, 1.5);
+    assert.ok(Math.abs(karo.tpPrice! - 0.1015) < 1e-12, `karo TP ${karo.tpPrice}`);
+    assert.strictEqual(main.rr, 2.2);
+    assert.ok(Math.abs(main.tpPrice! - 0.1022) < 1e-12);
+    assert.ok(kt.msgs[0].includes("RR 1.5"));
+  });
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }
