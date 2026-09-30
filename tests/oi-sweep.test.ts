@@ -38,13 +38,17 @@ const k = (open: number, high: number, low: number, close: number): MvHour => ({
 });
 
 scenario(
-  "sweep: above the previous high and back below it, long upper wick = TOP; mirror = BOTTOM; else none",
+  "sweep inside the candle: the longer wick, longer than the body = TOP / BOTTOM; a plain candle = none",
   () => {
     const prev = k(100, 101, 99, 100.5);
-    assert.strictEqual(sweepOf(k(100.5, 102, 100.2, 100.4), prev), "TOP");
+    assert.strictEqual(sweepOf(k(100.5, 102, 100.2, 100.4), prev), "TOP"); // upper wick 1.5 > lower 0.2, > body 0.1
     assert.strictEqual(sweepOf(k(100.2, 100.6, 98, 100.4), prev), "BOTTOM");
-    assert.strictEqual(sweepOf(k(100.5, 102, 100.2, 101.5), prev), null); // closed above the old high -> no sweep
-    assert.strictEqual(sweepOf(k(100.5, 100.9, 99.5, 100.6), prev), null); // nothing taken
+    assert.strictEqual(sweepOf(k(100, 101.2, 99.9, 101), prev), null); // body 1 > wicks -> just a move
+    assert.strictEqual(sweepOf(k(100.5, 100.9, 99.5, 100.6), prev), "BOTTOM"); // inside the previous range still counts now
+    assert.strictEqual(
+      sweepOf(k(100.5, 100.9, 99.5, 100.6), prev, "prev"),
+      null,
+    ); // the older reading needed the previous low taken
   },
 );
 
