@@ -10,7 +10,6 @@
  *      (trade against the accumulation); the other way -> CONTINUATION (trade with the accumulation).
  * 4. CONFIRMATION: the next 1h candle has the trade's colour and closes beyond the cleanup hour's close.
  *    Entry = its close. No SL / TP here: we only measure what the price did afterwards.
- * After an event the counting restarts from the cleanup hour's OI.
  */
 export interface CuHour {
   t: number;
@@ -86,30 +85,35 @@ function after(
   return res;
 }
 
-/** every accumulation (>= minAccPct) that was fully cleaned, oldest first */
+/**
+ * every accumulation (>= minAccPct) that was fully cleaned, oldest first.
+ * A peak = an hour whose OI has not been exceeded since. Its accumulation start = the lowest OI between the
+ * last HIGHER OI before it and the peak (at most maxAccH hours back) -- so the result does not depend on where
+ * the data window starts. The peak is fully cleaned at the first hour whose OI is back at that start or lower
+ * (within maxAccH hours after the peak). If several peaks are cleaned in the same hour, the biggest one counts.
+ */
 export function findCleanups(
   h: readonly CuHour[],
   minAccPct: number,
+  maxAccH = 48,
 ): CuEvent[] {
   const out: CuEvent[] = [];
-  let iL = -1,
-    iP = -1;
+  const stack: Array<{ p: number; l: number; used: boolean }> = []; // open peaks, OI strictly decreasing
   for (let i = 0; i < h.length; i++) {
     if (!(h[i].oi > 0)) continue;
-    if (iL < 0) {
-      iL = iP = i;
-      continue;
+    // 1. cleanups in this hour
+    let best: { p: number; l: number; acc: number } | null = null;
+    for (const e of stack) {
+      if (e.used || i - e.p > maxAccH || e.l === e.p || h[i].oi > h[e.l].oi)
+        continue;
+      e.used = true;
+      const acc = pct(h[e.l].oi, h[e.p].oi);
+      if (acc >= minAccPct && (!best || acc > best.acc))
+        best = { p: e.p, l: e.l, acc };
     }
-    if (h[i].oi > h[iP].oi) {
-      iP = i;
-      continue;
-    }
-    if (h[i].oi > h[iL].oi) continue;
-    // back at (or below) the start
-    const acc = pct(h[iL].oi, h[iP].oi);
-    if (iP > iL && acc >= minAccPct) {
-      const L = h[iL],
-        P = h[iP],
+    if (best) {
+      const L = h[best.l],
+        P = h[best.p],
         C = h[i];
       const accDir = P.close >= L.close ? "UP" : "DOWN";
       const cleanUp = C.close >= P.close;
@@ -139,7 +143,7 @@ export function findCleanups(
         oiStart: L.oi,
         oiPeak: P.oi,
         oiClean: C.oi,
-        accPct: acc,
+        accPct: best.acc,
         cleanedPct: (100 * (P.oi - C.oi)) / (P.oi - L.oi),
         priceStart: L.close,
         pricePeak: P.close,
@@ -153,7 +157,14 @@ export function findCleanups(
         after: confirmed ? after(h, i + 2, side, k.close) : null,
       });
     }
-    iL = iP = i; // restart from here
+    // 2. this hour as a new peak
+    while (stack.length && h[stack[stack.length - 1].p].oi <= h[i].oi)
+      stack.pop();
+    const higher = stack.length ? stack[stack.length - 1].p : -1;
+    let l = i;
+    for (let j = i - 1; j > higher && j >= i - maxAccH; j--)
+      if (h[j].oi > 0 && h[j].oi < h[l].oi) l = j;
+    stack.push({ p: i, l, used: false });
   }
   return out;
 }

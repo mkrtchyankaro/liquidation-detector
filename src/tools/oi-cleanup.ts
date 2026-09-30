@@ -7,6 +7,7 @@
  *   npx tsx src/tools/oi-cleanup.ts                                   (ETH, 180 days, accumulation >= 1%)
  *   npx tsx src/tools/oi-cleanup.ts --coins ETH,BTC,SOL --days 30
  *   npx tsx src/tools/oi-cleanup.ts --coins SUI --days 365 --minacc 2 --all   (--all: also the unconfirmed ones)
+ *   --maxh 48: the accumulation is measured over at most 48h before its peak, and must be cleaned within 48h
  * Rules: src/research/oi-cleanup.ts. Times are UTC, candle OPEN times (as on the Binance chart).
  */
 import "dotenv/config";
@@ -34,6 +35,7 @@ const SYMBOLS = arg("coins", arg("symbols", arg("symbol", "ETH")))
 let SYMBOL = SYMBOLS[0];
 const DAYS = Number(arg("days", "180")),
   MIN_ACC = Number(arg("minacc", "1")),
+  MAX_H = Number(arg("maxh", "48")),
   SHOW_ALL = argv.includes("--all");
 const H = 3_600_000,
   D = 24 * H;
@@ -187,11 +189,11 @@ async function runSymbol(to: number, from: number): Promise<CuEvent[]> {
   process.stderr.write(
     `${SYMBOL}: ${hours.length} 1h candles ${t(hours[0]?.t ?? null)} .. ${t(hours.at(-1)?.t ?? null)} UTC, OI on ${withOi}\n`,
   );
-  const ev = findCleanups(hours, MIN_ACC);
+  const ev = findCleanups(hours, MIN_ACC, MAX_H);
   const show = SHOW_ALL ? ev : ev.filter((e) => e.confirmed);
 
   console.log(
-    `\n=== ${SYMBOL} OI accumulation -> full cleanup, 1h, last ${DAYS} days, accumulation >= ${MIN_ACC}%, times UTC (candle open) ===`,
+    `\n=== ${SYMBOL} OI accumulation -> full cleanup, 1h, last ${DAYS} days, accumulation >= ${MIN_ACC}% built within ${MAX_H}h and cleaned within ${MAX_H}h, times UTC (candle open) ===`,
   );
   console.log(
     "TYPE          SIDE   OI growth: from -> peak (OI%, price%)            cleaned at (price% since peak, cleaned%)   confirm candle     entry      | 24h best/worst   48h best/worst   +1% / +1.5% / +2% after (hours, worst before)",

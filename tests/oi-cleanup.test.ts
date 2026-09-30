@@ -152,5 +152,57 @@ scenario("hours without OI are skipped, never counted as a cleanup", () => {
   assert.strictEqual(findCleanups(h, 1).length, 0);
 });
 
+scenario(
+  "the result does not depend on where the data starts: an old low (> maxAccH back) does not swallow a later accumulation",
+  () => {
+    const body: Array<[number, number]> = [
+      [100, 1000],
+      [99, 1010],
+      [98, 1020],
+      [97, 1030],
+      [96, 1015],
+      [95, 995],
+      [96, 994],
+      [98, 994],
+      [99, 994],
+    ];
+    // long ago OI was far lower (900), then it sat at 1000 for 60 hours before the accumulation
+    const prefix: Array<[number, number]> = [
+      ...Array.from({ length: 30 }, (): [number, number] => [100, 900]),
+      ...Array.from({ length: 60 }, (): [number, number] => [100, 1000]),
+    ];
+    const a = findCleanups(hours(body), 1),
+      b = findCleanups(hours([...prefix, ...body]), 1);
+    assert.strictEqual(b.length, 1);
+    assert.deepStrictEqual(
+      [b[0].kind, b[0].side, b[0].peakTs - b[0].startTs, b[0].entry],
+      [a[0].kind, a[0].side, a[0].peakTs - a[0].startTs, a[0].entry],
+    );
+    assert.strictEqual(
+      findCleanups(hours([...prefix, ...body]), 1, 168).length,
+      0,
+    ); // with a 7-day window the old low counts
+  },
+);
+
+scenario(
+  "when two accumulations are cleaned in the same hour the bigger one is reported once",
+  () => {
+    const h = hours([
+      [100, 1000],
+      [101, 1040],
+      [100, 1020],
+      [101, 1030],
+      [99, 990],
+      [98, 990],
+      [97, 990],
+    ]);
+    const e = findCleanups(h, 1);
+    assert.strictEqual(e.length, 1);
+    assert.strictEqual(e[0].peakTs, T0 + H);
+    assert.strictEqual(e[0].startTs, T0);
+  },
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exitCode = 1;
