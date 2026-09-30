@@ -15,6 +15,9 @@ import * as fs from "fs";
  *                              //   edge of the 4h frame (bottom zone for BUY, top zone for SELL)
  *     "lateSlMinPct": 0.6,     // optional: use the OITURN stop only if >= 0.6% from the entry
  *                              //   (closer = noise -> the stop stays at the episode extreme)
+ *     "maxOpenPerUser": { "karo": 2, "artak": 2 }, // optional: at most N V9 trades open at once for
+ *                              //   that user (all coins together); a new signal while N are open is
+ *                              //   skipped for that user only. Users not listed: no limit.
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
  *   }
  *
@@ -43,11 +46,13 @@ export interface V9Settings {
   frameOnlyUsers: Set<string>;
   /** Close a still-open trade at market after this many hours (null = off). */
   timeStopHours: number | null;
+  /** at most N open V9 trades per user (all symbols together); absent user = no limit */
+  maxOpenPerUser: Map<string, number>;
   userModes: Map<string, V9UserMode>;
 }
 
 export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), frameOnlyUsers: new Set(), timeStopHours: null, userModes: new Map() };
+  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), frameOnlyUsers: new Set(), timeStopHours: null, maxOpenPerUser: new Map(), userModes: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
@@ -100,7 +105,16 @@ export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], c
   }
   const timeStopHours = v.timeStopHours === undefined || v.timeStopHours === null ? null : v.timeStopHours;
   if (timeStopHours !== null && (typeof timeStopHours !== "number" || !(timeStopHours >= 1) || timeStopHours > 240)) throw new Error(`"v9.timeStopHours" must be null (off) or a number of hours between 1 and 240`);
-  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, frameOnlyUsers, timeStopHours, userModes };
+  const maxOpenPerUser = new Map<string, number>();
+  if (v.maxOpenPerUser !== undefined && v.maxOpenPerUser !== null) {
+    if (typeof v.maxOpenPerUser !== "object" || Array.isArray(v.maxOpenPerUser)) throw new Error(`"v9.maxOpenPerUser" must be an object like {"karo":2,"artak":2}`);
+    for (const [userId, n] of Object.entries(v.maxOpenPerUser as Record<string, unknown>)) {
+      if (!knownUserIds.includes(userId)) throw new Error(`"v9.maxOpenPerUser" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`);
+      if (typeof n !== "number" || !Number.isInteger(n) || n < 1 || n > 50) throw new Error(`"v9.maxOpenPerUser.${userId}" must be a whole number between 1 and 50 (got ${JSON.stringify(n)})`);
+      maxOpenPerUser.set(userId, n);
+    }
+  }
+  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, frameOnlyUsers, timeStopHours, maxOpenPerUser, userModes };
 }
 
 export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {

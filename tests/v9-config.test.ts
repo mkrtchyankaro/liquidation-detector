@@ -24,6 +24,17 @@ scenario("valid block parses; symbols normalised; unlisted users are OFF", () =>
   assert.strictEqual(s.userModes.get("karo"), "REAL");
   assert.strictEqual(s.userModes.get("artak"), undefined);
 });
+scenario("maxOpenPerUser: absent = no limit; {karo:2} parsed; unknown user / bad number fail fast", () => {
+  assert.strictEqual(parseV9Settings(ok, users, syms).maxOpenPerUser.size, 0);
+  const s = parseV9Settings({ ...ok, maxOpenPerUser: { karo: 2, artak: 2 } }, users, syms);
+  assert.strictEqual(s.maxOpenPerUser.get("karo"), 2);
+  assert.strictEqual(s.maxOpenPerUser.get("main"), undefined);
+  assert.throws(() => parseV9Settings({ ...ok, maxOpenPerUser: { bob: 2 } }, users, syms), /unknown user/);
+  assert.throws(() => parseV9Settings({ ...ok, maxOpenPerUser: { karo: 0 } }, users, syms), /whole number/);
+  assert.throws(() => parseV9Settings({ ...ok, maxOpenPerUser: { karo: 1.5 } }, users, syms), /whole number/);
+  assert.throws(() => parseV9Settings({ ...ok, maxOpenPerUser: { karo: "2" } }, users, syms), /whole number/);
+  assert.throws(() => parseV9Settings({ ...ok, maxOpenPerUser: [2] }, users, syms), /must be an object/);
+});
 scenario("mode typo fails fast", () => assert.throws(() => parseV9Settings({ ...ok, userModes: { karo: "real" } }, users, syms), /must be "OFF", "PAPER" or "REAL"/));
 scenario("unknown user fails fast", () => assert.throws(() => parseV9Settings({ ...ok, userModes: { bob: "PAPER" } }, users, syms), /unknown user/));
 scenario("symbol without collected data fails fast", () => assert.throws(() => parseV9Settings({ ...ok, symbols: ["XRPUSDT"] }, users, syms), /does not collect data/));
