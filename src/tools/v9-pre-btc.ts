@@ -137,11 +137,44 @@ async function main(): Promise<void> {
       rows.filter((x) => !x.p.byBtc),
     );
     grp("all                                  ", rows);
+    // Johnny's marks (Oct 1): ✅ = BTC brought it and we trade against that push, or the coin came alone and we trade
+    // with it; ⚠️ = the other two cases (what "moveFilterUsers" skips)
+    const good = (x: (typeof rows)[number]): boolean =>
+      x.p.byBtc ? x.p.btcPart < 0 : x.p.own > 0;
+    console.log(
+      "\n   by case (who brought the coin here · which way · our trade) -- what each moveBlock entry would cut:",
+    );
+    const sideOf = (x: (typeof rows)[number]): string => x.t.side;
+    const upOf = (x: (typeof rows)[number]): boolean =>
+      (x.t.side === "LONG" ? 1 : -1) * (x.p.byBtc ? x.p.btcPart : x.p.own) > 0;
+    const caseOf = (x: (typeof rows)[number]): string =>
+      `${x.p.byBtc ? "BTC" : "COIN"}_${upOf(x) ? "UP" : "DOWN"}_${sideOf(x)}`;
+    for (const c of [
+      "BTC_UP_LONG",
+      "BTC_DOWN_SHORT",
+      "COIN_UP_SHORT",
+      "COIN_DOWN_LONG",
+      "BTC_DOWN_LONG",
+      "BTC_UP_SHORT",
+      "COIN_UP_LONG",
+      "COIN_DOWN_SHORT",
+    ]) {
+      grp(
+        `${c.startsWith("BTC_UP_L") || c.startsWith("BTC_DOWN_S") || c === "COIN_UP_SHORT" || c === "COIN_DOWN_LONG" ? "⚠️" : "✅"} ${c.padEnd(35)}`,
+        rows.filter((x) => caseOf(x) === c),
+      );
+    }
+    console.log("");
+    grp("✅ (kept by the MOVE filter)          ", rows.filter(good));
+    grp(
+      "⚠️ (skipped by the MOVE filter)       ",
+      rows.filter((x) => !good(x)),
+    );
     if (argv.includes("--list")) {
       console.log("");
       for (const x of rows)
         console.log(
-          `     ${utc(x.t.createdAt)} ${x.t.symbol.padEnd(9)} ${x.t.side.padEnd(5)} ${String(x.p.minutes).padStart(4)}m beta ${x.p.beta.toFixed(2)} coin ${sp(x.p.coinPct).padStart(7)} BTC ${sp(x.p.btcPct).padStart(7)} -> BTC part ${sp(x.p.btcPart).padStart(7)} own ${sp(x.p.own).padStart(7)} ${x.p.byBtc ? "BTC " : "COIN"} -> ${x.res.status} ${sR(x.res.r)}`,
+          `     ${utc(x.t.createdAt)} ${x.t.symbol.padEnd(9)} ${x.t.side.padEnd(5)} ${String(x.p.minutes).padStart(4)}m beta ${x.p.beta.toFixed(2)} coin ${sp(x.p.coinPct).padStart(7)} BTC ${sp(x.p.btcPct).padStart(7)} -> BTC part ${sp(x.p.btcPart).padStart(7)} own ${sp(x.p.own).padStart(7)} ${good(x) ? "✅" : "⚠️"} ${caseOf(x).padEnd(15)} -> ${x.res.status} ${sR(x.res.r)}`,
         );
     }
   } finally {

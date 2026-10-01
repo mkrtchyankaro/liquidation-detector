@@ -51,6 +51,11 @@ export function formatV9Entry(d: V9Decision, t: V9TradeDoc): string {
     f = d.features;
   const lines = [
     `🔵 V9 ${d.symbol} · ${t.side === "LONG" ? "LONG (BUY)" : "SHORT (SELL)"} · ${t.mode}`,
+    ...(d.btcCheck
+      ? [
+          `${d.btcCheck.good ? "✅" : "⚠️"} ${d.btcCheck.byBtc ? "BTC" : d.symbol.replace(/USDT$/, "")} ${d.btcCheck.up ? "⬆️" : "⬇️"} · ${t.side}`,
+        ]
+      : []),
     SEP,
     `📍 ENTRY · ${utc(t.createdAt)}`,
     `🆔 ${t.signalId}`,

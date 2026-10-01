@@ -2,7 +2,7 @@ import type { V9FrameInfo } from "./v9-frame-core";
 import type { Collection, Db } from "mongodb";
 import type { Victim } from "./v9-core";
 import type { V9UserMode } from "./v9-config";
-import type { V9EpisodeSnapshot } from "./v9-causal-engine";
+import type { V9Decision, V9EpisodeSnapshot } from "./v9-causal-engine";
 import { childLogger } from "../../infrastructure/logging/logger";
 
 const log = childLogger({ mod: "v9-repo" });
@@ -40,6 +40,7 @@ export interface V9DecisionDoc {
   } | null;
   /** The 4h frame check (tradable decisions, from Sep 28). */
   frame?: V9FrameInfo | null;
+  btcCheck?: V9Decision["btcCheck"];
   createdAt: Date;
 }
 

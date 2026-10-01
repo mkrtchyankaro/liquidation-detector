@@ -24,6 +24,11 @@ import * as fs from "fs";
  *     "profitLock": { "atR": 1.5, "toR": 1.5 }, // optional: when the price reaches +1.5R the SL is moved
  *                              //   to +1.5R (toR optional, default = atR, must be <= atR); the TP stays at
  *                              //   the user's rr. Only for trades whose rr is above atR. Absent = off.
+ *     "moveFilterUsers": ["karo"], // optional: these users skip ALL four ⚠️ cases below
+ *     "moveBlock": { "karo": ["COIN_UP_SHORT"] }, // optional, per user: skip only the chosen cases -- who brought
+ *                              //   the coin here (BTC / COIN), which way (UP / DOWN), our trade (LONG / SHORT):
+ *                              //   ⚠️ BTC_UP_LONG, BTC_DOWN_SHORT, COIN_UP_SHORT, COIN_DOWN_LONG
+ *                              //   ✅ BTC_DOWN_LONG, BTC_UP_SHORT, COIN_UP_LONG, COIN_DOWN_SHORT
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
  *   }
  *
@@ -31,6 +36,23 @@ import * as fs from "fs";
  * clear message (a typo must never silently arm or disarm real trading).
  * A user not listed in userModes is OFF for V9.
  */
+/** who brought the coin to the signal level, which way, and our trade (Johnny, Oct 1). ⚠️ first, then ✅. */
+export const MOVE_CASES = [
+  "BTC_UP_LONG",
+  "BTC_DOWN_SHORT",
+  "COIN_UP_SHORT",
+  "COIN_DOWN_LONG",
+  "BTC_DOWN_LONG",
+  "BTC_UP_SHORT",
+  "COIN_UP_LONG",
+  "COIN_DOWN_SHORT",
+] as const;
+export const moveCase = (
+  byBtc: boolean,
+  up: boolean,
+  side: "LONG" | "SHORT",
+): string => `${byBtc ? "BTC" : "COIN"}_${up ? "UP" : "DOWN"}_${side}`;
+
 export type V9UserMode = "OFF" | "PAPER" | "REAL";
 
 export interface V9Settings {
@@ -50,6 +72,10 @@ export interface V9Settings {
   forcedOnlyUsers: Set<string>;
   /** Users who only take signals at the edge of the 4h frame (frame.verdict = IN_ZONE). */
   frameOnlyUsers: Set<string>;
+  /** users that skip ⚠️ signals (see btcCheck.good) */
+  moveFilterUsers: Set<string>;
+  /** per user: the move cases to skip, e.g. "COIN_UP_SHORT" (see MOVE_CASES) */
+  moveBlock: Map<string, Set<string>>;
   /** Close a still-open trade at market after this many hours (null = off). */
   timeStopHours: number | null;
   /** at most N open V9 trades per user (all symbols together); absent user = no limit */
@@ -77,6 +103,8 @@ export function parseV9Settings(
     lateSlMinPct: null,
     forcedOnlyUsers: new Set(),
     frameOnlyUsers: new Set(),
+    moveFilterUsers: new Set(),
+    moveBlock: new Map(),
     timeStopHours: null,
     maxOpenPerUser: new Map(),
     rrPerUser: new Map(),
@@ -195,6 +223,50 @@ export function parseV9Settings(
       frameOnlyUsers.add(id);
     }
   }
+  const moveFilterUsers = new Set<string>();
+  if (v.moveFilterUsers !== undefined) {
+    if (
+      !Array.isArray(v.moveFilterUsers) ||
+      !v.moveFilterUsers.every((x) => typeof x === "string")
+    )
+      throw new Error(
+        `"v9.moveFilterUsers" must be an array of user ids, e.g. ["karo","artak"]`,
+      );
+    for (const id of v.moveFilterUsers as string[]) {
+      if (!knownUserIds.includes(id))
+        throw new Error(
+          `"v9.moveFilterUsers" has unknown user "${id}" (known: ${knownUserIds.join(", ")})`,
+        );
+      moveFilterUsers.add(id);
+    }
+  }
+  const moveBlock = new Map<string, Set<string>>();
+  if (v.moveBlock !== undefined && v.moveBlock !== null) {
+    if (typeof v.moveBlock !== "object" || Array.isArray(v.moveBlock))
+      throw new Error(
+        `"v9.moveBlock" must be an object like {"karo":["COIN_UP_SHORT"]}`,
+      );
+    for (const [userId, list] of Object.entries(
+      v.moveBlock as Record<string, unknown>,
+    )) {
+      if (!knownUserIds.includes(userId))
+        throw new Error(
+          `"v9.moveBlock" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`,
+        );
+      if (
+        !Array.isArray(list) ||
+        !list.every(
+          (x) =>
+            typeof x === "string" &&
+            (MOVE_CASES as readonly string[]).includes(x),
+        )
+      )
+        throw new Error(
+          `"v9.moveBlock.${userId}" must be a list of: ${MOVE_CASES.join(", ")}`,
+        );
+      moveBlock.set(userId, new Set(list as string[]));
+    }
+  }
   const timeStopHours =
     v.timeStopHours === undefined || v.timeStopHours === null
       ? null
@@ -285,6 +357,8 @@ export function parseV9Settings(
     lateSlMinPct,
     forcedOnlyUsers,
     frameOnlyUsers,
+    moveFilterUsers,
+    moveBlock,
     timeStopHours,
     maxOpenPerUser,
     rrPerUser,

@@ -19,7 +19,7 @@ import {
   type V9Decision,
   type V9EngineSettings,
 } from "./v9-causal-engine";
-import type { V9Settings } from "./v9-config";
+import { moveCase, type V9Settings } from "./v9-config";
 import type { V9MongoFeed } from "./v9-feed";
 import type { V9DecisionDoc, V9Repository, V9TradeDoc } from "./v9-repository";
 import {
@@ -30,6 +30,7 @@ import {
 } from "./v9-telegram";
 import type { V9FrameSource } from "./v9-frame-source";
 import { estimateFeesUsd } from "./v9-fees";
+import { preMove } from "../../research/v9-own-move";
 
 const log = childLogger({ mod: "v9-live" });
 
@@ -126,7 +127,7 @@ export class V9LiveService {
     }
     this.ready = true;
     log.warn(
-      `[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} frameOnly=${[...(this.settings.frameOnlyUsers ?? [])].join("+") || "none"} frameCheck=${this.frameSource ? "on" : "off"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} maxOpen=${fmtPer(this.settings.maxOpenPerUser)} rrPerUser=${fmtPer(this.settings.rrPerUser)} minStop=${fmtPer(this.settings.minStopPerUser, "%")} profitLock=${this.settings.profitLock ? `at+${this.settings.profitLock.atR}R->SL+${this.settings.profitLock.toR}R` : "off"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users()
+      `[V9_READY] symbols=${[...this.engines.keys()].join(",")} rr=${this.settings.rr} minSl=${(this.engineSettings.minSlFraction * 100).toFixed(2)}% forcedOnly=${[...(this.settings.forcedOnlyUsers ?? [])].join("+") || "none"} frameOnly=${[...(this.settings.frameOnlyUsers ?? [])].join("+") || "none"} frameCheck=${this.frameSource ? "on" : "off"} timeStop=${this.settings.timeStopHours ? `${this.settings.timeStopHours}h` : "off"} maxOpen=${fmtPer(this.settings.maxOpenPerUser)} rrPerUser=${fmtPer(this.settings.rrPerUser)} minStop=${fmtPer(this.settings.minStopPerUser, "%")} moveFilter=${[...(this.settings.moveFilterUsers ?? [])].join("+") || "none"} moveBlock=${[...(this.settings.moveBlock ?? new Map<string, Set<string>>())].map(([k, v]) => `${k}:${[...v].join("+")}`).join(",") || "none"} profitLock=${this.settings.profitLock ? `at+${this.settings.profitLock.atR}R->SL+${this.settings.profitLock.toR}R` : "off"} lateSl=${this.engineSettings.lateSlPct === null ? "off" : this.engineSettings.lateSlPct === 0 ? "OITURN(always)" : `${this.engineSettings.lateSlPct}%`}${this.engineSettings.lateSlPct !== null && this.engineSettings.lateSlMinPct !== null ? `,min${this.engineSettings.lateSlMinPct}%` : ""} users=${this.users()
         .map((u) => `${u.userId}:${u.mode}`)
         .join(",")}`,
     );
@@ -235,6 +236,9 @@ export class V9LiveService {
         );
       }
     }
+    // Did BTC bring the coin here? (Johnny, Oct 1) -- information for the Telegram message only, never blocks.
+    if (d.tradable && d.symbol !== "BTCUSDT")
+      d = { ...d, btcCheck: this.btcCheckOf(d) };
     const doc: V9DecisionDoc = {
       signalId,
       symbol: d.symbol,
@@ -270,6 +274,7 @@ export class V9LiveService {
       missingMinutes: d.missingMinutes,
       quality: d.quality ?? null,
       frame: d.frame ?? null,
+      btcCheck: d.btcCheck ?? null,
       createdAt: new Date(),
     };
     await this.repo.insertDecision(doc);
@@ -296,6 +301,58 @@ export class V9LiveService {
         ),
       ),
     );
+  }
+
+  /** Over the episode (start -> the last closed minute): how much of the coin's move BTC explains, with the coin's
+   *  usual amplification of BTC from the 24h before the episode. Only data already in memory (past only). */
+  private btcCheckOf(d: V9Decision): V9Decision["btcCheck"] {
+    try {
+      const coinEng = this.engines.get(d.symbol),
+        btcEng = this.engines.get("BTCUSDT");
+      if (!coinEng || !btcEng) return null;
+      const from = d.episode.start - 25 * 3_600_000,
+        to = d.evaluatedAt - MINUTE_MS;
+      const bars = (e: V9CausalEngine) =>
+        e.store
+          .minuteRange(from, to)
+          .map((m) => ({ t: m.ts, high: m.high, low: m.low, close: m.close }));
+      const p = preMove(
+        {
+          id: "",
+          symbol: d.symbol,
+          side: d.tradeSide,
+          createdAt: to,
+          entry: d.referencePrice,
+          sl: d.stopPrice,
+        },
+        bars(coinEng),
+        bars(btcEng),
+        d.episode.start,
+        24,
+      );
+      if (!p) return null;
+      const sgn = d.tradeSide === "LONG" ? 1 : -1;
+      const moveInTradeDir = p.byBtc ? p.btcPart : p.own; // + = the move went the trade's way
+      return {
+        byBtc: p.byBtc,
+        coinPct: p.coinPct,
+        btcPct: p.btcPct,
+        btcPart: p.btcPart,
+        own: p.own,
+        beta: p.beta,
+        up: sgn * moveInTradeDir > 0,
+        good: p.byBtc ? moveInTradeDir < 0 : moveInTradeDir > 0,
+      };
+    } catch (err) {
+      log.warn(
+        {
+          symbol: d.symbol,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "[V9_BTC_CHECK_FAILED] -- no BTC line",
+      );
+      return null;
+    }
   }
 
   private async openTrade(
@@ -400,6 +457,35 @@ export class V9LiveService {
         "[V9_TRADE_SKIPPED_FRAME]",
       );
       return; // silent: a filtered user only hears about the signals of its own strategy (Johnny, Sep 28)
+    }
+
+    // MOVE filter (per user, Johnny Oct 1): skip ⚠️ signals -- BTC brought the coin here and we would trade WITH
+    // BTC's push, or the coin came here on its own and we would trade AGAINST it. Silent, like the other filters.
+    // moveBlock: only the cases chosen for this user (e.g. COIN_UP_SHORT).
+    const mcase = d.btcCheck
+      ? moveCase(d.btcCheck.byBtc, d.btcCheck.up, side)
+      : null;
+    if (
+      d.btcCheck &&
+      ((this.settings.moveFilterUsers?.has(u.userId) && !d.btcCheck.good) ||
+        (mcase !== null && this.settings.moveBlock?.get(u.userId)?.has(mcase)))
+    ) {
+      const c = d.btcCheck;
+      const reason = `MOVE_FILTER: ${mcase} -- ${c.byBtc ? "BTC" : d.symbol.replace(/USDT$/, "")} moved the coin ${c.up ? "up" : "down"} and the trade is ${side}`;
+      if (
+        !(await this.repo.insertTrade({
+          ...base,
+          state: "SKIPPED",
+          failureReason: reason,
+          entryInProgress: false,
+        }))
+      )
+        return;
+      log.warn(
+        { userId: u.userId, signalId, reason },
+        "[V9_TRADE_SKIPPED_MOVE]",
+      );
+      return;
     }
 
     // MIN STOP (per user, Johnny Sep 30): a signal whose SL is this % from the entry or closer is skipped -- silent,
