@@ -40,7 +40,7 @@ export function unzipFirst(buf: Buffer): string {
 }
 
 /** OI snapshots (coins) by timestamp, from `from` (a UTC day start) to `to` */
-export async function oiSnapshots(symbol: string, from: number, to: number): Promise<Map<number, number>> {
+export async function oiSnapshots(symbol: string, from: number, to: number, histPeriod: "1h" | "5m" = "1h"): Promise<Map<number, number>> {
   const m = new Map<number, number>(), dir = path.join("data", "metrics", symbol);
   fs.mkdirSync(dir, { recursive: true });
   let lastArchived = from - D;
@@ -62,8 +62,10 @@ export async function oiSnapshots(symbol: string, from: number, to: number): Pro
     process.stderr.write(`\r${symbol} OI archive ${day(d)}   `);
   }
   process.stderr.write("\n");
-  for (let s = Math.max(lastArchived + D, to - 29 * D); s < to; s += 400 * H) {
-    const r = await retry(`${symbol} OI hist`, () => fapi.get<Array<{ sumOpenInterest: string; timestamp: number }>>("/futures/data/openInterestHist", { params: { symbol, period: "1h", startTime: s, endTime: Math.min(to, s + 400 * H), limit: 500 } }));
+  // days not archived yet: Binance's own history (1h by default; 5m when a tool needs 15-minute OI, e.g. today)
+  const step = histPeriod === "5m" ? 400 * 5 * 60_000 : 400 * H;
+  for (let s = Math.max(lastArchived + D, to - 29 * D); s < to; s += step) {
+    const r = await retry(`${symbol} OI hist`, () => fapi.get<Array<{ sumOpenInterest: string; timestamp: number }>>("/futures/data/openInterestHist", { params: { symbol, period: histPeriod, startTime: s, endTime: Math.min(to, s + step), limit: 500 } }));
     for (const x of r.data) if (!m.has(x.timestamp)) m.set(x.timestamp, Number(x.sumOpenInterest));
   }
   return m;
