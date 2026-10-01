@@ -371,6 +371,198 @@ async function run(): Promise<void> {
     assert.ok(kt.msgs[0].includes("RR 1.5"));
   });
 
+  const LOCK = { profitLock: { atR: 1.5, toR: 1.5 } };
+
+  await scenario("PROFIT LOCK (PAPER): +1.5R reached -> SL moved to +1.5R (Telegram); back there -> PROFIT_STOP at +1.5R", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 }, t = tg();
+    const svc = service([{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: t }], repo, now, LOCK);
+    await svc.handleDecision(decision()); // entry 0.1, SL 0.099, TP 0.1022, lock at 0.1015
+    const id = [...repo.trades.values()][0].tradeId;
+    assert.deepStrictEqual(repo.trades.get(id)!.lock, { atR: 1.5, toR: 1.5 });
+    const store = svc.engines.get("DOGEUSDT")!.store;
+    store.addOiObservation(T0 + 70_000, T0 + 70_000, 1, 0.1016); // minute 1: through +1.5R, closes above it
+    now.t = T0 + 130_000;
+    await svc.monitorPaper("DOGEUSDT", svc.engines.get("DOGEUSDT"), now.t);
+    let tr = repo.trades.get(id)!;
+    assert.strictEqual(tr.state, "OPEN");
+    assert.ok(Math.abs(tr.slPrice - 0.1015) < 1e-12 && tr.slInitial === 0.099 && tr.lockedAt === T0 + 120_000);
+    assert.ok(t.msgs[1].includes("SL MOVED"), t.msgs[1]);
+    // the next run must not move / announce it again
+    await svc.monitorPaper("DOGEUSDT", svc.engines.get("DOGEUSDT"), now.t);
+    assert.strictEqual(t.msgs.length, 2);
+    store.addOiObservation(T0 + 130_000, T0 + 130_000, 1, 0.1012); // minute 2: back below +1.5R
+    now.t = T0 + 190_000;
+    await svc.monitorPaper("DOGEUSDT", svc.engines.get("DOGEUSDT"), now.t);
+    tr = repo.trades.get(id)!;
+    assert.strictEqual(tr.closeReason, "PROFIT_STOP");
+    assert.strictEqual(tr.exitPrice, 0.1015);
+    assert.ok(Math.abs(tr.pnlUsd! - (15 - 1)) < 1e-6, `pnl ${tr.pnlUsd}`); // +1.5R minus taker+taker on $1000
+    assert.ok(t.msgs[2].includes("PROFIT STOP") && !t.msgs[2].includes("STOP LOSS"));
+  });
+
+  await scenario("PROFIT LOCK (PAPER): after the lock the price goes on -> TP 2.2R; without profitLock nothing changes", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const svc = service([{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }], repo, now, LOCK);
+    await svc.handleDecision(decision());
+    const id = [...repo.trades.values()][0].tradeId;
+    const store = svc.engines.get("DOGEUSDT")!.store;
+    store.addOiObservation(T0 + 70_000, T0 + 70_000, 1, 0.1016);
+    store.addOiObservation(T0 + 130_000, T0 + 130_000, 1, 0.1023);
+    now.t = T0 + 190_000;
+    await svc.monitorPaper("DOGEUSDT", svc.engines.get("DOGEUSDT"), now.t);
+    assert.strictEqual(repo.trades.get(id)!.closeReason, "TP_FILLED");
+    // rr at or below atR (karo 1.5) -> no lock on that trade
+    const repo2 = new MemRepo();
+    const svc2 = service([{ userId: "karo", mode: "PAPER", riskUsd: 1, binanceRest: null, telegram: null }], repo2, { t: T0 + 10_000 }, { ...LOCK, rrPerUser: new Map([["karo", 1.5]]) });
+    await svc2.handleDecision(decision());
+    assert.strictEqual([...repo2.trades.values()][0].lock, null);
+  });
+
+  function lockRest(over: { createFails?: boolean; verifyFails?: boolean } = {}) {
+    const rest = mockRest({ fills: [
+      { orderId: 1, side: "BUY", price: "0.1", qty: "1000", realizedPnl: "0", commission: "0.05", commissionAsset: "USDT", time: T0 + 11_000 },
+      { orderId: 555, side: "SELL", price: "0.1015", qty: "1000", realizedPnl: "1.5", commission: "0.05", commissionAsset: "USDT", time: T0 + 900_000 },
+    ] });
+    let bid = "0.1003", algo = 9;
+    const r = rest as unknown as Record<string, unknown>;
+    r.getBookTicker = async () => ({ askPrice: bid, bidPrice: bid });
+    r.createAlgoOrder = async (p: Record<string, unknown>) => {
+      rest.calls.push({ fn: "createAlgoOrder", p });
+      if (algo > 9 && over.createFails) throw new Error("Order would immediately trigger.");
+      return { algoId: algo++ };
+    };
+    r.getAlgoOrderByClientId = async () => null;
+    r.getAlgoOrder = async (id: number) => (id === 10 && over.verifyFails ? { algoStatus: "CANCELED" } : { algoStatus: "NEW", actualOrderId: id === 10 ? 555 : "" });
+    return { rest, setBid: (b: string) => { bid = b; } };
+  }
+
+  await scenario("PROFIT LOCK (REAL): new stop placed FIRST, confirmed, saved, THEN the old one cancelled; close reported as PROFIT_STOP", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 }, t = tg();
+    const { rest, setBid } = lockRest();
+    const svc = service([{ userId: "karo", mode: "REAL", riskUsd: 1, binanceRest: rest as never, telegram: t, leverage: 20, marginMode: "ISOLATED" }], repo, now, LOCK);
+    await svc.handleDecision(decision());
+    const id = [...repo.trades.values()][0].tradeId;
+    await svc.monitorReal(); // bid 0.1003 < 0.1015 -> nothing
+    assert.strictEqual(rest.calls.filter((c) => c.fn === "createAlgoOrder").length, 1);
+    setBid("0.1016");
+    await svc.monitorReal();
+    const algos = rest.calls.filter((c) => c.fn === "createAlgoOrder");
+    assert.strictEqual(algos.length, 2);
+    const p = algos[1].p as Record<string, string>;
+    assert.deepStrictEqual([p.type, p.side, p.triggerPrice, p.reduceOnly, p.quantity], ["STOP_MARKET", "SELL", "0.10150", "true", String(repo.trades.get(id)!.quantity)]);
+    const iNew = rest.calls.indexOf(algos[1]), iCancel = rest.calls.findIndex((c) => c.fn === "cancelAlgoOrder" && c.p === 9);
+    assert.ok(iCancel > iNew, "old SL cancelled only after the new one exists");
+    let tr = repo.trades.get(id)!;
+    assert.strictEqual(tr.binance!.slAlgoId, 10);
+    assert.strictEqual(tr.binance!.slOldAlgoId, undefined, "old SL gone from Binance -> cleared");
+    assert.ok(tr.lockedAt && tr.slPrice === 0.1015 && tr.slInitial === 0.099);
+    assert.ok(t.msgs.some((m) => m.includes("SL MOVED")));
+    // next cycle: already locked -> no new orders
+    await svc.monitorReal();
+    assert.strictEqual(rest.calls.filter((c) => c.fn === "createAlgoOrder").length, 2);
+    // the moved stop fills -> flat
+    rest.setPosition("0");
+    now.t = T0 + 1_000_000;
+    await svc.monitorReal();
+    tr = repo.trades.get(id)!;
+    assert.strictEqual(tr.closeReason, "PROFIT_STOP");
+    assert.ok(t.msgs.at(-1)!.includes("PROFIT STOP"));
+  });
+
+  await scenario("PROFIT LOCK (REAL): Binance rejects the new stop -> the original SL stays, nothing cancelled, retried later", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const { rest, setBid } = lockRest({ createFails: true });
+    const svc = service([{ userId: "karo", mode: "REAL", riskUsd: 1, binanceRest: rest as never, telegram: null }], repo, now, LOCK);
+    await svc.handleDecision(decision());
+    const id = [...repo.trades.values()][0].tradeId;
+    setBid("0.1016");
+    await svc.monitorReal();
+    const tr = repo.trades.get(id)!;
+    assert.ok(!tr.lockedAt && tr.slPrice === 0.099 && tr.binance!.slAlgoId === 9);
+    assert.ok(!rest.calls.some((c) => c.fn === "cancelAlgoOrder"), "the original SL is never touched");
+    assert.ok(!rest.calls.some((c) => c.fn === "createOrder" && (c.p as Record<string, unknown>).type === "MARKET" && (c.p as Record<string, unknown>).reduceOnly), "no market close");
+  });
+
+  await scenario("PROFIT LOCK (REAL): the new stop cannot be confirmed -> it is cancelled, the original SL stays", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const { rest, setBid } = lockRest({ verifyFails: true });
+    const svc = service([{ userId: "karo", mode: "REAL", riskUsd: 1, binanceRest: rest as never, telegram: null }], repo, now, LOCK);
+    await svc.handleDecision(decision());
+    const id = [...repo.trades.values()][0].tradeId;
+    setBid("0.1016");
+    await svc.monitorReal();
+    const tr = repo.trades.get(id)!;
+    assert.ok(!tr.lockedAt && tr.binance!.slAlgoId === 9);
+    assert.ok(rest.calls.some((c) => c.fn === "cancelAlgoOrder" && c.p === 10), "unconfirmed new stop cancelled");
+    assert.ok(!rest.calls.some((c) => c.fn === "cancelAlgoOrder" && c.p === 9), "original SL kept");
+  });
+
+  await scenario("PROFIT LOCK (REAL SHORT): ask at -1.5R -> BUY stop at entry - 1.5R", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const { rest, setBid } = lockRest();
+    const svc = service([{ userId: "karo", mode: "REAL", riskUsd: 1, binanceRest: rest as never, telegram: null }], repo, now, LOCK);
+    await svc.handleDecision(decision({ tradeSide: "SHORT", stopPrice: 0.101 }));
+    const id = [...repo.trades.values()][0].tradeId;
+    setBid("0.0990"); // not yet: lock at 0.0985
+    await svc.monitorReal();
+    assert.strictEqual(rest.calls.filter((c) => c.fn === "createAlgoOrder").length, 1);
+    setBid("0.0984");
+    await svc.monitorReal();
+    const p = rest.calls.filter((c) => c.fn === "createAlgoOrder")[1].p as Record<string, string>;
+    assert.deepStrictEqual([p.side, p.triggerPrice], ["BUY", "0.09850"]);
+    assert.strictEqual(repo.trades.get(id)!.slPrice, 0.0985);
+  });
+
+  await scenario("PROFIT LOCK (REAL): crash after placing the moved stop -> next cycle adopts it even if the price fell back", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const { rest, setBid } = lockRest();
+    const svc = service([{ userId: "karo", mode: "REAL", riskUsd: 1, binanceRest: rest as never, telegram: null }], repo, now, LOCK);
+    await svc.handleDecision(decision());
+    const tr0 = [...repo.trades.values()][0];
+    // state after the crash: pending flag saved, rev-1 stop resting on Binance, nothing else saved
+    await repo.updateTrade(tr0.tradeId, { lockPending: true });
+    const { strategyClientOrderId } = await import("../src/execution/client-order-id");
+    const rev1 = strategyClientOrderId("karo", tr0.signalId, "STOP_LOSS", 1);
+    (rest as unknown as Record<string, unknown>).getOpenAlgoOrders = async () => [{ algoId: 10, clientAlgoId: rev1 }];
+    setBid("0.1005"); // fell back below the lock level
+    await svc.monitorReal();
+    const tr = repo.trades.get(tr0.tradeId)!;
+    assert.strictEqual(rest.calls.filter((c) => c.fn === "createAlgoOrder").length, 1, "not placed twice");
+    assert.ok(tr.lockedAt && tr.binance!.slAlgoId === 10 && tr.slPrice === 0.1015 && tr.lockPending === false);
+  });
+
+  await scenario("REAL flat: an unrecorded moved stop still resting is cancelled; the close waits until none of our stops is listed", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const { rest } = lockRest();
+    const svc = service([{ userId: "karo", mode: "REAL", riskUsd: 1, binanceRest: rest as never, telegram: null }], repo, now, LOCK);
+    await svc.handleDecision(decision());
+    const tr0 = [...repo.trades.values()][0];
+    const { strategyClientOrderId } = await import("../src/execution/client-order-id");
+    const rev1 = strategyClientOrderId("karo", tr0.signalId, "STOP_LOSS", 1);
+    let listed = true;
+    const r = rest as unknown as Record<string, unknown>;
+    r.getOpenAlgoOrders = async () => (listed ? [{ algoId: 10, clientAlgoId: rev1 }] : []);
+    r.cancelAlgoOrder = async (id: number) => { rest.calls.push({ fn: "cancelAlgoOrder", p: id }); if (id === 10) listed = false; return {}; };
+    r.getAlgoOrderByClientId = async () => ({ algoStatus: "NEW" });
+    rest.setPosition("0"); // closed by the original TP / SL
+    now.t = T0 + 1_000_000;
+    await svc.monitorReal();
+    assert.ok(rest.calls.some((c) => c.fn === "cancelAlgoOrder" && c.p === 10), "orphan moved stop cancelled");
+    assert.strictEqual(repo.trades.get(tr0.tradeId)!.state, "CLOSED");
+  });
+
+  await scenario("PROFIT LOCK (PAPER): a saved lock is kept even when its minute is no longer in memory", async () => {
+    const repo = new MemRepo(), now = { t: T0 + 10_000 };
+    const svc = service([{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }], repo, now, LOCK);
+    await svc.handleDecision(decision());
+    const id = [...repo.trades.values()][0].tradeId;
+    await repo.updateTrade(id, { lockedAt: T0 + 120_000, slInitial: 0.099, slPrice: 0.1015 }); // locked in a minute we no longer have
+    svc.engines.get("DOGEUSDT")!.store.addOiObservation(T0 + 130_000, T0 + 130_000, 1, 0.1005);
+    now.t = T0 + 190_000;
+    await svc.monitorPaper("DOGEUSDT", svc.engines.get("DOGEUSDT"), now.t);
+    assert.strictEqual(repo.trades.get(id)!.closeReason, "PROFIT_STOP");
+  });
+
   console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
   if (failed > 0) process.exit(1);
 }

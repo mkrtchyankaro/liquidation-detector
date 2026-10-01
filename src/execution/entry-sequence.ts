@@ -86,7 +86,11 @@ export interface SymbolFilters {
   minNotional: number;
 }
 
-function roundToStep(value: number, step: number, precision: number): number {
+export function roundToStep(
+  value: number,
+  step: number,
+  precision: number,
+): number {
   return Number((Math.round(value / step) * step).toFixed(precision));
 }
 function floorToStep(value: number, step: number, precision: number): number {
@@ -645,7 +649,7 @@ async function verifyPositionOpen(
  *  (Binance returned -2013 "Order does not exist" ~0.5s after creation in
  *  production). Retry, and accept the symbol's open-algo-order list as
  *  equally authoritative proof that the order is resting. */
-async function verifyAlgoOrderOpen(
+export async function verifyAlgoOrderOpen(
   rest: BinanceRestLike,
   symbol: string,
   algoId: number,
@@ -683,7 +687,7 @@ async function verifyAlgoOrderOpen(
 
 /** Best-effort: cancel our own SL algo order by id, then sweep the open
  *  list for our clientAlgoId in case the id was never learned. */
-async function cancelOwnAlgoOrder(
+export async function cancelOwnAlgoOrder(
   rest: BinanceRestLike,
   symbol: string,
   algoId: number | null,

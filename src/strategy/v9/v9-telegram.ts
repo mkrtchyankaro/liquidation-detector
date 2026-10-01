@@ -214,15 +214,17 @@ export function formatV9ForcedSkip(
 
 export function formatV9Close(t: V9TradeDoc): string {
   const label =
-    t.closeReason === "TP_FILLED"
-      ? "✅ TAKE PROFIT"
-      : t.closeReason === "SL_FILLED"
-        ? "❌ STOP LOSS"
-        : t.closeReason === "TIME_STOP"
-          ? "⏱ TIME STOP (closed at market)"
-          : t.closeReason === "POSITION_CLOSED_EXTERNALLY"
-            ? "⚪ CLOSED MANUALLY"
-            : `⚪ ${t.closeReason ?? "CLOSED"}`;
+    t.closeReason === "PROFIT_STOP"
+      ? `✅ PROFIT STOP (SL moved to +${t.lock?.toR ?? "?"}R)`
+      : t.closeReason === "TP_FILLED"
+        ? "✅ TAKE PROFIT"
+        : t.closeReason === "SL_FILLED"
+          ? "❌ STOP LOSS"
+          : t.closeReason === "TIME_STOP"
+            ? "⏱ TIME STOP (closed at market)"
+            : t.closeReason === "POSITION_CLOSED_EXTERNALLY"
+              ? "⚪ CLOSED MANUALLY"
+              : `⚪ ${t.closeReason ?? "CLOSED"}`;
   const gross =
     t.pnlUsd !== null && t.feesUsd !== null ? t.pnlUsd + t.feesUsd : null;
   return [
@@ -240,6 +242,18 @@ export function formatV9Close(t: V9TradeDoc): string {
       : []),
     `Net PnL   ${fmtUsd(t.pnlUsd)}${t.pnlR !== null ? `  (${r(t.pnlR)})` : ""}`,
     `Held      ${t.closedAt && t.createdAt ? Math.round((t.closedAt - t.createdAt) / 60_000) : "n/a"} min`,
+  ].join("\n");
+}
+
+export function formatV9Lock(t: V9TradeDoc, newSl: number): string {
+  return [
+    `🔒 SL MOVED · V9 ${t.symbol} · ${t.side} · ${t.mode}`,
+    SEP,
+    `🆔 ${t.signalId}`,
+    `Price reached +${t.lock?.atR}R -- SL moved to +${t.lock?.toR}R`,
+    `Entry     ${fmtPrice(t.entryPrice)}`,
+    `SL        ${fmtPrice(t.slInitial ?? null)} -> ${fmtPrice(newSl)}  (${t.entryPrice ? pct(t.entryPrice, newSl) : "n/a"})`,
+    `TP        ${fmtPrice(t.tpPrice)}  (still ${t.rr}R)`,
   ].join("\n");
 }
 

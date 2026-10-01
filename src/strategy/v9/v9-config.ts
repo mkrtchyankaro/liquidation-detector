@@ -21,6 +21,9 @@ import * as fs from "fs";
  *     "rrPerUser": { "karo": 1.5, "artak": 1.5 }, // optional: this user's TP in R (absent user = "rr")
  *     "minStopPerUser": { "karo": 0.7 }, // optional: skip (silently) a signal whose SL is this % from the
  *                              //   entry or closer -- tiny stops = fees + noise (absent user = no filter)
+ *     "profitLock": { "atR": 1.5, "toR": 1.5 }, // optional: when the price reaches +1.5R the SL is moved
+ *                              //   to +1.5R (toR optional, default = atR, must be <= atR); the TP stays at
+ *                              //   the user's rr. Only for trades whose rr is above atR. Absent = off.
  *     "userModes": { "main": "PAPER", "karo": "REAL", "artak": "REAL" }
  *   }
  *
@@ -55,85 +58,253 @@ export interface V9Settings {
   rrPerUser: Map<string, number>;
   /** per-user filter: skip a signal whose SL is <= this % from the entry (absent user = no filter) */
   minStopPerUser: Map<string, number>;
+  /** move the SL into profit: at +atR the SL goes to +toR (null = off) */
+  profitLock: { atR: number; toR: number } | null;
   userModes: Map<string, V9UserMode>;
 }
 
-export function parseV9Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
-  const off: V9Settings = { enabled: false, symbols: [], rr: 2.2, minSlPct: 0.33, lateSlPct: null, lateSlMinPct: null, forcedOnlyUsers: new Set(), frameOnlyUsers: new Set(), timeStopHours: null, maxOpenPerUser: new Map(), rrPerUser: new Map(), minStopPerUser: new Map(), userModes: new Map() };
+export function parseV9Settings(
+  raw: unknown,
+  knownUserIds: readonly string[],
+  collectedSymbols: readonly string[],
+): V9Settings {
+  const off: V9Settings = {
+    enabled: false,
+    symbols: [],
+    rr: 2.2,
+    minSlPct: 0.33,
+    lateSlPct: null,
+    lateSlMinPct: null,
+    forcedOnlyUsers: new Set(),
+    frameOnlyUsers: new Set(),
+    timeStopHours: null,
+    maxOpenPerUser: new Map(),
+    rrPerUser: new Map(),
+    minStopPerUser: new Map(),
+    profitLock: null,
+    userModes: new Map(),
+  };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object") throw new Error(`"v9" must be an object`);
   const v = raw as Record<string, unknown>;
-  if (typeof v.enabled !== "boolean") throw new Error(`"v9.enabled" must be true or false`);
+  if (typeof v.enabled !== "boolean")
+    throw new Error(`"v9.enabled" must be true or false`);
   if (!v.enabled) return off;
 
-  if (!Array.isArray(v.symbols) || v.symbols.length === 0 || !v.symbols.every((s) => typeof s === "string")) {
-    throw new Error(`"v9.symbols" must be a non-empty array of symbols, e.g. ["BTCUSDT","ETHUSDT"]`);
+  if (
+    !Array.isArray(v.symbols) ||
+    v.symbols.length === 0 ||
+    !v.symbols.every((s) => typeof s === "string")
+  ) {
+    throw new Error(
+      `"v9.symbols" must be a non-empty array of symbols, e.g. ["BTCUSDT","ETHUSDT"]`,
+    );
   }
-  const symbols = [...new Set((v.symbols as string[]).map((s) => s.trim().toUpperCase()))];
+  const symbols = [
+    ...new Set((v.symbols as string[]).map((s) => s.trim().toUpperCase())),
+  ];
   const missing = symbols.filter((s) => !collectedSymbols.includes(s));
   if (missing.length) {
-    throw new Error(`"v9.symbols" contains ${missing.join(", ")} which this bot does not collect data for (SYMBOLS env: ${collectedSymbols.join(", ")})`);
+    throw new Error(
+      `"v9.symbols" contains ${missing.join(", ")} which this bot does not collect data for (SYMBOLS env: ${collectedSymbols.join(", ")})`,
+    );
   }
 
   const rr = v.rr === undefined ? 2.2 : v.rr;
-  if (typeof rr !== "number" || !(rr > 0) || rr > 20) throw new Error(`"v9.rr" must be a number between 0 and 20`);
+  if (typeof rr !== "number" || !(rr > 0) || rr > 20)
+    throw new Error(`"v9.rr" must be a number between 0 and 20`);
   const minSlPct = v.minSlPct === undefined ? 0.33 : v.minSlPct;
-  if (typeof minSlPct !== "number" || !(minSlPct >= 0) || minSlPct > 5) throw new Error(`"v9.minSlPct" must be a number between 0 and 5 (percent)`);
+  if (typeof minSlPct !== "number" || !(minSlPct >= 0) || minSlPct > 5)
+    throw new Error(`"v9.minSlPct" must be a number between 0 and 5 (percent)`);
 
   const userModes = new Map<string, V9UserMode>();
   if (v.userModes !== undefined) {
-    if (typeof v.userModes !== "object" || v.userModes === null) throw new Error(`"v9.userModes" must be an object like {"karo":"REAL"}`);
-    for (const [userId, mode] of Object.entries(v.userModes as Record<string, unknown>)) {
-      if (!knownUserIds.includes(userId)) throw new Error(`"v9.userModes" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`);
-      if (mode !== "OFF" && mode !== "PAPER" && mode !== "REAL") throw new Error(`"v9.userModes.${userId}" must be "OFF", "PAPER" or "REAL" (got ${JSON.stringify(mode)})`);
+    if (typeof v.userModes !== "object" || v.userModes === null)
+      throw new Error(`"v9.userModes" must be an object like {"karo":"REAL"}`);
+    for (const [userId, mode] of Object.entries(
+      v.userModes as Record<string, unknown>,
+    )) {
+      if (!knownUserIds.includes(userId))
+        throw new Error(
+          `"v9.userModes" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`,
+        );
+      if (mode !== "OFF" && mode !== "PAPER" && mode !== "REAL")
+        throw new Error(
+          `"v9.userModes.${userId}" must be "OFF", "PAPER" or "REAL" (got ${JSON.stringify(mode)})`,
+        );
       userModes.set(userId, mode);
     }
   }
-  const lateSlPct = v.lateSlPct === undefined || v.lateSlPct === null ? null : v.lateSlPct;
-  if (lateSlPct !== null && (typeof lateSlPct !== "number" || !(lateSlPct >= 0) || lateSlPct > 10)) throw new Error(`"v9.lateSlPct" must be null (off) or a number between 0 and 10 (percent; 0 = always)`);
-  const lateSlMinPct = v.lateSlMinPct === undefined || v.lateSlMinPct === null ? null : v.lateSlMinPct;
-  if (lateSlMinPct !== null && (typeof lateSlMinPct !== "number" || !(lateSlMinPct >= 0) || lateSlMinPct > 5)) throw new Error(`"v9.lateSlMinPct" must be null (off) or a number between 0 and 5 (percent)`);
-  if (lateSlMinPct !== null && lateSlPct === null) throw new Error(`"v9.lateSlMinPct" only works together with "v9.lateSlPct" (set "lateSlPct": 0)`);
+  const lateSlPct =
+    v.lateSlPct === undefined || v.lateSlPct === null ? null : v.lateSlPct;
+  if (
+    lateSlPct !== null &&
+    (typeof lateSlPct !== "number" || !(lateSlPct >= 0) || lateSlPct > 10)
+  )
+    throw new Error(
+      `"v9.lateSlPct" must be null (off) or a number between 0 and 10 (percent; 0 = always)`,
+    );
+  const lateSlMinPct =
+    v.lateSlMinPct === undefined || v.lateSlMinPct === null
+      ? null
+      : v.lateSlMinPct;
+  if (
+    lateSlMinPct !== null &&
+    (typeof lateSlMinPct !== "number" ||
+      !(lateSlMinPct >= 0) ||
+      lateSlMinPct > 5)
+  )
+    throw new Error(
+      `"v9.lateSlMinPct" must be null (off) or a number between 0 and 5 (percent)`,
+    );
+  if (lateSlMinPct !== null && lateSlPct === null)
+    throw new Error(
+      `"v9.lateSlMinPct" only works together with "v9.lateSlPct" (set "lateSlPct": 0)`,
+    );
   const forcedOnlyUsers = new Set<string>();
   if (v.forcedOnlyUsers !== undefined) {
-    if (!Array.isArray(v.forcedOnlyUsers) || !v.forcedOnlyUsers.every((x) => typeof x === "string")) throw new Error(`"v9.forcedOnlyUsers" must be an array of user ids, e.g. ["karo","artak"]`);
+    if (
+      !Array.isArray(v.forcedOnlyUsers) ||
+      !v.forcedOnlyUsers.every((x) => typeof x === "string")
+    )
+      throw new Error(
+        `"v9.forcedOnlyUsers" must be an array of user ids, e.g. ["karo","artak"]`,
+      );
     for (const id of v.forcedOnlyUsers as string[]) {
-      if (!knownUserIds.includes(id)) throw new Error(`"v9.forcedOnlyUsers" has unknown user "${id}" (known: ${knownUserIds.join(", ")})`);
+      if (!knownUserIds.includes(id))
+        throw new Error(
+          `"v9.forcedOnlyUsers" has unknown user "${id}" (known: ${knownUserIds.join(", ")})`,
+        );
       forcedOnlyUsers.add(id);
     }
   }
   const frameOnlyUsers = new Set<string>();
   if (v.frameOnlyUsers !== undefined) {
-    if (!Array.isArray(v.frameOnlyUsers) || !v.frameOnlyUsers.every((x) => typeof x === "string")) throw new Error(`"v9.frameOnlyUsers" must be an array of user ids, e.g. ["karo","artak"]`);
+    if (
+      !Array.isArray(v.frameOnlyUsers) ||
+      !v.frameOnlyUsers.every((x) => typeof x === "string")
+    )
+      throw new Error(
+        `"v9.frameOnlyUsers" must be an array of user ids, e.g. ["karo","artak"]`,
+      );
     for (const id of v.frameOnlyUsers as string[]) {
-      if (!knownUserIds.includes(id)) throw new Error(`"v9.frameOnlyUsers" has unknown user "${id}" (known: ${knownUserIds.join(", ")})`);
+      if (!knownUserIds.includes(id))
+        throw new Error(
+          `"v9.frameOnlyUsers" has unknown user "${id}" (known: ${knownUserIds.join(", ")})`,
+        );
       frameOnlyUsers.add(id);
     }
   }
-  const timeStopHours = v.timeStopHours === undefined || v.timeStopHours === null ? null : v.timeStopHours;
-  if (timeStopHours !== null && (typeof timeStopHours !== "number" || !(timeStopHours >= 1) || timeStopHours > 240)) throw new Error(`"v9.timeStopHours" must be null (off) or a number of hours between 1 and 240`);
-  const perUser = (key: string, ok: (n: number) => boolean, what: string, example: string): Map<string, number> => {
-    const out = new Map<string, number>(), raw = v[key];
+  const timeStopHours =
+    v.timeStopHours === undefined || v.timeStopHours === null
+      ? null
+      : v.timeStopHours;
+  if (
+    timeStopHours !== null &&
+    (typeof timeStopHours !== "number" ||
+      !(timeStopHours >= 1) ||
+      timeStopHours > 240)
+  )
+    throw new Error(
+      `"v9.timeStopHours" must be null (off) or a number of hours between 1 and 240`,
+    );
+  const perUser = (
+    key: string,
+    ok: (n: number) => boolean,
+    what: string,
+    example: string,
+  ): Map<string, number> => {
+    const out = new Map<string, number>(),
+      raw = v[key];
     if (raw === undefined || raw === null) return out;
-    if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`"v9.${key}" must be an object like ${example}`);
+    if (typeof raw !== "object" || Array.isArray(raw))
+      throw new Error(`"v9.${key}" must be an object like ${example}`);
     for (const [userId, n] of Object.entries(raw as Record<string, unknown>)) {
-      if (!knownUserIds.includes(userId)) throw new Error(`"v9.${key}" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`);
-      if (typeof n !== "number" || !Number.isFinite(n) || !ok(n)) throw new Error(`"v9.${key}.${userId}" must be ${what} (got ${JSON.stringify(n)})`);
+      if (!knownUserIds.includes(userId))
+        throw new Error(
+          `"v9.${key}" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`,
+        );
+      if (typeof n !== "number" || !Number.isFinite(n) || !ok(n))
+        throw new Error(
+          `"v9.${key}.${userId}" must be ${what} (got ${JSON.stringify(n)})`,
+        );
       out.set(userId, n);
     }
     return out;
   };
-  const maxOpenPerUser = perUser("maxOpenPerUser", (n) => Number.isInteger(n) && n >= 1 && n <= 50, "a whole number between 1 and 50", `{"karo":2,"artak":2}`);
-  const rrPerUser = perUser("rrPerUser", (n) => n >= 0.5 && n <= 20, "a number of R between 0.5 and 20", `{"karo":1.5}`);
-  const minStopPerUser = perUser("minStopPerUser", (n) => n >= 0 && n <= 10, "a percent between 0 and 10", `{"karo":0.7}`);
-  return { enabled: true, symbols, rr, minSlPct, lateSlPct, lateSlMinPct, forcedOnlyUsers, frameOnlyUsers, timeStopHours, maxOpenPerUser, rrPerUser, minStopPerUser, userModes };
+  const maxOpenPerUser = perUser(
+    "maxOpenPerUser",
+    (n) => Number.isInteger(n) && n >= 1 && n <= 50,
+    "a whole number between 1 and 50",
+    `{"karo":2,"artak":2}`,
+  );
+  const rrPerUser = perUser(
+    "rrPerUser",
+    (n) => n >= 0.5 && n <= 20,
+    "a number of R between 0.5 and 20",
+    `{"karo":1.5}`,
+  );
+  const minStopPerUser = perUser(
+    "minStopPerUser",
+    (n) => n >= 0 && n <= 10,
+    "a percent between 0 and 10",
+    `{"karo":0.7}`,
+  );
+  let profitLock: V9Settings["profitLock"] = null;
+  if (v.profitLock !== undefined && v.profitLock !== null) {
+    const pl = v.profitLock as Record<string, unknown>;
+    if (typeof pl !== "object" || Array.isArray(pl))
+      throw new Error(
+        `"v9.profitLock" must be an object like {"atR":1.5,"toR":1.5}`,
+      );
+    const atR = pl.atR,
+      toR = pl.toR === undefined ? pl.atR : pl.toR;
+    if (typeof atR !== "number" || !(atR > 0) || atR > 20)
+      throw new Error(`"v9.profitLock.atR" must be a number of R above 0`);
+    if (typeof toR !== "number" || !(toR > 0) || toR > atR)
+      throw new Error(
+        `"v9.profitLock.toR" must be a number of R above 0 and not above atR (${atR})`,
+      );
+    if (!(atR < rr))
+      throw new Error(
+        `"v9.profitLock.atR" (${atR}) must be below "v9.rr" (${rr}) -- otherwise the TP is reached first`,
+      );
+    for (const [userId, r] of rrPerUser)
+      if (!(atR < r))
+        throw new Error(
+          `"v9.profitLock.atR" (${atR}) must be below "v9.rrPerUser.${userId}" (${r}) -- otherwise the TP is reached first and the lock never acts`,
+        );
+    profitLock = { atR, toR };
+  }
+  return {
+    enabled: true,
+    symbols,
+    rr,
+    minSlPct,
+    lateSlPct,
+    lateSlMinPct,
+    forcedOnlyUsers,
+    frameOnlyUsers,
+    timeStopHours,
+    maxOpenPerUser,
+    rrPerUser,
+    minStopPerUser,
+    profitLock,
+    userModes,
+  };
 }
 
-export function loadV9Settings(filePath: string, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V9Settings {
+export function loadV9Settings(
+  filePath: string,
+  knownUserIds: readonly string[],
+  collectedSymbols: readonly string[],
+): V9Settings {
   const raw = JSON.parse(fs.readFileSync(filePath, "utf8")) as { v9?: unknown };
   try {
     return parseV9Settings(raw.v9, knownUserIds, collectedSymbols);
   } catch (err) {
-    throw new Error(`users config at ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+    throw new Error(
+      `users config at ${filePath}: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }

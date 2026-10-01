@@ -46,6 +46,16 @@ scenario("rrPerUser / minStopPerUser: parsed per user, absent = global; bad valu
   assert.throws(() => parseV9Settings({ ...ok, minStopPerUser: { karo: -1 } }, users, syms), /percent between 0 and 10/);
   assert.throws(() => parseV9Settings({ ...ok, minStopPerUser: { karo: "0.7" } }, users, syms), /percent/);
 });
+scenario("profitLock: off by default; toR defaults to atR; atR must be below rr; toR <= atR", () => {
+  assert.strictEqual(parseV9Settings(ok, users, syms).profitLock, null);
+  assert.deepStrictEqual(parseV9Settings({ ...ok, profitLock: { atR: 1.5 } }, users, syms).profitLock, { atR: 1.5, toR: 1.5 });
+  assert.deepStrictEqual(parseV9Settings({ ...ok, profitLock: { atR: 1.5, toR: 1 } }, users, syms).profitLock, { atR: 1.5, toR: 1 });
+  assert.throws(() => parseV9Settings({ ...ok, profitLock: { atR: 2.2 } }, users, syms), /below "v9.rr"/);
+  assert.throws(() => parseV9Settings({ ...ok, profitLock: { atR: 1.5, toR: 1.6 } }, users, syms), /not above atR/);
+  assert.throws(() => parseV9Settings({ ...ok, profitLock: { atR: "1.5" } }, users, syms), /atR/);
+  assert.throws(() => parseV9Settings({ ...ok, profitLock: 1.5 }, users, syms), /must be an object/);
+  assert.throws(() => parseV9Settings({ ...ok, rrPerUser: { karo: 1.5 }, profitLock: { atR: 1.5 } }, users, syms), /rrPerUser.karo/);
+});
 scenario("mode typo fails fast", () => assert.throws(() => parseV9Settings({ ...ok, userModes: { karo: "real" } }, users, syms), /must be "OFF", "PAPER" or "REAL"/));
 scenario("unknown user fails fast", () => assert.throws(() => parseV9Settings({ ...ok, userModes: { bob: "PAPER" } }, users, syms), /unknown user/));
 scenario("symbol without collected data fails fast", () => assert.throws(() => parseV9Settings({ ...ok, symbols: ["XRPUSDT"] }, users, syms), /does not collect data/));

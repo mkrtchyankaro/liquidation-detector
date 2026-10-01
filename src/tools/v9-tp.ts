@@ -5,6 +5,7 @@
  *
  *   npx tsx src/tools/v9-tp.ts --days 7 --tp 1.5,2.2 --minsl 0.7 --maxopen 2
  *   options: --user main  --risk 10  --timestop 24 (0 = none)  --list (every trade)
+ *            --lock 1.5 [--lockto 1.5]: also show each TP with the PROFIT LOCK (at +1.5R the SL moves to +lockto R)
  * Note: the symbol lock is as it was live (with 2.2R exits) -- with an earlier TP some locked signals would have
  * come, those are not in the data.
  */
@@ -96,13 +97,21 @@ async function main(): Promise<void> {
     console.log(
       `V9 what-if · user ${user} · ${trades.length} signals · last ${days} days · risk $${risk} · min SL > ${minSl}% · max open ${maxOpen ?? "none"} · time stop ${ts || "none"}h · UTC\n`,
     );
-    for (const tpR of tps) {
+    const lockAt = arg("lock", "") === "" ? null : Number(arg("lock", "")),
+      lockTo = arg("lockto", "") === "" ? lockAt : Number(arg("lockto", ""));
+    const runs: Array<{ tpR: number; lock: boolean }> = tps.flatMap((tpR) => [
+      { tpR, lock: false },
+      ...(lockAt !== null && tpR > lockAt ? [{ tpR, lock: true }] : []),
+    ]);
+    for (const { tpR, lock } of runs) {
       const o: TpOpts = {
         tpR,
         minSlPct: minSl,
         maxOpen,
         timeStopH: ts > 0 ? ts : null,
         riskUsd: risk,
+        lockAtR: lock ? lockAt : null,
+        lockToR: lock ? lockTo : null,
       };
       const { taken, skipped } = simPortfolio(
         trades,
@@ -115,10 +124,10 @@ async function main(): Promise<void> {
         taken.filter((x) => x.status === s).length;
       const nDays = Math.max(1, dayKeys.length);
       console.log(
-        `TP ${tpR}R: taken ${taken.length} (skipped: min SL ${skipped.filter((x) => x.why === "MIN_SL").length}, max open ${skipped.filter((x) => x.why === "MAX_OPEN").length})`,
+        `TP ${tpR}R${lock ? ` + LOCK (at +${lockAt}R the SL -> +${lockTo}R)` : ""}: taken ${taken.length} (skipped: min SL ${skipped.filter((x) => x.why === "MIN_SL").length}, max open ${skipped.filter((x) => x.why === "MAX_OPEN").length})`,
       );
       console.log(
-        `   TP ${c("TP")} · SL ${c("SL")} · time stop ${c("TIME")} · still open ${c("OPEN")} · win ${done.length ? ((100 * c("TP")) / done.length).toFixed(0) : 0}%`,
+        `   TP ${c("TP")} · SL ${c("SL")}${lock ? ` · profit stop ${c("PROFIT_STOP")}` : ""} · time stop ${c("TIME")} · still open ${c("OPEN")} · win ${done.length ? ((100 * (c("TP") + c("PROFIT_STOP"))) / done.length).toFixed(0) : 0}%`,
       );
       console.log(
         `   total ${sR(R)} = $${(R * risk).toFixed(0)} · per day (${nDays} days) ${sR(R / nDays)} = $${((R * risk) / nDays).toFixed(1)}`,
@@ -129,7 +138,7 @@ async function main(): Promise<void> {
       if (argv.includes("--list"))
         for (const x of taken)
           console.log(
-            `     ${utc(x.trade.createdAt)} ${x.trade.symbol.padEnd(9)} ${x.trade.side.padEnd(5)} SL ${x.slPct.toFixed(2)}%  ${x.status.padEnd(4)} ${sR(x.r)}`,
+            `     ${utc(x.trade.createdAt)} ${x.trade.symbol.padEnd(9)} ${x.trade.side.padEnd(5)} SL ${x.slPct.toFixed(2)}%  ${x.status.padEnd(11)} ${sR(x.r)}`,
           );
       console.log("");
     }
