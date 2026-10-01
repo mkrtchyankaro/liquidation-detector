@@ -3,7 +3,12 @@
  */
 import * as assert from "assert";
 import type { MvHour } from "../src/research/oi-moves";
-import { afterOf, leadSignals, type Q15 } from "../src/research/btc-lead";
+import {
+  afterOf,
+  leadSignals,
+  pickCoin,
+  type Q15,
+} from "../src/research/btc-lead";
 
 let passed = 0,
   failed = 0;
@@ -71,6 +76,35 @@ scenario(
       [s[0].side, s[0].ts, s[0].fall, s[0].maxRise, s[0].moveStart],
       ["SHORT", T0 + 2 * H + 3 * Q, 16, 15, T0],
     );
+    assert.strictEqual(
+      s[0].big,
+      false,
+      "no hours before the episode -> cannot call it big",
+    );
+  },
+);
+scenario(
+  "big = the OI built is more than any single-hour OI rise of the 24 hours before the episode",
+  () => {
+    const before = Array.from({ length: 24 }, (_, i) =>
+      hr(i - 24, 100, 100, 1000, 1000 + (i === 5 ? 30 : 2)),
+    );
+    const h = [
+      ...before,
+      hr(0, 100, 101, 1000, 1040),
+      hr(1, 101, 102, 1040, 1060),
+      hr(2, 102, 101.5, 1060, 1030),
+    ];
+    const qs = [
+      ...quarters(0, 1000, [10, 15, 5, 10]),
+      ...quarters(1, 1040, [5, -8, 13, 10]),
+      ...quarters(2, 1060, [4, -10, -16, -8]),
+    ];
+    const s = leadSignals(h, qs).filter((x) => x.moveStart === T0);
+    assert.deepStrictEqual(
+      [s.length, s[0].prevMaxHourRise, s[0].big],
+      [1, 30, true],
+    ); // built 54 > 30
   },
 );
 scenario(
@@ -116,6 +150,19 @@ scenario(
         Math.abs(a.after[0].worst - -1) < 1e-9 &&
         a.after[0].close === null,
     );
+  },
+);
+scenario(
+  "pick amp: the biggest x BTC among the coins that follow BTC (R2 upper half); r2: best follower",
+  () => {
+    const rank = [
+      { symbol: "ETH", r2: 0.9, beta: 1.0 },
+      { symbol: "DOGE", r2: 0.7, beta: 2.0 },
+      { symbol: "WLD", r2: 0.2, beta: 3.0 },
+      { symbol: "BNB", r2: 0.6, beta: 0.8 },
+    ];
+    assert.strictEqual(pickCoin(rank, "amp")!.symbol, "DOGE"); // WLD moves most but does not follow BTC
+    assert.strictEqual(pickCoin(rank, "r2")!.symbol, "ETH");
   },
 );
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
