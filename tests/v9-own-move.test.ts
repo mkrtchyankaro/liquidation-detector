@@ -2,7 +2,12 @@
  * V9 own move vs BTC. Usage: npx tsx tests/v9-own-move.test.ts
  */
 import * as assert from "assert";
-import { betaOf, ownCheck, type OwnBar } from "../src/research/v9-own-move";
+import {
+  betaOf,
+  ownCheck,
+  preMove,
+  type OwnBar,
+} from "../src/research/v9-own-move";
 
 let passed = 0,
   failed = 0;
@@ -106,6 +111,40 @@ scenario(
         !c.ruled.closedByRule &&
         c.base.status === "TP" &&
         c.ruled.r === c.base.r,
+    );
+  },
+);
+scenario(
+  "before the entry: a fall that BTC explains -> byBtc; a fall of the coin alone -> not byBtc",
+  () => {
+    const start = T0 - 30 * M; // the episode started 30 min before the entry; beta from the hour before that
+    const btcB = btcPast.map((b) => ({ ...b, t: b.t - 30 * M })),
+      coinB = coinPast.map((b) => ({ ...b, t: b.t - 30 * M }));
+    const withBtc = preMove(
+      trade,
+      [...coinB, bar(start, 10), bar(T0, 9.8)],
+      [...btcB, bar(start, 100), bar(T0, 99)],
+      start,
+      1,
+    )!;
+    assert.ok(
+      withBtc.byBtc &&
+        withBtc.coinPct < 0 &&
+        Math.abs(withBtc.btcPart - -2) < 0.1,
+      JSON.stringify(withBtc),
+    );
+    const alone = preMove(
+      trade,
+      [...coinB, bar(start, 10), bar(T0, 9.8)],
+      [...btcB, bar(start, 100), bar(T0, 100)],
+      start,
+      1,
+    )!;
+    assert.ok(!alone.byBtc && Math.abs(alone.own - -2) < 1e-9);
+    assert.strictEqual(
+      preMove(trade, coinB, btcB, T0 + M, 1),
+      null,
+      "episode start after the entry -> null",
     );
   },
 );

@@ -118,3 +118,53 @@ export function ownCheck(
     ruled: { r, exitTs: kTs + M, closedByRule: true },
   };
 }
+
+/**
+ * BEFORE THE ENTRY (Johnny, Oct 1): did BTC bring the coin to this level? Over the signal's own episode
+ * (episode start -> entry), with beta from the `betaHours` before the episode start (past only):
+ *   coinPct / btcPct   the moves over the episode, in the TRADE's direction (a V9 reversal usually starts negative)
+ *   btcPart            beta x btcPct = the part of the coin's move BTC explains;  own = coinPct - btcPart
+ *   byBtc              |btcPart| >= |own| -> BTC brought the coin here more than the coin itself (no other threshold)
+ * Everything is known at the entry minute.
+ */
+export interface PreMove {
+  beta: number;
+  minutes: number;
+  coinPct: number;
+  btcPct: number;
+  btcPart: number;
+  own: number;
+  byBtc: boolean;
+}
+export function preMove(
+  t: TpTrade,
+  coin: readonly OwnBar[],
+  btc: readonly OwnBar[],
+  episodeStart: number,
+  betaHours: number,
+): PreMove | null {
+  const from = Math.floor(episodeStart / M) * M,
+    to = Math.floor(t.createdAt / M) * M;
+  if (!(to > from)) return null;
+  const beta = betaOf(coin, btc, from - betaHours * H, from);
+  if (beta === null) return null;
+  const c0 = coin.find((x) => x.t === from)?.close,
+    c1 = coin.find((x) => x.t === to)?.close;
+  const b0 = btc.find((x) => x.t === from)?.close,
+    b1 = btc.find((x) => x.t === to)?.close;
+  if (!c0 || !c1 || !b0 || !b1) return null;
+  const sgn = t.side === "LONG" ? 1 : -1;
+  const coinPct = (sgn * 100 * (c1 - c0)) / c0,
+    btcPct = (sgn * 100 * (b1 - b0)) / b0,
+    btcPart = beta * btcPct,
+    own = coinPct - btcPart;
+  return {
+    beta,
+    minutes: (to - from) / M,
+    coinPct,
+    btcPct,
+    btcPart,
+    own,
+    byBtc: Math.abs(btcPart) >= Math.abs(own),
+  };
+}
