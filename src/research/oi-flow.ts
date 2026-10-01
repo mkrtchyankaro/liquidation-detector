@@ -40,6 +40,7 @@ export interface FlowSignal {
   entry: number;
   sl: number;
   slPct: number;
+  storyStart: number; // where the story starts: the drop before the rise (or the rise)
   accStart: number;
   peak: number;
   accIn: number;
@@ -244,6 +245,7 @@ export function flowSignals(
       entry,
       sl,
       slPct: (100 * Math.abs(entry - sl)) / entry,
+      storyStart: before && before.e === bottom ? p[before.s].t : p[bottom].t,
       accStart: p[bottom].t,
       peak: p[peak].t,
       accIn: sum(p, bottom + 1, peak, (q) => q.inF) / a.up,

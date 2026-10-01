@@ -6,6 +6,10 @@
  *   REV   only when the drop BEFORE the accumulation liquidated the other side (the V9 3-phase story)
  * Trades like live V9: SL at the extreme since the OI peak, TP 1.5R, time stop 24h, fees, one trade per coin.
  * Results split by size (in ATRs) -- nothing picked. At the end the REAL V9 (main) over the same days.
+ * BTC FILTER (Johnny, Oct 2): signals where the coin only moved WITH BTC are left out -- same rule as the live
+ * Telegram line (src/research/v9-own-move.ts preMove): over the story (its start -> entry), with the coin's usual
+ * amplification of BTC from the 24h before, |BTC's part| >= |the coin's own part| -> "moved with BTC" -> out.
+ * BTC's own signals stay. The left-out ones are shown in one line. Same for the real V9 signals.
  *
  *   npx tsx src/tools/oi-flow.ts --days 30
  *   options: --tf 5 (ATR window minutes)  --n 14  --rev 1  --tp 1.5  --minsl 0.7  --timestop 24  --coins BTC,DOGE  --list
@@ -20,6 +24,7 @@ import {
   type FlowMinute,
   type FlowSignal,
 } from "../research/oi-flow";
+import { preMove } from "../research/v9-own-move";
 import {
   simTrade,
   type TpBar,
@@ -141,6 +146,47 @@ async function main(): Promise<void> {
       cR = { sl: 0, busy: 0 };
     let firstData = Infinity;
     const barsBySym = new Map<string, TpBar[]>();
+    const btcDocs = await db
+      .collection(MINUTE_BARS)
+      .find({
+        symbol: "BTCUSDT",
+        ts: { $gte: new Date(warm - D) },
+        close: { $ne: null },
+      })
+      .project({ ts: 1, high: 1, low: 1, close: 1 })
+      .sort({ ts: 1 })
+      .toArray();
+    const btc: TpBar[] = btcDocs
+      .map((d) => ({
+        t: num(d.ts),
+        high: Number(d.high),
+        low: Number(d.low),
+        close: Number(d.close),
+      }))
+      .filter((b) => b.close > 0);
+    /** true = BTC brought the coin here (left out); null = cannot tell (kept) */
+    const withBtc = (
+      symbol: string,
+      side: "LONG" | "SHORT",
+      createdAt: number,
+      entry: number,
+      sl: number,
+      start: number,
+      bars: readonly TpBar[],
+    ): boolean | null => {
+      if (symbol === "BTCUSDT") return false;
+      const p = preMove(
+        { id: "", symbol, side, createdAt, entry, sl },
+        bars,
+        btc,
+        start,
+        24,
+      );
+      return p ? p.byBtc : null;
+    };
+    const contBtc: Row[] = [],
+      revBtc: Row[] = [];
+    let unknown = 0;
     for (const s of coins) {
       const docs = await db
         .collection(MINUTE_BARS)
@@ -170,13 +216,21 @@ async function main(): Promise<void> {
         .filter((b) => b.high! > 0 && b.low! > 0 && b.close! > 0)
         .map((b) => ({ t: b.t, high: b.high!, low: b.low!, close: b.close! }));
       barsBySym.set(s, bars);
-      const sigs = flowSignals(s, rows, {
+      const all = flowSignals(s, rows, {
         tf,
         n,
         rev,
         minSlPct: 0.33,
         maxGapMin: 15,
       }).filter((x) => x.t >= since);
+      const flag = all.map((x) =>
+        x.slPct > minSl
+          ? withBtc(s, x.side, x.t - 1, x.entry, x.sl, x.storyStart, bars)
+          : false,
+      ); // SL-too-small ones are skipped anyway
+      unknown += flag.filter((f) => f === null).length;
+      const sigs = all.filter((_, i) => flag[i] !== true),
+        byBtc = all.filter((_, i) => flag[i] === true);
       cont.push(...trade(sigs, bars, o, minSl, cC));
       rev3.push(
         ...trade(
@@ -185,6 +239,16 @@ async function main(): Promise<void> {
           o,
           minSl,
           cR,
+        ),
+      );
+      contBtc.push(...trade(byBtc, bars, o, minSl, { sl: 0, busy: 0 }));
+      revBtc.push(
+        ...trade(
+          byBtc.filter((x) => x.prior === "OTHER_SIDE"),
+          bars,
+          o,
+          minSl,
+          { sl: 0, busy: 0 },
         ),
       );
     }
@@ -197,23 +261,28 @@ async function main(): Promise<void> {
       `IN/OUT minute by minute · ATR = normal IN / OUT per ${tf} minutes (${n}) · a leg ends when OI turns back ${rev} ATR`,
     );
     console.log(
-      `trade WITH the move (longs liquidated -> SHORT) · SL at the extreme since the OI peak · TP ${tpR}R · SL > ${minSl}% · time stop ${ts || "none"}h · one trade per coin\n`,
+      `trade WITH the move (longs liquidated -> SHORT) · SL at the extreme since the OI peak · TP ${tpR}R · SL > ${minSl}% · time stop ${ts || "none"}h · one trade per coin`,
+    );
+    console.log(
+      `BTC FILTER ON: signals where the coin moved WITH BTC are left out (shown in one line below each part) · could not tell (kept): ${unknown}\n`,
     );
 
-    for (const [name, rows, cnt, what] of [
-      ["CONT", cont, cC, "every liquidation after an OI rise"],
+    for (const [name, rows, cnt, what, out] of [
+      ["CONT", cont, cC, "every liquidation after an OI rise", contBtc],
       [
         "REV ",
         rev3,
         cR,
         "only if the drop before the rise liquidated the OTHER side (V9 story)",
+        revBtc,
       ],
     ] as const) {
       console.log(`================ ${name} -- ${what}`);
       console.log(
         `skipped: SL too small ${cnt.sl} · coin already in a trade ${cnt.busy}`,
       );
-      console.log(`ALL                  ${stats(rows, nDays)}\n`);
+      console.log(`ALL (own moves)      ${stats(rows, nDays)}`);
+      console.log(`left out (with BTC)  ${stats(out, nDays)}\n`);
       table(
         "ACCUMULATION: new positions IN ÷ up-ATR (how many normal windows of IN):",
         rows,
@@ -282,13 +351,57 @@ async function main(): Promise<void> {
           t.entry !== t.sl &&
           (100 * Math.abs(t.entry - t.sl)) / t.entry > minSl,
       );
-    const v9rows = v9.map((t) => ({
-      r: simTrade(t, barsBySym.get(t.symbol) ?? [], o),
-    }));
-    console.log(
-      `================ REAL V9 (main) same days, SL > ${minSl}%, same TP/time stop:`,
+    for (const s of new Set(v9.map((t) => t.symbol)))
+      if (!barsBySym.has(s)) {
+        const r = await db
+          .collection(MINUTE_BARS)
+          .find({
+            symbol: s,
+            ts: { $gte: new Date(from - 2 * D) },
+            close: { $ne: null },
+          })
+          .sort({ ts: 1 })
+          .toArray();
+        barsBySym.set(
+          s,
+          r.map((b) => ({
+            t: num(b.ts),
+            high: Number(b.high),
+            low: Number(b.low),
+            close: Number(b.close),
+          })),
+        );
+      }
+    const sigIds = docs
+      .filter((d) => v9.some((t) => t.id === String(d.tradeId)))
+      .map((d) => String(d.signalId));
+    const decs = new Map(
+      (
+        await db
+          .collection("v9_decisions")
+          .find({ signalId: { $in: sigIds } })
+          .project({ signalId: 1, episodeStart: 1 })
+          .toArray()
+      ).map((d) => [String(d.signalId), num(d.episodeStart)]),
     );
-    console.log(`                     ${stats(v9rows, nDays)}\n`);
+    const sigOf = new Map(
+      docs.map((d) => [String(d.tradeId), String(d.signalId)]),
+    );
+    const v9own: Array<{ r: TpResult }> = [],
+      v9btc: Array<{ r: TpResult }> = [];
+    for (const t of v9) {
+      const bars = barsBySym.get(t.symbol) ?? [],
+        start = decs.get(sigOf.get(t.id) ?? "");
+      const f = start
+        ? withBtc(t.symbol, t.side, t.createdAt, t.entry, t.sl, start, bars)
+        : null;
+      (f === true ? v9btc : v9own).push({ r: simTrade(t, bars, o) });
+    }
+    console.log(
+      `================ REAL V9 (main) same days, SL > ${minSl}%, same TP/time stop, same BTC filter:`,
+    );
+    console.log(`ALL (own moves)      ${stats(v9own, nDays)}`);
+    console.log(`left out (with BTC)  ${stats(v9btc, nDays)}\n`);
 
     if (argv.includes("--list")) {
       for (const [name, rows] of [
