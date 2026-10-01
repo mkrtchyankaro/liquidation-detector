@@ -66,3 +66,23 @@ export function blameOf(
     r2,
   };
 }
+
+/** The best point of the trade (the coin's furthest minute close in the trade's direction) -> splits the trade in
+ *  two legs: entry -> best ("up" leg, did BTC carry it?) and best -> end ("back" leg, did BTC pull it back?). */
+export function bestPointTs(
+  side: "LONG" | "SHORT",
+  coin: readonly BlameBar[],
+  from: number,
+  to: number,
+): number | null {
+  let best: BlameBar | null = null;
+  for (const x of coin) {
+    if (x.t < from || x.t > to || !(x.close > 0)) continue;
+    if (
+      !best ||
+      (side === "LONG" ? x.close > best.close : x.close < best.close)
+    )
+      best = x;
+  }
+  return best ? best.t : null;
+}

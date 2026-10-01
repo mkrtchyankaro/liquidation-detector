@@ -2,7 +2,7 @@
  * V9 BTC blame numbers. Usage: npx tsx tests/v9-btc-blame.test.ts
  */
 import * as assert from "assert";
-import { blameOf } from "../src/research/v9-btc-blame";
+import { bestPointTs, blameOf } from "../src/research/v9-btc-blame";
 
 let passed = 0,
   failed = 0;
@@ -58,6 +58,14 @@ scenario(
     )!;
     assert.strictEqual(b.minutes, 2);
     assert.strictEqual(b.ratio, null);
+  },
+);
+scenario(
+  "best point: highest close for a LONG, lowest for a SHORT, inside the trade only",
+  () => {
+    const c = series([10, 12, 11, 9, 13]);
+    assert.strictEqual(bestPointTs("LONG", c, 0, 3 * M), M);
+    assert.strictEqual(bestPointTs("SHORT", c, 0, 3 * M), 3 * M);
   },
 );
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

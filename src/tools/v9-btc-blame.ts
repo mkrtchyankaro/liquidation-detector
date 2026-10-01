@@ -5,12 +5,17 @@
  * BTC explains (R2). Then the same numbers per result (TP / SL / other). See src/research/v9-btc-blame.ts.
  *
  *   npx tsx src/tools/v9-btc-blame.ts --days 8
- *   options: --user main
+ *   options: --user main   --legs (each trade split at its best point: entry -> best, best -> end; OPEN trades too)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
-import { blameOf, type Blame, type BlameBar } from "../research/v9-btc-blame";
+import {
+  bestPointTs,
+  blameOf,
+  type Blame,
+  type BlameBar,
+} from "../research/v9-btc-blame";
 
 const argv = process.argv.slice(2);
 const arg = (n: string, d: string): string => {
@@ -33,13 +38,20 @@ async function main(): Promise<void> {
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     const since = Date.now() - days * 86_400_000;
+    const legs = argv.includes("--legs");
     const trades = (
       await db
         .collection("v9_trades")
-        .find({ userId: user, state: "CLOSED", entryPrice: { $ne: null } })
+        .find({
+          userId: user,
+          state: legs ? { $in: ["CLOSED", "OPEN"] } : "CLOSED",
+          entryPrice: { $ne: null },
+        })
         .toArray()
     )
-      .filter((t) => num(t.createdAt) >= since && t.closedAt)
+      .filter(
+        (t) => num(t.createdAt) >= since && (t.closedAt || t.state === "OPEN"),
+      )
       .sort((a, b) => num(a.createdAt) - num(b.createdAt));
     const bars = new Map<string, BlameBar[]>();
     const load = async (s: string): Promise<BlameBar[]> => {
@@ -70,13 +82,17 @@ async function main(): Promise<void> {
     const rows: Array<{ res: string; b: Blame }> = [];
     for (const t of trades) {
       const res =
-        t.closeReason === "TP_FILLED"
-          ? "TP"
-          : t.closeReason === "SL_FILLED"
-            ? "SL"
-            : String(t.closeReason ?? "?");
+        t.state === "OPEN"
+          ? "OPEN"
+          : t.closeReason === "TP_FILLED"
+            ? "TP"
+            : t.closeReason === "SL_FILLED"
+              ? "SL"
+              : String(t.closeReason ?? "?");
       const from = Math.floor(num(t.createdAt) / M) * M,
-        to = Math.floor(num(t.closedAt) / M) * M;
+        to =
+          Math.floor((t.state === "OPEN" ? Date.now() : num(t.closedAt)) / M) *
+          M;
       const coin = t.symbol === "BTCUSDT" ? btc : await load(String(t.symbol));
       const b = blameOf(t.side, coin, btc, from, to);
       if (!b) {
@@ -86,10 +102,28 @@ async function main(): Promise<void> {
         continue;
       }
       if (t.symbol !== "BTCUSDT") rows.push({ res, b });
+      if (legs) {
+        const pk = bestPointTs(t.side, coin, from, to);
+        const up =
+          pk !== null && pk > from
+            ? blameOf(t.side, coin, btc, from, pk)
+            : null;
+        const back =
+          pk !== null && pk < to ? blameOf(t.side, coin, btc, pk, to) : null;
+        const leg = (n: string, x: Blame | null): string =>
+          x
+            ? `${n} ${String(x.minutes).padStart(4)}m coin ${sp(x.coinPct).padStart(7)} BTC ${sp(x.btcPct).padStart(7)} R2 ${x.r2 === null ? "n/a " : x.r2.toFixed(2)}`
+            : `${n} ${"-".padStart(40)}`;
+        console.log(
+          `  ${utc(from)} ${String(t.symbol).padEnd(9)} ${String(t.side).padEnd(5)} ${res.padEnd(9)} | ${leg("UP to best", up)} | ${leg("BACK", back)}`,
+        );
+        continue;
+      }
       console.log(
         `  ${utc(from)} ${String(t.symbol).padEnd(9)} ${String(t.side).padEnd(5)} ${res.padEnd(9)} ${String(Math.round(b.minutes)).padStart(4)} min  coin ${sp(b.coinPct).padStart(7)}  BTC ${sp(b.btcPct).padStart(7)}${b.btcPct < 0 ? " against" : "        "}  x${b.ratio === null ? " n/a" : b.ratio.toFixed(2).padStart(5)}  R2 ${b.r2 === null ? "n/a" : b.r2.toFixed(2)}${t.symbol === "BTCUSDT" ? "  (BTC itself)" : ""}`,
       );
     }
+    if (legs) return;
     console.log(`\nSUMMARY (BTC's own trades left out)`);
     const avg = (v: number[]): string =>
       v.length ? (v.reduce((s, x) => s + x, 0) / v.length).toFixed(2) : "n/a";
