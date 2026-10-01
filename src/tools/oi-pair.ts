@@ -6,10 +6,12 @@
  *
  *   npx tsx src/tools/oi-pair.ts --coin DOGE --days 7
  *   options: --base BTC
+ *   --show 2026-09-30T06:00 --hours 12   hour-by-hour table of both coins from that UTC hour (price, OI) and, for every
+ *                                        price move found there, WHY it was or was not taken as an episode
  */
 import "dotenv/config";
 import { klines, oiAt, oiSnapshots } from "../research/binance-history";
-import type { MvHour } from "../research/oi-moves";
+import { findMoves, type MvHour } from "../research/oi-moves";
 import { episodes, pairEpisodes, type Episode } from "../research/oi-pair";
 
 const argv = process.argv.slice(2);
@@ -54,6 +56,66 @@ async function main(): Promise<void> {
     win = to - days * D,
     from = Math.floor((win - 2 * D) / D) * D;
   const [hb, hc] = [await hours(base, from, to), await hours(coin, from, to)];
+  const show = arg("show", "");
+  if (show) {
+    const s0 = Date.parse(show.endsWith("Z") ? show : `${show}:00Z`),
+      n = Number(arg("hours", "12"));
+    if (!Number.isFinite(s0))
+      throw new Error("--show must look like 2026-09-30T06:00 (UTC)");
+    const row = (h: MvHour[], ts: number) => h.find((x) => x.t === ts);
+    const pc = (a: number, b: number): string => {
+      const v = (100 * (b - a)) / a;
+      return `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`.padStart(7);
+    };
+    const B = base.replace(/USDT$/, ""),
+      C = coin.replace(/USDT$/, "");
+    console.log(
+      `\nhour (UTC)   | ${B} candle   ${B} OI    | ${C} candle   ${C} OI     (change of each 1h candle, open -> close)`,
+    );
+    for (let ts = s0; ts < s0 + n * H; ts += H) {
+      const a = row(hb, ts),
+        c = row(hc, ts);
+      if (!a || !c) continue;
+      console.log(
+        `${t(ts)}  | ${pc(a.open, a.close)}   ${pc(a.oiOpen, a.oi)}  | ${pc(c.open, c.close)}   ${pc(c.oiOpen, c.oi)}`,
+      );
+    }
+    for (const [name, h] of [
+      [B, hb],
+      [C, hc],
+    ] as const) {
+      console.log(
+        `\n${name}: price moves (1h bodies stepping one way, >= 3 candles) touching that window, and the episode checks:`,
+      );
+      const ms = findMoves(h).filter(
+        (m) => h[m.e].t + H > s0 && h[m.s].t < s0 + n * H,
+      );
+      if (!ms.length)
+        console.log(
+          "   none -- the candle BODIES did not step one way for 3+ hours, or the move was not bigger than the range just before it",
+        );
+      for (const m of ms) {
+        const p = m.phases[0];
+        const before = h
+          .slice(Math.max(0, m.s - p.hours), m.s)
+          .flatMap((x) => [x.oiOpen, x.oi])
+          .filter((x) => x > 0);
+        const range = before.length
+            ? Math.max(...before) - Math.min(...before)
+            : NaN,
+          grew = p.oiTo - p.oiFrom;
+        const priceOk =
+          m.dir === "UP" ? p.priceTo > p.priceFrom : p.priceTo < p.priceFrom;
+        console.log(
+          `   ${m.dir} ${t(h[m.s].t)} -> ${t(h[m.e].t + H)} price ${pc(m.startPrice, h[m.e].close)} | first phase ${p.kind} ${p.hours}h, OI ${pc(p.oiFrom, p.oiTo)}`,
+        );
+        console.log(
+          `      OI grew ${grew.toFixed(0)} vs the OI range of the ${p.hours}h before ${range.toFixed(0)} -> ${p.kind.endsWith("OI UP") && grew > range && priceOk ? "EPISODE" : `not an episode (${!p.kind.endsWith("OI UP") ? "the OI did not rise first" : !priceOk ? "the price did not move while the OI rose" : "the OI growth was not bigger than its normal swing"})`}`,
+        );
+      }
+    }
+    return;
+  }
   const eb = episodes(hb).filter((e) => e.peak > win),
     ec = episodes(hc).filter((e) => e.peak > win);
   const pairs = pairEpisodes(eb, ec);
