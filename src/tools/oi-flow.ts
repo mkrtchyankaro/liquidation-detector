@@ -6,6 +6,7 @@
  *   REV   only when the drop BEFORE the accumulation liquidated the other side (the V9 3-phase story)
  * Trades like live V9: SL at the extreme since the OI peak, TP 1.5R, time stop 24h, fees, one trade per coin.
  * Results split by size (in ATRs) -- nothing picked. At the end the REAL V9 (main) over the same days.
+ *   REV+PRICE  REV + the price directions fit the story (src/research/oi-flow.ts priceOk)
  * BTC FILTER (Johnny, Oct 2): signals where the coin only moved WITH BTC are left out -- same rule as the live
  * Telegram line (src/research/v9-own-move.ts preMove): over the story (its start -> entry), with the coin's usual
  * amplification of BTC from the 24h before, |BTC's part| >= |the coin's own part| -> "moved with BTC" -> out.
@@ -141,9 +142,11 @@ async function main(): Promise<void> {
       since = now - days * D,
       warm = since - 2 * D;
     const cont: Row[] = [],
-      rev3: Row[] = [];
+      rev3: Row[] = [],
+      revP: Row[] = [];
     const cC = { sl: 0, busy: 0 },
-      cR = { sl: 0, busy: 0 };
+      cR = { sl: 0, busy: 0 },
+      cP = { sl: 0, busy: 0 };
     let firstData = Infinity;
     const barsBySym = new Map<string, TpBar[]>();
     const btcDocs = await db
@@ -185,7 +188,8 @@ async function main(): Promise<void> {
       return p ? p.byBtc : null;
     };
     const contBtc: Row[] = [],
-      revBtc: Row[] = [];
+      revBtc: Row[] = [],
+      revPBtc: Row[] = [];
     let unknown = 0;
     for (const s of coins) {
       const docs = await db
@@ -241,10 +245,28 @@ async function main(): Promise<void> {
           cR,
         ),
       );
+      revP.push(
+        ...trade(
+          sigs.filter((x) => x.prior === "OTHER_SIDE" && x.priceOk),
+          bars,
+          o,
+          minSl,
+          cP,
+        ),
+      );
       contBtc.push(...trade(byBtc, bars, o, minSl, { sl: 0, busy: 0 }));
       revBtc.push(
         ...trade(
           byBtc.filter((x) => x.prior === "OTHER_SIDE"),
+          bars,
+          o,
+          minSl,
+          { sl: 0, busy: 0 },
+        ),
+      );
+      revPBtc.push(
+        ...trade(
+          byBtc.filter((x) => x.prior === "OTHER_SIDE" && x.priceOk),
           bars,
           o,
           minSl,
@@ -275,6 +297,13 @@ async function main(): Promise<void> {
         cR,
         "only if the drop before the rise liquidated the OTHER side (V9 story)",
         revBtc,
+      ],
+      [
+        "REV+PRICE",
+        revP,
+        cP,
+        "REV + the price did what the story says (1: against the first victims, 2: same way, 3: against the new victims)",
+        revPBtc,
       ],
     ] as const) {
       console.log(`================ ${name} -- ${what}`);
@@ -313,6 +342,13 @@ async function main(): Promise<void> {
           SIZE_BUCKETS,
           nDays,
         );
+      table(
+        "PRICE of each phase (drop before / rise / drop now; · = no phase before):",
+        rows,
+        (s) => s.px,
+        [...new Set(rows.map((x) => x.s.px))].sort(),
+        nDays,
+      );
       table("side:", rows, (s) => s.side, ["LONG", "SHORT"], nDays);
       table(
         "coin:",
@@ -407,12 +443,13 @@ async function main(): Promise<void> {
       for (const [name, rows] of [
         ["CONT", cont],
         ["REV", rev3],
+        ["REV+PRICE", revP],
       ] as const) {
         console.log(`---- ${name}`);
         for (const x of [...rows].sort((a, b) => a.s.t - b.s.t)) {
           const s = x.s;
           console.log(
-            `${utc(s.t)} ${s.symbol.replace(/USDT$/, "").padEnd(5)} ${s.side.padEnd(5)} rise ${utc(s.accStart)}..${utc(s.peak).slice(6)} IN ${s.accIn.toFixed(1)} net ${s.accNet.toFixed(1)}ATR · before: ${s.prior} · ${s.victim} liq · SL ${s.slPct.toFixed(2)}% · ${x.r.status} ${sR(x.r.r)}`,
+            `${utc(s.t)} ${s.symbol.replace(/USDT$/, "").padEnd(5)} ${s.side.padEnd(5)} rise ${utc(s.accStart)}..${utc(s.peak).slice(6)} IN ${s.accIn.toFixed(1)} net ${s.accNet.toFixed(1)}ATR · before: ${s.prior} · price ${s.px} · ${s.victim} liq · SL ${s.slPct.toFixed(2)}% · ${x.r.status} ${sR(x.r.r)}`,
           );
         }
       }

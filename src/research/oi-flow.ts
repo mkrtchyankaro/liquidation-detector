@@ -50,6 +50,12 @@ export interface FlowSignal {
   priorOut: number; // the falling leg before the rise (gross OUT / down-ATR)
   dropOut: number;
   victim: Side; // since the peak: gross OUT / down-ATR, who was liquidated
+  /** price direction of each phase (close to close): drop before / rise / drop now, e.g. "↑↑↓" ("·" = no phase) */
+  px: string;
+  /** PRICE CHECK (Johnny, Oct 2): the price did what the story says -- phase 1 moved against the first victims
+   *  (shorts liquidated -> price UP), phase 2 went on the same way (new positions follow it), phase 3 moved
+   *  against the new victims (longs liquidated -> price DOWN). Only directions, no sizes. Needs all 3 phases. */
+  priceOk: boolean;
 }
 export interface FlowOpts {
   tf: number;
@@ -238,7 +244,24 @@ export function flowSignals(
       priorOut =
         sum(p, before.s + 1, before.e, (q) => q.outF) / p[before.s + 1].down;
     }
+    const dirOf = (a: number, b: number): number =>
+      Math.sign(p[b].close - p[a].close);
+    const arrow = (d: number): string => (d > 0 ? "↑" : d < 0 ? "↓" : "=");
+    const against = (vic: Side): number => (vic === "SHORT" ? 1 : -1); // price direction that liquidates this side
+    const hasBefore = !!before && before.e === bottom && before.s < before.e;
+    const d1 = hasBefore ? dirOf(before!.s, before!.e) : NaN,
+      d2 = dirOf(bottom, peak),
+      d3 = Math.sign(x.close - p[peak].close);
+    const pv1 = hasBefore ? victim(p, before!.s + 1, before!.e) : null;
+    const priceOk =
+      hasBefore &&
+      pv1 !== null &&
+      d1 === against(pv1) &&
+      d2 === d1 &&
+      d3 === against(v);
     res.push({
+      px: `${hasBefore ? arrow(d1) : "·"}${arrow(d2)}${arrow(d3)}`,
+      priceOk,
       symbol,
       t: x.t + MIN,
       side,

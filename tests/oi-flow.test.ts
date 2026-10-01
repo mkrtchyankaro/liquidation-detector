@@ -24,16 +24,23 @@ function scenario(name: string, fn: () => void): void {
   }
 }
 const M = 60_000;
-const rows = (oi: number[], liq: Array<[number, number]> = []): FlowMinute[] =>
-  oi.map((x, i) => ({
-    t: i * M,
-    oi: x,
-    high: 100.5,
-    low: 99.5,
-    close: 100,
-    longLiq: liq[i]?.[0] ?? 0,
-    shortLiq: liq[i]?.[1] ?? 0,
-  }));
+const rows = (
+  oi: number[],
+  liq: Array<[number, number]> = [],
+  px: number[] = [],
+): FlowMinute[] =>
+  oi.map((x, i) => {
+    const c = px[i] ?? 100;
+    return {
+      t: i * M,
+      oi: x,
+      high: c + 0.5,
+      low: c - 0.5,
+      close: c,
+      longLiq: liq[i]?.[0] ?? 0,
+      shortLiq: liq[i]?.[1] ?? 0,
+    };
+  });
 
 scenario(
   "IN and OUT inside ONE window are both counted (+8 then -7 is not 'net +1')",
@@ -100,6 +107,59 @@ scenario("no look-ahead: cut data gives the same signal", () => {
     flowSignals("X", full, opts).filter((x) => x.t <= story.length * M),
   );
 });
+// prices: flat warm-up, UP while shorts are liquidated, UP while new positions come, DOWN while longs are liquidated
+const pxStory = [
+  ...warm.map(() => 100),
+  101,
+  102,
+  103,
+  104,
+  105,
+  106,
+  107,
+  108,
+  106,
+  104,
+];
+scenario(
+  "PRICE CHECK: shorts liquidated + price up, rise + price up, longs liquidated + price down = ok (↑↑↓)",
+  () => {
+    const s = flowSignals("X", rows(story, liq(1, 0), pxStory), opts);
+    assert.strictEqual(s.length, 1);
+    assert.strictEqual(s[0].px, "↑↑↓");
+    assert.strictEqual(s[0].priceOk, true);
+  },
+);
+scenario(
+  "PRICE CHECK fails when a phase goes the other way (rise phase with the price falling)",
+  () => {
+    const px = [
+      ...warm.map(() => 100),
+      101,
+      102,
+      103,
+      102,
+      101,
+      100,
+      99,
+      98,
+      97,
+      96,
+    ];
+    const s = flowSignals("X", rows(story, liq(1, 0), px), opts);
+    assert.strictEqual(s[0].px, "↑↓↓");
+    assert.strictEqual(s[0].priceOk, false);
+  },
+);
+scenario(
+  "PRICE CHECK fails with a flat price (no direction) and without a phase before",
+  () => {
+    assert.strictEqual(
+      flowSignals("X", rows(story, liq(1, 0)), opts)[0].priceOk,
+      false,
+    );
+  },
+);
 scenario("buckets", () => {
   assert.deepStrictEqual([0.5, 1.5, 2.5, 4, 7, 12].map(sizeBucket), [
     "<1",
