@@ -3,27 +3,41 @@ import { estimateFeesUsd } from "../v9/v9-fees";
 import type { V10SignalDoc, V10TradeDoc } from "./v10-repository";
 
 /**
- * V10 messages (plain text). Header "V10 · BTC" on every message so it is never mixed up with V9.
+ * V10 messages (plain text). Header "V10 · BTC" (part 1, BTC-led) or "V10 · ALT" (part 2, the alt's own move) on every
+ * message so it is never mixed up with V9 or with the other part.
  * 🔻 SHORT entry · 🔺 LONG entry · ✅ TP · ❌ SL · ⚪ other close · ⚠️ not opened. $ figures use THIS user's trade.
  * The story is told in 15m candles, UTC.
  */
 const SEP = "------------------------------";
-const utc = (ms: number): string =>
-  new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+const utc = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 const hm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
-const dhm = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("T", " ");
+const dhm = (ms: number): string => new Date(ms).toISOString().slice(5, 16).replace("T", " ");
 const sp = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 const coin = (s: string): string => s.replace(/USDT$/, "");
 const W = 15 * 60_000;
 
-export function v10Story(
-  sig: Pick<V10SignalDoc, "btc" | "rankWindowHours">,
-  t: Pick<V10TradeDoc, "symbol" | "side" | "pick">,
-  picks: number,
-): string[] {
-  const b = sig.btc,
-    top = t.side === "SHORT";
+/** "V10 · BTC" / "V10 · ALT" */
+export const v10Head = (t: { kind?: string }): string => `V10 · ${t.kind === "OWN" ? "ALT" : "BTC"}`;
+
+/** part 2: the alt moved on its own */
+export function v10OwnStory(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">, t: Pick<V10TradeDoc, "symbol" | "side">): string[] {
+  const a = sig.turn, top = t.side === "SHORT", o = sig.own;
+  return [
+    `📖 Ինչու (15m մոմեր, UTC)`,
+    ``,
+    `1️⃣ ${coin(t.symbol)}-ն ինքն իրենով ${top ? "բարձրացավ" : "իջավ"} · ${dhm(a.moveStartT)} → ${hm(a.extremeT + W)}`,
+    `Գինը ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} · OI-ով ամենամեծը վերջին ${sig.rankWindowHours} ժամի ${a.prior} շարժումից`,
+    ``,
+    `2️⃣ ${top ? "Գագաթ" : "Հատակ"} · ${hm(a.candleEnd - W)}–${hm(a.candleEnd)} մոմը`,
+    `${a.label} · OI ${sp(a.candleOiPct)} · ${coin(t.symbol)} ${fmtPrice(a.price)}`,
+    ``,
+    `3️⃣ BTC-ն այդ ընթացքում ${o ? sp(o.btcPct) : "n/a"}`,
+    o?.how === "BTC OPPOSITE" ? `BTC-ն գնաց հակառակ ուղղությամբ · R² ${o.follow.toFixed(2)}` : `BTC-ն բացատրում է շարժման կեսից քիչը · R² ${o ? o.follow.toFixed(2) : "n/a"}`,
+  ];
+}
+
+export function v10Story(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">, t: Pick<V10TradeDoc, "symbol" | "side" | "pick">, picks: number): string[] {
+  const b = sig.turn, top = t.side === "SHORT";
   return [
     `📖 Ինչու (15m մոմեր, UTC)`,
     ``,
@@ -39,17 +53,14 @@ export function v10Story(
 }
 
 export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
-  const long = t.side === "LONG",
-    risk = t.actualRiskUsd ?? t.plannedRiskUsd;
-  const entry = t.entryPrice!,
-    sl = t.slPrice!,
-    tp = t.tpPrice;
+  const long = t.side === "LONG", risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+  const entry = t.entryPrice!, sl = t.slPrice!, tp = t.tpPrice;
   const notional = t.quantity !== null ? entry * t.quantity : NaN;
   const fees = estimateFeesUsd(notional);
   const pctOf = (p: number): string => sp((100 * (p - entry)) / entry);
   const rr = tp !== null ? Math.abs(tp - entry) / Math.abs(entry - sl) : NaN;
   return [
-    `${long ? "🔺" : "🔻"} V10 · BTC · ${t.symbol} · ${long ? "LONG (BUY)" : "SHORT (SELL)"} · ${t.mode}`,
+    `${long ? "🔺" : "🔻"} ${v10Head(t)} · ${t.symbol} · ${long ? "LONG (BUY)" : "SHORT (SELL)"} · ${t.mode}`,
     SEP,
     `📍 ENTRY · ${utc(t.createdAt)}`,
     `🆔 ${t.orderSignalId}`,
@@ -62,25 +73,20 @@ export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
     `Position  ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)})`,
     `Fees ≈    ${fmtUsd(fees.tp, false)} at TP · ${fmtUsd(fees.sl, false)} at SL`,
     ``,
-    ...v10Story(sig, t, sig.picks.length),
+    ...(sig.kind === "OWN" ? v10OwnStory(sig, t) : v10Story(sig, t, sig.picks.length)),
   ].join("\n");
 }
 
 const REASON: Record<string, string> = {
-  TP_FILLED: "✅ TAKE PROFIT",
-  SL_FILLED: "❌ STOP LOSS",
-  POSITION_CLOSED_EXTERNALLY: "⚪ CLOSED OUTSIDE THE BOT",
-  CLOSED_NO_FILLS_FOUND: "⚪ CLOSED (no fills found)",
+  TP_FILLED: "✅ TAKE PROFIT", SL_FILLED: "❌ STOP LOSS",
+  POSITION_CLOSED_EXTERNALLY: "⚪ CLOSED OUTSIDE THE BOT", CLOSED_NO_FILLS_FOUND: "⚪ CLOSED (no fills found)",
   FAILSAFE_CLOSED: "⚪ FAIL-SAFE CLOSE (no SL found)",
 };
 
 export function formatV10Close(t: V10TradeDoc): string {
-  const held =
-    t.closedAt !== null
-      ? Math.max(0, Math.round((t.closedAt - t.createdAt) / 60_000))
-      : null;
+  const held = t.closedAt !== null ? Math.max(0, Math.round((t.closedAt - t.createdAt) / 60_000)) : null;
   return [
-    `${REASON[t.closeReason ?? ""] ?? "⚪ CLOSED"} · V10 · BTC · ${t.symbol} · ${t.side} · ${t.mode}`,
+    `${REASON[t.closeReason ?? ""] ?? "⚪ CLOSED"} · ${v10Head(t)} · ${t.symbol} · ${t.side} · ${t.mode}`,
     SEP,
     `🆔 ${t.orderSignalId}`,
     `Entry     ${fmtPrice(t.entryPrice)}`,
@@ -90,14 +96,9 @@ export function formatV10Close(t: V10TradeDoc): string {
   ].join("\n");
 }
 
-export function formatV10Failure(
-  t: Pick<
-    V10TradeDoc,
-    "symbol" | "side" | "mode" | "orderSignalId" | "failureReason" | "state"
-  >,
-): string {
+export function formatV10Failure(t: Pick<V10TradeDoc, "symbol" | "side" | "mode" | "orderSignalId" | "failureReason" | "state" | "kind">): string {
   return [
-    `⚠️ V10 · BTC · ${t.symbol} · ${t.side} · ${t.mode} · ${t.state === "SKIPPED" ? "NOT OPENED (skipped)" : "NOT OPENED"}`,
+    `⚠️ ${v10Head(t)} · ${t.symbol} · ${t.side} · ${t.mode} · ${t.state === "SKIPPED" ? "NOT OPENED (skipped)" : "NOT OPENED"}`,
     SEP,
     `🆔 ${t.orderSignalId}`,
     `Reason: ${t.failureReason ?? "unknown"}`,

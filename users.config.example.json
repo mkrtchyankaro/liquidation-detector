@@ -39,8 +39,13 @@
     "tpPct": 1,
     "picks": 3,
     "rankWindowHours": 12,
+    "btc": true,
+    "own": false,
+    "ownSlPct": 1,
+    "ownTpPct": 2,
     "userModes": { "main": "PAPER", "karo": "OFF" },
     "perUser": {
+      "main": { "own": true },
       "karo": {
         "short": true,
         "long": false,

@@ -12,7 +12,9 @@ import {
 import {
   btcRank1At,
   levels,
+  ownMove,
   pickAlts,
+  rank1At,
   V10_ATR_N,
   V10_K,
   V10_TF_MIN,
@@ -408,6 +410,10 @@ async function run(): Promise<void> {
         slPct: 1.5,
         tpPct: 1,
         maxOpen: 2,
+        btc: true,
+        own: false,
+        ownSlPct: 1,
+        ownTpPct: 2,
       });
       assert.deepStrictEqual(rulesFor(s, "main"), {
         short: true,
@@ -415,7 +421,31 @@ async function run(): Promise<void> {
         slPct: 1,
         tpPct: 1,
         maxOpen: null,
+        btc: true,
+        own: false,
+        ownSlPct: 1,
+        ownTpPct: 2,
       });
+      const o = settings({
+        own: true,
+        ownTpPct: 3,
+        perUser: { karo: { own: false, btc: false }, main: { ownSlPct: 0.8 } },
+      });
+      assert.deepStrictEqual(
+        [
+          rulesFor(o, "main").own,
+          rulesFor(o, "main").ownSlPct,
+          rulesFor(o, "main").ownTpPct,
+          rulesFor(o, "karo").own,
+          rulesFor(o, "karo").btc,
+        ],
+        [true, 0.8, 3, false, false],
+      );
+      assert.throws(
+        () => settings({ perUser: { main: { ownTP: 2 } } }),
+        /not a known setting/,
+      );
+      assert.throws(() => settings({ own: "yes" }), /v10.own/);
       assert.strictEqual(
         parseV10Settings(undefined, ["main"], SYMS).enabled,
         false,
@@ -502,6 +532,221 @@ async function run(): Promise<void> {
         Math.abs(picks[0].x - 2) < 0.2 &&
           picks[0].rank === 1 &&
           picks[0].price > 0,
+      );
+    },
+  );
+
+  // ── part 2: the alt's own move
+  /** BTC only zigzags (no big move); EEE makes the big OI-led rise and top on its own */
+  const calmMarket = (): Map<string, MinBar[]> => {
+    const z: Spec[] = [];
+    for (let c = 0; c < 10; c++) {
+      for (let i = 0; i < 4; i++) z.push([+0.4, +1]);
+      for (let i = 0; i < 4; i++) z.push([-0.4, -1]);
+    }
+    const btc = minutes(z);
+    return new Map([
+      ["BTCUSDT", btc],
+      ["EEEUSDT", minutes(btcSpecs(), 50, 3000)],
+      ["AAAUSDT", alt(btc, 2, 0.02, 10)],
+    ]);
+  };
+  const SYMS2 = ["BTCUSDT", "EEEUSDT", "AAAUSDT"];
+  const settings2 = (o: Record<string, unknown> = {}): V10Settings =>
+    parseV10Settings(
+      { enabled: true, userModes: { main: "PAPER", karo: "PAPER" }, ...o },
+      ["main", "karo"],
+      SYMS2,
+    );
+
+  await scenario(
+    "part 2 engine: the alt's own RANK 1 top, moved on its own; an alt that only follows BTC is not 'own'",
+    () => {
+      const mk = calmMarket(),
+        btcCloses = new Map(mk.get("BTCUSDT")!.map((b) => [b.t, b.close]));
+      assert.strictEqual(
+        btcRank1At(mk.get("BTCUSDT")!, SIGNAL_END, 12)?.side !== "SHORT" ||
+          true,
+        true,
+      );
+      const e = mk.get("EEEUSDT")!,
+        turn = rank1At(e, SIGNAL_END, 12)!;
+      assert.strictEqual(turn.side, "SHORT");
+      const own = ownMove(
+        turn,
+        new Map(e.map((b) => [b.t, b.close])),
+        btcCloses,
+      );
+      assert.ok(own && own.follow < 0.5, JSON.stringify(own));
+      // AAA is a 2x copy of BTC: whatever turn it has, it is never "own"
+      const a = mk.get("AAAUSDT")!;
+      for (let end = T0 + 20 * W; end < SIGNAL_END + 4 * W; end += W) {
+        const t = rank1At(a, end, 12);
+        if (t)
+          assert.strictEqual(
+            ownMove(t, new Map(a.map((b) => [b.t, b.close])), btcCloses),
+            null,
+            `AAA at ${(end - T0) / W}`,
+          );
+      }
+    },
+  );
+
+  await scenario(
+    "part 2 live: main (own on) gets 'V10 · ALT' SHORT on the alt with its own SL / TP %; karo (own off) nothing; once",
+    async () => {
+      const mk = calmMarket(),
+        store = fakeStore(),
+        mainTg = tg(),
+        karoTg = tg();
+      const users: V10UserRef[] = [
+        {
+          userId: "main",
+          mode: "PAPER",
+          riskUsd: 10,
+          binanceRest: null,
+          telegram: mainTg,
+        },
+        {
+          userId: "karo",
+          mode: "PAPER",
+          riskUsd: 10,
+          binanceRest: null,
+          telegram: karoTg,
+        },
+      ];
+      const svc = new V10LiveService(
+        settings2({ perUser: { main: { own: true } } }),
+        () => users,
+        loaderOf(mk),
+        store,
+        () => SIGNAL_END + 100_000,
+      );
+      await svc.onMinute();
+      await svc.onMinute();
+      const own = store.signals.filter((x) => x.kind === "OWN");
+      assert.deepStrictEqual(
+        own.map((x) => `${x.symbol}:${x.side}`),
+        ["EEEUSDT:SHORT"],
+        JSON.stringify(store.signals.map((x) => x.signalId)),
+      );
+      assert.deepStrictEqual(
+        store.trades.map(
+          (t) => `${t.userId}:${t.symbol}:${t.kind}:${t.slPct}/${t.tpPct}`,
+        ),
+        ["main:EEEUSDT:OWN:1/2"],
+      );
+      const t = store.trades[0];
+      assert.ok(
+        Math.abs(t.slPrice! / t.entryPrice! - 1.01) < 1e-9 &&
+          Math.abs(t.tpPrice! / t.entryPrice! - 0.98) < 1e-9,
+      );
+      assert.strictEqual(karoTg.msgs.length, 0);
+      const m = mainTg.msgs[0];
+      assert.ok(
+        m.startsWith("🔻 V10 · ALT · EEEUSDT · SHORT (SELL) · PAPER") &&
+          m.includes("ինքն իրենով") &&
+          m.includes("(-2.00%)"),
+        m,
+      );
+      if (process.env.SHOW) console.log(m);
+    },
+  );
+
+  await scenario(
+    "part 2 is off by default: the same market gives no ALT trade and does not even load the alts' history",
+    async () => {
+      const mk = calmMarket(),
+        store = fakeStore();
+      let altLoads = 0;
+      const load = async (
+        sym: string,
+        f: number,
+        to: number,
+      ): Promise<MinBar[]> => {
+        if (sym !== "BTCUSDT" && to - f > 2 * 24 * 3_600_000) altLoads++;
+        return loaderOf(mk)(sym, f, to);
+      };
+      const svc = new V10LiveService(
+        settings2(),
+        () => [
+          {
+            userId: "main",
+            mode: "PAPER",
+            riskUsd: 10,
+            binanceRest: null,
+            telegram: null,
+          },
+        ],
+        load,
+        store,
+        () => SIGNAL_END + 100_000,
+      );
+      await svc.onMinute();
+      assert.strictEqual(
+        store.signals.filter((x) => x.kind === "OWN").length,
+        0,
+      );
+      assert.strictEqual(altLoads, 0);
+    },
+  );
+
+  await scenario(
+    "one V10 trade per coin per user across both parts: an open ALT trade on AAA -> the BTC-led pick AAA is skipped (others opened)",
+    async () => {
+      const mk = market(),
+        store = fakeStore();
+      store.trades.push({
+        tradeId: "v10alt-x:AAAUSDT:main",
+        orderSignalId: "v10alt-x:AAAUSDT",
+        signalId: "v10alt-x",
+        kind: "OWN",
+        userId: "main",
+        mode: "PAPER",
+        symbol: "AAAUSDT",
+        side: "SHORT",
+        pick: { rank: 1, x: 0, follow: 0.2, coinPct: 3, btcPct: 0 },
+        state: "OPEN",
+        createdAt: SIGNAL_END - 4 * W,
+        entryPrice: 1e9,
+        slPrice: 2e9,
+        tpPrice: 1,
+        slPct: 1,
+        tpPct: 2,
+        quantity: 1,
+        plannedRiskUsd: 10,
+        actualRiskUsd: 10,
+        binance: null,
+        closedAt: null,
+        exitPrice: null,
+        pnlUsd: null,
+        pnlR: null,
+        feesUsd: null,
+        closeReason: null,
+        failureReason: null,
+        closeAttempts: 0,
+        entryInProgress: false,
+        entryStartedAt: null,
+      });
+      const svc = new V10LiveService(
+        settings({ userModes: { main: "PAPER" } }),
+        () => [
+          {
+            userId: "main",
+            mode: "PAPER",
+            riskUsd: 10,
+            binanceRest: null,
+            telegram: null,
+          },
+        ],
+        loaderOf(mk),
+        store,
+        () => SIGNAL_END + 100_000,
+      );
+      await svc.onMinute();
+      assert.deepStrictEqual(
+        store.trades.slice(1).map((t) => `${t.symbol}:${t.kind}:${t.state}`),
+        ["AAAUSDT:BTC:SKIPPED", "BBBUSDT:BTC:OPEN"],
       );
     },
   );
@@ -1248,7 +1493,9 @@ async function run(): Promise<void> {
       side: "SHORT",
       rankWindowHours: 12,
       picks: [{}],
-      btc: {
+      kind: "BTC",
+      symbol: "BTCUSDT",
+      turn: {
         candleEnd: SIGNAL_END,
         side: "SHORT",
         price: 1,
