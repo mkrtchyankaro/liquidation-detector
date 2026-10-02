@@ -204,3 +204,33 @@ export function outcome(
     worst: Number.isFinite(worst) ? worst : NaN,
   };
 }
+
+/**
+ * HOW BIG WAS THIS MOVE'S OI, COMPARED WITH THE MOVES BEFORE IT? (Johnny, Oct 2) No threshold: each accepted turn's
+ * |move OI %| against the accepted turns of the `windowH` hours BEFORE it (known at the signal -> live-safe).
+ *   rank   1 = bigger than every move of that window, 2 = one was bigger, ...
+ *   share  part of those earlier moves that were smaller (1 = all of them)
+ *   prior  how many earlier moves there were (0 = nothing to compare with -> rank 1, share NaN)
+ */
+export interface Ranked {
+  turn: Turn;
+  rank: number;
+  share: number;
+  prior: number;
+}
+export function pastRank(list: readonly Turn[], windowH: number): Ranked[] {
+  const acc = list.filter((t) => t.accepted);
+  return acc.map((t) => {
+    const before = acc.filter(
+      (p) => p.t < t.t && p.t >= t.t - windowH * 3_600_000,
+    );
+    const me = Math.abs(t.moveOiPct),
+      bigger = before.filter((p) => Math.abs(p.moveOiPct) >= me).length;
+    return {
+      turn: t,
+      rank: bigger + 1,
+      share: before.length ? (before.length - bigger) / before.length : NaN,
+      prior: before.length,
+    };
+  });
+}

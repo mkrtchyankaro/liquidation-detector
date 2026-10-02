@@ -6,9 +6,11 @@ import {
   atrBefore,
   candles,
   outcome,
+  pastRank,
   turns,
   type Candle,
   type MinBar,
+  type Turn,
 } from "../src/research/dc15";
 
 let passed = 0,
@@ -132,5 +134,37 @@ scenario("outcome: signed by direction, best / worst inside the window", () => {
   assert.ok(Math.abs(o.at[0] - 1) < 1e-9, String(o.at[0])); // after 2 minutes close 99 -> +1% for a SHORT
   assert.ok(o.worst < 0 && o.best > 0);
 });
+scenario(
+  "pastRank: compared only with the accepted moves of the window BEFORE it",
+  () => {
+    const H = 3_600_000;
+    const t = (h: number, oi: number, accepted = true): Turn => ({
+      t: h * H,
+      newDir: "UP",
+      price: 1,
+      extreme: 1,
+      extremeT: 0,
+      moveOiPct: oi,
+      candleOiPct: 0,
+      label: "",
+      accepted,
+      atr: 1,
+    });
+    const r = pastRank(
+      [t(0, 1), t(5, -3), t(10, 2), t(11, 9, false), t(40, 0.5)],
+      24,
+    );
+    assert.deepStrictEqual(
+      r.map((x) => [x.rank, x.prior]),
+      [
+        [1, 0],
+        [1, 1],
+        [2, 2],
+        [1, 0],
+      ],
+    ); // |-3| beats 1; 2 loses to 3; the rejected 9 does not count; 40h: window empty
+    assert.ok(Number.isNaN(r[0].share) && r[2].share === 0.5);
+  },
+);
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

@@ -8,7 +8,9 @@
  * candles: what the move did after them (did it really go on?).
  *
  *   npx tsx src/tools/dc15.ts
- *   options: --symbol BTCUSDT  --from 2026-09-22  --tf 15  --k 1  --n 14  --quiet (summary only)
+ *   options: --symbol BTCUSDT  --from 2026-09-22  --tf 15  --k 1  --n 14  --window 24 (hours)  --quiet (summary only)
+ * BIG MOVES (Johnny, Oct 2): each accepted turn's |move OI| ranked against the accepted moves of the --window hours
+ * BEFORE it (no threshold, live-safe): results by rank, "bigger than all of them", "bigger than most of them".
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -16,6 +18,7 @@ import { MINUTE_BARS } from "../collector/minute-bars";
 import {
   candles,
   outcome,
+  pastRank,
   turns,
   type MinBar,
   type Turn,
@@ -116,6 +119,67 @@ async function main(): Promise<void> {
     console.log(
       "* rejected = if we HAD taken them: minus = right to reject (the move really went on)",
     );
+
+    const win = Number(arg("window", "24"));
+    const days = Math.max(
+      1,
+      (bars[bars.length - 1].t - bars[0].t) / 86_400_000,
+    );
+    for (const [name, list] of [
+      ["DC + OI rule", withOi],
+      ["PLAIN DC", plain.map((t) => ({ ...t, accepted: true }))],
+    ] as const) {
+      const r = pastRank(list, win).filter((x) => x.prior > 0); // the first moves have nothing before them to compare with
+      console.log(
+        `\nBIG MOVES · ${name} · each move's |OI change| vs the moves of the ${win}h before it (only moves with earlier ones: ${r.length})`,
+      );
+      const line = (label: string, sel: typeof r): void => {
+        const os = sel.map((x) => res(x.turn));
+        const avg = (i: number): string => {
+          const v = os.map((o) => o.at[i]).filter(Number.isFinite);
+          return `${sp(v.reduce((a, b) => a + b, 0) / (v.length || 1))} (right ${v.filter((x) => x > 0).length}/${v.length})`;
+        };
+        const w = os.map((o) => o.worst).filter(Number.isFinite),
+          b = os.map((o) => o.best).filter(Number.isFinite);
+        console.log(
+          `   ${label.padEnd(36)} ${String(sel.length).padStart(4)} (${(sel.length / days).toFixed(1)}/day) · 2h ${avg(1)} · 4h ${avg(2)} · best ${sp(b.reduce((a, x) => a + x, 0) / (b.length || 1))} · worst ${sp(w.reduce((a, x) => a + x, 0) / (w.length || 1))}`,
+        );
+      };
+      line(
+        "rank 1 = bigger than ALL before it",
+        r.filter((x) => x.rank === 1),
+      );
+      line(
+        "rank 2",
+        r.filter((x) => x.rank === 2),
+      );
+      line(
+        "rank 3",
+        r.filter((x) => x.rank === 3),
+      );
+      line(
+        "rank 4 and lower",
+        r.filter((x) => x.rank >= 4),
+      );
+      line(
+        "bigger than MOST before it (share>1/2)",
+        r.filter((x) => x.share > 0.5),
+      );
+      line(
+        "smaller than most",
+        r.filter((x) => x.share <= 0.5),
+      );
+      if (name === "DC + OI rule" && !argv.includes("--quiet")) {
+        console.log("   the rank-1 signals:");
+        for (const x of r.filter((y) => y.rank === 1)) {
+          const o = res(x.turn),
+            t = x.turn;
+          console.log(
+            `     ${utc(t.t)} ${t.newDir === "UP" ? "▲ UP  " : "▼ DOWN"} move OI ${sp(t.moveOiPct).padStart(7)} (vs ${x.prior} earlier) · candle ${t.label.padEnd(10)} | 2h ${sp(o.at[1]).padStart(7)} 4h ${sp(o.at[2]).padStart(7)} | best ${sp(o.best)} worst ${sp(o.worst)}`,
+          );
+        }
+      }
+    }
   } finally {
     await client.close();
   }
