@@ -127,6 +127,12 @@ async function main(): Promise<void> {
       d2 = 0;
     console.log(`\nPART 2 (ALT) · the alt's own RANK 1 turn, moved on its own`);
     for (const [sym, bars] of altBars) {
+      if (bars[0].t > btc[0].t + 86_400_000) {
+        console.log(
+          `  ${sym.replace("USDT", "")}: too new for part 2 (live skips it too)`,
+        );
+        continue;
+      }
       const map = closes.get(sym)!;
       const res = new Map(
         pastRank(turns(candles(bars, V10_TF_MIN), V10_K, V10_ATR_N, true), win)

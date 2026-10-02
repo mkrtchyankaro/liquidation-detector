@@ -1145,12 +1145,21 @@ async function run(): Promise<void> {
     },
   );
 
-  const realSetup = (o: { marketThrows?: boolean } = {}) => {
+  const realSetup = (
+    o: { marketThrows?: boolean; book?: (signal: number) => number } = {},
+  ) => {
     const mk = market(),
       store = fakeStore(),
       t = tg();
     let now = SIGNAL_END + 100_000;
-    const bx = fakeBinance(10, () => now);
+    const signal = mk
+      .get("AAAUSDT")!
+      .filter((b) => b.t < SIGNAL_END)
+      .at(-1)!.close;
+    const bx = fakeBinance(
+      Number((o.book ? o.book(signal) : signal).toFixed(4)),
+      () => now,
+    );
     bx.st.marketThrows = !!o.marketThrows;
     const users: V10UserRef[] = [
       {
@@ -1226,7 +1235,7 @@ async function run(): Promise<void> {
         !a.entryInProgress &&
           a.binance?.slAlgoId &&
           a.binance.tpOrderId &&
-          a.entryPrice === 10,
+          a.entryPrice === bx.st.entry,
         JSON.stringify(a),
       );
       assert.ok(t.msgs.at(-1)!.includes("with its SL resting"), t.msgs.at(-1));
@@ -1254,6 +1263,82 @@ async function run(): Promise<void> {
         bx.st.algos.length,
         0,
         "our SL must not stay on the other trade's position",
+      );
+    },
+  );
+
+  await scenario(
+    "REAL: SL / TP are the SAME prices as PAPER (from the signal price), even when the price moved a bit before the entry",
+    async () => {
+      const { store, bx, svc } = realSetup({ book: (p) => p * 1.004 }); // +0.4% against us before the order
+      await svc.onMinute();
+      const tr = store.trades[0],
+        signal = tr.entryPrice! / 1.004;
+      assert.strictEqual(tr.state, "OPEN", tr.failureReason ?? "");
+      assert.ok(
+        Math.abs(Number(bx.st.algos[0].triggerPrice) / signal - 1.01) < 0.0002,
+        `SL ${bx.st.algos[0].triggerPrice} vs signal ${signal}`,
+      );
+      assert.ok(
+        Math.abs(Number(bx.st.orders[0].price) / signal - 0.99) < 0.0002,
+        `TP ${bx.st.orders[0].price}`,
+      );
+      assert.ok(
+        Math.abs(tr.actualRiskUsd! - 10) < 0.2,
+        `risk stays ~$10 (${tr.actualRiskUsd})`,
+      );
+    },
+  );
+
+  await scenario(
+    "REAL: the price already passed the SL before the entry (UNI, Oct 2) -> not opened, no order, the user told why",
+    async () => {
+      const { store, t, bx, svc } = realSetup({ book: (p) => p * 1.011 });
+      await svc.onMinute();
+      assert.strictEqual(store.trades[0].state, "SKIPPED");
+      assert.strictEqual(bx.st.created.length, 0);
+      assert.ok(t.msgs[0].includes("already reached the SL"), t.msgs[0]);
+    },
+  );
+
+  await scenario(
+    "part 2 only on alts with as much history as BTC: the same alt move is ignored when BTC has 2 more days of data",
+    async () => {
+      const run = async (btcExtraDays: number): Promise<number> => {
+        const mk = calmMarket(),
+          store = fakeStore();
+        const btc = mk.get("BTCUSDT")!;
+        const extra = btc
+          .slice(0, 8 * 15 * btcExtraDays * 12)
+          .map((b) => ({ ...b, t: b.t - btcExtraDays * 24 * 60 * M })); // older zigzag
+        mk.set("BTCUSDT", [...extra, ...btc]);
+        const svc = new V10LiveService(
+          settings2({ own: true }),
+          () => [
+            {
+              userId: "main",
+              mode: "PAPER",
+              riskUsd: 10,
+              binanceRest: null,
+              telegram: null,
+            },
+          ],
+          loaderOf(mk),
+          store,
+          () => SIGNAL_END + 100_000,
+        );
+        await svc.onMinute();
+        return store.signals.filter((x) => x.kind === "OWN").length;
+      };
+      assert.strictEqual(
+        await run(0),
+        1,
+        "same history as BTC -> the ALT signal",
+      );
+      assert.strictEqual(
+        await run(2),
+        0,
+        "EEE starts 2 days after BTC -> too new",
       );
     },
   );
