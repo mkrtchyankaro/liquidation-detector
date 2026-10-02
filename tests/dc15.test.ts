@@ -264,5 +264,31 @@ scenario("coin OI change: last known OI at each time, no look-ahead", () => {
   assert.ok(Math.abs(oiChange(oi, 60_000, 120_000) - 10) < 1e-9); // at 2:00 the minute 2:00 is not closed yet -> 110
   assert.ok(Number.isNaN(oiChange(oi, 0, 60_000))); // nothing known before 0:00
 });
+scenario(
+  "x fix: with a direction, the move is measured to the extreme, not to a close that came back",
+  () => {
+    const btc = new Map<number, number>(),
+      coin = new Map<number, number>();
+    // BTC: 100 -> 102 -> back to 100.1 ; coin: 50 -> 52 (+4%) -> back to 50
+    [100, 101, 102, 101, 100.1, 100.1].forEach((v, i) =>
+      btc.set(i * 60_000, v),
+    );
+    [50, 51, 52, 51, 50, 50].forEach((v, i) => coin.set(i * 60_000, v));
+    const close = coinInWindow(coin, btc, 60_000, 6 * 60_000),
+      ext = coinInWindow(coin, btc, 60_000, 6 * 60_000, true);
+    assert.ok(
+      Math.abs(close.btcPct - 0.1) < 1e-9 && Math.abs(close.x) < 1e-9,
+      JSON.stringify(close),
+    ); // close-based: x = 0, meaningless
+    assert.ok(
+      Math.abs(ext.btcPct - 2) < 1e-9 &&
+        Math.abs(ext.pct - 4) < 1e-9 &&
+        Math.abs(ext.x - 2) < 1e-9,
+      JSON.stringify(ext),
+    );
+    const down = coinInWindow(coin, btc, 60_000, 6 * 60_000, false); // nothing below the start
+    assert.ok(down.btcPct === 0 && down.pct === 0);
+  },
+);
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

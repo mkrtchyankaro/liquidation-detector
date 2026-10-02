@@ -314,6 +314,7 @@ export function pastRank(
 /**
  * THE COINS IN THE MOVE (Johnny, Oct 2): over the BTC move window [from, to] -- known at the signal:
  *   pct     the coin's move (close at `from` -> close at `to`), x = pct / BTC's pct
+ *           with `up` given: both moves to their furthest close in that direction inside the window (the extreme)
  *   follow  R2 of the coin's 1-minute returns on BTC's inside the window (1 = moved exactly with BTC)
  */
 export interface Close {
@@ -327,14 +328,37 @@ export function priceAt(bars: ReadonlyMap<number, number>, t: number): number {
   }
   return NaN;
 }
+/** the furthest close in the window from the start, in BTC's move direction (up -> highest, down -> lowest) -- the
+ *  move to its extreme, not to a candle close that may have come back (x fix, Johnny Oct 2) */
+function toExtreme(
+  m: ReadonlyMap<number, number>,
+  from: number,
+  to: number,
+  up: boolean,
+): number {
+  const p0 = priceAt(m, from);
+  let e = p0;
+  for (let t = Math.floor(from / M) * M; t < to; t += M) {
+    const v = m.get(t);
+    if (v) e = up ? Math.max(e, v) : Math.min(e, v);
+  }
+  return 100 * (e / p0 - 1);
+}
 export function coinInWindow(
   coin: ReadonlyMap<number, number>,
   btc: ReadonlyMap<number, number>,
   from: number,
   to: number,
+  up?: boolean,
 ): { pct: number; btcPct: number; x: number; follow: number } {
-  const pct = 100 * (priceAt(coin, to) / priceAt(coin, from) - 1),
-    btcPct = 100 * (priceAt(btc, to) / priceAt(btc, from) - 1);
+  const pct =
+    up === undefined
+      ? 100 * (priceAt(coin, to) / priceAt(coin, from) - 1)
+      : toExtreme(coin, from, to, up);
+  const btcPct =
+    up === undefined
+      ? 100 * (priceAt(btc, to) / priceAt(btc, from) - 1)
+      : toExtreme(btc, from, to, up);
   const xs: number[] = [],
     ys: number[] = [];
   for (let t = Math.floor(from / M) * M + M; t < to; t += M) {

@@ -1,18 +1,19 @@
 /**
- * THE BEST BTC TURNS -> WHICH COIN? + FILTERS (Johnny, Oct 2 2026) Read-only, our DB (minute_bars). See src/research/dc15.ts.
- * BTC turns: DC on 15m candles + the OI rule. Signals = RANK 1: the move's |OI change| is bigger than every move of the 24h before it.
+ * THE BEST BTC TURNS -> WHICH COIN? (Johnny, Oct 2 2026) Read-only, our DB (minute_bars). See src/research/dc15.ts.
+ * BTC turns: DC on 15m candles + the OI rule. Signals = RANK 1: the move's |OI change| is bigger than every move of the window (12h / 24h / 48h) before it.
  * For each signal, over the BTC move that just ended (its start -> its extreme): every coin's move, x BTC and follow
  * (R2 of 1-minute moves on BTC's). Picks = the coins that followed BTC most (upper half by follow) ranked by x BTC.
  * Then from the signal (candle close), in the signal's direction: 1h, 2h, best / worst within 2h. No TP / SL.
  *
- * FILTERS (Johnny agreed, Oct 2) -- no fixed numbers, all known at the signal:
- *   1  BTC price: the move's |price %| compared with the moves of the 24h before it (same ranking as the OI)
- *   2  direction: SHORT (after a BTC top) / LONG (after a BTC bottom)
- *   3  the coin's own OI: in the move (fuel: new positions that can be liquidated) and in the reversal candle
- * The same split is also run on ALL accepted turns (summary only) -- more signals, to see if a filter holds in general.
+ * Oct 2, after the filter test (Johnny agreed):
+ *   x FIX    x = the coin's move to its EXTREME in the window / BTC's move to its extreme (a candle close that came back
+ *            made x = 133 on 09-26)
+ *   KEPT     direction: SHORT (after a BTC top) / LONG (after a BTC bottom). Dropped: the BTC price rank and the coin's
+ *            own OI -- they did not hold on all 146 turns.
+ *   STABLE?  RANK 1 with a 12h, 24h and 48h window: if RANK 1 + SHORT is good in all three, the rule is not luck.
  *
  *   npx tsx src/tools/dc15-coins.ts
- *   options: --from 2026-09-22  --window 24  --quiet (summary only)
+ *   options: --from 2026-09-22  --quiet (summary only)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -20,7 +21,6 @@ import { MINUTE_BARS } from "../collector/minute-bars";
 import {
   candles,
   coinInWindow,
-  oiChange,
   outcome,
   pastRank,
   priceAt,
@@ -39,6 +39,8 @@ const utc = (ms: number): string =>
 const sp = (v: number): string =>
   Number.isFinite(v) ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}%` : "   n/a";
 const W15 = 15 * 60_000;
+const WINDOWS = [12, 24, 48];
+const EXAMPLE = Date.parse("2026-09-30T13:30:00Z");
 
 interface Res {
   at: number[];
@@ -48,8 +50,7 @@ interface Res {
 interface Sig {
   turn: Turn;
   short: boolean;
-  pRank: number;
-  pShare: number;
+  btcUp: number;
   btc: Res;
 }
 interface Rec {
@@ -59,8 +60,6 @@ interface Rec {
   follow: number;
   pick: number;
   follower: boolean;
-  oiMove: number;
-  oiCandle: number;
   r: Res;
 }
 
@@ -71,13 +70,12 @@ function line(name: string, list: Res[]): string {
   };
   const b = list.map((o) => o.best).filter(Number.isFinite),
     w = list.map((o) => o.worst).filter(Number.isFinite);
-  return `   ${name.padEnd(44)} ${String(list.length).padStart(4)} · 1h ${col(0)} · 2h ${col(1)} · best ${sp(b.reduce((a, x) => a + x, 0) / (b.length || 1))} · worst ${sp(w.reduce((a, x) => a + x, 0) / (w.length || 1))}`;
+  return `   ${name.padEnd(30)} ${String(list.length).padStart(4)} · 1h ${col(0)} · 2h ${col(1)} · best ${sp(b.reduce((a, x) => a + x, 0) / (b.length || 1))} · worst ${sp(w.reduce((a, x) => a + x, 0) / (w.length || 1))}`;
 }
 
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
-  const from = arg("from", ""),
-    win = Number(arg("window", "24"));
+  const from = arg("from", "");
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   try {
@@ -116,12 +114,6 @@ async function main(): Promise<void> {
     if (!btc.length) throw new Error("no BTC data");
     const btcMap = new Map(btc.map((b) => [b.t, b.close]));
     const all = turns(candles(btc, 15), 1, 14, true);
-    const byOi = pastRank(all, win),
-      byPrice = pastRank(all, win, (t) => t.movePct);
-    const priceOf = new Map(byPrice.map((r) => [r.turn.t, r]));
-    const rank1 = new Set(
-      byOi.filter((r) => r.rank === 1 && r.prior > 0).map((r) => r.turn.t),
-    );
 
     const symbols = (process.env.SYMBOLS ?? "")
       .split(",")
@@ -129,94 +121,107 @@ async function main(): Promise<void> {
       .filter((s) => s && s !== "BTCUSDT");
     const coins = new Map<
       string,
-      { bars: MinBar[]; map: Map<number, number>; oi: Map<number, number> }
+      { bars: MinBar[]; map: Map<number, number> }
     >();
     for (const s of symbols) {
       const bars = await load(s);
       if (bars.length)
-        coins.set(s, {
-          bars,
-          map: new Map(bars.map((b) => [b.t, b.close])),
-          oi: new Map(bars.map((b) => [b.t, b.oiLast])),
-        });
+        coins.set(s, { bars, map: new Map(bars.map((b) => [b.t, b.close])) });
     }
     console.log(
       `BTC turns (15m DC + OI rule) · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC · coins with data: ${coins.size}`,
     );
     console.log(
-      "picks = coins that followed BTC most in the move (upper half by follow), ranked by x BTC · after = from the signal, in its direction (+ = right)",
+      "picks = coins that followed BTC most in the move (upper half by follow), ranked by x BTC",
     );
     console.log(
-      "price rank = the BTC move's |price %| vs the moves of the 24h before it (1 = biggest) · coin OI: in the move / in the reversal candle\n",
+      "x = the coin's move to its extreme in the window / BTC's move to its extreme · after = from the signal, in its direction (+ = right)\n",
     );
 
-    const study = (sigTurns: Turn[]): { sigs: Sig[]; recs: Rec[] } => {
-      const sigs: Sig[] = [],
-        recs: Rec[] = [];
-      for (const t of sigTurns) {
-        const pr = priceOf.get(t.t);
-        const sig: Sig = {
-          turn: t,
-          short: t.newDir === "DOWN",
-          pRank: pr?.rank ?? NaN,
-          pShare: pr?.share ?? NaN,
-          btc: outcome(btc, t.t, t.price, t.newDir, [1, 2], 2),
-        };
-        sigs.push(sig);
-        const fromT = t.moveStartT,
-          toT = t.extremeT + W15;
-        const rows: Rec[] = [];
-        for (const [sym, c] of coins) {
-          const w = coinInWindow(c.map, btcMap, fromT, toT);
-          const p = priceAt(c.map, t.t);
-          if (
-            !Number.isFinite(w.pct) ||
-            !Number.isFinite(w.follow) ||
-            !Number.isFinite(p)
-          )
-            continue;
-          rows.push({
-            sig,
-            sym: sym.replace(/USDT$/, ""),
-            x: w.x,
-            follow: w.follow,
-            pick: 0,
-            follower: false,
-            oiMove: oiChange(c.oi, fromT, toT),
-            oiCandle: oiChange(c.oi, t.t - W15, t.t),
-            r: outcome(c.bars, t.t, p, t.newDir, [1, 2], 2),
-          });
-        }
-        if (rows.length) {
-          const med = [...rows].map((r) => r.follow).sort((a, b) => a - b)[
-            Math.floor(rows.length / 2)
-          ];
-          const followers = rows
-            .filter((r) => r.follow >= med)
-            .sort((a, b) => b.x - a.x);
-          followers.forEach((r, i) => {
+    // one signal -> BTC result + every coin with x / follow / picks (cached: the same turn is in several windows)
+    const cache = new Map<number, { sig: Sig; recs: Rec[] }>();
+    const study = (t: Turn): { sig: Sig; recs: Rec[] } => {
+      const hit = cache.get(t.t);
+      if (hit) return hit;
+      const fromT = t.moveStartT,
+        toT = t.extremeT + W15,
+        up = t.newDir === "DOWN"; // a SHORT ends an UP move
+      const btcW = coinInWindow(btcMap, btcMap, fromT, toT, up);
+      const sig: Sig = {
+        turn: t,
+        short: up,
+        btcUp: btcW.pct,
+        btc: outcome(btc, t.t, t.price, t.newDir, [1, 2], 2),
+      };
+      const rows: Rec[] = [];
+      for (const [sym, c] of coins) {
+        const w = coinInWindow(c.map, btcMap, fromT, toT, up);
+        const p = priceAt(c.map, t.t);
+        if (
+          !Number.isFinite(w.x) ||
+          !Number.isFinite(w.follow) ||
+          !Number.isFinite(p)
+        )
+          continue;
+        rows.push({
+          sig,
+          sym: sym.replace(/USDT$/, ""),
+          x: w.x,
+          follow: w.follow,
+          pick: 0,
+          follower: false,
+          r: outcome(c.bars, t.t, p, t.newDir, [1, 2], 2),
+        });
+      }
+      if (rows.length) {
+        const med = [...rows].map((r) => r.follow).sort((a, b) => a - b)[
+          Math.floor(rows.length / 2)
+        ];
+        rows
+          .filter((r) => r.follow >= med)
+          .sort((a, b) => b.x - a.x)
+          .forEach((r, i) => {
             r.follower = true;
             r.pick = i < 3 ? i + 1 : 0;
           });
-        }
-        recs.push(...rows);
       }
-      return { sigs, recs };
+      const out = { sig, recs: rows };
+      cache.set(t.t, out);
+      return out;
     };
-    const summary = (name: string, s: { sigs: Sig[]; recs: Rec[] }): void => {
-      const picks = s.recs.filter((r) => r.pick > 0),
-        fol = s.recs.filter((r) => r.follower);
-      const big = (g: Sig): string =>
-        g.pRank === 1
-          ? "biggest"
-          : g.pShare > 0.5
-            ? "bigger than most"
-            : "smaller than most";
-      console.log(`SUMMARY ${name} (averages in the signal's direction)`);
+
+    const table: string[] = [];
+    for (const win of WINDOWS) {
+      const sigTurns = pastRank(all, win)
+        .filter((r) => r.rank === 1 && r.prior > 0)
+        .map((r) => r.turn);
+      const res = sigTurns.map(study);
+      console.log(
+        `================ RANK 1 · window ${win}h (biggest move OI of the ${win}h before): ${res.length} signals`,
+      );
+      if (!argv.includes("--quiet") && win === 24)
+        for (const { sig: g, recs } of res) {
+          const t = g.turn;
+          console.log(
+            `${utc(t.t)} ${g.short ? "▼ SHORT" : "▲ LONG "} · BTC move ${utc(t.moveStartT)} -> ${utc(t.extremeT + W15)} ${sp(g.btcUp)} · move OI ${sp(t.moveOiPct)} · candle ${t.label} (${t.candleLiq})`,
+          );
+          console.log(
+            `   BTC                      | 1h ${sp(g.btc.at[0]).padStart(7)}  2h ${sp(g.btc.at[1]).padStart(7)} | best ${sp(g.btc.best).padStart(7)} worst ${sp(g.btc.worst).padStart(7)}`,
+          );
+          for (const r of recs
+            .filter((x) => x.pick > 0)
+            .sort((a, b) => a.pick - b.pick))
+            console.log(
+              `   #${r.pick} ${r.sym.padEnd(6)} x ${r.x.toFixed(2).padStart(5)} f ${r.follow.toFixed(2)} | 1h ${sp(r.r.at[0]).padStart(7)}  2h ${sp(r.r.at[1]).padStart(7)} | best ${sp(r.r.best).padStart(7)} worst ${sp(r.r.worst).padStart(7)}`,
+            );
+        }
+      const picks = res.flatMap((s) => s.recs.filter((r) => r.pick > 0)),
+        fol = res.flatMap((s) => s.recs.filter((r) => r.follower));
+      console.log(`SUMMARY window ${win}h`);
       console.log(
         line(
           "BTC",
-          s.sigs.map((g) => g.btc),
+          res.map((s) => s.sig.btc),
         ),
       );
       console.log(
@@ -231,118 +236,29 @@ async function main(): Promise<void> {
           fol.map((r) => r.r),
         ),
       );
-      console.log("  FILTER 2 · direction");
       for (const sh of [true, false]) {
-        const tag = sh ? "SHORT (after a top)" : "LONG (after a bottom)";
+        const tag = sh ? "SHORT" : "LONG ";
+        const b = res.filter((s) => s.sig.short === sh).map((s) => s.sig.btc),
+          p = picks.filter((r) => r.sig.short === sh).map((r) => r.r);
+        console.log(line(`${tag} · BTC`, b));
+        console.log(line(`${tag} · picks 1-3`, p));
         console.log(
           line(
-            `${tag} · BTC`,
-            s.sigs.filter((g) => g.short === sh).map((g) => g.btc),
+            `${tag} · followers`,
+            fol.filter((r) => r.sig.short === sh).map((r) => r.r),
           ),
         );
-        console.log(
-          line(
-            `${tag} · picks 1-3`,
-            picks.filter((r) => r.sig.short === sh).map((r) => r.r),
-          ),
+        table.push(
+          line(`${win}h ${tag} · BTC`, b),
+          line(`${win}h ${tag} · picks 1-3`, p),
         );
       }
-      console.log("  FILTER 1 · BTC price move vs the 24h before");
-      for (const k of ["biggest", "bigger than most", "smaller than most"]) {
-        console.log(
-          line(
-            `${k} · BTC`,
-            s.sigs.filter((g) => big(g) === k).map((g) => g.btc),
-          ),
-        );
-        console.log(
-          line(
-            `${k} · picks 1-3`,
-            picks.filter((r) => big(r.sig) === k).map((r) => r.r),
-          ),
-        );
-      }
-      console.log("  FILTER 3 · the coin's own OI (picks 1-3 / all followers)");
-      for (const [lab, f] of [
-        ["OI UP in the move", (r: Rec) => r.oiMove > 0],
-        ["OI DOWN in the move", (r: Rec) => r.oiMove <= 0],
-        ["OI UP in the reversal candle", (r: Rec) => r.oiCandle > 0],
-        ["OI DOWN in the reversal candle", (r: Rec) => r.oiCandle <= 0],
-      ] as Array<[string, (r: Rec) => boolean]>) {
-        console.log(
-          line(
-            `${lab} · picks`,
-            picks
-              .filter((r) => Number.isFinite(r.oiMove) && f(r))
-              .map((r) => r.r),
-          ),
-        );
-        console.log(
-          line(
-            `${lab} · followers`,
-            fol
-              .filter((r) => Number.isFinite(r.oiMove) && f(r))
-              .map((r) => r.r),
-          ),
-        );
-      }
-      console.log("  FILTER 2 + 3 · SHORT, followers");
-      for (const [lab, f] of [
-        ["SHORT · coin OI UP in the move", (r: Rec) => r.oiMove > 0],
-        ["SHORT · coin OI DOWN in the move", (r: Rec) => r.oiMove <= 0],
-        ["SHORT · coin OI UP in the candle", (r: Rec) => r.oiCandle > 0],
-        ["SHORT · coin OI DOWN in the candle", (r: Rec) => r.oiCandle <= 0],
-      ] as Array<[string, (r: Rec) => boolean]>)
-        console.log(
-          line(
-            lab,
-            fol
-              .filter((r) => r.sig.short && Number.isFinite(r.oiMove) && f(r))
-              .map((r) => r.r),
-          ),
-        );
-      console.log("");
-    };
-
-    // RANK 1, signal by signal
-    const r1 = study(all.filter((t) => rank1.has(t.t)));
-    console.log(
-      `================ RANK 1 (biggest move OI of the last 24h): ${r1.sigs.length} signals`,
-    );
-    if (!argv.includes("--quiet"))
-      for (const g of r1.sigs) {
-        const t = g.turn;
-        console.log(
-          `${utc(t.t)} ${g.short ? "▼ SHORT" : "▲ LONG "} · BTC move ${utc(t.moveStartT)} -> ${utc(t.extremeT + W15)} ${sp(t.movePct)} (price rank ${g.pRank}) · move OI ${sp(t.moveOiPct)} · candle ${t.label} (${t.candleLiq})`,
-        );
-        console.log(
-          `   BTC                                      | 1h ${sp(g.btc.at[0]).padStart(7)}  2h ${sp(g.btc.at[1]).padStart(7)} | best ${sp(g.btc.best).padStart(7)} worst ${sp(g.btc.worst).padStart(7)}`,
-        );
-        for (const r of r1.recs
-          .filter((x) => x.sig === g && x.pick > 0)
-          .sort((a, b) => a.pick - b.pick))
-          console.log(
-            `   #${r.pick} ${r.sym.padEnd(6)} x ${r.x.toFixed(2).padStart(6)} · OI move ${sp(r.oiMove).padStart(7)} candle ${sp(r.oiCandle).padStart(7)} | 1h ${sp(r.r.at[0]).padStart(7)}  2h ${sp(r.r.at[1]).padStart(7)} | best ${sp(r.r.best).padStart(7)} worst ${sp(r.r.worst).padStart(7)}`,
-          );
-      }
-    console.log("");
-    summary("RANK 1", r1);
-    summary(
-      `ALL accepted turns (${all.filter((t) => t.accepted).length}) -- does a filter hold in general?`,
-      study(all.filter((t) => t.accepted)),
-    );
-    const ex = Date.parse("2026-09-30T13:30:00Z"),
-      exS = r1.sigs.find((g) => g.turn.t === ex);
-    console.log(
-      `the 09-30 example (signal 13:30 UTC): RANK 1 ${exS ? "YES" : "no"}${
-        exS
-          ? ` · price rank ${exS.pRank} · picks OI in the move: ${r1.recs
-              .filter((r) => r.sig === exS && r.pick > 0)
-              .map((r) => `${r.sym} ${sp(r.oiMove)}`)
-              .join(", ")}`
-          : ""
-      }`,
-    );
+      console.log(
+        `   the 09-30 example (13:30 UTC): ${sigTurns.some((t) => t.t === EXAMPLE) ? "IN" : "NOT in"} RANK 1 with ${win}h\n`,
+      );
+    }
+    console.log("STABILITY · RANK 1 + direction, by window");
+    for (const l of table) console.log(l);
   } finally {
     await client.close();
   }
