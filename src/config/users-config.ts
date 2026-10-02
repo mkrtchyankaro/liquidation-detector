@@ -2,6 +2,7 @@ import * as fs from "fs";
 import { parseV9Settings, type V9Settings } from "../strategy/v9/v9-config";
 import { parseZzSettings, type ZzSettings } from "../strategy/zz/zz-config";
 import { parseOaSettings, type OaSettings } from "../strategy/oa/oa-config";
+import { parseV10Settings, type V10Settings } from "../strategy/v10/v10-config";
 
 /**
  * users.config.json -- the ONE file that decides who trades what.
@@ -12,6 +13,8 @@ import { parseOaSettings, type OaSettings } from "../strategy/oa/oa-config";
  *           "userModes": { "main": "PAPER", "karo": "REAL" } },
  *   "zz": { "enabled": true, "users": ["main"] },   // OI-zigzag, PAPER only
  *   "oa": { "enabled": true, "users": ["main"] },   // OI accumulation (1h), PAPER only
+ *   "v10": { "enabled": true, "short": true, "long": false, "slPct": 1, "tpPct": 1,
+ *            "userModes": { "main": "PAPER", "karo": "OFF" } },  // BTC-led alts (see v10-config.ts)
  *   "users": [
  *     { "userId": "karo", "enabled": true,
  *       "telegram": { "enabled": true, "botToken": "...", "chatIds": ["123"] },
@@ -45,6 +48,8 @@ export interface AppConfig {
   zz: ZzSettings;
   /** OI-accumulation strategy (1h), PAPER only (Telegram messages, never orders). */
   oa: OaSettings;
+  /** BTC-led alts (15m DC + OI rule on BTC -> the alts that moved most with it), PAPER / REAL per user. */
+  v10: V10Settings;
 }
 
 const USER_ID = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -68,6 +73,14 @@ export function parseAppConfig(
     fail(path, `"realOrdersEnabled" must be true or false`);
   if (!Array.isArray(r.users) || r.users.length === 0)
     fail(path, `"users" must be a non-empty array`);
+  for (const k of Object.keys(r)) {
+    const known = ["v9", "zz", "oa", "v10"].find((b) => b === k.toLowerCase());
+    if (known && known !== k)
+      fail(
+        path,
+        `"${k}" must be written "${known}" (lower case) -- otherwise that strategy would be silently off`,
+      );
+  }
 
   const seen = new Set<string>();
   const users: UserConfig[] = (r.users as Array<Record<string, unknown>>).map(
@@ -185,7 +198,24 @@ export function parseAppConfig(
   } catch (err) {
     fail(path, err instanceof Error ? err.message : String(err));
   }
-  return { realOrdersEnabled: r.realOrdersEnabled === true, users, v9, zz, oa };
+  let v10: V10Settings;
+  try {
+    v10 = parseV10Settings(
+      r.v10,
+      users.map((u) => u.userId),
+      collectedSymbols,
+    );
+  } catch (err) {
+    fail(path, err instanceof Error ? err.message : String(err));
+  }
+  return {
+    realOrdersEnabled: r.realOrdersEnabled === true,
+    users,
+    v9,
+    zz,
+    oa,
+    v10,
+  };
 }
 
 export function loadAppConfig(

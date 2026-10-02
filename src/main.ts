@@ -29,6 +29,12 @@ import {
   mongoMinuteLoader,
   OaPaperService,
 } from "./strategy/oa/oa-paper.service";
+import {
+  mongoV10Loader,
+  V10LiveService,
+  type V10UserRef,
+} from "./strategy/v10/v10-live.service";
+import { V10Repository } from "./strategy/v10/v10-repository";
 
 const log = childLogger({ mod: "main" });
 
@@ -40,6 +46,8 @@ const log = childLogger({ mod: "main" });
  *   ZzPaperService    OI-zigzag strategy, PAPER only: Telegram messages to the "zz" users, never orders
  *   OaPaperService    OI-accumulation strategy (1h), PAPER only: Telegram messages to the "oa" users, never orders
  *   MinuteBarWriter   1 row per symbol per minute (price, OI, liquidations), kept 365 days (research only)
+ *   V10LiveService    every 15m candle: BTC top / bottom (DC + OI rule, RANK 1) -> the alts that moved most with BTC
+ *                     -> PAPER / REAL trades with fixed % SL / TP (own settings "v10", own collections)
  *   V9LiveService     every minute: V9 engine -> signals -> PAPER / REAL trades
  *                     -> Binance orders -> close detection -> Telegram
  *
@@ -82,40 +90,57 @@ async function main(): Promise<void> {
         })
       : null;
 
-  // ── V9 users: REAL only if every gate agrees AND the account proves it can trade ──
-  const v9Users: V9UserRef[] = [];
-  for (const u of users) {
-    const requested = config.v9.enabled
-      ? (config.v9.userModes.get(u.userId) ?? "OFF")
-      : "OFF";
-    if (requested === "OFF") continue;
-    const telegram = telegramOf(u);
-    let mode: "PAPER" | "REAL" = "PAPER";
-    let rest: BinanceRestClient | null = null;
-    if (requested === "REAL") {
-      rest = restOf(u);
+  // ── REAL only if every gate agrees AND the account proves it can trade (checked once per user, shared by V9 / V10) ──
+  const readiness = new Map<
+    string,
+    Promise<{ mode: "PAPER" | "REAL"; rest: BinanceRestClient | null }>
+  >();
+  const resolveMode = (
+    u: UserConfig,
+    requested: "PAPER" | "REAL",
+    strategy: string,
+  ): Promise<{ mode: "PAPER" | "REAL"; rest: BinanceRestClient | null }> => {
+    if (requested === "PAPER")
+      return Promise.resolve({ mode: "PAPER", rest: null });
+    const cached = readiness.get(u.userId);
+    if (cached) return cached;
+    const p = (async () => {
+      const rest = restOf(u);
       const why = !config.realOrdersEnabled
         ? "realOrdersEnabled=false"
         : rest === null
           ? "binance.enabled is not true"
           : null;
       if (why) {
-        log.error(`[REAL_DOWNGRADED] userId=${u.userId} ${why} -- runs PAPER`);
-      } else {
-        const ready = await checkRealReadiness(u.userId, rest!);
-        if (ready.ok) mode = "REAL";
-        else {
-          log.error(
-            `[REAL_NOT_READY] userId=${u.userId} ${ready.reason} -- runs PAPER until restart`,
-          );
-          await telegram
-            ?.sendMessage(
-              `⚠️ REAL trading NOT active for ${u.userId}\nReason: ${ready.reason}\nYou will receive PAPER signals until this is fixed and the bot is restarted.`,
-            )
-            .catch(() => undefined);
-        }
+        log.error(
+          `[REAL_DOWNGRADED] userId=${u.userId} (${strategy}) ${why} -- runs PAPER`,
+        );
+        return { mode: "PAPER" as const, rest: null };
       }
-    }
+      const ready = await checkRealReadiness(u.userId, rest!);
+      if (ready.ok) return { mode: "REAL" as const, rest };
+      log.error(
+        `[REAL_NOT_READY] userId=${u.userId} ${ready.reason} -- runs PAPER until restart`,
+      );
+      await telegramOf(u)
+        ?.sendMessage(
+          `⚠️ REAL trading NOT active for ${u.userId}\nReason: ${ready.reason}\nYou will receive PAPER signals until this is fixed and the bot is restarted.`,
+        )
+        .catch(() => undefined);
+      return { mode: "PAPER" as const, rest: null };
+    })();
+    readiness.set(u.userId, p);
+    return p;
+  };
+
+  // ── V9 users ──
+  const v9Users: V9UserRef[] = [];
+  for (const u of users) {
+    const requested = config.v9.enabled
+      ? (config.v9.userModes.get(u.userId) ?? "OFF")
+      : "OFF";
+    if (requested === "OFF") continue;
+    const { mode, rest } = await resolveMode(u, requested, "V9");
     v9Users.push({
       userId: u.userId,
       mode,
@@ -123,11 +148,39 @@ async function main(): Promise<void> {
       binanceRest: mode === "REAL" ? rest : null,
       leverage: u.binance?.leverage,
       marginMode: u.binance?.marginMode,
-      telegram,
+      telegram: telegramOf(u),
     });
   }
   log.warn(
     `[V9_USER_MODE] enabled=${config.v9.enabled} ${v9Users.map((u) => `${u.userId}=${u.mode}($${u.riskUsd})`).join(" ") || "(no users)"}`,
+  );
+
+  // ── V10 users (same REAL gates) ──
+  // OFF users with Binance keys are listed too (mode OFF: no new trades) so a REAL V10 trade they still have open keeps
+  // being watched and settled after the user was switched off.
+  const v10Users: V10UserRef[] = [];
+  for (const u of users) {
+    const requested = config.v10.enabled
+      ? (config.v10.userModes.get(u.userId) ?? "OFF")
+      : "OFF";
+    if (requested === "OFF" && !u.binance) continue;
+    const { mode, rest } =
+      requested === "OFF"
+        ? { mode: "OFF" as const, rest: null }
+        : await resolveMode(u, requested, "V10");
+    v10Users.push({
+      userId: u.userId,
+      mode,
+      riskUsd: u.riskUsd,
+      binanceRest: mode === "REAL" ? rest : null,
+      monitorRest: rest ?? restOf(u),
+      leverage: u.binance?.leverage,
+      marginMode: u.binance?.marginMode,
+      telegram: telegramOf(u),
+    });
+  }
+  log.warn(
+    `[V10_USER_MODE] enabled=${config.v10.enabled} ${v10Users.map((u) => `${u.userId}=${u.mode}($${u.riskUsd})`).join(" ") || "(no users)"}`,
   );
 
   // System alerts (e.g. feed silent) go to every user with Telegram.
@@ -225,6 +278,26 @@ async function main(): Promise<void> {
         ),
       );
 
+  // BTC-led alts: separate from V9 (own settings, collections, messages); its failure never stops V9.
+  // V10 disabled but users with Binance keys -> it still runs to WATCH any REAL V10 trade left open (no new signals).
+  const v10 =
+    config.v10.enabled || v10Users.length > 0
+      ? new V10LiveService(
+          config.v10,
+          () => v10Users,
+          mongoV10Loader(mongo.db),
+          new V10Repository(mongo.db),
+        )
+      : null;
+  if (v10)
+    void v10
+      .start()
+      .catch((err) =>
+        log.error(
+          `[V10_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- V10 not running, V9 unaffected`,
+        ),
+      );
+
   if (v9)
     void v9
       .start()
@@ -250,6 +323,7 @@ async function main(): Promise<void> {
     v9?.stop();
     zz?.stop();
     oa?.stop();
+    v10?.stop();
     context.stop();
     minuteBars.stop();
     await collector.stop();

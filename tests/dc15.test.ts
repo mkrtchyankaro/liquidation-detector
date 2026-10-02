@@ -156,6 +156,13 @@ scenario(
       label: "",
       accepted,
       atr: 1,
+      moveLiqL: 0,
+      moveLiqS: 0,
+      candleLiqL: 0,
+      candleLiqS: 0,
+      moveLiq: "NONE",
+      candleLiq: "NONE",
+      forced: NaN,
     });
     const r = pastRank(
       [t(0, 1), t(5, -3), t(10, 2), t(11, 9, false), t(40, 0.5)],

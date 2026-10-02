@@ -31,6 +31,25 @@
     "continuation": true,
     "reversal": false
   },
+  "v10": {
+    "enabled": true,
+    "short": true,
+    "long": false,
+    "slPct": 1,
+    "tpPct": 1,
+    "picks": 3,
+    "rankWindowHours": 12,
+    "userModes": { "main": "PAPER", "karo": "OFF" },
+    "perUser": {
+      "karo": {
+        "short": true,
+        "long": false,
+        "slPct": 1,
+        "tpPct": 1,
+        "maxOpen": 3
+      }
+    }
+  },
   "users": [
     {
       "userId": "main",
