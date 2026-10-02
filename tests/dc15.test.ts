@@ -1,0 +1,136 @@
+/**
+ * DC on 15m candles + the OI rule. Usage: npx tsx tests/dc15.test.ts
+ */
+import * as assert from "assert";
+import {
+  atrBefore,
+  candles,
+  outcome,
+  turns,
+  type Candle,
+  type MinBar,
+} from "../src/research/dc15";
+
+let passed = 0,
+  failed = 0;
+function scenario(name: string, fn: () => void): void {
+  try {
+    fn();
+    passed++;
+    console.log(`  ✓ ${name}`);
+  } catch (err) {
+    failed++;
+    console.log(
+      `  ✗ ${name}\n      ${err instanceof Error ? err.message : String(err)}\n`,
+    );
+  }
+}
+const W = 15 * 60_000;
+/** candles from [close, oiChange] with a fixed 1-unit range around the move */
+function mk(rows: Array<[number, number]>): Candle[] {
+  let oi = 1000,
+    prev = 100;
+  return rows.map(([c, d], i) => {
+    const o = prev,
+      oi0 = oi;
+    oi += d;
+    prev = c;
+    return {
+      t: i * W,
+      end: (i + 1) * W,
+      open: o,
+      high: Math.max(o, c) + 0.2,
+      low: Math.min(o, c) - 0.2,
+      close: c,
+      oi0,
+      oi1: oi,
+    };
+  });
+}
+// warm-up (ATR ~1), rise with OI up, then a red candle with OI DOWN (accepted), fall with OI down,
+// a green candle with OI DOWN (rejected: not the end), more fall, then a green candle with OI UP (accepted)
+const warm: Array<[number, number]> = Array.from({ length: 16 }, (_, i) => [
+  i % 2 ? 100.8 : 100,
+  0,
+]);
+const story: Array<[number, number]> = [
+  ...warm,
+  [102, 5],
+  [104, 5],
+  [106, 5], // up, OI up
+  [104.5, -4], // reversal candle, OI DOWN -> accepted (top)
+  [102, -6],
+  [100, -6], // down, OI down
+  [101.5, -1], // green, OI DOWN -> rejected
+  [98, -5], // down again
+  [99.6, +6], // green, OI UP -> accepted (bottom)
+];
+
+scenario("15m candles from minutes: open = first close, OI first/last", () => {
+  const bars: MinBar[] = [0, 1, 2, 15].map((m, i) => ({
+    t: m * 60_000,
+    high: 10 + i,
+    low: 9,
+    close: 9.5 + i,
+    oiFirst: 100 + i,
+    oiLast: 101 + i,
+  }));
+  const c = candles(bars, 15);
+  assert.strictEqual(c.length, 2);
+  assert.deepStrictEqual(
+    [c[0].open, c[0].close, c[0].high, c[0].oi0, c[0].oi1],
+    [9.5, 11.5, 12, 100, 103],
+  );
+});
+scenario("ATR uses only candles before", () => {
+  const a = atrBefore(mk(story), 14);
+  assert.ok(Number.isNaN(a[13]) && a[14] > 0);
+});
+scenario(
+  "OI rule: accepts the top (OI down after an OI-up rise), rejects the green candle with OI down, accepts the bottom with OI up",
+  () => {
+    const t = turns(mk(story), 1, 14, true).filter((x) => x.t > 17 * W); // after the warm-up start
+    const desc = t.map((x) => `${x.newDir}:${x.accepted}`);
+    assert.deepStrictEqual(
+      desc,
+      ["DOWN:true", "UP:false", "UP:true"],
+      desc.join(" "),
+    );
+    assert.strictEqual(t[0].label, "LONGS OUT");
+    assert.strictEqual(t[1].label, "SHORTS OUT");
+    assert.strictEqual(t[2].label, "NEW LONGS");
+    assert.strictEqual(t[2].extreme, mk(story)[24].low); // the bottom kept going through the rejected candle
+  },
+);
+scenario("plain DC (no OI rule) takes the fake green candle as a turn", () => {
+  const t = turns(mk(story), 1, 14, false).filter((x) => x.t > 16 * W);
+  assert.ok(
+    t.some((x) => x.newDir === "UP" && x.label === "SHORTS OUT" && x.accepted),
+  );
+});
+scenario(
+  "no look-ahead: the turns on cut data are the same as on full data up to the cut",
+  () => {
+    const full = turns(mk(story), 1, 14, true),
+      cut = turns(mk(story).slice(0, 22), 1, 14, true);
+    assert.deepStrictEqual(
+      cut,
+      full.filter((x) => x.t <= 22 * W),
+    );
+  },
+);
+scenario("outcome: signed by direction, best / worst inside the window", () => {
+  const bars: MinBar[] = [0, 1, 2, 3].map((i) => ({
+    t: i * 60_000,
+    high: 101 + i,
+    low: 99 - i,
+    close: 100 - i,
+    oiFirst: 1,
+    oiLast: 1,
+  }));
+  const o = outcome(bars, 0, 100, "DOWN", [1 / 30], 1);
+  assert.ok(Math.abs(o.at[0] - 1) < 1e-9, String(o.at[0])); // after 2 minutes close 99 -> +1% for a SHORT
+  assert.ok(o.worst < 0 && o.best > 0);
+});
+console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
+if (failed > 0) process.exit(1);
