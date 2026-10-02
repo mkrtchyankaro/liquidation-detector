@@ -64,3 +64,33 @@ export function extremeIn(
   }
   return e;
 }
+
+/** SL never closer than 1 x ATR from the entry (the same k = 1 that the DC uses to call a turn: closer is noise) */
+export function stopFor(
+  entry: number,
+  extreme: number,
+  atr: number,
+  dir: Dir,
+): number {
+  const a = Number.isFinite(atr) && atr > 0 ? atr : 0;
+  return dir === "DOWN"
+    ? Math.max(extreme, entry + a)
+    : Math.min(extreme, entry - a);
+}
+
+/**
+ * A, two steps (Johnny, Oct 2): BTC's top ARMS an alt; the entry is the alt's OWN accepted turn the same way
+ * (its 15m DC + OI rule), at or after BTC's signal and before BTC's next accepted turn. First one only.
+ */
+export function armedTurn<
+  T extends { t: number; newDir: Dir; accepted: boolean },
+>(
+  altTurns: readonly T[],
+  dir: Dir,
+  from: number,
+  until: number,
+): T | undefined {
+  return altTurns.find(
+    (x) => x.accepted && x.newDir === dir && x.t >= from && x.t < until,
+  );
+}

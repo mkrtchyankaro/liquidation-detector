@@ -2,7 +2,7 @@
  * SL / TP simulation. Usage: npx tsx tests/sltp.test.ts
  */
 import * as assert from "assert";
-import { extremeIn, simTrade } from "../src/research/sltp";
+import { armedTurn, extremeIn, simTrade, stopFor } from "../src/research/sltp";
 import type { MinBar } from "../src/research/dc15";
 
 let passed = 0,
@@ -68,5 +68,30 @@ scenario("extremeIn: highest high before `to` only", () => {
   assert.strictEqual(extremeIn(bars, 0, 2 * M, "DOWN"), 103);
   assert.strictEqual(extremeIn(bars, 0, 3 * M, "UP"), 99);
 });
+scenario("stopFor: the move's high, but never closer than 1 ATR", () => {
+  assert.strictEqual(stopFor(100, 100.1, 0.5, "DOWN"), 100.5); // high too close -> 1 ATR
+  assert.strictEqual(stopFor(100, 102, 0.5, "DOWN"), 102); // high far enough -> the high
+  assert.strictEqual(stopFor(100, 99.9, 0.5, "UP"), 99.5);
+});
+scenario(
+  "armedTurn: the alt's first accepted turn the same way, from BTC's signal to BTC's next turn",
+  () => {
+    const T = (t: number, newDir: "UP" | "DOWN", accepted = true) => ({
+      t,
+      newDir,
+      accepted,
+    });
+    const alt = [
+      T(5, "DOWN"),
+      T(10, "UP"),
+      T(12, "DOWN", false),
+      T(14, "DOWN"),
+      T(30, "DOWN"),
+    ];
+    assert.strictEqual(armedTurn(alt, "DOWN", 10, 20)?.t, 14); // before 10 is too early, the rejected 12 does not count
+    assert.strictEqual(armedTurn(alt, "DOWN", 15, 20), undefined); // nothing before BTC's next turn
+    assert.strictEqual(armedTurn(alt, "DOWN", 14, 20)?.t, 14); // at the same candle close counts
+  },
+);
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
