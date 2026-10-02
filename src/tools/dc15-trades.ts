@@ -7,13 +7,14 @@
  *   B  an alt's OWN 15m DC + OI rule, RANK 1 (12h) top, when the alt moved on its own (OWN / BTC OPPOSITE) -> SHORT it
  *      (B: only alts with full history)
  * Entry = the alt's price at the signal (the reversal candle's close).
- * SL = the alt's high of its own move, but never closer than 1 x the alt's 15m ATR (the k = 1 of the DC: closer is noise).
- * TP = 2R / 2.2R / 2.5R. Same minute SL + TP -> SL. One trade per coin at a time (a new signal on a busy coin is skipped;
+ * EXIT (Johnny, Oct 2): default = TP -1% / SL +1% from the entry, no time limit (--pct to change).
+ *   --top = the earlier test: SL = the alt's high of its own move (>= 1 x its 15m ATR), TP = 2R / 2.2R / 2.5R.
+ * A is run two ways: A1 = in at BTC's signal, A2 = in at the alt's own top after BTC's signal (see below). Same minute SL + TP -> SL. One trade per coin at a time (a new signal on a busy coin is skipped;
  * A and B on the same coin at the same time = one trade "A+B").
  * Prices are our minute bars (mark price from the 1/s polls). Fees: --fee (taker % per side, default 0.05) -> net R.
  *
  *   npx tsx src/tools/dc15-trades.ts
- *   options: --from 2026-09-22  --window 12  --fee 0.05  --list  --without AVAX (any coins, comma list)
+ *   options: --from 2026-09-22  --window 12  --pct 1  --top  --fee 0.05  --list  --without AVAX (any coins, comma list)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -53,9 +54,10 @@ interface Cand {
   sym: string;
   src: string;
   entry: number;
+  high: number;
+  atr: number;
   sl: number;
   riskPct: number;
-  atrStop: boolean;
 }
 interface Done extends Cand {
   tr: Trade;
@@ -67,6 +69,8 @@ async function main(): Promise<void> {
   const from = arg("from", ""),
     win = Number(arg("window", "12")),
     fee = Number(arg("fee", "0.05"));
+  const top = argv.includes("--top"),
+    pct = Number(arg("pct", "1"));
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   try {
@@ -111,33 +115,42 @@ async function main(): Promise<void> {
         });
     }
 
-    const cands: Cand[] = [];
-    const add = (
+    const candA1: Cand[] = [],
+      candA2: Cand[] = [],
+      candB: Cand[] = [];
+    const mk = (
       t: number,
       sym: string,
       src: string,
       entry: number,
       high: number,
       atr: number,
-    ): void => {
-      const sl = stopFor(entry, high, atr, "DOWN");
-      if (!(entry > 0) || !(sl > entry)) return;
-      cands.push({
+    ): Cand | null => {
+      // --top: SL at the move's high (>= 1 ATR), TP = RR x risk · default: SL and TP both at the same % from the entry
+      const sl = top
+        ? stopFor(entry, high, atr, "DOWN")
+        : entry * (1 + pct / 100);
+      if (!(entry > 0) || !(sl > entry)) return null;
+      return {
         t,
         sym,
         src,
         entry,
+        high,
+        atr,
         sl,
         riskPct: (100 * (sl - entry)) / entry,
-        atrStop: sl > high,
-      });
+      };
+    };
+    const push = (list: Cand[], c: Cand | null): void => {
+      if (c) list.push(c);
     };
     const altTurns = new Map<string, ReturnType<typeof turns>>();
     for (const [sym, c] of coins)
       altTurns.set(sym, turns(candles(c.bars, 15), 1, 14, true));
     let armed = 0,
       entered = 0;
-    // A: BTC tops
+    // A: BTC tops -> the 3 alts that followed BTC most
     const bt = turns(candles(btc, 15), 1, 14, true);
     const btAcc = bt.filter((x) => x.accepted);
     for (const r of pastRank(bt, win).filter(
@@ -165,25 +178,41 @@ async function main(): Promise<void> {
         .filter((x) => x.follow >= med)
         .sort((a, b) => b.x - a.x)
         .slice(0, 3)) {
+        const c = coins.get(p.sym)!;
+        // A1: in at BTC's signal
+        push(
+          candA1,
+          mk(
+            t.t,
+            p.sym,
+            "A",
+            priceAt(c.map, t.t),
+            extremeIn(c.bars, fromT, t.t, "DOWN"),
+            NaN,
+          ),
+        );
+        // A2: in at the alt's own top after BTC's signal
         armed++;
         const at = armedTurn(altTurns.get(p.sym)!, "DOWN", t.t, until);
         if (!at) continue;
         entered++;
-        add(
-          at.t,
-          p.sym,
-          "A",
-          at.price,
-          extremeIn(coins.get(p.sym)!.bars, at.moveStartT, at.t, "DOWN"),
-          at.atr,
+        push(
+          candA2,
+          mk(
+            at.t,
+            p.sym,
+            "A",
+            at.price,
+            extremeIn(c.bars, at.moveStartT, at.t, "DOWN"),
+            at.atr,
+          ),
         );
       }
     }
-    // B: an alt's own tops
+    // B: an alt's own tops, when it moved on its own
     for (const [sym, c] of coins) {
       if (!c.old) continue;
-      const at = altTurns.get(sym)!;
-      for (const r of pastRank(at, win).filter(
+      for (const r of pastRank(altTurns.get(sym)!, win).filter(
         (x) => x.rank === 1 && x.prior > 0 && x.turn.newDir === "DOWN",
       )) {
         const t = r.turn;
@@ -194,49 +223,66 @@ async function main(): Promise<void> {
           ownness(w.follow, w.pct, w.btcPct) === "WITH BTC"
         )
           continue;
-        add(
-          t.t,
-          sym,
-          "B",
-          t.price,
-          extremeIn(c.bars, t.moveStartT, t.t, "DOWN"),
-          t.atr,
+        push(
+          candB,
+          mk(
+            t.t,
+            sym,
+            "B",
+            t.price,
+            extremeIn(c.bars, t.moveStartT, t.t, "DOWN"),
+            t.atr,
+          ),
         );
       }
     }
     // A and B on the same coin at the same time -> one trade
-    cands.sort((a, b) => a.t - b.t || a.sym.localeCompare(b.sym));
-    const merged: Cand[] = [];
-    for (const c of cands) {
-      const same = merged.find((m) => m.t === c.t && m.sym === c.sym);
-      if (same) {
-        if (!same.src.includes(c.src)) same.src = "A+B";
-      } else merged.push({ ...c });
-    }
+    const merge = (a: Cand[], b: Cand[]): Cand[] => {
+      const out: Cand[] = [];
+      for (const c of [...a, ...b].sort(
+        (x, y) => x.t - y.t || x.sym.localeCompare(y.sym),
+      )) {
+        const same = out.find((m) => m.t === c.t && m.sym === c.sym);
+        if (same) {
+          if (!same.src.includes(c.src)) same.src = "A+B";
+        } else out.push({ ...c });
+      }
+      return out;
+    };
 
     console.log(
       `SHORT strategy · A (BTC top -> its alts) + B (an alt's own top) · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`,
     );
     console.log(
-      `A: armed ${armed} alts at BTC tops -> ${entered} made their own top before BTC's next turn`,
+      top
+        ? "exit: SL = the alt's high of its move (>= 1 x 15m ATR), TP = 2R / 2.2R / 2.5R"
+        : `exit: TP -${pct}% · SL +${pct}% from the entry (no time limit)`,
     );
     console.log(
-      `SL = the alt's high of its move, at least 1 x its 15m ATR (${merged.filter((c) => c.atrStop).length} of ${merged.length} stops were set by the ATR) · fee ${fee}% per side -> net R = R - 2 x fee / risk% · same minute SL+TP = SL · one trade per coin at a time`,
+      `fee ${fee}% per side -> net R = R - 2 x fee / risk% · same minute SL+TP = SL · one trade per coin at a time`,
     );
-    const risks = merged.map((c) => c.riskPct).sort((a, b) => a - b);
-    const q = (p: number): string =>
-      risks.length ? risks[Math.floor(p * (risks.length - 1))].toFixed(2) : "-";
     console.log(
-      `signals: ${merged.length} (A ${merged.filter((c) => c.src === "A").length}, B ${merged.filter((c) => c.src === "B").length}, A+B ${merged.filter((c) => c.src === "A+B").length}) · SL distance %: min ${q(0)} · quarter ${q(0.25)} · median ${q(0.5)} · 3 quarters ${q(0.75)} · max ${q(1)}\n`,
+      `A1 = in at BTC's signal (${candA1.length}) · A2 = in at the alt's own top after it: armed ${armed} -> ${entered} made their top before BTC's next turn · B: ${candB.length}\n`,
     );
 
-    for (const rr of RRS) {
+    const without = arg("without", "AVAX")
+      .toUpperCase()
+      .split(",")
+      .map((x) => x.trim())
+      .filter(Boolean);
+    const run = (title: string, merged: Cand[], rr: number): void => {
       const busy = new Map<string, number>(),
         done: Done[] = [];
       for (const c of merged) {
         if ((busy.get(c.sym) ?? 0) > c.t) continue;
-        const bars = coins.get(c.sym)!.bars;
-        const tr = simTrade(bars, c.t, c.entry, c.sl, rr, "DOWN");
+        const tr = simTrade(
+          coins.get(c.sym)!.bars,
+          c.t,
+          c.entry,
+          c.sl,
+          rr,
+          "DOWN",
+        );
         busy.set(c.sym, tr.exitT);
         done.push({ ...c, tr, net: tr.r - (2 * fee) / c.riskPct });
       }
@@ -259,7 +305,7 @@ async function main(): Promise<void> {
         worstStreak = Math.max(worstStreak, streak);
       }
       console.log(
-        `================ TP ${rr}R · worst losing streak ${worstStreak}`,
+        `================ ${title} · worst losing streak ${worstStreak}`,
       );
       console.log(line("ALL", done));
       for (const s of ["A", "B", "A+B"])
@@ -269,11 +315,6 @@ async function main(): Promise<void> {
             done.filter((d) => d.src === s),
           ),
         );
-      const without = arg("without", "AVAX")
-        .toUpperCase()
-        .split(",")
-        .map((x) => x.trim())
-        .filter(Boolean);
       if (without.length) {
         const rest = done.filter((d) => !without.includes(d.sym));
         console.log(`   without ${without.join(", ")}:`);
@@ -297,10 +338,20 @@ async function main(): Promise<void> {
       if (argv.includes("--list"))
         for (const d of done)
           console.log(
-            `     ${utc(d.t)} ${d.src.padEnd(3)} ${d.sym.padEnd(5)} entry ${+d.entry.toPrecision(6)} SL ${+d.sl.toPrecision(6)} (${d.riskPct.toFixed(2)}%${d.atrStop ? " ATR" : ""}) -> ${d.tr.exit.padEnd(4)} ${utc(d.tr.exitT)} R ${sp(d.tr.r)} net ${sp(d.net)}`,
+            `     ${utc(d.t)} ${d.src.padEnd(3)} ${d.sym.padEnd(5)} entry ${+d.entry.toPrecision(6)} SL ${+d.sl.toPrecision(6)} (${d.riskPct.toFixed(2)}%) -> ${d.tr.exit.padEnd(4)} ${utc(d.tr.exitT)} R ${sp(d.tr.r)} net ${sp(d.net)}`,
           );
       console.log("");
-    }
+    };
+    for (const [aName, a] of [
+      ["A1 (in at BTC's signal)", candA1],
+      ["A2 (in at the alt's own top)", candA2],
+    ] as Array<[string, Cand[]]>)
+      for (const rr of top ? RRS : [1])
+        run(
+          `${aName} + B · ${top ? `TP ${rr}R` : `±${pct}%`}`,
+          merge(a, candB),
+          rr,
+        );
   } finally {
     await client.close();
   }
