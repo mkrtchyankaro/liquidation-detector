@@ -34,6 +34,10 @@ const utc = (ms: number): string =>
 const sp = (v: number): string =>
   Number.isFinite(v) ? `${v >= 0 ? "+" : ""}${v.toFixed(2)}%` : "   n/a";
 const H = [1, 2, 4];
+const k$ = (v: number): string =>
+  `$${v >= 1e6 ? (v / 1e6).toFixed(1) + "M" : Math.round(v / 1e3) + "K"}`.padStart(
+    6,
+  );
 
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
@@ -55,7 +59,16 @@ async function main(): Promise<void> {
     const docs = await db
       .collection(MINUTE_BARS)
       .find(q)
-      .project({ ts: 1, high: 1, low: 1, close: 1, oiFirst: 1, oiLast: 1 })
+      .project({
+        ts: 1,
+        high: 1,
+        low: 1,
+        close: 1,
+        oiFirst: 1,
+        oiLast: 1,
+        longLiqUsd: 1,
+        shortLiqUsd: 1,
+      })
       .sort({ ts: 1 })
       .toArray();
     const bars: MinBar[] = docs.map((d) => ({
@@ -65,6 +78,8 @@ async function main(): Promise<void> {
       close: Number(d.close),
       oiFirst: Number(d.oiFirst),
       oiLast: Number(d.oiLast),
+      longLiq: Number(d.longLiqUsd ?? 0),
+      shortLiq: Number(d.shortLiqUsd ?? 0),
     }));
     if (!bars.length) throw new Error("no data");
     const c = candles(bars, tf);
@@ -82,12 +97,12 @@ async function main(): Promise<void> {
     );
     if (!argv.includes("--quiet")) {
       console.log(
-        "signal (UTC)  new dir  price      extreme (time)            move OI   candle OI  label        | 1h       2h       4h      | best    worst",
+        "signal (UTC)  new dir  price      extreme (time)            move OI   candle OI  label       candle liq (long/short, who)  move liq | 1h       2h       4h      | best    worst",
       );
       for (const t of withOi) {
         const o = res(t);
         console.log(
-          `${utc(t.t)}   ${t.accepted ? (t.newDir === "UP" ? "▲ UP  " : "▼ DOWN") : "  (no) "}  ${t.price.toFixed(1).padStart(9)}  ${t.extreme.toFixed(1).padStart(9)} (${utc(t.extremeT)})  ${sp(t.moveOiPct).padStart(7)}  ${sp(t.candleOiPct).padStart(8)}  ${t.label.padEnd(11)} | ${o.at.map((v) => sp(v).padStart(7)).join("  ")} | ${sp(o.best).padStart(6)} ${sp(o.worst).padStart(7)}${t.accepted ? "" : "   <- NOT THE END (rejected)"}`,
+          `${utc(t.t)}   ${t.accepted ? (t.newDir === "UP" ? "▲ UP  " : "▼ DOWN") : "  (no) "}  ${t.price.toFixed(1).padStart(9)}  ${t.extreme.toFixed(1).padStart(9)} (${utc(t.extremeT)})  ${sp(t.moveOiPct).padStart(7)}  ${sp(t.candleOiPct).padStart(8)}  ${t.label.padEnd(11)} liq L ${k$(t.candleLiqL)} S ${k$(t.candleLiqS)} ${t.candleLiq.padEnd(7)} move ${t.moveLiq.padEnd(7)} | ${o.at.map((v) => sp(v).padStart(7)).join("  ")} | ${sp(o.best).padStart(6)} ${sp(o.worst).padStart(7)}${t.accepted ? "" : "   <- NOT THE END (rejected)"}`,
         );
       }
       console.log("");
@@ -119,6 +134,75 @@ async function main(): Promise<void> {
     console.log(
       "* rejected = if we HAD taken them: minus = right to reject (the move really went on)",
     );
+
+    // LIQUIDATIONS (Johnny, Oct 2) -- no rank here: does WHO was liquidated separate good turns from bad ones?
+    const liqBlock = (name: string, list: Turn[]): void => {
+      console.log(`\nLIQUIDATIONS · ${name} (${list.length})`);
+      const line = (label: string, sel: Turn[]): void => {
+        const os = sel.map(res);
+        const avg = (i: number): string => {
+          const v = os.map((o) => o.at[i]).filter(Number.isFinite);
+          return `${sp(v.reduce((a, b) => a + b, 0) / (v.length || 1))} (right ${v.filter((x) => x > 0).length}/${v.length})`;
+        };
+        const w = os.map((o) => o.worst).filter(Number.isFinite),
+          b = os.map((o) => o.best).filter(Number.isFinite);
+        console.log(
+          `   ${label.padEnd(44)} ${String(sel.length).padStart(4)} · 2h ${avg(1)} · 4h ${avg(2)} · best ${sp(b.reduce((a, x) => a + x, 0) / (b.length || 1))} · worst ${sp(w.reduce((a, x) => a + x, 0) / (w.length || 1))}`,
+        );
+      };
+      console.log("   reversal candle: who was liquidated more");
+      line(
+        "LOSERS (longs at a top / shorts at a bottom)",
+        list.filter((t) => t.candleLiq === "LOSERS"),
+      );
+      line(
+        "WINNERS (the other side)",
+        list.filter((t) => t.candleLiq === "WINNERS"),
+      );
+      line(
+        "NONE (no liquidations)",
+        list.filter((t) => t.candleLiq === "NONE"),
+      );
+      console.log("   the move before it: who was liquidated more");
+      line(
+        "SQUEEZE (shorts in a rise / longs in a fall)",
+        list.filter((t) => t.moveLiq === "SQUEEZE"),
+      );
+      line(
+        "AGAINST (the move's own side)",
+        list.filter((t) => t.moveLiq === "AGAINST"),
+      );
+      line(
+        "NONE",
+        list.filter((t) => t.moveLiq === "NONE"),
+      );
+      const f = list
+        .filter((t) => Number.isFinite(t.forced) && t.forced > 0)
+        .sort((a, z) => a.forced - z.forced);
+      if (f.length >= 8) {
+        console.log(
+          "   forced share in the reversal candle (losers' liquidations / |OI change|), quarters of these signals",
+        );
+        const q = Math.ceil(f.length / 4);
+        for (let i = 0; i < 4; i++) {
+          const g = f.slice(i * q, (i + 1) * q);
+          if (g.length)
+            line(
+              `Q${i + 1} ${i === 0 ? "most voluntary" : i === 3 ? "most forced" : ""} (${g[0].forced.toFixed(2)}..${g[g.length - 1].forced.toFixed(2)})`,
+              g,
+            );
+        }
+        line(
+          "no losers' liquidations at all",
+          list.filter((t) => !(t.forced > 0)),
+        );
+      }
+    };
+    liqBlock(
+      "DC + OI rule (accepted)",
+      withOi.filter((t) => t.accepted),
+    );
+    liqBlock("PLAIN DC (no OI rule)", plain);
 
     const win = Number(arg("window", "24"));
     const days = Math.max(

@@ -17,6 +17,8 @@ export interface MinBar {
   close: number;
   oiFirst: number;
   oiLast: number;
+  longLiq?: number;
+  shortLiq?: number;
 }
 export interface Candle {
   t: number;
@@ -27,6 +29,8 @@ export interface Candle {
   close: number;
   oi0: number;
   oi1: number;
+  liqL: number;
+  liqS: number;
 }
 export type Dir = "UP" | "DOWN";
 export interface Turn {
@@ -40,6 +44,19 @@ export interface Turn {
   label: string;
   accepted: boolean;
   atr: number;
+  /** LIQUIDATIONS (Johnny, Oct 2), our DB: USD in the move (after its start, up to the reversal candle) and in the reversal candle */
+  moveLiqL: number;
+  moveLiqS: number;
+  candleLiqL: number;
+  candleLiqS: number;
+  /** in the move: SQUEEZE = the side AGAINST the move was liquidated more (shorts in a rise), AGAINST = the move's own
+   *  side more, NONE = no liquidations */
+  moveLiq: "SQUEEZE" | "AGAINST" | "NONE";
+  /** in the reversal candle: LOSERS = the side the new direction hurts was liquidated more (longs at a top),
+   *  WINNERS = the other side more, NONE */
+  candleLiq: "LOSERS" | "WINNERS" | "NONE";
+  /** forced share: the losers' liquidations / |the candle's OI change in USD| (NaN when OI did not change) */
+  forced: number;
 }
 
 const M = 60_000;
@@ -65,6 +82,8 @@ export function candles(bars: readonly MinBar[], tfMin: number): Candle[] {
         close: b.close,
         oi0: b.oiFirst,
         oi1: b.oiLast,
+        liqL: 0,
+        liqS: 0,
       };
     } else {
       cur.high = Math.max(cur.high, b.high);
@@ -72,6 +91,8 @@ export function candles(bars: readonly MinBar[], tfMin: number): Candle[] {
       cur.close = b.close;
       cur.oi1 = b.oiLast;
     }
+    cur.liqL += b.longLiq ?? 0;
+    cur.liqS += b.shortLiq ?? 0;
   }
   if (cur) out.push(cur);
   return out;
@@ -97,6 +118,48 @@ export function atrBefore(c: readonly Candle[], n: number): number[] {
     }
   }
   return out;
+}
+
+function liqOf(
+  c: readonly Candle[],
+  start: number,
+  ext: number,
+  i: number,
+  newDir: Dir,
+): Pick<
+  Turn,
+  | "moveLiqL"
+  | "moveLiqS"
+  | "candleLiqL"
+  | "candleLiqS"
+  | "moveLiq"
+  | "candleLiq"
+  | "forced"
+> {
+  let L = 0,
+    S = 0;
+  for (let j = start + 1; j < i && j <= ext; j++) {
+    L += c[j].liqL;
+    S += c[j].liqS;
+  }
+  const x = c[i],
+    moveUp = newDir === "DOWN";
+  const moveLiq =
+    L === S ? "NONE" : (moveUp ? S > L : L > S) ? "SQUEEZE" : "AGAINST";
+  const losers = newDir === "DOWN" ? x.liqL : x.liqS,
+    winners = newDir === "DOWN" ? x.liqS : x.liqL;
+  const candleLiq =
+    losers === winners ? "NONE" : losers > winners ? "LOSERS" : "WINNERS";
+  const dOiUsd = Math.abs(x.oi1 - x.oi0) * x.close;
+  return {
+    moveLiqL: L,
+    moveLiqS: S,
+    candleLiqL: x.liqL,
+    candleLiqS: x.liqS,
+    moveLiq,
+    candleLiq,
+    forced: dOiUsd > 0 ? losers / dOiUsd : NaN,
+  };
 }
 
 export function label(c: Candle): string {
@@ -155,6 +218,7 @@ export function turns(
       label: label(x),
       accepted,
       atr: a,
+      ...liqOf(c, start, ext, i, dir === "UP" ? "DOWN" : "UP"),
     });
     if (accepted) {
       start = ext;

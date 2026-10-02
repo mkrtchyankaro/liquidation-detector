@@ -46,6 +46,8 @@ function mk(rows: Array<[number, number]>): Candle[] {
       close: c,
       oi0,
       oi1: oi,
+      liqL: 0,
+      liqS: 0,
     };
   });
 }
@@ -166,5 +168,39 @@ scenario(
     assert.ok(Number.isNaN(r[0].share) && r[2].share === 0.5);
   },
 );
+scenario(
+  "liquidations: squeeze in the rise, longs (losers) liquidated in the top candle, forced share",
+  () => {
+    const c = mk(story);
+    c[17].liqS = 500;
+    c[18].liqS = 300;
+    c[17].liqL = 10; // the rise was a short squeeze
+    c[19].liqL = 400;
+    c[19].liqS = 50; // the top candle: longs liquidated
+    const top = turns(c, 1, 14, true).find(
+      (x) => x.newDir === "DOWN" && x.accepted,
+    )!;
+    assert.strictEqual(top.moveLiq, "SQUEEZE");
+    assert.strictEqual(top.candleLiq, "LOSERS");
+    assert.ok(
+      Math.abs(top.forced - 400 / (4 * 104.5)) < 1e-9,
+      String(top.forced),
+    ); // 400 USD / |OI -4| x price
+  },
+);
+scenario("candles sum the minute liquidations", () => {
+  const bars: MinBar[] = [0, 1].map((m) => ({
+    t: m * 60_000,
+    high: 2,
+    low: 1,
+    close: 1.5,
+    oiFirst: 1,
+    oiLast: 1,
+    longLiq: 3,
+    shortLiq: 4,
+  }));
+  const [k] = candles(bars, 15);
+  assert.deepStrictEqual([k.liqL, k.liqS], [6, 8]);
+});
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
