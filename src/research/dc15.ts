@@ -41,6 +41,8 @@ export interface Turn {
   extremeT: number;
   /** where the move that just ended started (its start candle's open time) -- for the coins' window */
   moveStartT: number;
+  /** the move's price change %: the start candle's close -> the extreme (high of an up move / low of a down move) */
+  movePct: number;
   moveOiPct: number;
   candleOiPct: number;
   label: string;
@@ -216,6 +218,9 @@ export function turns(
       moveStartT: c[start].t,
       extreme: dir === "UP" ? c[ext].high : c[ext].low,
       extremeT: c[ext].t,
+      movePct:
+        (100 * ((dir === "UP" ? c[ext].high : c[ext].low) - c[start].close)) /
+        c[start].close,
       moveOiPct: (100 * moveOi) / c[start].oi1,
       candleOiPct: (100 * candleOi) / x.oi0,
       label: label(x),
@@ -274,7 +279,7 @@ export function outcome(
 
 /**
  * HOW BIG WAS THIS MOVE'S OI, COMPARED WITH THE MOVES BEFORE IT? (Johnny, Oct 2) No threshold: each accepted turn's
- * |move OI %| against the accepted turns of the `windowH` hours BEFORE it (known at the signal -> live-safe).
+ * |move OI %| (or another `key`, e.g. the move's price %) against the accepted turns of the `windowH` hours BEFORE it (known at the signal -> live-safe).
  *   rank   1 = bigger than every move of that window, 2 = one was bigger, ...
  *   share  part of those earlier moves that were smaller (1 = all of them)
  *   prior  how many earlier moves there were (0 = nothing to compare with -> rank 1, share NaN)
@@ -285,14 +290,18 @@ export interface Ranked {
   share: number;
   prior: number;
 }
-export function pastRank(list: readonly Turn[], windowH: number): Ranked[] {
+export function pastRank(
+  list: readonly Turn[],
+  windowH: number,
+  key: (t: Turn) => number = (t) => t.moveOiPct,
+): Ranked[] {
   const acc = list.filter((t) => t.accepted);
   return acc.map((t) => {
     const before = acc.filter(
       (p) => p.t < t.t && p.t >= t.t - windowH * 3_600_000,
     );
-    const me = Math.abs(t.moveOiPct),
-      bigger = before.filter((p) => Math.abs(p.moveOiPct) >= me).length;
+    const me = Math.abs(key(t)),
+      bigger = before.filter((p) => Math.abs(key(p)) >= me).length;
     return {
       turn: t,
       rank: bigger + 1,
@@ -354,4 +363,15 @@ export function coinInWindow(
     follow = sxx > 0 && syy > 0 ? (sxy * sxy) / (sxx * syy) : NaN;
   }
   return { pct, btcPct, x: btcPct !== 0 ? pct / btcPct : NaN, follow };
+}
+
+/** OI change % of a coin between two times, from its minute OI (the last known OI at each time -- live-safe) */
+export function oiChange(
+  oi: ReadonlyMap<number, number>,
+  from: number,
+  to: number,
+): number {
+  const a = priceAt(oi, from),
+    b = priceAt(oi, to);
+  return a > 0 && b > 0 ? 100 * (b / a - 1) : NaN;
 }

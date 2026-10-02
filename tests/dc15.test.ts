@@ -6,6 +6,7 @@ import {
   atrBefore,
   candles,
   coinInWindow,
+  oiChange,
   outcome,
   pastRank,
   turns,
@@ -148,6 +149,7 @@ scenario(
       moveStartT: 0,
       extreme: 1,
       extremeT: 0,
+      movePct: -oi / 10,
       moveOiPct: oi,
       candleOiPct: 0,
       label: "",
@@ -222,5 +224,45 @@ scenario(
     assert.ok(Math.abs(s.x - 2) < 0.05 && s.follow > 0.99, JSON.stringify(s));
   },
 );
+scenario(
+  "price filter: movePct = start close -> extreme; pastRank by price uses its own key",
+  () => {
+    const c = mk(story);
+    const top = turns(c, 1, 14, true).find(
+      (x) => x.newDir === "DOWN" && x.accepted && x.t > 17 * W,
+    )!;
+    const startClose = c.find((k) => k.t === top.moveStartT)!.close;
+    assert.ok(
+      Math.abs(top.movePct - (100 * (top.extreme - startClose)) / startClose) <
+        1e-9 && top.movePct > 0,
+    );
+    const H = 3_600_000;
+    const t = (h: number, oi: number, px: number): Turn => ({
+      ...top,
+      t: h * H,
+      moveOiPct: oi,
+      movePct: px,
+      accepted: true,
+    });
+    const list = [t(0, 1, 5), t(1, 3, 1)];
+    assert.deepStrictEqual(
+      pastRank(list, 24).map((r) => r.rank),
+      [1, 1],
+    ); // OI: 3 > 1
+    assert.deepStrictEqual(
+      pastRank(list, 24, (x) => x.movePct).map((r) => r.rank),
+      [1, 2],
+    ); // price: 1 < 5
+  },
+);
+scenario("coin OI change: last known OI at each time, no look-ahead", () => {
+  const oi = new Map<number, number>([
+    [0, 100],
+    [60_000, 110],
+    [120_000, 999],
+  ]);
+  assert.ok(Math.abs(oiChange(oi, 60_000, 120_000) - 10) < 1e-9); // at 2:00 the minute 2:00 is not closed yet -> 110
+  assert.ok(Number.isNaN(oiChange(oi, 0, 60_000))); // nothing known before 0:00
+});
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);
