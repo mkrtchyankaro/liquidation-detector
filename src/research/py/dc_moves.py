@@ -7,11 +7,11 @@ extremes; when it comes back from the extreme by a threshold, that run is OVER (
     relative to the current market. Small k finds small moves, big k only the big ones ("zoom levels").
   * live-safe: a move is CONFIRMED only when the price came back by the threshold -- that moment is printed too
     ("known at"); the start and end are the real extremes, known only afterwards.
-For every move: start -> end (Yerevan time, UTC+4), price %, size in ATRs, hours, BTC OI change (5-minute OI).
+For every move: start -> end (UTC by default), price %, size in ATRs, hours, BTC OI change (5-minute OI).
 A chart (PNG) is saved with the moves of one zoom level drawn on the price, and OI below.
 
-    python research/py/dc_moves.py                       # BTC, last 24h, k = 0.5, 1, 2
-    python research/py/dc_moves.py --hours 72 --k 1,2,3 --plot-k 2 --symbol ETHUSDT
+    python src/research/py/dc_moves.py                       # BTC, last 24h, k = 1, UTC
+    python src/research/py/dc_moves.py --hours 72 --k 1,2,3 --plot-k 2 --symbol ETHUSDT
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 
 FAPI = "https://fapi.binance.com"
-TZ = timezone(timedelta(hours=4))  # Yerevan
+TZ = timezone.utc  # default UTC; --tz 4 for Yerevan
 MIN, HOUR = 60_000, 3_600_000
 
 
@@ -144,6 +144,16 @@ def oi_at(oi: pd.Series, ts: int) -> float:
 
 
 # ---------------------------------------------------------------- report + chart
+def set_tz(hours: float) -> None:
+    global TZ
+    TZ = timezone(timedelta(hours=hours))
+
+
+def tz_name() -> str:
+    off = TZ.utcoffset(None).total_seconds() / 3600
+    return "UTC" if off == 0 else f"UTC{off:+g}"
+
+
 def fmt(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, TZ).strftime("%m-%d %H:%M")
 
@@ -157,13 +167,14 @@ def report(symbol: str, k: float, moves: list[Move], atr_now: float, oi: pd.Seri
         o0, o1 = oi_at(oi, m.start), oi_at(oi, m.end)
         rows.append({
             "dir": m.dir, "start": fmt(m.start), "end": fmt(m.end), "known_at": fmt(m.known) if m.known > 0 else "still going",
+            "wait_min": round((m.known - m.end) / MIN) if m.known > 0 else None,
             "hours": round((m.end - m.start) / HOUR, 1), "price_%": round(pct, 2),
             "size_ATR": round(abs(m.p1 - m.p0) / (m.threshold / k), 1),
             "late_%": round(100 * m.threshold / m.p1, 2) if m.known > 0 else None,
             "OI_%": round(100 * (o1 - o0) / o0, 2) if o0 and np.isfinite(o0) and np.isfinite(o1) else None,
         })
     df = pd.DataFrame(rows)
-    print(f"\n=== {symbol} · zoom k = {k} (a move ends when the price comes back {k} x 1h-ATR; ATR now = {atr_now:,.1f}) · {len(df)} moves · Yerevan time")
+    print(f"\n=== {symbol} · zoom k = {k} (a move ends when the price comes back {k} x 1h-ATR; ATR now = {atr_now:,.1f}) · {len(df)} moves · {tz_name()}")
     if df.empty:
         print("   none")
     else:
@@ -189,7 +200,7 @@ def chart(path: str, symbol: str, m: pd.DataFrame, oi: pd.Series, moves: list[Mo
         a1.annotate(f"{pct:+.2f}%", (when(mv.end), mv.p1), color=c, fontsize=8, ha="center", va="bottom" if mv.dir == "UP" else "top")
         if mv.known > 0:
             a1.axvline(when(mv.known), color=c, lw=0.6, ls=":")
-    a1.set_title(f"{symbol} · moves at zoom k={k} (green up, red down; dotted = when it became known live) · Yerevan time")
+    a1.set_title(f"{symbol} · moves at zoom k={k} (green up, red down; dotted = when it became known live) · {tz_name()}")
     oo = oi[oi.index >= since]
     a2.plot([when(x) for x in oo.index], oo.values, color="#4575b4", lw=1)
     a2.set_ylabel("OI")
@@ -204,10 +215,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="BTCUSDT")
     ap.add_argument("--hours", type=float, default=24)
-    ap.add_argument("--k", default="0.5,1,2", help="zoom levels: multiples of the 1h ATR")
+    ap.add_argument("--k", default="1", help="zoom levels: multiples of the 1h ATR, e.g. 0.5,1,2")
+    ap.add_argument("--tz", type=float, default=0, help="hours from UTC for printed times (0 = UTC, 4 = Yerevan)")
     ap.add_argument("--plot-k", type=float, default=None, help="which zoom to draw (default: the middle one)")
     ap.add_argument("--out", default=os.path.expanduser("~/research-out"))
     a = ap.parse_args()
+    set_tz(a.tz)
     ks = [float(x) for x in a.k.split(",")]
     now = int(time.time() * 1000) // MIN * MIN
     since = now - int(a.hours * HOUR)
@@ -221,7 +234,7 @@ def main() -> None:
     plot_k = a.plot_k if a.plot_k is not None else ks[len(ks) // 2]
     atr_now = float(h["atr"].iloc[-1])
     print(f"{a.symbol} · last {a.hours:g}h · 1-minute candles · 1h ATR(14) now {atr_now:,.1f} ({100 * atr_now / m['close'].iloc[-1]:.2f}% of price)")
-    print("columns: start/end = the real extremes · known_at = when it was confirmed live · size_ATR = move / 1h-ATR · "
+    print("columns: start/end = the real extremes · known_at = when it was confirmed live · wait_min = minutes from the end to that moment · size_ATR = move / 1h-ATR · "
           "late_% = how far the price had already come back when it became known · OI_% = BTC OI start -> end")
     for k in ks:
         th = threshold_at(t, h["t"].to_numpy(), h["atr"].to_numpy(), k)

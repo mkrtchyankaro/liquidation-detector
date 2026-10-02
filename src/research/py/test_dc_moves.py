@@ -1,4 +1,4 @@
-"""Tests for dc_moves.py (no network). Run: python research/py/test_dc_moves.py"""
+"""Tests for dc_moves.py (no network). Run: python src/research/py/test_dc_moves.py"""
 import os
 import sys
 
