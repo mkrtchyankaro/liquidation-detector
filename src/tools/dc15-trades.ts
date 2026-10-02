@@ -14,7 +14,7 @@
  * Prices are our minute bars (mark price from the 1/s polls). Fees: --fee (taker % per side, default 0.05) -> net R.
  *
  *   npx tsx src/tools/dc15-trades.ts
- *   options: --from 2026-09-22  --window 12  --pct 1 (SL %)  --tp 2 (TP %, default = --pct)  --top  --fee 0.05  --list  --without AVAX (any coins, comma list)
+ *   options: --from 2026-09-22  --window 12  --pct 1 (SL %)  --tp 2 (TP %, default = --pct)  --picks 3  --top  --fee 0.05  --list  --without AVAX (any coins, comma list)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -58,6 +58,7 @@ interface Cand {
   atr: number;
   sl: number;
   riskPct: number;
+  rank: number;
 }
 interface Done extends Cand {
   tr: Trade;
@@ -69,6 +70,7 @@ async function main(): Promise<void> {
   const from = arg("from", ""),
     win = Number(arg("window", "12")),
     fee = Number(arg("fee", "0.05"));
+  const npicks = Number(arg("picks", "3"));
   const top = argv.includes("--top"),
     pct = Number(arg("pct", "1")),
     tpPct = Number(arg("tp", arg("pct", "1")));
@@ -141,6 +143,7 @@ async function main(): Promise<void> {
         atr,
         sl,
         riskPct: (100 * (sl - entry)) / entry,
+        rank: 0,
       };
     };
     const push = (list: Cand[], c: Cand | null): void => {
@@ -175,23 +178,23 @@ async function main(): Promise<void> {
         Math.floor(rows.length / 2)
       ];
       const until = btAcc.find((x) => x.t > t.t)?.t ?? Infinity; // armed until BTC's next accepted turn
-      for (const p of rows
+      for (const [ri, p] of rows
         .filter((x) => x.follow >= med)
         .sort((a, b) => b.x - a.x)
-        .slice(0, 3)) {
+        .slice(0, npicks)
+        .entries()) {
         const c = coins.get(p.sym)!;
         // A1: in at BTC's signal
-        push(
-          candA1,
-          mk(
-            t.t,
-            p.sym,
-            "A",
-            priceAt(c.map, t.t),
-            extremeIn(c.bars, fromT, t.t, "DOWN"),
-            NaN,
-          ),
+        const c1 = mk(
+          t.t,
+          p.sym,
+          "A",
+          priceAt(c.map, t.t),
+          extremeIn(c.bars, fromT, t.t, "DOWN"),
+          NaN,
         );
+        if (c1) c1.rank = ri + 1;
+        push(candA1, c1);
         // A2: in at the alt's own top after BTC's signal
         armed++;
         const at = armedTurn(altTurns.get(p.sym)!, "DOWN", t.t, until);
@@ -314,6 +317,13 @@ async function main(): Promise<void> {
           line(
             s,
             done.filter((d) => d.src === s),
+          ),
+        );
+      for (let k = 1; k <= npicks; k++)
+        console.log(
+          line(
+            ` A pick #${k}`,
+            done.filter((d) => d.src !== "B" && d.rank === k),
           ),
         );
       if (without.length) {
