@@ -5,6 +5,7 @@ import * as assert from "assert";
 import {
   atrBefore,
   candles,
+  coinInWindow,
   outcome,
   pastRank,
   turns,
@@ -144,6 +145,7 @@ scenario(
       t: h * H,
       newDir: "UP",
       price: 1,
+      moveStartT: 0,
       extreme: 1,
       extremeT: 0,
       moveOiPct: oi,
@@ -202,5 +204,23 @@ scenario("candles sum the minute liquidations", () => {
   const [k] = candles(bars, 15);
   assert.deepStrictEqual([k.liqL, k.liqS], [6, 8]);
 });
+scenario(
+  "coin in the BTC window: x = 2 and follow ~1 for a 2x copy; window only",
+  () => {
+    const btc = new Map<number, number>(),
+      coin = new Map<number, number>();
+    let b = 100,
+      c = 50;
+    for (let i = 0; i < 60; i++) {
+      const r = 0.001 * Math.sin(i * 1.7) + 0.0005;
+      b *= 1 + r;
+      c *= 1 + 2 * r;
+      btc.set(i * 60_000, b);
+      coin.set(i * 60_000, c);
+    }
+    const s = coinInWindow(coin, btc, 10 * 60_000, 50 * 60_000);
+    assert.ok(Math.abs(s.x - 2) < 0.05 && s.follow > 0.99, JSON.stringify(s));
+  },
+);
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

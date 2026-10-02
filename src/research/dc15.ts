@@ -39,6 +39,8 @@ export interface Turn {
   price: number;
   extreme: number;
   extremeT: number;
+  /** where the move that just ended started (its start candle's open time) -- for the coins' window */
+  moveStartT: number;
   moveOiPct: number;
   candleOiPct: number;
   label: string;
@@ -211,6 +213,7 @@ export function turns(
       t: x.end,
       newDir: dir === "UP" ? "DOWN" : "UP",
       price: x.close,
+      moveStartT: c[start].t,
       extreme: dir === "UP" ? c[ext].high : c[ext].low,
       extremeT: c[ext].t,
       moveOiPct: (100 * moveOi) / c[start].oi1,
@@ -297,4 +300,58 @@ export function pastRank(list: readonly Turn[], windowH: number): Ranked[] {
       prior: before.length,
     };
   });
+}
+
+/**
+ * THE COINS IN THE MOVE (Johnny, Oct 2): over the BTC move window [from, to] -- known at the signal:
+ *   pct     the coin's move (close at `from` -> close at `to`), x = pct / BTC's pct
+ *   follow  R2 of the coin's 1-minute returns on BTC's inside the window (1 = moved exactly with BTC)
+ */
+export interface Close {
+  t: number;
+  close: number;
+}
+export function priceAt(bars: ReadonlyMap<number, number>, t: number): number {
+  for (let k = Math.floor(t / M) * M - M; k >= t - 6 * M; k -= M) {
+    const v = bars.get(k);
+    if (v) return v;
+  }
+  return NaN;
+}
+export function coinInWindow(
+  coin: ReadonlyMap<number, number>,
+  btc: ReadonlyMap<number, number>,
+  from: number,
+  to: number,
+): { pct: number; btcPct: number; x: number; follow: number } {
+  const pct = 100 * (priceAt(coin, to) / priceAt(coin, from) - 1),
+    btcPct = 100 * (priceAt(btc, to) / priceAt(btc, from) - 1);
+  const xs: number[] = [],
+    ys: number[] = [];
+  for (let t = Math.floor(from / M) * M + M; t < to; t += M) {
+    const c0 = coin.get(t - M),
+      c1 = coin.get(t),
+      b0 = btc.get(t - M),
+      b1 = btc.get(t);
+    if (c0 && c1 && b0 && b1) {
+      xs.push(b1 / b0 - 1);
+      ys.push(c1 / c0 - 1);
+    }
+  }
+  let follow = NaN;
+  if (xs.length >= 10) {
+    const n = xs.length,
+      mx = xs.reduce((a, b) => a + b, 0) / n,
+      my = ys.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0,
+      sxx = 0,
+      syy = 0;
+    for (let i = 0; i < n; i++) {
+      sxy += (xs[i] - mx) * (ys[i] - my);
+      sxx += (xs[i] - mx) ** 2;
+      syy += (ys[i] - my) ** 2;
+    }
+    follow = sxx > 0 && syy > 0 ? (sxy * sxy) / (sxx * syy) : NaN;
+  }
+  return { pct, btcPct, x: btcPct !== 0 ? pct / btcPct : NaN, follow };
 }
