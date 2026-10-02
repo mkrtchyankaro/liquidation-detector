@@ -8,6 +8,7 @@ import {
   coinInWindow,
   oiChange,
   outcome,
+  ownness,
   pastRank,
   turns,
   type Candle,
@@ -288,6 +289,15 @@ scenario(
     );
     const down = coinInWindow(coin, btc, 60_000, 6 * 60_000, false); // nothing below the start
     assert.ok(down.btcPct === 0 && down.pct === 0);
+  },
+);
+scenario(
+  "ownness: BTC the other way / BTC explains less than half / with BTC",
+  () => {
+    assert.strictEqual(ownness(0.9, 2, -0.5), "BTC OPPOSITE");
+    assert.strictEqual(ownness(0.3, 2, 0.5), "OWN");
+    assert.strictEqual(ownness(0.7, -2, -1), "WITH BTC");
+    assert.strictEqual(ownness(0.7, 2, 0), "WITH BTC"); // BTC flat: decided by R2
   },
 );
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

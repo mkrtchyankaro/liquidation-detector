@@ -399,3 +399,16 @@ export function oiChange(
     b = priceAt(oi, to);
   return a > 0 && b > 0 ? 100 * (b / a - 1) : NaN;
 }
+
+/**
+ * DID THE ALT MOVE ON ITS OWN? (Johnny, Oct 2) For an alt's move, from what is known at its signal:
+ *   BTC OPPOSITE  BTC went the other way over the same window (close to close) -> clearly the alt's own move
+ *   OWN           BTC explains less than half of the alt's minute moves (R2 < 1/2) -> more its own than BTC's
+ *   WITH BTC      BTC explains half or more
+ */
+export type Own = "BTC OPPOSITE" | "OWN" | "WITH BTC";
+export function ownness(follow: number, coinPct: number, btcPct: number): Own {
+  if (coinPct !== 0 && btcPct !== 0 && Math.sign(coinPct) !== Math.sign(btcPct))
+    return "BTC OPPOSITE";
+  return follow < 0.5 ? "OWN" : "WITH BTC";
+}
