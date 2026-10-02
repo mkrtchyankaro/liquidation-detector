@@ -14,7 +14,7 @@
  * Prices are our minute bars (mark price from the 1/s polls). Fees: --fee (taker % per side, default 0.05) -> net R.
  *
  *   npx tsx src/tools/dc15-trades.ts
- *   options: --from 2026-09-22  --window 12  --pct 1  --top  --fee 0.05  --list  --without AVAX (any coins, comma list)
+ *   options: --from 2026-09-22  --window 12  --pct 1 (SL %)  --tp 2 (TP %, default = --pct)  --top  --fee 0.05  --list  --without AVAX (any coins, comma list)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -70,7 +70,8 @@ async function main(): Promise<void> {
     win = Number(arg("window", "12")),
     fee = Number(arg("fee", "0.05"));
   const top = argv.includes("--top"),
-    pct = Number(arg("pct", "1"));
+    pct = Number(arg("pct", "1")),
+    tpPct = Number(arg("tp", arg("pct", "1")));
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   try {
@@ -256,7 +257,7 @@ async function main(): Promise<void> {
     console.log(
       top
         ? "exit: SL = the alt's high of its move (>= 1 x 15m ATR), TP = 2R / 2.2R / 2.5R"
-        : `exit: TP -${pct}% · SL +${pct}% from the entry (no time limit)`,
+        : `exit: TP -${tpPct}% · SL +${pct}% from the entry (no time limit)`,
     );
     console.log(
       `fee ${fee}% per side -> net R = R - 2 x fee / risk% · same minute SL+TP = SL · one trade per coin at a time`,
@@ -346,9 +347,9 @@ async function main(): Promise<void> {
       ["A1 (in at BTC's signal)", candA1],
       ["A2 (in at the alt's own top)", candA2],
     ] as Array<[string, Cand[]]>)
-      for (const rr of top ? RRS : [1])
+      for (const rr of top ? RRS : [tpPct / pct])
         run(
-          `${aName} + B · ${top ? `TP ${rr}R` : `±${pct}%`}`,
+          `${aName} + B · ${top ? `TP ${rr}R` : `SL ${pct}% · TP ${tpPct}%`}`,
           merge(a, candB),
           rr,
         );
