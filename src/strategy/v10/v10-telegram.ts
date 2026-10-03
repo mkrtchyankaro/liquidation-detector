@@ -6,7 +6,7 @@ import type { V10SignalDoc, V10TradeDoc } from "./v10-repository";
  * V10 messages (plain text). Header "V10 · BTC" (part 1, BTC-led) or "V10 · ALT" (part 2, the alt's own move) on every
  * message so it is never mixed up with V9 or with the other part.
  * 🔻 SHORT entry · 🔺 LONG entry · ✅ TP · ❌ SL · ⚪ other close · ⚠️ not opened. $ figures use THIS user's trade.
- * The story is told in 15m candles, UTC.
+ * The story = Johnny's 3 points (OI up -> OI falls after its peak -> the first red candle with OI down), 15m, UTC.
  */
 const SEP = "------------------------------";
 const utc = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
@@ -19,36 +19,35 @@ const W = 15 * 60_000;
 /** "V10 · BTC" / "V10 · ALT" */
 export const v10Head = (t: { kind?: string }): string => `V10 · ${t.kind === "OWN" ? "ALT" : "BTC"}`;
 
-/** part 2: the alt moved on its own */
-export function v10OwnStory(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">, t: Pick<V10TradeDoc, "symbol" | "side">): string[] {
-  const a = sig.turn, top = t.side === "SHORT", o = sig.own;
+/** "10-03 01:30" -- every time in UTC */
+const t15 = (ms: number): string => dhm(ms);
+
+/** Johnny's 3 points, short, UTC (Oct 3). `who` = whose candles (BTC or the alt). */
+function threePoints(a: V10SignalDoc["turn"], who: string, rankH: number): string[] {
+  const top = a.side === "SHORT";
   return [
-    `📖 Ինչու (15m մոմեր, UTC)`,
-    ``,
-    `1️⃣ ${coin(t.symbol)}-ն ինքն իրենով ${top ? "բարձրացավ" : "իջավ"} · ${dhm(a.moveStartT)} → ${hm(a.extremeT + W)}`,
-    `Գինը ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} · OI-ով ամենամեծը վերջին ${sig.rankWindowHours} ժամի ${a.prior} շարժումից`,
-    ``,
-    `2️⃣ ${top ? "Գագաթ" : "Հատակ"} · ${hm(a.candleEnd - W)}–${hm(a.candleEnd)} մոմը`,
-    `${a.label} · OI ${sp(a.candleOiPct)} · ${coin(t.symbol)} ${fmtPrice(a.price)}`,
-    ``,
-    `3️⃣ BTC-ն այդ ընթացքում ${o ? sp(o.btcPct) : "n/a"}`,
-    o?.how === "BTC OPPOSITE" ? `BTC-ն գնաց հակառակ ուղղությամբ · R² ${o.follow.toFixed(2)}` : `BTC-ն բացատրում է շարժման կեսից քիչը · R² ${o ? o.follow.toFixed(2) : "n/a"}`,
+    `1️⃣ ${t15(a.moveStartT)} → ${hm(a.peakT)} · ${who} ${top ? "⬆️" : "⬇️"} ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
+    `2️⃣ OI-ի գագաթից հետո OI ${sp(a.fromPeakOiPct)}`,
+    `3️⃣ ${hm(a.candleEnd - W)} ${top ? "կարմիր" : "կանաչ"} մոմ · OI ${sp(a.candleOiPct)} → entry`,
   ];
 }
 
-export function v10Story(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">, t: Pick<V10TradeDoc, "symbol" | "side" | "pick">, picks: number): string[] {
-  const b = sig.turn, top = t.side === "SHORT";
+/** part 2: the alt moved on its own */
+export function v10OwnStory(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">, t: Pick<V10TradeDoc, "symbol" | "side">): string[] {
+  const o = sig.own;
   return [
-    `📖 Ինչու (15m մոմեր, UTC)`,
-    ``,
-    `1️⃣ BTC-ն ${top ? "բարձրացավ" : "իջավ"} · ${dhm(b.moveStartT)} → ${hm(b.extremeT + W)}`,
-    `Գինը ${sp(b.movePct)} · OI ${sp(b.moveOiPct)} · OI-ով ամենամեծը վերջին ${sig.rankWindowHours} ժամի ${b.prior} շարժումից`,
-    ``,
-    `2️⃣ ${top ? "Գագաթ" : "Հատակ"} · ${hm(b.candleEnd - W)}–${hm(b.candleEnd)} մոմը`,
-    `${b.label} · OI ${sp(b.candleOiPct)} · BTC ${fmtPrice(b.price)}`,
-    ``,
-    `3️⃣ ${coin(t.symbol)}-ն ${top ? "բարձրացավ" : "իջավ"} BTC-ի հետ`,
-    `${sp(t.pick.coinPct)} (BTC-ից x${t.pick.x.toFixed(2)} անգամ) · R² ${t.pick.follow.toFixed(2)} · ընտրված #${t.pick.rank} / ${picks}`,
+    `📖 ${coin(t.symbol)} · 15m · UTC`,
+    ...threePoints(sig.turn, coin(t.symbol), sig.rankWindowHours),
+    `BTC-ն այդ ընթացքում ${o ? sp(o.btcPct) : "n/a"} · ${o?.how === "BTC OPPOSITE" ? "գնաց հակառակ" : "բացատրում է կեսից քիչը"} (R² ${o ? o.follow.toFixed(2) : "n/a"})`,
+  ];
+}
+
+/** part 1: BTC's 3 points, then this alt with BTC */
+export function v10Story(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">, t: Pick<V10TradeDoc, "symbol" | "side" | "pick">, picks: number): string[] {
+  return [
+    `📖 BTC · 15m · UTC`,
+    ...threePoints(sig.turn, "BTC", sig.rankWindowHours),
+    `${coin(t.symbol)}-ն BTC-ի հետ ${sp(t.pick.coinPct)} (x${t.pick.x.toFixed(2)}, R² ${t.pick.follow.toFixed(2)}) · #${t.pick.rank}/${picks}`,
   ];
 }
 
@@ -62,16 +61,11 @@ export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
   return [
     `${long ? "🔺" : "🔻"} ${v10Head(t)} · ${t.symbol} · ${long ? "LONG (BUY)" : "SHORT (SELL)"} · ${t.mode}`,
     SEP,
-    `📍 ENTRY · ${utc(t.createdAt)}`,
-    `🆔 ${t.orderSignalId}`,
-    ``,
-    `Entry     ${fmtPrice(entry)}`,
-    `TP        ${tp !== null ? `${fmtPrice(tp)}  (${pctOf(tp)})  ${fmtUsd(risk * rr)}` : `n/a${t.binance?.tpFailureReason ? ` -- ${t.binance.tpFailureReason}` : ""}`}`,
-    `SL        ${fmtPrice(sl)}  (${pctOf(sl)})  ${fmtUsd(-risk)}`,
-    ``,
-    `Risk      ${fmtUsd(risk, false)}  ·  RR ${Number.isFinite(rr) ? rr.toFixed(2) : "n/a"}`,
-    `Position  ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)})`,
-    `Fees ≈    ${fmtUsd(fees.tp, false)} at TP · ${fmtUsd(fees.sl, false)} at SL`,
+    `📍 ${utc(t.createdAt)} · 🆔 ${t.orderSignalId}`,
+    `Entry ${fmtPrice(entry)}`,
+    `TP    ${tp !== null ? `${fmtPrice(tp)} (${pctOf(tp)}) ${fmtUsd(risk * rr)}` : `n/a${t.binance?.tpFailureReason ? ` -- ${t.binance.tpFailureReason}` : ""}`}`,
+    `SL    ${fmtPrice(sl)} (${pctOf(sl)}) ${fmtUsd(-risk)}`,
+    `Risk ${fmtUsd(risk, false)} · RR ${Number.isFinite(rr) ? rr.toFixed(2) : "n/a"} · ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)}) · fees ≈ ${fmtUsd(fees.tp, false)}/${fmtUsd(fees.sl, false)}`,
     ``,
     ...(sig.kind === "OWN" ? v10OwnStory(sig, t) : v10Story(sig, t, sig.picks.length)),
   ].join("\n");

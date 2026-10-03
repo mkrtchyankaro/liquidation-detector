@@ -1,37 +1,41 @@
 /**
- * V10 ENGINE (Johnny, Oct 2 2026) -- pure, live-safe. The SAME functions as the research (src/research/dc15.ts,
- * src/tools/dc15-trades.ts "A1"), so live signals are exactly the backtested ones.
+ * V10 ENGINE (Johnny, Oct 2-3 2026) -- pure, live-safe. The SAME functions as the backtest
+ * (src/research/oi-peak.ts, src/tools/v10-peak-trades.ts), so live signals are exactly the backtested ones.
  *
- *   1. BTC 15m candles from minute bars, decided at the candle CLOSE
- *   2. a turn: the close is 1 x ATR(14) back from the move's extreme (directional change)
- *   3. the OI rule: in that reversal candle OI goes the opposite way to how the move was built
- *   4. RANK 1: the move's |OI change| is bigger than every accepted BTC move of the `rankWindowHours` before it
- *   5. the picks: over BTC's move (its start -> the extreme candle's close), every alt's move to its extreme in BTC's
- *      direction, x = alt % / BTC %, follow = R2 of 1-minute moves on BTC's. The upper half by follow, ranked by x.
- * A BTC top (the new direction DOWN) -> SHORT the picks; a BTC bottom (UP) -> LONG the picks.
- *
- * PART 2 "ALT" (the alt's own move, research "B"): steps 1-4 on the ALT's own bars; then, over the alt's move window,
- * the alt must have moved ON ITS OWN (src/research/dc15.ts ownness: BTC went the other way, or BTC explains less than
- * half of its minute moves). Its top -> SHORT it, its bottom -> LONG it.
+ * JOHNNY'S RULE, on 15m candles decided at the candle CLOSE (BTC for part 1, the alt itself for part 2):
+ *   1  price goes up and OI goes up -- from OI's lowest point to the OI peak; this build-up is RANK 1 (bigger than every
+ *      move of the `rankWindowHours` before it; the moves = the 15m directional change, used ONLY for this comparison)
+ *   2  after the peak OI falls (green candles may still come)
+ *   3  the FIRST red candle with OI down -> entry at its close (SHORT). Mirror: a fall with OI up -> first green -> LONG
+ * PART 1 "BTC": the picks = the alts that moved most WITH BTC from OI's low to the entry: R2 of 1-minute moves on BTC's
+ *   (upper half), ranked by x = alt % / BTC % (each to its extreme in BTC's direction).
+ * PART 2 "ALT": the alt's own signal, only if the build-up (OI low -> OI peak) was NOT BTC's doing (src/research/dc15.ts
+ *   ownness: BTC went the other way, or BTC explains less than half of its minute moves).
  * Only bars that closed before the candle end are used (`bars` is cut here, whatever the caller passes).
  */
-import { candles, coinInWindow, ownness, pastRank, priceAt, turns, type MinBar, type Own, type Turn } from "../../research/dc15";
+import { candles, coinInWindow, ownness, priceAt, type MinBar, type Own } from "../../research/dc15";
+import { oiPeakSignals, type PeakSignal } from "../../research/oi-peak";
 
 export const V10_TF_MIN = 15;
 export const V10_K = 1;
 export const V10_ATR_N = 14;
-/** BTC history used for the turns -- long enough for the DC to settle into the same turns as the research */
+/** history used for the moves (RANK 1 comparison) -- long enough to settle into the same moves as the backtest */
 export const V10_HISTORY_MS = 10 * 24 * 3_600_000;
 const M = 60_000, W = V10_TF_MIN * M;
 
 export type V10Side = "SHORT" | "LONG";
 
-/** a RANK 1 turn of one symbol (BTC for part 1, the alt itself for part 2) */
+/** a RANK 1 signal of one symbol (BTC for part 1, the alt itself for part 2) */
 export interface V10Turn {
-  candleEnd: number; side: V10Side; price: number;
-  moveStartT: number; extremeT: number; extreme: number; movePct: number;
-  moveOiPct: number; candleOiPct: number; label: string;
-  /** how many accepted BTC moves it was compared with (RANK 1 = bigger than all of them) */
+  /** 3: the entry candle's close, the price then, the candle */
+  candleEnd: number; side: V10Side; price: number; candleOiPct: number; label: string;
+  /** 1: the moment OI was lowest (a candle close) and the OI peak moment; the build-up in % */
+  moveStartT: number; peakT: number; moveOiPct: number;
+  /** the price's extreme so far (high / low) and its candle (open time), the price move from 1 to it */
+  extreme: number; extremeT: number; movePct: number;
+  /** 2: OI from the peak to the entry */
+  fromPeakOiPct: number;
+  /** RANK 1 against how many earlier moves */
   prior: number;
 }
 
@@ -39,33 +43,28 @@ export interface V10Pick { symbol: string; rank: number; x: number; follow: numb
 
 export type V10BtcTurn = V10Turn;
 
-/** The turn of `bars` (any symbol) decided at `candleEnd` if it is a RANK 1 accepted turn, else null. */
+const toTurn = (s: PeakSignal): V10Turn => ({
+  candleEnd: s.t, side: s.side, price: s.price, candleOiPct: s.candleOiPct, label: s.label,
+  moveStartT: s.startT, peakT: s.peakT, moveOiPct: s.buildOiPct,
+  extreme: s.extreme, extremeT: s.extremeT, movePct: s.movePct, fromPeakOiPct: s.fromPeakOiPct, prior: s.prior,
+});
+
+/** The signal of `bars` (any symbol) at `candleEnd` by Johnny's rule (RANK 1), else null. */
 export function rank1At(bars: readonly MinBar[], candleEnd: number, rankWindowHours: number): V10Turn | null {
   const cut = bars.filter((b) => b.t < candleEnd);
-  const all = turns(candles(cut, V10_TF_MIN), V10_K, V10_ATR_N, true);
-  const r = pastRank(all, rankWindowHours).find((x) => x.turn.t === candleEnd);
-  if (!r || r.rank !== 1 || r.prior === 0) return null;
-  return toBtcTurn(r.turn, r.prior);
+  const s = oiPeakSignals(candles(cut, V10_TF_MIN), V10_K, V10_ATR_N, rankWindowHours).find((x) => x.t === candleEnd);
+  return s ? toTurn(s) : null;
 }
 
-/** BTC's RANK 1 turn at `candleEnd` (part 1) */
+/** BTC's signal at `candleEnd` (part 1) */
 export const btcRank1At = rank1At;
 
-function toBtcTurn(t: Turn, prior: number): V10Turn {
-  return {
-    candleEnd: t.t, side: t.newDir === "DOWN" ? "SHORT" : "LONG", price: t.price,
-    moveStartT: t.moveStartT, extremeT: t.extremeT, extreme: t.extreme, movePct: t.movePct,
-    moveOiPct: t.moveOiPct, candleOiPct: t.candleOiPct, label: t.label, prior,
-  };
-}
-
-/** The alts that moved most with BTC over its move (see the header). `closes` = each alt's minute closes. */
+/** PART 1: the alts that moved most with BTC from OI's low to the entry. `closes` = each alt's minute closes. */
 export function pickAlts(turn: V10Turn, btcCloses: ReadonlyMap<number, number>, closes: ReadonlyMap<string, ReadonlyMap<number, number>>, picks: number): V10Pick[] {
   const up = turn.side === "SHORT"; // a SHORT ends an UP move
-  const fromT = turn.moveStartT, toT = turn.extremeT + W;
   const rows: Array<Omit<V10Pick, "rank">> = [];
   for (const [symbol, m] of closes) {
-    const w = coinInWindow(m, btcCloses, fromT, toT, up);
+    const w = coinInWindow(m, btcCloses, turn.moveStartT, turn.candleEnd, up);
     const price = priceAt(m, turn.candleEnd);
     if (Number.isFinite(w.x) && Number.isFinite(w.follow) && price > 0) rows.push({ symbol, x: w.x, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, price });
   }
@@ -74,11 +73,10 @@ export function pickAlts(turn: V10Turn, btcCloses: ReadonlyMap<number, number>, 
   return rows.filter((r) => r.follow >= med).sort((a, b) => b.x - a.x).slice(0, picks).map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
-/** PART 2: did the alt make this move ON ITS OWN? Over its move window (start -> the extreme candle's close), close to
- *  close, exactly like the research. null = it moved with BTC (not a part-2 signal). */
+/** PART 2: was the alt's build-up (OI low -> OI peak) its OWN move? null = BTC's doing (not a part-2 signal). */
 export interface V10OwnMove { how: Exclude<Own, "WITH BTC">; follow: number; coinPct: number; btcPct: number }
 export function ownMove(turn: V10Turn, altCloses: ReadonlyMap<number, number>, btcCloses: ReadonlyMap<number, number>): V10OwnMove | null {
-  const w = coinInWindow(altCloses, btcCloses, turn.moveStartT, turn.extremeT + W);
+  const w = coinInWindow(altCloses, btcCloses, turn.moveStartT, turn.peakT);
   if (!Number.isFinite(w.follow) || !Number.isFinite(w.pct)) return null;
   const how = ownness(w.follow, w.pct, w.btcPct);
   return how === "WITH BTC" ? null : { how, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct };

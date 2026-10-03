@@ -1,21 +1,15 @@
 /**
- * V10 PARITY CHECK (Oct 2 2026) Read-only. Does the LIVE engine (src/strategy/v10/v10-engine.ts: at each 15m close,
- * only the last 10 days of BTC bars) give exactly the same signals and picks as the RESEARCH (all history at once,
- * src/tools/dc15-trades.ts "A1")? Prints every signal and any difference.
+ * V10 PARITY CHECK (Oct 2-3 2026) Read-only. Does the LIVE engine (src/strategy/v10/v10-engine.ts: at each 15m close,
+ * only the last 10 days of bars) give exactly the same signals as the BACKTEST (Johnny's rule on all history at once,
+ * src/research/oi-peak.ts / src/tools/v10-peak-trades.ts)? Prints every signal and any difference.
  *
  *   npx tsx src/tools/v10-parity.ts            options: --window 12  --picks 3
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
-import {
-  candles,
-  coinInWindow,
-  ownness,
-  pastRank,
-  turns,
-  type MinBar,
-} from "../research/dc15";
+import { candles, type MinBar } from "../research/dc15";
+import { oiPeakSignals } from "../research/oi-peak";
 import {
   btcRank1At,
   ownMove,
@@ -25,6 +19,7 @@ import {
   V10_HISTORY_MS,
   V10_K,
   V10_TF_MIN,
+  type V10Turn,
 } from "../strategy/v10/v10-engine";
 
 const argv = process.argv.slice(2);
@@ -75,13 +70,12 @@ async function main(): Promise<void> {
     }
     const btcCloses = new Map(btc.map((b) => [b.t, b.close]));
 
-    const research = pastRank(
-      turns(candles(btc, V10_TF_MIN), V10_K, V10_ATR_N, true),
-      win,
-    )
-      .filter((r) => r.rank === 1 && r.prior > 0)
-      .map((r) => r.turn);
-    const researchAt = new Map(research.map((t) => [t.t, t]));
+    // the research = Johnny's rule on ALL history at once (src/research/oi-peak.ts)
+    const researchAt = new Map(
+      oiPeakSignals(candles(btc, V10_TF_MIN), V10_K, V10_ATR_N, win).map(
+        (s) => [s.t, s],
+      ),
+    );
     const ends = new Set<number>();
     for (
       let e = Math.ceil(btc[0].t / 900_000) * 900_000 + 900_000;
@@ -102,7 +96,7 @@ async function main(): Promise<void> {
       );
       const res = researchAt.get(e);
       if (!live && !res) continue;
-      const side = live?.side ?? (res!.newDir === "DOWN" ? "SHORT" : "LONG");
+      const side = live?.side ?? res!.side;
       const livePicks = live
         ? pickAlts(live, btcCloses, closes, npicks)
             .map((p) => p.symbol.replace("USDT", ""))
@@ -111,8 +105,8 @@ async function main(): Promise<void> {
       const ok =
         !!live &&
         !!res &&
-        live.side === (res.newDir === "DOWN" ? "SHORT" : "LONG") &&
-        live.moveStartT === res.moveStartT;
+        live.side === res.side &&
+        live.moveStartT === res.startT;
       ok ? same++ : diff++;
       console.log(
         `${ok ? "✓" : "✗ DIFFERENT"} ${utc(e)} ${side.padEnd(5)} · research ${res ? "yes" : "no "} · live ${live ? "yes" : "no "} · picks ${livePicks}`,
@@ -135,22 +129,16 @@ async function main(): Promise<void> {
       }
       const map = closes.get(sym)!;
       const res = new Map(
-        pastRank(turns(candles(bars, V10_TF_MIN), V10_K, V10_ATR_N, true), win)
-          .filter((r) => r.rank === 1 && r.prior > 0)
-          .filter((r) => {
-            const w = coinInWindow(
-              map,
-              btcCloses,
-              r.turn.moveStartT,
-              r.turn.extremeT + 900_000,
-            );
-            return (
-              Number.isFinite(w.follow) &&
-              Number.isFinite(w.pct) &&
-              ownness(w.follow, w.pct, w.btcPct) !== "WITH BTC"
-            );
-          })
-          .map((r) => [r.turn.t, r.turn]),
+        oiPeakSignals(candles(bars, V10_TF_MIN), V10_K, V10_ATR_N, win)
+          .filter(
+            (s) =>
+              ownMove(
+                { moveStartT: s.startT, peakT: s.peakT } as V10Turn,
+                map,
+                btcCloses,
+              ) !== null,
+          )
+          .map((s) => [s.t, s]),
       );
       for (
         let e = Math.ceil(bars[0].t / 900_000) * 900_000 + 900_000;
@@ -165,11 +153,11 @@ async function main(): Promise<void> {
         const live = t && ownMove(t, map, btcCloses) ? t : null,
           r = res.get(e);
         if (!live && !r) continue;
-        const ok = !!live && !!r && live.moveStartT === r.moveStartT;
+        const ok = !!live && !!r && live.moveStartT === r.startT;
         ok ? s2++ : d2++;
         if (!ok || argv.includes("--all"))
           console.log(
-            `${ok ? "✓" : "✗ DIFFERENT"} ${utc(e)} ${sym.replace("USDT", "").padEnd(5)} ${(live?.side ?? (r!.newDir === "DOWN" ? "SHORT" : "LONG")).padEnd(5)} · research ${r ? "yes" : "no "} · live ${live ? "yes" : "no "}`,
+            `${ok ? "✓" : "✗ DIFFERENT"} ${utc(e)} ${sym.replace("USDT", "").padEnd(5)} ${(live?.side ?? r!.side).padEnd(5)} · research ${r ? "yes" : "no "} · live ${live ? "yes" : "no "}`,
           );
       }
     }

@@ -84,9 +84,8 @@ export function formatV9Entry(d: V9Decision, t: V9TradeDoc): string {
   return lines.join("\n");
 }
 
-/** Yerevan time (UTC+4, no daylight saving), HH:MM. */
-const yvn = (ms: number): string =>
-  new Date(ms + 4 * 3_600_000).toISOString().slice(11, 16);
+/** UTC, HH:MM (Johnny, Oct 3: every message in UTC). */
+const yvn = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
 const coinsFmt = (v: number, coin: string): string => {
   const a = Math.abs(v);
   const n =
@@ -108,7 +107,7 @@ export function formatV9Story(st: V9Story, coin: string): string[] {
     t = st.turn;
   const victims = st.victim === "LONG" ? "Լոնգերը" : "Շորտերը";
   const out = [
-    "📖 Ի՞նչ տեղի ունեցավ (Երևանի ժամով)",
+    "📖 Ի՞նչ տեղի ունեցավ (UTC)",
     "",
     `1️⃣ Մաքրում · ${yvn(c.from)} → ${yvn(c.to)}`,
     `${victims} լիկվիդացվեցին՝ ${compact(c.liqUsd)}`,
