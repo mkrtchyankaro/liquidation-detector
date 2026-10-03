@@ -17,6 +17,7 @@
  *     "btc": true,                // part 1 "V10 · BTC": BTC's top / bottom -> the alts that moved most WITH BTC
  *     "own": false,               // part 2 "V10 · ALT": an alt's OWN top / bottom (same 15m DC + OI rule + RANK 1, on the
  *                                 //   alt's own data) when it moved ON ITS OWN (BTC explains < half, or went the other way)
+ *     "ownR2Minutes": 15,          // part 2: "moved on its own" = the R2 with BTC on 15m closes (15) or 1-minute returns (1)
  *     "ownSlPct": 1, "ownTpPct": 2,  // SL / TP % for part 2 (its moves run further: tested best at 1 / 2)
  *     "userModes": { "main": "PAPER", "karo": "OFF", "artak": "OFF" },   // OFF | PAPER | REAL
  *     "perUser": { "karo": { "short": true, "long": false, "slPct": 1, "tpPct": 1, "maxOpen": 3,
@@ -53,6 +54,8 @@ export interface V10Settings {
   own: boolean;
   ownSlPct: number;
   ownTpPct: number;
+  /** part 2: the R2 with BTC on closes this many minutes apart (15 = the 15m chart, 1 = minute returns) */
+  ownR2Minutes: number;
   /** the alts to choose from (never BTCUSDT) */
   symbols: string[];
   userModes: Map<string, V10UserMode>;
@@ -73,11 +76,11 @@ export function rulesFor(s: V10Settings, userId: string): V10UserRules {
 const isNum = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
 export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V10Settings {
-  const off: V10Settings = { enabled: false, rule: { entry: "atr", redCandle: false }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, symbols: [], userModes: new Map(), perUser: new Map() };
+  const off: V10Settings = { enabled: false, rule: { entry: "atr", redCandle: false }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 15, symbols: [], userModes: new Map(), perUser: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`"v10" must be an object`);
   const v = raw as Record<string, unknown>;
-  const KNOWN = ["enabled", "entry", "redCandle", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "symbols", "userModes", "perUser"];
+  const KNOWN = ["enabled", "entry", "redCandle", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
   for (const k of Object.keys(v)) if (!KNOWN.includes(k)) throw new Error(`"v10.${k}" is not a known setting (${KNOWN.join(", ")}) -- check the spelling`);
   if (typeof v.enabled !== "boolean") throw new Error(`"v10.enabled" must be true or false`);
   if (!v.enabled) return off;
@@ -106,6 +109,8 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
   const btc = bool("btc", true), own = bool("own", false);
   const ownSlPct = num("ownSlPct", 1, 0.1, 10, "a percent between 0.1 and 10");
   const ownTpPct = num("ownTpPct", 2, 0.1, 20, "a percent between 0.1 and 20");
+  const ownR2Minutes = num("ownR2Minutes", 15, 1, 15, "1 or 15");
+  if (ownR2Minutes !== 1 && ownR2Minutes !== 15) throw new Error(`"v10.ownR2Minutes" must be 1 or 15 (got ${ownR2Minutes})`);
 
   let symbols = collectedSymbols.filter((s) => s !== BTC);
   if (v.symbols !== undefined) {
@@ -151,5 +156,5 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
       perUser.set(userId, r);
     }
   }
-  return { enabled: true, rule, short, long, slPct, tpPct, picks, rankWindowHours, btc, own, ownSlPct, ownTpPct, symbols, userModes, perUser };
+  return { enabled: true, rule, short, long, slPct, tpPct, picks, rankWindowHours, btc, own, ownSlPct, ownTpPct, ownR2Minutes, symbols, userModes, perUser };
 }

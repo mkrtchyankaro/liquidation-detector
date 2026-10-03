@@ -167,6 +167,9 @@ async function run(): Promise<void> {
     assert.deepStrictEqual(settings().rule, { entry: "atr", redCandle: false }, "default entry = atr (live ATR), no red");
     assert.deepStrictEqual(settings({ entry: "atrFrozen", redCandle: true }).rule, { entry: "atrFrozen", redCandle: true });
     assert.throws(() => settings({ entry: "ATR" }), /v10.entry/);
+    assert.strictEqual(settings().ownR2Minutes, 15, "part 2 R² on 15m closes by default");
+    assert.strictEqual(settings({ ownR2Minutes: 1 }).ownR2Minutes, 1);
+    assert.throws(() => settings({ ownR2Minutes: 5 }), /ownR2Minutes/);
     assert.throws(() => settings({ entry: "oiPeak", redCandle: true }), /redCandle/);
     assert.throws(() => settings({ userModes: { main: "LIVE" } }), /"OFF", "PAPER" or "REAL"/);
     assert.throws(() => settings({ userModes: { bob: "PAPER" } }), /unknown user "bob"/);
@@ -207,20 +210,20 @@ async function run(): Promise<void> {
     return new Map([["BTCUSDT", btc], ["EEEUSDT", minutes(btcSpecs(), 50, 3000)], ["AAAUSDT", alt(btc, 2, 0.02, 10)]]);
   };
   const SYMS2 = ["BTCUSDT", "EEEUSDT", "AAAUSDT"];
-  const settings2 = (o: Record<string, unknown> = {}): V10Settings => parseV10Settings({ enabled: true, userModes: { main: "PAPER", karo: "PAPER" }, ...o }, ["main", "karo"], SYMS2);
+  const settings2 = (o: Record<string, unknown> = {}): V10Settings => parseV10Settings({ enabled: true, ownR2Minutes: 1, userModes: { main: "PAPER", karo: "PAPER" }, ...o }, ["main", "karo"], SYMS2);
 
   await scenario("part 2 engine: the alt's own RANK 1 top, moved on its own; an alt that only follows BTC is not 'own'", () => {
     const mk = calmMarket(), btcCloses = new Map(mk.get("BTCUSDT")!.map((b) => [b.t, b.close]));
     assert.strictEqual(btcRank1At(mk.get("BTCUSDT")!, SIGNAL_END, 12, PEAK)?.side !== "SHORT" || true, true);
     const e = mk.get("EEEUSDT")!, turn = rank1At(e, SIGNAL_END, 12, PEAK)!;
     assert.strictEqual(turn.side, "SHORT");
-    const own = ownMove(turn, new Map(e.map((b) => [b.t, b.close])), btcCloses);
+    const own = ownMove(turn, new Map(e.map((b) => [b.t, b.close])), btcCloses, 1);
     assert.ok(own && own.follow < 0.5, JSON.stringify(own));
     // AAA is a 2x copy of BTC: whatever turn it has, it is never "own"
     const a = mk.get("AAAUSDT")!;
     for (let end = T0 + 20 * W; end < SIGNAL_END + 4 * W; end += W) {
       const t = rank1At(a, end, 12, PEAK);
-      if (t) assert.strictEqual(ownMove(t, new Map(a.map((b) => [b.t, b.close])), btcCloses), null, `AAA at ${(end - T0) / W}`);
+      if (t) assert.strictEqual(ownMove(t, new Map(a.map((b) => [b.t, b.close])), btcCloses, 1), null, `AAA at ${(end - T0) / W}`);
     }
   });
 

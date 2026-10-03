@@ -98,13 +98,15 @@ export function pickAlts(turn: V10Turn, btcCloses: ReadonlyMap<number, number>, 
   return rows.filter((r) => r.follow >= med).sort((a, b) => b.x - a.x).slice(0, picks).map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
-/** PART 2: was the alt's build-up (OI low -> OI peak) its OWN move? null = BTC's doing (not a part-2 signal). */
-export interface V10OwnMove { how: Exclude<Own, "WITH BTC">; follow: number; coinPct: number; btcPct: number }
-export function ownMove(turn: V10Turn, altCloses: ReadonlyMap<number, number>, btcCloses: ReadonlyMap<number, number>): V10OwnMove | null {
-  const w = coinInWindow(altCloses, btcCloses, turn.moveStartT, turn.peakT);
+/** PART 2: was the alt's build-up its OWN move? null = BTC's doing (not a part-2 signal).
+ *  r2Minutes (Oct 3): the R2 on 15m closes (Johnny: what the chart shows) or on 1-minute returns (the old way). */
+export interface V10OwnMove { how: Exclude<Own, "WITH BTC">; follow: number; coinPct: number; btcPct: number; r2Minutes?: number }
+export function ownMove(turn: V10Turn, altCloses: ReadonlyMap<number, number>, btcCloses: ReadonlyMap<number, number>, r2Minutes: number): V10OwnMove | null {
+  const w = coinInWindow(altCloses, btcCloses, turn.moveStartT, turn.peakT, undefined, r2Minutes);
+  // a move too short to measure (fewer than 10 steps) is not "own"
   if (!Number.isFinite(w.follow) || !Number.isFinite(w.pct)) return null;
   const how = ownness(w.follow, w.pct, w.btcPct);
-  return how === "WITH BTC" ? null : { how, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct };
+  return how === "WITH BTC" ? null : { how, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, r2Minutes };
 }
 
 /** SL / TP prices for a side, from the entry and this user's percents */

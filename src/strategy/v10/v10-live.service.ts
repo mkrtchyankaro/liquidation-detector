@@ -107,7 +107,7 @@ export class V10LiveService {
     await this.ensureIndexes();
     const s = this.settings;
     if (!s.enabled) log.warn(`[V10_MONITOR_ONLY] v10 is disabled -- no new signals; open REAL V10 trades are still watched (users: ${this.users().map((u) => u.userId).join(",") || "none"})`);
-    log.warn(`[V10_READY] entry=${s.rule.entry}${s.rule.redCandle ? "+red" : ""} short=${s.short} long=${s.long} sl=${s.slPct}% tp=${s.tpPct}% picks=${s.picks} rank=${s.rankWindowHours}h alts=${s.symbols.length} users=${this.users().map((u) => {
+    log.warn(`[V10_READY] entry=${s.rule.entry}${s.rule.redCandle ? "+red" : ""} ownR2=${s.ownR2Minutes}m short=${s.short} long=${s.long} sl=${s.slPct}% tp=${s.tpPct}% picks=${s.picks} rank=${s.rankWindowHours}h alts=${s.symbols.length} users=${this.users().map((u) => {
       const r = rulesFor(s, u.userId);
       return `${u.userId}:${u.mode}(${[r.short ? "S" : "", r.long ? "L" : ""].join("") || "none"},btc:${r.btc ? `sl${r.slPct}/tp${r.tpPct}` : "off"},alt:${r.own ? `sl${r.ownSlPct}/tp${r.ownTpPct}` : "off"}${r.maxOpen ? `,max${r.maxOpen}` : ""})`;
     }).join(" ") || "(none)"}`);
@@ -215,7 +215,7 @@ export class V10LiveService {
         if (this.handledOwn.size > 5000) this.handledOwn = new Set([...this.handledOwn].slice(-2500));
         const turn = rank1At(bars, end, this.settings.rankWindowHours, this.settings.rule);
         if (!turn) continue;
-        const own = ownMove(turn, new Map(bars.map((b) => [b.t, b.close])), btcCloses);
+        const own = ownMove(turn, new Map(bars.map((b) => [b.t, b.close])), btcCloses, this.settings.ownR2Minutes);
         if (!own) { log.info({ symbol: s, candleEnd: new Date(end).toISOString() }, "[V10_ALT_TURN_WITH_BTC] -- not a part-2 signal"); continue; }
         const signalId = `v10alt-${new Date(end).toISOString().slice(0, 16)}-${s.replace(/USDT$/, "")}-${turn.side}`;
         const pick: V10Pick = { symbol: s, rank: 1, x: own.btcPct !== 0 ? own.coinPct / own.btcPct : NaN, follow: own.follow, coinPct: own.coinPct, btcPct: own.btcPct, price: turn.price };

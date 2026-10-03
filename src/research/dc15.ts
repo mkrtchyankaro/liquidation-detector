@@ -176,13 +176,24 @@ function toExtreme(m: ReadonlyMap<number, number>, from: number, to: number, up:
   for (let t = Math.floor(from / M) * M; t < to; t += M) { const v = m.get(t); if (v) e = up ? Math.max(e, v) : Math.min(e, v); }
   return 100 * (e / p0 - 1);
 }
-export function coinInWindow(coin: ReadonlyMap<number, number>, btc: ReadonlyMap<number, number>, from: number, to: number, up?: boolean): { pct: number; btcPct: number; x: number; follow: number } {
+/** stepMin (Johnny, Oct 3): the R2 on 1-minute returns (1, default) or on returns between candle closes (e.g. 15 = the
+ *  15m closes inside the window) -- minute returns are mostly noise in a quiet market, the 15m shape is what the eye sees */
+export function coinInWindow(coin: ReadonlyMap<number, number>, btc: ReadonlyMap<number, number>, from: number, to: number, up?: boolean, stepMin = 1): { pct: number; btcPct: number; x: number; follow: number; points: number } {
   const pct = up === undefined ? 100 * (priceAt(coin, to) / priceAt(coin, from) - 1) : toExtreme(coin, from, to, up);
   const btcPct = up === undefined ? 100 * (priceAt(btc, to) / priceAt(btc, from) - 1) : toExtreme(btc, from, to, up);
   const xs: number[] = [], ys: number[] = [];
-  for (let t = Math.floor(from / M) * M + M; t < to; t += M) {
-    const c0 = coin.get(t - M), c1 = coin.get(t), b0 = btc.get(t - M), b1 = btc.get(t);
-    if (c0 && c1 && b0 && b1) { xs.push(b1 / b0 - 1); ys.push(c1 / c0 - 1); }
+  if (stepMin <= 1) {
+    for (let t = Math.floor(from / M) * M + M; t < to; t += M) {
+      const c0 = coin.get(t - M), c1 = coin.get(t), b0 = btc.get(t - M), b1 = btc.get(t);
+      if (c0 && c1 && b0 && b1) { xs.push(b1 / b0 - 1); ys.push(c1 / c0 - 1); }
+    }
+  } else {
+    // the closes at each step boundary (the last minute before it), from the first boundary at/after `from` to `to`
+    const S = stepMin * M;
+    for (let t = Math.ceil(from / S) * S + S; t <= to; t += S) {
+      const c0 = priceAt(coin, t - S), c1 = priceAt(coin, t), b0 = priceAt(btc, t - S), b1 = priceAt(btc, t);
+      if (c0 > 0 && c1 > 0 && b0 > 0 && b1 > 0) { xs.push(b1 / b0 - 1); ys.push(c1 / c0 - 1); }
+    }
   }
   let follow = NaN;
   if (xs.length >= 10) {
@@ -191,7 +202,7 @@ export function coinInWindow(coin: ReadonlyMap<number, number>, btc: ReadonlyMap
     for (let i = 0; i < n; i++) { sxy += (xs[i] - mx) * (ys[i] - my); sxx += (xs[i] - mx) ** 2; syy += (ys[i] - my) ** 2; }
     follow = sxx > 0 && syy > 0 ? (sxy * sxy) / (sxx * syy) : NaN;
   }
-  return { pct, btcPct, x: btcPct !== 0 ? pct / btcPct : NaN, follow };
+  return { pct, btcPct, x: btcPct !== 0 ? pct / btcPct : NaN, follow, points: xs.length };
 }
 
 /** OI change % of a coin between two times, from its minute OI (the last known OI at each time -- live-safe) */

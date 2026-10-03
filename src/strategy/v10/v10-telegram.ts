@@ -49,7 +49,7 @@ export function v10OwnStory(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" |
   return [
     `📖 ${coin(t.symbol)} · 15m · UTC`,
     ...threePoints(sig.turn, coin(t.symbol), sig.rankWindowHours),
-    `BTC-ն այդ ընթացքում ${o ? sp(o.btcPct) : "n/a"} · ${o?.how === "BTC OPPOSITE" ? "գնաց հակառակ" : "բացատրում է կեսից քիչը"} (R² ${o ? o.follow.toFixed(2) : "n/a"})`,
+    `BTC-ն այդ ընթացքում ${o ? sp(o.btcPct) : "n/a"} · ${o?.how === "BTC OPPOSITE" ? "գնաց հակառակ" : "բացատրում է կեսից քիչը"} (R² ${o ? o.follow.toFixed(2) : "n/a"}${o?.r2Minutes ? `, ${o.r2Minutes}m` : ""})`,
   ];
 }
 

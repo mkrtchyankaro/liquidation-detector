@@ -11,7 +11,7 @@
  * net R = R - 2 x fee / SL%.
  *
  *   npx tsx src/tools/v10-entry-compare.ts --pct 1 --tp 2
- *   options: --window 12  --picks 3  --fee 0.05  --side SHORT|LONG  --without AVAX  --list atr  (prints that rule's trades)
+ *   options: --own 15|1 (part 2 R2 on 15m closes / 1m returns)  --window 12  --picks 3  --fee 0.05  --side SHORT|LONG  --without AVAX  --list atr  (prints that rule's trades)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -40,7 +40,7 @@ interface Done extends Cand { tr: Trade; net: number }
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const pct = Number(arg("pct", "1")), tpPct = Number(arg("tp", arg("pct", "1"))), win = Number(arg("window", "12"));
-  const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase();
+  const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "15"));
   const without = arg("without", "AVAX").toUpperCase().split(",").map((x) => x.trim()).filter(Boolean);
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
@@ -61,7 +61,7 @@ async function main(): Promise<void> {
     const short = (s: string): string => s.replace(/USDT$/, "");
 
     console.log(`V10 ENTRIES COMPARED · ${side} · SL ${pct}% · TP ${tpPct}% · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`);
-    console.log(`A = BTC's signal -> ${npicks} picks · B = the alt's own move (old alts only) · net R at $10 risk\n`);
+    console.log(`A = BTC's signal -> ${npicks} picks · B = the alt's own move (old alts only, R² on ${own}m) · net R at $10 risk\n`);
     const head = `${"rule".padEnd(14)} ${"part".padEnd(10)} trades   TP   SL open  win   net R      $  hold`;
     console.log(head);
     for (const [name, rule] of RULES) {
@@ -74,7 +74,7 @@ async function main(): Promise<void> {
       for (const [sym, c] of coins) {
         if (!c.old) continue;
         for (const s of signalsOf(altC.get(sym)!, win, rule).filter((x) => x.side === side)) {
-          if (!ownMove({ moveStartT: s.startT, peakT: s.peakT } as V10Turn, c.map, btcMap)) continue;
+          if (!ownMove({ moveStartT: s.startT, peakT: s.peakT } as V10Turn, c.map, btcMap, own)) continue;
           cands.push({ t: s.t, sym, src: "B", side: s.side, entry: s.price, rank: 0 });
         }
       }
