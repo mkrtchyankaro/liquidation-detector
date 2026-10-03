@@ -15,6 +15,10 @@
  *   --by-coin  every coin's result (A and B apart, worst first; * = a new coin, data since Oct 1)  --new  part B on the new coins too
  *   --tf 60        1-hour candles (default 15); "self" rows = the top candle is the entry if it closes red 1 ATR below its high
  *   "A:high" / "B:body" = the entry candle's HIGH (with its wick) / its BODY top must be 1 ATR below the top (not the close)
+ *   --zone up|down|none  only entries where OI went up / down over the candles between the top candle and the entry
+ *                        candle (distribution at a top), or there was no such candle
+ *   "flush" rows (Johnny Oct 3): a fall built with OI FALLING, then a candle with OI RISING that closes 1 ATR above
+ *                        the low -> LONG (run with --side LONG; with --side SHORT: the mirror, a rise built with OI falling)
  *   --posttop up|down   only entries where OI went up / down in the candle right after the top candle
  *   --h1           only 15m signals inside a 1h move of their direction in which OI grew with the price (1h context)
  *   --no-minmove   without the live rule "the coin moved more than the TP %" (default: with it)
@@ -67,6 +71,9 @@ const RULES: Array<[string, V10Rule]> = [
   ["atr noRed", { entry: "atr", redAfterTop: false }],
   ["atrFrozen noRed", { entry: "atrFrozen", redAfterTop: false }],
   ["oiPeak", { entry: "oiPeak" }],
+  ["flush", { entry: "flush" }],
+  ["flush noRank", { entry: "flush", flushRank: false }],
+  ["flush green", { entry: "flush", flushGreen: true }],
   ["story", { entry: "story" }],
   ["storyFrozen", { entry: "storyFrozen" }],
 ];
@@ -121,6 +128,24 @@ async function main(): Promise<void> {
   // (big sellers opening new shorts after the shorts' liquidity was collected) / went down. Known at the entry: that
   // candle is closed by then (the entry candle is after the top).
   const postTop = arg("posttop", "");
+  // --zone up|down|none (Johnny Oct 3, distribution at the top / accumulation at the bottom): the "top zone" = the
+  // candles AFTER the top candle and BEFORE the entry candle (the price still within 1 ATR of the top). up = OI rose
+  // over that zone (positions built while the price stalled at the top), down = it fell, none = no such candle
+  // (the entry came right after the top).
+  const zone = arg("zone", "");
+  const zoneOk = (
+    cs: readonly Candle[],
+    extremeT: number,
+    t: number,
+  ): boolean => {
+    if (!zone) return true;
+    const topC = cs.find((x) => x.t === extremeT),
+      z = cs.filter((x) => x.t > extremeT && x.end < t);
+    if (!topC) return false;
+    if (!z.length) return zone === "none";
+    const d = z[z.length - 1].oi1 - topC.oi1;
+    return zone === "up" ? d > 0 : zone === "down" ? d < 0 : false;
+  };
   const postTopOk = (
     cs: readonly Candle[],
     extremeT: number,
@@ -193,7 +218,7 @@ async function main(): Promise<void> {
     const short = (s: string): string => s.replace(/USDT$/, "");
 
     console.log(
-      `V10 ENTRIES COMPARED · ${tf}m candles${postTop ? ` · ONLY entries where OI went ${postTop.toUpperCase()} in the candle right after the top` : ""}${h1 ? " INSIDE a 1h growth (OI up with the price on 1h)" : ""} · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`,
+      `V10 ENTRIES COMPARED · ${tf}m candles${zone ? ` · ONLY entries whose top zone (candles between the top and the entry) has OI ${zone.toUpperCase()}` : ""}${postTop ? ` · ONLY entries where OI went ${postTop.toUpperCase()} in the candle right after the top` : ""}${h1 ? " INSIDE a 1h growth (OI up with the price on 1h)" : ""} · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`,
     );
     console.log(
       `${minMove > -Infinity ? `only coins that moved MORE than the TP ${tpPct}% (as live) · ` : "no minimum move · "}A = BTC's signal -> ${npicks} picks · B = the alt's own move (${withNew ? "ALL alts, the new ones too" : "old alts only"}, R² on ${own}m) · net R at $10 risk\n`,
@@ -205,7 +230,8 @@ async function main(): Promise<void> {
       const btcSigs = signalsOf(btcC, win, rule).filter((s) => s.side === side);
       for (const s of btcSigs) {
         if (h1 && !inH1Growth(btcH1, s.t, s.side)) continue;
-        if (!postTopOk(btcC, s.extremeT, s.t)) continue;
+        if (!postTopOk(btcC, s.extremeT, s.t) || !zoneOk(btcC, s.extremeT, s.t))
+          continue;
         const turn = {
           moveStartT: s.startT,
           candleEnd: s.t,
@@ -234,7 +260,11 @@ async function main(): Promise<void> {
           (x) => x.side === side,
         )) {
           if (h1 && !inH1Growth(altH1.get(sym)!, s.t, s.side)) continue;
-          if (!postTopOk(altC.get(sym)!, s.extremeT, s.t)) continue;
+          if (
+            !postTopOk(altC.get(sym)!, s.extremeT, s.t) ||
+            !zoneOk(altC.get(sym)!, s.extremeT, s.t)
+          )
+            continue;
           if (
             !ownMove(
               { moveStartT: s.startT, candleEnd: s.t } as V10Turn,

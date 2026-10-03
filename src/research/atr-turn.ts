@@ -10,7 +10,7 @@
  * The moves (where a move starts, the accepted moves for RANK 1) = the 15m directional change with the OI rule, as
  * src/research/oi-peak.ts, except that the candle that made the top itself never ends the move (the next one may). One entry per move. ATR "live" = before the candle · "frozen" = when the move began.
  */
-import { atrBefore, label, type Candle } from "./dc15";
+import { atrBefore, label, pastRank, turns, type Candle } from "./dc15";
 import type { PeakSignal } from "./oi-peak";
 
 export interface AtrSignal extends PeakSignal {
@@ -589,4 +589,58 @@ export function inH1Growth(
   return (
     !!s && s.dir === (side === "SHORT" ? "UP" : "DOWN") && s.growthOiPct > 0
   );
+}
+
+/**
+ * "FLUSH" LONG (Johnny, Oct 3 2026) -- NOT the mirror of the SHORT. A fall in which OI FALLS (longs liquidated /
+ * stopped / closing: the market deleverages), then at the bottom OI starts to RISE (new positions) and a 15m candle
+ * CLOSES at least 1 ATR above the low -> LONG at its close. This is exactly the directional change with the OI rule
+ * (src/research/dc15.ts turns): a move built with OI DOWN ends only on a candle whose OI goes UP.
+ *   rank  (default true)  the fall's |OI change| is bigger than every accepted move's of the `windowH` hours before
+ *   green (default false) the turn candle must also be green
+ * The mirror for SHORT (a rise with OI falling = shorts squeezed, then OI rising at the top) is the same with side
+ * "SHORT"; only LONG is asked for now.
+ */
+export function flushSignals(
+  c: readonly Candle[],
+  k: number,
+  n: number,
+  windowH: number,
+  opts: { rank?: boolean; green?: boolean; side?: "LONG" | "SHORT" } = {},
+): PeakSignal[] {
+  const want = opts.side ?? "LONG",
+    rank = opts.rank !== false;
+  const W = c.length > 0 ? c[0].end - c[0].t : 0;
+  const idx = new Map(c.map((x, i) => [x.t, i]));
+  const out: PeakSignal[] = [];
+  for (const r of pastRank(turns(c, k, n, true), windowH)) {
+    const t = r.turn;
+    const side = t.newDir === "UP" ? "LONG" : "SHORT";
+    if (side !== want || !(t.moveOiPct < 0) || !(t.candleOiPct > 0)) continue; // built with OI down, the turn with OI up
+    if (rank && (r.rank !== 1 || r.prior === 0)) continue;
+    const i = idx.get(t.t - W),
+      s = idx.get(t.moveStartT),
+      e = idx.get(t.extremeT);
+    if (i === undefined || s === undefined || e === undefined) continue;
+    const x = c[i];
+    if (opts.green && !(side === "LONG" ? x.close > x.open : x.close < x.open))
+      continue;
+    out.push({
+      t: t.t,
+      side,
+      price: t.price,
+      startT: t.moveStartT,
+      startPrice: c[s].close,
+      peakT: c[e].end,
+      buildOiPct: t.moveOiPct,
+      extreme: t.extreme,
+      extremeT: t.extremeT,
+      movePct: t.movePct,
+      fromPeakOiPct: t.candleOiPct,
+      candleOiPct: t.candleOiPct,
+      label: t.label,
+      prior: r.prior,
+    });
+  }
+  return out;
 }

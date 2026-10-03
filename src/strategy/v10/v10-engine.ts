@@ -26,6 +26,7 @@ import { oiPeakSignals, type PeakSignal } from "../../research/oi-peak";
 import {
   atrSignals,
   atrStorySignals,
+  flushSignals,
   type AtrSignal,
   type StorySignal,
 } from "../../research/atr-turn";
@@ -50,7 +51,13 @@ export type V10Side = "SHORT" | "LONG";
  *               atrStorySignals) · "storyFrozen" = the same with the ATR from the move's start
  *   "oiPeak"    OI low -> OI peak (RANK 1) -> the first red candle with OI down, no ATR distance (src/research/oi-peak.ts)
  */
-export type V10Entry = "atr" | "atrFrozen" | "oiPeak" | "story" | "storyFrozen";
+export type V10Entry =
+  | "atr"
+  | "atrFrozen"
+  | "oiPeak"
+  | "story"
+  | "storyFrozen"
+  | "flush";
 export interface V10Rule {
   entry: V10Entry;
   /** atr / atrFrozen: how the OI growth is measured (src/research/atr-turn.ts), default "afterLow" */ growth?:
@@ -62,6 +69,8 @@ export interface V10Rule {
     | "close"
     | "high"
     | "body";
+  /** "flush" (tests): RANK 1 on (default true), the turn candle green (default false) */ flushRank?: boolean;
+  flushGreen?: boolean;
   /** tests only: false = without "red entry candle after a top candle that closed 1 ATR back" */ redAfterTop?: boolean;
 }
 
@@ -72,6 +81,19 @@ export function signalsOf(
   rule: V10Rule,
   why?: (t: number, reason: string) => void,
 ): Array<PeakSignal | AtrSignal | StorySignal> {
+  if (rule.entry === "flush")
+    return [
+      ...flushSignals(c, V10_K, V10_ATR_N, rankWindowHours, {
+        rank: rule.flushRank,
+        green: rule.flushGreen,
+        side: "LONG",
+      }),
+      ...flushSignals(c, V10_K, V10_ATR_N, rankWindowHours, {
+        rank: rule.flushRank,
+        green: rule.flushGreen,
+        side: "SHORT",
+      }),
+    ].sort((a, b) => a.t - b.t);
   if (rule.entry === "story" || rule.entry === "storyFrozen")
     return atrStorySignals(c, V10_K, V10_ATR_N, rankWindowHours, {
       atr: rule.entry === "storyFrozen" ? "frozen" : "live",

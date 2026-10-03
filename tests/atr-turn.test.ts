@@ -7,6 +7,7 @@ import type { Candle } from "../src/research/dc15";
 import {
   atrSignals,
   atrStorySignals,
+  flushSignals,
   h1Context,
   inH1Growth,
 } from "../src/research/atr-turn";
@@ -588,6 +589,36 @@ scenario(
       "body: that candle opened at the top -> the next one",
     );
     assert.ok(high[0].price < close[0].price);
+  },
+);
+
+scenario(
+  "flush LONG: a fall with OI FALLING, then a candle with OI RISING closing 1 ATR above the low = LONG; a fall with OI rising is not",
+  () => {
+    const flush: Array<[number, number]> = [
+      ...warm,
+      [-0.6, -8],
+      [-0.6, -8],
+      [-0.6, -8],
+      [-0.6, -8],
+      [+0.8, +3],
+      [+0.4, +1],
+    ];
+    const s = after(flushSignals(mk(flush), 1, 14, 12));
+    assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+    assert.strictEqual(s[0].side, "LONG");
+    assert.strictEqual(rel(s[0].t), 5);
+    assert.ok(s[0].buildOiPct < 0 && s[0].candleOiPct > 0);
+    const notFlush: Array<[number, number]> = [
+      ...warm,
+      [-0.6, +8],
+      [-0.6, +8],
+      [-0.6, +8],
+      [-0.6, +8],
+      [+0.8, -3],
+      [+0.4, -1],
+    ];
+    assert.strictEqual(after(flushSignals(mk(notFlush), 1, 14, 12)).length, 0);
   },
 );
 
