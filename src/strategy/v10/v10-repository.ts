@@ -25,7 +25,7 @@ export interface V10SignalDoc {
 }
 
 export type V10TradeState = "OPEN" | "CLOSED" | "FAILED" | "SKIPPED";
-export type V10CloseReason = "TP_FILLED" | "SL_FILLED" | "POSITION_CLOSED_EXTERNALLY" | "CLOSED_NO_FILLS_FOUND" | "FAILSAFE_CLOSED";
+export type V10CloseReason = "MANUAL_CLOSE" | "TP_FILLED" | "SL_FILLED" | "POSITION_CLOSED_EXTERNALLY" | "CLOSED_NO_FILLS_FOUND" | "FAILSAFE_CLOSED";
 
 export interface V10TradeDoc {
   /** `${signalId}:${symbol}:${userId}` */

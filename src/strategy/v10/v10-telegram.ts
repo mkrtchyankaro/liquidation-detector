@@ -95,7 +95,7 @@ export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
 const REASON: Record<string, string> = {
   TP_FILLED: "✅ TAKE PROFIT", SL_FILLED: "❌ STOP LOSS",
   POSITION_CLOSED_EXTERNALLY: "⚪ CLOSED OUTSIDE THE BOT", CLOSED_NO_FILLS_FOUND: "⚪ CLOSED (no fills found)",
-  FAILSAFE_CLOSED: "⚪ FAIL-SAFE CLOSE (no SL found)",
+  FAILSAFE_CLOSED: "⚪ FAIL-SAFE CLOSE (no SL found)", MANUAL_CLOSE: "⚪ CLOSED BY HAND",
 };
 
 export function formatV10Close(t: V10TradeDoc): string {
