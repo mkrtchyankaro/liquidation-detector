@@ -4,7 +4,7 @@
  */
 import * as assert from "assert";
 import type { Candle } from "../src/research/dc15";
-import { atrSignals } from "../src/research/atr-turn";
+import { atrSignals, atrStorySignals } from "../src/research/atr-turn";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -130,6 +130,45 @@ scenario("after a top candle that closed 1 ATR back (OI down), the entry candle 
   assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
   assert.strictEqual(rel(s[0].t), 7, "candle 5 is green (opened lower, closed up) -> the entry is the red candle 6");
   assert.strictEqual(rel(after(atrSignals(mk(rows), 1, 14, 12, { redAfterTop: false }))[0].t), 6, "without the rule: the green candle");
+});
+
+// ── "story" (Johnny's final wording, Oct 3) ──
+scenario("story: OI grows with the price -> OI falls while the price still rises -> top (its OI may rise a little) -> red candle 1 ATR back = SHORT", () => {
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, -4], [+0.6, -4], [+0.3, +1], [-0.8, -1], [-0.4, -2]];
+  const s = after(atrStorySignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  const x = s[0];
+  assert.strictEqual(x.side, "SHORT"); assert.strictEqual(rel(x.t), 6);
+  assert.ok(x.buildOiPct > 0 && x.buildPricePct > 0 && x.declineOiPct < 0 && x.declinePricePct > 0, JSON.stringify(x));
+  assert.strictEqual(rel(x.peakT), 2, "the OI peak = the 2nd candle's close"); assert.strictEqual(rel(x.topT), 5);
+});
+
+scenario("story: OI grows up to the top, the TOP candle (a wick) has the big OI drop -> the next red candle = SHORT", () => {
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, -6, +1.0], [-0.3, -1], [-0.4, -2]];
+  const s = after(atrStorySignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(rel(s[0].t), 5);
+  assert.ok(s[0].declineOiPct < 0);
+});
+
+scenario("story: OI grows INTO the top with no fall before or in the top candle -> no SHORT", () => {
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, +3, +1.0], [-0.3, -1], [-0.4, -2], [-0.4, -2]];
+  const why = new Map<number, string>();
+  assert.strictEqual(after(atrStorySignals(mk(rows), 1, 14, 12, { why: (t, m) => why.set(rel(t), m) })).filter((x) => x.side === "SHORT").length, 0);
+  assert.match(why.get(5) ?? "", /OI's peak is not before the top/);
+});
+
+scenario("story: a GREEN candle 1 ATR below the top waits; the next red one is the entry", () => {
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, -4], [+0.6, -4], [+0.3, +1], [-0.8, -1, -1.2], [-0.2, -1], [-0.4, -2]];
+  const s = after(atrStorySignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(rel(s[0].t), 7);
+});
+
+scenario("story: the mirror -- a fall with OI growing, OI then falls while the price still falls, green candle 1 ATR up = LONG", () => {
+  const rows: Array<[number, number, number?]> = [...warm, [-0.6, +8], [-0.6, +8], [-0.6, -4], [-0.6, -4], [-0.3, +1], [+0.8, -1], [+0.4, -2]];
+  const s = after(atrStorySignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1); assert.strictEqual(s[0].side, "LONG"); assert.strictEqual(rel(s[0].t), 6);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

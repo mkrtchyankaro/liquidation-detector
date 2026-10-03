@@ -16,7 +16,7 @@
  */
 import { candles, coinInWindow, ownness, priceAt, type MinBar, type Own } from "../../research/dc15";
 import { oiPeakSignals, type PeakSignal } from "../../research/oi-peak";
-import { atrSignals, type AtrSignal } from "../../research/atr-turn";
+import { atrSignals, atrStorySignals, type AtrSignal, type StorySignal } from "../../research/atr-turn";
 
 export const V10_TF_MIN = 15;
 export const V10_K = 1;
@@ -32,13 +32,18 @@ export type V10Side = "SHORT" | "LONG";
  *   "atr"       OI grew with the price (RANK 1), OI is now below its peak, and the 15m candle CLOSES 1 ATR back from
  *               the top made by an earlier candle (src/research/atr-turn.ts) -- the ATR known before that candle
  *   "atrFrozen" the same, with the ATR of the moment the move began
+ *   "story"     Johnny's final wording (Oct 3): OI grows with the price (RANK 1) -> OI falls while the price still rises,
+ *               before / in the top candle -> the first RED candle closing 1 ATR below the top (src/research/atr-turn.ts
+ *               atrStorySignals) · "storyFrozen" = the same with the ATR from the move's start
  *   "oiPeak"    OI low -> OI peak (RANK 1) -> the first red candle with OI down, no ATR distance (src/research/oi-peak.ts)
  */
-export type V10Entry = "atr" | "atrFrozen" | "oiPeak";
+export type V10Entry = "atr" | "atrFrozen" | "oiPeak" | "story" | "storyFrozen";
 export interface V10Rule { entry: V10Entry; /** atr / atrFrozen: how the OI growth is measured (src/research/atr-turn.ts), default "afterLow" */ growth?: "afterLow" | "biggest"; /** tests only: false = without the top-candle OI rule */ topCandleOi?: boolean; /** tests only: false = without "red entry candle after a top candle that closed 1 ATR back" */ redAfterTop?: boolean }
 
 /** every signal of these candles by the rule (the backtest and live both call this) */
-export function signalsOf(c: Parameters<typeof oiPeakSignals>[0], rankWindowHours: number, rule: V10Rule, why?: (t: number, reason: string) => void): Array<PeakSignal | AtrSignal> {
+export function signalsOf(c: Parameters<typeof oiPeakSignals>[0], rankWindowHours: number, rule: V10Rule, why?: (t: number, reason: string) => void): Array<PeakSignal | AtrSignal | StorySignal> {
+  if (rule.entry === "story" || rule.entry === "storyFrozen")
+    return atrStorySignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "storyFrozen" ? "frozen" : "live", why });
   return rule.entry === "oiPeak"
     ? oiPeakSignals(c, V10_K, V10_ATR_N, rankWindowHours)
     : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "atrFrozen" ? "frozen" : "live", growth: rule.growth, topCandleOi: rule.topCandleOi, redAfterTop: rule.redAfterTop, why });
@@ -58,6 +63,8 @@ export interface V10Turn {
   prior: number;
   /** the ATR entries only: the ATR used and how far (%) the close came back from the extreme; the picks' window end */
   atr?: number; backPct?: number;
+  /** the "story" entries: the price while OI grew, OI and the price from OI's peak to the top, the top candle's close */
+  buildPricePct?: number; declineOiPct?: number; declinePricePct?: number; topT?: number;
   /** which entry made it */
   entry?: V10Entry;
 }
@@ -66,11 +73,12 @@ export interface V10Pick { symbol: string; rank: number; x: number; follow: numb
 
 export type V10BtcTurn = V10Turn;
 
-const toTurn = (s: PeakSignal | AtrSignal, entry: V10Entry): V10Turn => ({
+const toTurn = (s: PeakSignal | AtrSignal | StorySignal, entry: V10Entry): V10Turn => ({
   candleEnd: s.t, side: s.side, price: s.price, candleOiPct: s.candleOiPct, label: s.label,
   moveStartT: s.startT, peakT: s.peakT, moveOiPct: s.buildOiPct,
   extreme: s.extreme, extremeT: s.extremeT, movePct: s.movePct, fromPeakOiPct: s.fromPeakOiPct, prior: s.prior,
-  ...("atr" in s ? { atr: s.atr, backPct: s.backPct } : {}), entry,
+  ...("atr" in s ? { atr: s.atr, backPct: s.backPct } : {}),
+  ...("declineOiPct" in s ? { buildPricePct: s.buildPricePct, declineOiPct: s.declineOiPct, declinePricePct: s.declinePricePct, topT: s.topT } : {}), entry,
 });
 
 /** The signal of `bars` (any symbol) at `candleEnd` by the rule (RANK 1), else null. */

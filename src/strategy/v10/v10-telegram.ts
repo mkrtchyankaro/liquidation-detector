@@ -26,6 +26,15 @@ const t15 = (ms: number): string => dhm(ms);
 /** Johnny's 3 points, short, UTC (Oct 3). `who` = whose candles (BTC or the alt). */
 function threePoints(a: V10SignalDoc["turn"], who: string, rankH: number): string[] {
   const top = a.side === "SHORT";
+  if (a.declineOiPct !== undefined && a.atr !== undefined) {
+    // the "story" entry (Johnny Oct 3): growth -> OI falls while the price still goes on -> the red candle 1 ATR back
+    const atrPct = (100 * a.atr) / a.extreme;
+    return [
+      `1️⃣ ${t15(a.moveStartT)} → ${hm(a.peakT)} · ${who} · OI ${sp(a.moveOiPct)} · գինը ${sp(a.buildPricePct ?? NaN)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
+      `2️⃣ ${hm(a.peakT)} → ${hm(a.topT ?? a.extremeT + W)} · OI ${sp(a.declineOiPct)} · գինը ${sp(a.declinePricePct ?? NaN)} → ${top ? "գագաթ" : "հատակ"}`,
+      `3️⃣ ${hm(a.candleEnd - W)} ${top ? "կարմիր" : "կանաչ"} մոմ · ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : a.backPct ?? NaN)} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "storyFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
+    ];
+  }
   if (a.atr !== undefined) {
     // the ATR entry (Johnny Oct 3): OI grew with the price -> OI below its peak -> the close 1 ATR back from the top
     const atrPct = (100 * a.atr) / a.extreme;

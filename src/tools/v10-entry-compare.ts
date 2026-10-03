@@ -40,6 +40,8 @@ const RULES: Array<[string, V10Rule]> = [
   ["atr noRed", { entry: "atr", redAfterTop: false }],
   ["atrFrozen noRed", { entry: "atrFrozen", redAfterTop: false }],
   ["oiPeak", { entry: "oiPeak" }],
+  ["story", { entry: "story" }],
+  ["storyFrozen", { entry: "storyFrozen" }],
 ];
 
 interface Cand { t: number; sym: string; src: "A" | "B"; side: "SHORT" | "LONG"; entry: number; rank: number; ext: number }

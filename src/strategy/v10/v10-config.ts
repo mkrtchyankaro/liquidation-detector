@@ -98,7 +98,7 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
     if (!isNum(v[k], lo, hi)) throw new Error(`"v10.${k}" must be ${what} (got ${JSON.stringify(v[k])})`);
     return v[k] as number;
   };
-  const ENTRIES: V10Entry[] = ["atr", "atrFrozen", "oiPeak"];
+  const ENTRIES: V10Entry[] = ["atr", "atrFrozen", "oiPeak", "story", "storyFrozen"];
   const entryOf = (k: string, d: V10Entry): V10Rule => {
     if (v[k] !== undefined && !ENTRIES.includes(v[k] as V10Entry)) throw new Error(`"v10.${k}" must be ${ENTRIES.map((e) => `"${e}"`).join(", ")} (got ${JSON.stringify(v[k])})`);
     return { entry: (v[k] as V10Entry | undefined) ?? d };

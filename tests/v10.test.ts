@@ -167,6 +167,7 @@ async function run(): Promise<void> {
     assert.deepStrictEqual([settings().rule, settings().ownRule], [{ entry: "atrFrozen" }, { entry: "atr" }], "defaults: BTC part atrFrozen, ALT part atr");
     assert.deepStrictEqual([settings({ entry: "oiPeak", ownEntry: "atrFrozen" }).rule, settings({ entry: "oiPeak", ownEntry: "atrFrozen" }).ownRule], [{ entry: "oiPeak" }, { entry: "atrFrozen" }]);
     assert.throws(() => settings({ ownEntry: "x" }), /v10.ownEntry/);
+    assert.deepStrictEqual(settings({ entry: "storyFrozen", ownEntry: "story" }).ownRule, { entry: "story" });
     assert.throws(() => settings({ entry: "ATR" }), /v10.entry/);
     assert.strictEqual(settings().ownR2Minutes, 1, "part 2 R² on 1-minute returns by default");
     assert.strictEqual(settings({ ownR2Minutes: 15 }).ownR2Minutes, 15);
