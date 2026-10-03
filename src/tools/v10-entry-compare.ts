@@ -13,6 +13,7 @@
  *   "noTopOi" = WITHOUT the rule "the candle that made the top and closed 1 ATR back must have OI down" (as before Oct 3)
  *   "big" = the OI growth measured as the biggest OI rise in the move with the price going the same way (SUI, Oct 3)
  *   --by-coin  every coin's result (A and B apart, worst first; * = a new coin, data since Oct 1)  --new  part B on the new coins too
+ *   --no-minmove   without the live rule "the coin moved more than the TP %" (default: with it)
  *   --sl extreme --rr 2   SL at the move's extreme (each coin's own high since the build-up began), TP 2 x that risk; net R
  *                         uses each trade's own risk for the fees
  *   "noRed" = without "the entry candle must close red after a top candle that closed 1 ATR back"
@@ -23,7 +24,7 @@ import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
 import { candles, type MinBar } from "../research/dc15";
 import { simTrade, type Trade } from "../research/sltp";
-import { ownMove, pickAlts, signalsOf, V10_TF_MIN, type V10Rule, type V10Turn } from "../strategy/v10/v10-engine";
+import { moveOf, ownMove, pickAlts, signalsOf, V10_TF_MIN, type V10Rule, type V10Turn } from "../strategy/v10/v10-engine";
 
 const argv = process.argv.slice(2);
 const arg = (n: string, d: string): string => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : d; };
@@ -59,6 +60,8 @@ async function main(): Promise<void> {
   const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "1")), withNew = argv.includes("--new"), byCoin = argv.includes("--by-coin");
   // --sl extreme (Johnny Oct 3): SL at the move's extreme (the coin's own high since the build-up began), TP = --rr x that risk
   const slExt = arg("sl", "pct") === "extreme", rrExt = Number(arg("rr", "2"));
+  // as live (Oct 3, ETH +0.36%): the coin must have moved MORE than the TP %; --no-minmove = without it
+  const minMove = argv.includes("--no-minmove") ? -Infinity : slExt ? -Infinity : tpPct;
   const without = arg("without", "AVAX").toUpperCase().split(",").map((x) => x.trim()).filter(Boolean);
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
@@ -79,7 +82,7 @@ async function main(): Promise<void> {
     const short = (s: string): string => s.replace(/USDT$/, "");
 
     console.log(`V10 ENTRIES COMPARED · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`);
-    console.log(`A = BTC's signal -> ${npicks} picks · B = the alt's own move (${withNew ? "ALL alts, the new ones too" : "old alts only"}, R² on ${own}m) · net R at $10 risk\n`);
+    console.log(`${minMove > -Infinity ? `only coins that moved MORE than the TP ${tpPct}% (as live) · ` : "no minimum move · "}A = BTC's signal -> ${npicks} picks · B = the alt's own move (${withNew ? "ALL alts, the new ones too" : "old alts only"}, R² on ${own}m) · net R at $10 risk\n`);
     const head = `${"rule".padEnd(18)} ${"part".padEnd(10)} trades   TP   SL open  win   net R      $  hold`;
     console.log(head);
     for (const [name, rule] of RULES) {
@@ -88,13 +91,13 @@ async function main(): Promise<void> {
       for (const s of btcSigs) {
         const turn = { moveStartT: s.startT, candleEnd: s.t, side: s.side } as V10Turn;
         for (const p of pickAlts(turn, btcMap, closes, npicks))
-          cands.push({ t: s.t, sym: p.symbol, src: "A", side: s.side, entry: p.price, rank: p.rank, ext: extremeOf(coins.get(p.symbol)!.bars, s.startT, s.t, s.side === "SHORT") });
+          if (moveOf({ kind: "BTC", side: s.side, turn: s }, p) > minMove) cands.push({ t: s.t, sym: p.symbol, src: "A", side: s.side, entry: p.price, rank: p.rank, ext: extremeOf(coins.get(p.symbol)!.bars, s.startT, s.t, s.side === "SHORT") });
       }
       for (const [sym, c] of coins) {
         if (!c.old && !withNew) continue;
         for (const s of signalsOf(altC.get(sym)!, win, rule).filter((x) => x.side === side)) {
           if (!ownMove({ moveStartT: s.startT, candleEnd: s.t } as V10Turn, c.map, btcMap, own)) continue;
-          cands.push({ t: s.t, sym, src: "B", side: s.side, entry: s.price, rank: 0, ext: s.extreme });
+          if (moveOf({ kind: "OWN", side: s.side, turn: s }, { coinPct: NaN }) > minMove) cands.push({ t: s.t, sym, src: "B", side: s.side, entry: s.price, rank: 0, ext: s.extreme });
         }
       }
       cands.sort((a, b) => a.t - b.t || (a.src === "A" ? -1 : 1));

@@ -171,5 +171,13 @@ scenario("story: the mirror -- a fall with OI growing, OI then falls while the p
   assert.strictEqual(s.length, 1); assert.strictEqual(s[0].side, "LONG"); assert.strictEqual(rel(s[0].t), 6);
 });
 
+scenario("story (SUI): OI grows with the price, then falls BELOW where it started while the price runs -> the growth still counts -> SHORT", () => {
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, -4], [+0.6, -4], [+0.6, -4], [+0.6, -4], [-0.8, -2], [-0.4, -2]];
+  const s = after(atrStorySignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(rel(s[0].t), 6);
+  assert.ok(Math.abs(s[0].buildOiPct - 0.8) < 0.05 && s[0].declineOiPct < -1, JSON.stringify(s[0]));
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

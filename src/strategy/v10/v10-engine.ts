@@ -117,6 +117,13 @@ export function ownMove(turn: V10Turn, altCloses: ReadonlyMap<number, number>, b
   return how === "WITH BTC" ? null : { how, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, r2Minutes };
 }
 
+/** How far the coin went in the signal's direction (%, positive = the move we trade against): the BTC part -> the pick's
+ *  own move with BTC (to its extreme); the ALT part -> the alt's move from its OI low to the top. Must be > the TP. */
+export function moveOf(sig: { kind: "BTC" | "OWN"; side: V10Side; turn: Pick<V10Turn, "movePct"> }, p: Pick<V10Pick, "coinPct">): number {
+  const m = sig.kind === "BTC" ? p.coinPct : sig.turn.movePct;
+  return sig.side === "SHORT" ? m : -m;
+}
+
 /** SL / TP prices for a side, from the entry and this user's percents */
 export function levels(side: V10Side, entry: number, slPct: number, tpPct: number): { sl: number; tp: number } {
   return side === "SHORT"

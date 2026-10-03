@@ -6,7 +6,7 @@ import * as assert from "assert";
 import { candles, type MinBar } from "../src/research/dc15";
 import { oiPeakSignals } from "../src/research/oi-peak";
 import { parseV10Settings, rulesFor, type V10Settings } from "../src/strategy/v10/v10-config";
-import { btcRank1At, levels, ownMove, pickAlts, rank1At, V10_ATR_N, V10_K, V10_TF_MIN } from "../src/strategy/v10/v10-engine";
+import { btcRank1At, levels, moveOf, ownMove, pickAlts, rank1At, V10_ATR_N, V10_K, V10_TF_MIN } from "../src/strategy/v10/v10-engine";
 const PEAK = { entry: "oiPeak" } as const;
 import { V10LiveService, type V10UserRef } from "../src/strategy/v10/v10-live.service";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "../src/strategy/v10/v10-repository";
@@ -270,6 +270,21 @@ async function run(): Promise<void> {
   await scenario("levels: SHORT SL above / TP below, LONG mirrored", () => {
     assert.deepStrictEqual(levels("SHORT", 100, 1, 1.5), { sl: 101, tp: 98.5 });
     assert.deepStrictEqual(levels("LONG", 100, 1, 2), { sl: 99, tp: 102 });
+  });
+
+  await scenario("live: a coin that moved NOT MORE than this user's TP % is not taken (ETH +0.36%, Oct 3) -- per user, silently", async () => {
+    const mk = market(), store = fakeStore(), mainTg = tg(), karoTg = tg();
+    const users: V10UserRef[] = [
+      { userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: mainTg },
+      { userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: karoTg },
+    ];
+    const svc = new V10LiveService(settings({ userModes: { main: "PAPER", karo: "PAPER" }, perUser: { karo: { tpPct: 20 } } }), () => users, loaderOf(mk), store, () => SIGNAL_END + 100_000);
+    await svc.onMinute();
+    assert.deepStrictEqual(store.trades.filter((t) => t.userId === "main").map((t) => t.state), ["OPEN", "OPEN"]);
+    const k = store.trades.filter((t) => t.userId === "karo");
+    assert.ok(k.length === 2 && k.every((t) => t.state === "SKIPPED" && /not more than the TP 20%/.test(t.failureReason ?? "")), JSON.stringify(k));
+    assert.strictEqual(karoTg.msgs.length, 0, "no Telegram for a quiet-market skip");
+    assert.strictEqual(moveOf({ kind: "OWN", side: "LONG", turn: { movePct: -3 } }, { coinPct: 0 }), 3);
   });
 
   await scenario("live PAPER: one signal -> main gets the picks (entry / TP / SL with prices and %), once; karo (short off) gets nothing", async () => {

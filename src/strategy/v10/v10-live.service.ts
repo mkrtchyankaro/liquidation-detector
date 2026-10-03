@@ -7,7 +7,7 @@ import { simTrade } from "../../research/sltp";
 import type { MinBar } from "../../research/dc15";
 import { estimateFeesUsd } from "../v9/v9-fees";
 import { BTC, rulesFor, type V10Settings } from "./v10-config";
-import { btcRank1At, lastCandleEnd, levels, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick } from "./v10-engine";
+import { btcRank1At, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick } from "./v10-engine";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "./v10-repository";
 import { formatV10Close, formatV10Entry, formatV10Failure, v10Head } from "./v10-telegram";
 
@@ -261,6 +261,11 @@ export class V10LiveService {
       log.warn({ userId: u.userId, tradeId: base.tradeId, reason }, `[V10_TRADE_${state}]`);
       if (tell) await this.notify(u, formatV10Failure(t));
     };
+
+    // Johnny Oct 3 (ETH +0.36%): the coin must have moved MORE than this user's TP -- we want back more than it went.
+    // BTC part: the alt's own move with BTC (to its extreme); ALT part: the alt's move from its OI low to the top.
+    const moved = moveOf(sig, p);
+    if (!(moved > rules.tpPct)) return skip(`the move was only ${moved.toFixed(2)}%, not more than the TP ${rules.tpPct}% -- a quiet market, not taken`, false);
 
     const open = await this.store.findOpenTrades();
     if (open.some((t) => t.userId === u.userId && t.symbol === p.symbol)) return skip(`a V10 trade on ${p.symbol} is already open for this user`, false);
