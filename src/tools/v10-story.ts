@@ -4,7 +4,7 @@
  *   1 = OI's low (the build-up starts) · PEAK = OI's peak · 3 = the entry (first red candle with OI down after the peak)
  *
  *   npx tsx src/tools/v10-story.ts --symbol SUIUSDT --from "2026-10-02 22:00" --to "2026-10-03 03:00"
- *   options: --entry atr|atrFrozen|oiPeak (default atr)  --red  --window 12 (RANK 1 hours)  --atrfrom "2026-10-02 23:00" (freeze the ATR at that candle; default = the
+ *   options: --entry atr|atrFrozen|oiPeak (default atr)  --window 12 (RANK 1 hours)  --atrfrom "2026-10-02 23:00" (freeze the ATR at that candle; default = the
  *            window's start) -- prints the 15m ATR(14) per candle and where "close 1 ATR below the high" is reached,
  *            with the live ATR and with the ATR frozen before the move
  */
@@ -33,7 +33,7 @@ async function main(): Promise<void> {
       .map((d) => ({ t: (d.ts as Date).getTime(), high: Number(d.high), low: Number(d.low), close: Number(d.close), oiFirst: Number(d.oiFirst), oiLast: Number(d.oiLast) }));
     const c = candles(bars, 15);
     const entry = arg("entry", "atr") as V10Entry;
-    const sigs = signalsOf(c, win, { entry, redCandle: argv.includes("--red") }).filter((s) => s.t > from && s.t <= to);
+    const sigs = signalsOf(c, win, { entry }).filter((s) => s.t > from && s.t <= to);
     const marks = new Map<number, string[]>();
     const add = (t: number, m: string): void => { marks.set(t, [...(marks.get(t) ?? []), m]); };
     for (const s of sigs) {

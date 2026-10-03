@@ -7,7 +7,7 @@ import { candles, type MinBar } from "../src/research/dc15";
 import { oiPeakSignals } from "../src/research/oi-peak";
 import { parseV10Settings, rulesFor, type V10Settings } from "../src/strategy/v10/v10-config";
 import { btcRank1At, levels, ownMove, pickAlts, rank1At, V10_ATR_N, V10_K, V10_TF_MIN } from "../src/strategy/v10/v10-engine";
-const PEAK = { entry: "oiPeak", redCandle: false } as const;
+const PEAK = { entry: "oiPeak" } as const;
 import { V10LiveService, type V10UserRef } from "../src/strategy/v10/v10-live.service";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "../src/strategy/v10/v10-repository";
 import { formatV10Entry } from "../src/strategy/v10/v10-telegram";
@@ -164,13 +164,13 @@ async function run(): Promise<void> {
     assert.throws(() => settings({ perUser: { main: { ownTP: 2 } } }), /not a known setting/);
     assert.throws(() => settings({ own: "yes" }), /v10.own/);
     assert.strictEqual(parseV10Settings(undefined, ["main"], SYMS).enabled, false);
-    assert.deepStrictEqual(settings().rule, { entry: "atr", redCandle: false }, "default entry = atr (live ATR), no red");
-    assert.deepStrictEqual(settings({ entry: "atrFrozen", redCandle: true }).rule, { entry: "atrFrozen", redCandle: true });
+    assert.deepStrictEqual(settings().rule, { entry: "atr" }, "default entry = atr (live ATR)");
+    assert.deepStrictEqual(settings({ entry: "atrFrozen" }).rule, { entry: "atrFrozen" });
     assert.throws(() => settings({ entry: "ATR" }), /v10.entry/);
     assert.strictEqual(settings().ownR2Minutes, 15, "part 2 R² on 15m closes by default");
     assert.strictEqual(settings({ ownR2Minutes: 1 }).ownR2Minutes, 1);
     assert.throws(() => settings({ ownR2Minutes: 5 }), /ownR2Minutes/);
-    assert.throws(() => settings({ entry: "oiPeak", redCandle: true }), /redCandle/);
+    assert.throws(() => settings({ redCandle: true }), /not a known setting/);
     assert.throws(() => settings({ userModes: { main: "LIVE" } }), /"OFF", "PAPER" or "REAL"/);
     assert.throws(() => settings({ userModes: { bob: "PAPER" } }), /unknown user "bob"/);
     assert.throws(() => settings({ slPct: 0 }), /v10.slPct/);
@@ -288,7 +288,7 @@ async function run(): Promise<void> {
     assert.strictEqual(m.length, 2);
     assert.ok(m[0].startsWith("🔻 V10 · BTC · AAAUSDT · SHORT (SELL) · PAPER"), m[0]);
     assert.ok(/TP\s+\S+\s+\(-1\.00%\)\s+\+\$10\.00/.test(m[0]) && /SL\s+\S+\s+\(\+1\.00%\)\s+-\$10\.00/.test(m[0]), m[0]);
-    assert.ok(m[0].includes("1️⃣") && m[0].includes("2️⃣") && m[0].includes("3️⃣ ") && m[0].includes("կարմիր մոմ") && m[0].includes("#1/2") && m[0].includes("UTC"), m[0]);
+    assert.ok(m[0].includes("1️⃣") && m[0].includes("2️⃣") && m[0].includes("3️⃣ ") && m[0].includes("մոմը փակվեց գագաթից -") && m[0].includes("1 ATR =") && m[0].includes("#1/2") && m[0].includes("UTC"), m[0]);
     if (process.env.SHOW) console.log(m[0]);
     // a restart: same candle evaluated again by a fresh service -> nothing new
     const again = new V10LiveService(settings(), () => users, loaderOf(mk), store, () => now);
@@ -342,7 +342,7 @@ async function run(): Promise<void> {
       assert.deepStrictEqual(store.trades.map((x) => `${x.symbol}:${x.side}`), ["AAAUSDT:LONG", "BBBUSDT:LONG"]);
       const tr = store.trades[0];
       assert.ok(tr.slPrice! < tr.entryPrice! && tr.tpPrice! > tr.entryPrice!);
-      assert.ok(t.msgs[0].startsWith("🔺 V10 · BTC · AAAUSDT · LONG (BUY) · PAPER") && t.msgs[0].includes("կանաչ մոմ") && t.msgs[0].includes("⬇️"), t.msgs[0]);
+      assert.ok(t.msgs[0].startsWith("🔺 V10 · BTC · AAAUSDT · LONG (BUY) · PAPER") && t.msgs[0].includes("մոմը փակվեց հատակից +") && t.msgs[0].includes("⬇️"), t.msgs[0]);
     }
   });
 

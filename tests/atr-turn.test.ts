@@ -1,6 +1,6 @@
 /**
  * V10 "atr" entry (Johnny Oct 3): close 1 ATR back from the top + OI down, the move built with OI up, RANK 1;
- * variants: frozen ATR (from the move's start), red candle. Usage: npx tsx tests/atr-turn.test.ts
+ * variant: frozen ATR (from the move's start). Usage: npx tsx tests/atr-turn.test.ts
  */
 import * as assert from "assert";
 import type { Candle } from "../src/research/dc15";
@@ -23,7 +23,7 @@ function mk(rows: Array<[number, number, number?]>): Candle[] {
 const warm: Array<[number, number]> = [];
 for (let c = 0; c < 5; c++) { for (let i = 0; i < 4; i++) warm.push([+0.4, +1]); for (let i = 0; i < 4; i++) warm.push([-0.4, -1]); }
 const W0 = warm.length;
-const after = (s: { t: number }[]): Array<{ t: number }> => s.filter((x) => x.t > W0 * W);
+const after = <T extends { t: number }>(s: T[]): T[] => s.filter((x) => x.t > W0 * W);
 const rel = (t: number): number => t / W - W0;
 
 // the rise with OI up, a small red wiggle inside it (OI down, less than 1 ATR) that must NOT be an entry
@@ -32,22 +32,38 @@ const wiggle: Array<[number, number]> = [
   [+0.6, +8], [+0.6, +8],
   [-0.2, -2],                    // wiggle: red, OI down, but only 0.3 back from the high (< 1 ATR)
   [+0.6, +8], [+0.6, +8],
-  [-0.7, -3],                    // closes 0.8 back from the high (>= 1 ATR) with OI down -> ENTRY
+  [-0.7, -3],                    // closes 0.8 back from the high (>= 1 ATR), OI below its peak -> ENTRY
   [-0.4, -2], [-0.4, -2],
 ];
 
-scenario("a red candle with OI down inside the rise (less than 1 ATR back) is not an entry; the close 1 ATR back with OI down is -- SHORT", () => {
-  const s = after(atrSignals(mk(wiggle), 1, 14, 12));
+scenario("a red candle with OI down inside the rise (less than 1 ATR back) is not an entry; the close 1 ATR back is -- SHORT", () => {
+  const s = atrSignals(mk(wiggle), 1, 14, 12).filter((y) => y.t > W0 * W);
   assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
-  const x = atrSignals(mk(wiggle), 1, 14, 12).find((y) => y.t > W0 * W)!;
+  const x = s[0];
   assert.strictEqual(x.side, "SHORT");
   assert.strictEqual(rel(x.t), 6, "the entry is the close of the 1 ATR candle");
-  assert.ok(x.buildOiPct > 0 && x.candleOiPct < 0 && x.prior > 0);
+  assert.ok(x.buildOiPct > 0 && x.fromPeakOiPct < 0 && x.prior > 0);
   assert.ok(x.backPct > 0 && x.atr > 0);
 });
 
-scenario("a rise built with OI DOWN (shorts closing) is never an entry -- not even when the turn candle's OI goes up", () => {
-  const rows: Array<[number, number]> = [...warm, [+0.6, -8], [+0.6, -8], [+0.6, -8], [+0.6, -8], [-0.7, +3], [-0.4, +2], [-0.4, -2]];
+scenario("the candle that MAKES the top and closes 1 ATR below it is not the entry -- the next candle is", () => {
+  // [close change, OI, open gap]: candle 4 opens 1.0 higher (a new high), closes 0.6 below the previous close
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, -3, +1.0], [-0.2, -1], [-0.4, -2], [-0.4, -2]];
+  const s = after(atrSignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(rel(s[0].t), 6, "wait for the candle after the one that made the top");
+});
+
+scenario("OI fell BEFORE the top (take-profits on the way up) and the entry candle's own OI goes up -> still the entry (OI is below its peak)", () => {
+  const rows: Array<[number, number]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, -2], [+0.6, -2], [-0.8, +1], [-0.4, -2], [-0.4, -2]];
+  const s = after(atrSignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(rel(s[0].t), 5);
+  assert.ok(s.map((x) => x as unknown as { candleOiPct: number })[0].candleOiPct > 0, "the candle's own OI went up");
+});
+
+scenario("a rise with OI only falling (no growth) is never an entry", () => {
+  const rows: Array<[number, number]> = [...warm, [+0.6, -8], [+0.6, -8], [+0.6, -8], [+0.6, -8], [-0.8, -3], [-0.4, +2], [-0.4, -2]];
   assert.strictEqual(after(atrSignals(mk(rows), 1, 14, 12)).length, 0);
 });
 
@@ -55,7 +71,8 @@ scenario("not RANK 1 (a smaller OI build than the earlier moves) -> no entry", (
   const rows: Array<[number, number]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.7, -3], [-0.7, -3], [-0.7, -3], [-0.4, -2], [-0.4, -2],
     [+0.6, +1], [+0.6, +1], [+0.6, +1], [-0.7, -1], [-0.4, -1]];
   const s = after(atrSignals(mk(rows), 1, 14, 12));
-  assert.ok(s.every((x) => rel(x.t) < 9), JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.ok(rel(s[0].t) < 9, "only the first (big) build-up");
 });
 
 // a fast rise: the live ATR grows, the frozen ATR stays at its size before the move
@@ -69,19 +86,11 @@ scenario("frozen ATR (from the move's start) enters earlier than the live ATR af
   assert.strictEqual(rel(frozen[0].t), 7);
 });
 
-scenario("red: a GREEN candle that closes 1 ATR below the high (a big drop, then up inside the candle) is an entry only without --red", () => {
-  // [close change, OI, open gap]: the candle opens 1.3 lower and closes 0.3 up from its open -> green, 1.0 below the high
-  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-1.0, -3, -1.3], [-0.6, -3], [-0.4, -2], [-0.4, -2]];
-  const plain = after(atrSignals(mk(rows), 1, 14, 12));
-  const red = after(atrSignals(mk(rows), 1, 14, 12, { red: true }));
-  assert.strictEqual(plain.length, 1); assert.strictEqual(rel(plain[0].t), 5);
-  assert.strictEqual(red.length, 1); assert.strictEqual(rel(red[0].t), 6, "with red: the next (red) candle");
-});
-
-scenario("the mirror: a fall built with OI up, then a close 1 ATR up with OI down -> LONG", () => {
+scenario("the mirror: a fall with OI growing, OI then below its peak, a close 1 ATR up from the low -> LONG", () => {
   const rows: Array<[number, number]> = [...warm, [-0.6, +8], [-0.6, +8], [-0.6, +8], [-0.6, +8], [+0.7, -3], [+0.4, -2], [+0.4, -2]];
-  const s = atrSignals(mk(rows), 1, 14, 12).filter((x) => x.t > W0 * W);
-  assert.strictEqual(s.length, 1); assert.strictEqual(s[0].side, "LONG");
+  const s = after(atrSignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1); assert.strictEqual((s[0] as unknown as { side: string }).side, "LONG");
+  assert.strictEqual(rel(s[0].t), 5);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

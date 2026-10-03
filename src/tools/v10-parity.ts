@@ -3,7 +3,7 @@
  * only the last 10 days of bars) give exactly the same signals as the BACKTEST (Johnny's rule on all history at once,
  * src/research/oi-peak.ts / src/tools/v10-peak-trades.ts)? Prints every signal and any difference.
  *
- *   npx tsx src/tools/v10-parity.ts            options: --entry atr|atrFrozen|oiPeak  --red  --window 12  --picks 3
+ *   npx tsx src/tools/v10-parity.ts            options: --entry atr|atrFrozen|oiPeak  --window 12  --picks 3
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -18,7 +18,7 @@ const utc = (ms: number): string => new Date(ms).toISOString().slice(5, 16).repl
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const win = Number(arg("window", "12")), npicks = Number(arg("picks", "3")), own = Number(arg("own", "15"));
-  const rule: V10Rule = { entry: arg("entry", "atr") as V10Entry, redCandle: argv.includes("--red") };
+  const rule: V10Rule = { entry: arg("entry", "atr") as V10Entry };
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   try {
@@ -37,7 +37,7 @@ async function main(): Promise<void> {
     const ends = new Set<number>();
     for (let e = Math.ceil(btc[0].t / 900_000) * 900_000 + 900_000; e <= btc[btc.length - 1].t + 60_000; e += 900_000) ends.add(e);
     let same = 0, diff = 0;
-    console.log(`V10 parity · BTC ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC · live = last ${V10_HISTORY_MS / 86_400_000} days at each close · RANK 1 ${win}h · entry ${rule.entry}${rule.redCandle ? "+red" : ""}\n`);
+    console.log(`V10 parity · BTC ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC · live = last ${V10_HISTORY_MS / 86_400_000} days at each close · RANK 1 ${win}h · entry ${rule.entry}\n`);
     for (const e of ends) {
       const live = btcRank1At(btc.filter((b) => b.t >= e - V10_HISTORY_MS), e, win, rule);
       const res = researchAt.get(e);
@@ -57,7 +57,7 @@ async function main(): Promise<void> {
       if (bars[0].t > btc[0].t + 86_400_000) { console.log(`  ${sym.replace("USDT", "")}: too new for part 2 (live skips it too)`); continue; }
       const map = closes.get(sym)!;
       const res = new Map(signalsOf(candles(bars, V10_TF_MIN), win, rule)
-        .filter((s) => ownMove({ moveStartT: s.startT, peakT: s.peakT } as V10Turn, map, btcCloses, own) !== null).map((s) => [s.t, s]));
+        .filter((s) => ownMove({ moveStartT: s.startT, candleEnd: s.t } as V10Turn, map, btcCloses, own) !== null).map((s) => [s.t, s]));
       for (let e = Math.ceil(bars[0].t / 900_000) * 900_000 + 900_000; e <= bars[bars.length - 1].t + 60_000; e += 900_000) {
         const t = rank1At(bars.filter((b) => b.t >= e - V10_HISTORY_MS && b.t < e), e, win, rule);
         const live = t && ownMove(t, map, btcCloses, own) ? t : null, r = res.get(e);

@@ -1,10 +1,9 @@
 /**
  * V10 ENTRIES COMPARED -- BACKTEST (Oct 3 2026) Read-only, our DB (minute_bars). The SAME functions as live
  * (src/strategy/v10/v10-engine.ts signalsOf / pickAlts / ownMove), on all history at once, for each entry rule:
- *   atr            15m close 1 ATR back from the top (ATR before the candle) + OI down, move built with OI up, RANK 1
- *   atr+red        the same, the candle must be red (green for LONG)
- *   atrFrozen      the ATR from the move's start
- *   atrFrozen+red
+ *   atr            OI grew with the price (RANK 1), OI now below its peak, the 15m close 1 ATR back from the top made
+ *                  by an earlier candle (src/research/atr-turn.ts) -- the ATR before the candle
+ *   atrFrozen      the same with the ATR from the move's start
  *   oiPeak         OI low -> OI peak -> first red candle with OI down (no ATR distance)
  *   A = BTC's signal -> the picks (in at BTC's signal) · B = an alt's own signal, moved on its own (old alts only)
  * Exit: SL / TP % from the entry, no time limit, same minute SL + TP = SL; one trade per coin at a time (A first);
@@ -27,11 +26,9 @@ const sp = (v: number): string => (Number.isFinite(v) ? `${v >= 0 ? "+" : ""}${v
 const DAY = 86_400_000;
 
 const RULES: Array<[string, V10Rule]> = [
-  ["atr", { entry: "atr", redCandle: false }],
-  ["atr+red", { entry: "atr", redCandle: true }],
-  ["atrFrozen", { entry: "atrFrozen", redCandle: false }],
-  ["atrFrozen+red", { entry: "atrFrozen", redCandle: true }],
-  ["oiPeak", { entry: "oiPeak", redCandle: false }],
+  ["atr", { entry: "atr" }],
+  ["atrFrozen", { entry: "atrFrozen" }],
+  ["oiPeak", { entry: "oiPeak" }],
 ];
 
 interface Cand { t: number; sym: string; src: "A" | "B"; side: "SHORT" | "LONG"; entry: number; rank: number }
@@ -68,13 +65,13 @@ async function main(): Promise<void> {
       const cands: Cand[] = [];
       const btcSigs = signalsOf(btcC, win, rule).filter((s) => s.side === side);
       for (const s of btcSigs) {
-        const turn = { moveStartT: s.startT, candleEnd: s.t, side: s.side, windowEndT: "windowEndT" in s ? s.windowEndT : undefined } as V10Turn;
+        const turn = { moveStartT: s.startT, candleEnd: s.t, side: s.side } as V10Turn;
         for (const p of pickAlts(turn, btcMap, closes, npicks)) cands.push({ t: s.t, sym: p.symbol, src: "A", side: s.side, entry: p.price, rank: p.rank });
       }
       for (const [sym, c] of coins) {
         if (!c.old) continue;
         for (const s of signalsOf(altC.get(sym)!, win, rule).filter((x) => x.side === side)) {
-          if (!ownMove({ moveStartT: s.startT, peakT: s.peakT } as V10Turn, c.map, btcMap, own)) continue;
+          if (!ownMove({ moveStartT: s.startT, candleEnd: s.t } as V10Turn, c.map, btcMap, own)) continue;
           cands.push({ t: s.t, sym, src: "B", side: s.side, entry: s.price, rank: 0 });
         }
       }
