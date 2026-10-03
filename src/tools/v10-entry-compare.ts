@@ -10,7 +10,7 @@
  * net R = R - 2 x fee / SL%.
  *
  *   npx tsx src/tools/v10-entry-compare.ts --pct 1 --tp 2
- *   options: --own 15|1 (part 2 R2 on 15m closes / 1m returns)  --window 12  --picks 3  --fee 0.05  --side SHORT|LONG  --without AVAX  --list atr  (prints that rule's trades)
+ *   options: --own 1|15 (part 2 R2 on 1m returns, default / 15m closes)  --window 12  --picks 3  --fee 0.05  --side SHORT|LONG  --without AVAX  --list atr  (prints that rule's trades)
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -37,7 +37,7 @@ interface Done extends Cand { tr: Trade; net: number }
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const pct = Number(arg("pct", "1")), tpPct = Number(arg("tp", arg("pct", "1"))), win = Number(arg("window", "12"));
-  const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "15"));
+  const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "1"));
   const without = arg("without", "AVAX").toUpperCase().split(",").map((x) => x.trim()).filter(Boolean);
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();

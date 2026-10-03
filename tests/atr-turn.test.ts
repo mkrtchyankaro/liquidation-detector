@@ -93,5 +93,15 @@ scenario("the mirror: a fall with OI growing, OI then below its peak, a close 1 
   assert.strictEqual(rel(s[0].t), 5);
 });
 
+scenario("why no entry (story tool): the wiggle is 'less than 1 ATR back', the top-making candle 'wait for the next one'", () => {
+  const why = new Map<number, string>();
+  atrSignals(mk(wiggle), 1, 14, 12, { why: (t, m) => why.set(rel(t), m) });
+  assert.match(why.get(3) ?? "", /back from the top, 1 ATR/);
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, -3, +1.0], [-0.2, -1], [-0.4, -2]];
+  const w2 = new Map<number, string>();
+  atrSignals(mk(rows), 1, 14, 12, { why: (t, m) => w2.set(rel(t), m) });
+  assert.match(w2.get(5) ?? "", /made the top -> wait/);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

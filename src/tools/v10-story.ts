@@ -4,7 +4,7 @@
  *   1 = OI's low (the build-up starts) · PEAK = OI's peak · 3 = the entry (first red candle with OI down after the peak)
  *
  *   npx tsx src/tools/v10-story.ts --symbol SUIUSDT --from "2026-10-02 22:00" --to "2026-10-03 03:00"
- *   options: --entry atr|atrFrozen|oiPeak (default atr)  --window 12 (RANK 1 hours)  --atrfrom "2026-10-02 23:00" (freeze the ATR at that candle; default = the
+ *   options: --entry atr|atrFrozen|oiPeak (default atr; atr / atrFrozen print why each candle was not the entry)  --window 12 (RANK 1 hours)  --atrfrom "2026-10-02 23:00" (freeze the ATR at that candle; default = the
  *            window's start) -- prints the 15m ATR(14) per candle and where "close 1 ATR below the high" is reached,
  *            with the live ATR and with the ATR frozen before the move
  */
@@ -33,12 +33,13 @@ async function main(): Promise<void> {
       .map((d) => ({ t: (d.ts as Date).getTime(), high: Number(d.high), low: Number(d.low), close: Number(d.close), oiFirst: Number(d.oiFirst), oiLast: Number(d.oiLast) }));
     const c = candles(bars, 15);
     const entry = arg("entry", "atr") as V10Entry;
-    const sigs = signalsOf(c, win, { entry }).filter((s) => s.t > from && s.t <= to);
+    const whyAt = new Map<number, string[]>();
+    const sigs = signalsOf(c, win, { entry }, (t, m) => { whyAt.set(t, [...(whyAt.get(t) ?? []), m]); }).filter((s) => s.t > from && s.t <= to);
     const marks = new Map<number, string[]>();
     const add = (t: number, m: string): void => { marks.set(t, [...(marks.get(t) ?? []), m]); };
     for (const s of sigs) {
       if (entry === "oiPeak") { add(s.startT, "1️⃣ OI low"); add(s.peakT, "OI PEAK"); }
-      else { add(s.startT + 900_000, "1️⃣ move start"); add(s.peakT, s.side === "SHORT" ? "TOP" : "BOTTOM"); }
+      else { add(s.startT, "1️⃣ OI low"); add(s.peakT, "OI PEAK"); add(s.extremeT + 900_000, s.side === "SHORT" ? "TOP" : "BOTTOM"); }
       add(s.t, `3️⃣ ENTRY ${s.side}`);
     }
     const inRange = c.filter((x) => x.t >= from && x.end <= to);
@@ -59,7 +60,7 @@ async function main(): Promise<void> {
       if (okLive && !firstLive) firstLive = hm(x.end);
       if (okFrozen && !firstFrozen) firstFrozen = hm(x.end);
       const f = (v: number): string => String(+v.toPrecision(6)).padEnd(10);
-      console.log(`${hm(x.t)}  ${f(x.close)} ${sp((100 * (x.close - x.open)) / x.open).padStart(7)} ${sp((100 * (x.oi1 - x.oi0)) / x.oi0).padStart(7)} ${sp((100 * (x.oi1 - oiRef)) / oiRef).padStart(8)}  ${label(x).padEnd(11)}  ${sp((100 * a) / x.open).padStart(7)}  ${f(hi)} ${f(lineLive)}${okLive ? "✓" : " "} ${f(lineFrozen)}${okFrozen ? "✓" : " "}    ${(marks.get(x.end) ?? []).join(" · ")}`);
+      console.log(`${hm(x.t)}  ${f(x.close)} ${sp((100 * (x.close - x.open)) / x.open).padStart(7)} ${sp((100 * (x.oi1 - x.oi0)) / x.oi0).padStart(7)} ${sp((100 * (x.oi1 - oiRef)) / oiRef).padStart(8)}  ${label(x).padEnd(11)}  ${sp((100 * a) / x.open).padStart(7)}  ${f(hi)} ${f(lineLive)}${okLive ? "✓" : " "} ${f(lineFrozen)}${okFrozen ? "✓" : " "}    ${(marks.get(x.end) ?? []).join(" · ")}${entry !== "oiPeak" && !marks.get(x.end)?.some((m) => m.startsWith("3️⃣")) && whyAt.get(x.end) ? `  (no entry: ${whyAt.get(x.end)!.join("; ")})` : ""}`);
     }
     console.log(`\nfirst close 1 ATR below the high (the high counted from the window's start): live ATR ${firstLive || "never"} · frozen ATR ${firstFrozen || "never"}`);
     console.log(`\n(the rule's times are candle CLOSES: "OI low" / "OI PEAK" / "ENTRY" are printed on the candle that closes then)\n`);

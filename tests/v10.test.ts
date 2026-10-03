@@ -164,11 +164,12 @@ async function run(): Promise<void> {
     assert.throws(() => settings({ perUser: { main: { ownTP: 2 } } }), /not a known setting/);
     assert.throws(() => settings({ own: "yes" }), /v10.own/);
     assert.strictEqual(parseV10Settings(undefined, ["main"], SYMS).enabled, false);
-    assert.deepStrictEqual(settings().rule, { entry: "atr" }, "default entry = atr (live ATR)");
-    assert.deepStrictEqual(settings({ entry: "atrFrozen" }).rule, { entry: "atrFrozen" });
+    assert.deepStrictEqual([settings().rule, settings().ownRule], [{ entry: "atrFrozen" }, { entry: "atr" }], "defaults: BTC part atrFrozen, ALT part atr");
+    assert.deepStrictEqual([settings({ entry: "oiPeak", ownEntry: "atrFrozen" }).rule, settings({ entry: "oiPeak", ownEntry: "atrFrozen" }).ownRule], [{ entry: "oiPeak" }, { entry: "atrFrozen" }]);
+    assert.throws(() => settings({ ownEntry: "x" }), /v10.ownEntry/);
     assert.throws(() => settings({ entry: "ATR" }), /v10.entry/);
-    assert.strictEqual(settings().ownR2Minutes, 15, "part 2 R² on 15m closes by default");
-    assert.strictEqual(settings({ ownR2Minutes: 1 }).ownR2Minutes, 1);
+    assert.strictEqual(settings().ownR2Minutes, 1, "part 2 R² on 1-minute returns by default");
+    assert.strictEqual(settings({ ownR2Minutes: 15 }).ownR2Minutes, 15);
     assert.throws(() => settings({ ownR2Minutes: 5 }), /ownR2Minutes/);
     assert.throws(() => settings({ redCandle: true }), /not a known setting/);
     assert.throws(() => settings({ userModes: { main: "LIVE" } }), /"OFF", "PAPER" or "REAL"/);

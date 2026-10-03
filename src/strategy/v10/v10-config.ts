@@ -3,7 +3,8 @@
  *
  *   "v10": {
  *     "enabled": true,
- *     "entry": "atr",             // the entry (Oct 3): "atr" = OI grew with the price (RANK 1), OI is now below its peak,
+ *     "entry": "atrFrozen",       // part 1 (BTC) entry (Oct 3) · "ownEntry": "atr" = part 2 (ALT) entry. Each one of:
+ *                                 //   "atr" = OI grew with the price (RANK 1), OI is now below its peak,
  *                                 //   the 15m candle closes 1 ATR back from the top made by an earlier candle ·
  *                                 //   "atrFrozen" = the same with the ATR from the move's start ·
  *                                 //   "oiPeak" = OI low -> OI peak -> the first red candle with OI down
@@ -17,7 +18,7 @@
  *     "btc": true,                // part 1 "V10 · BTC": BTC's top / bottom -> the alts that moved most WITH BTC
  *     "own": false,               // part 2 "V10 · ALT": an alt's OWN top / bottom (same 15m DC + OI rule + RANK 1, on the
  *                                 //   alt's own data) when it moved ON ITS OWN (BTC explains < half, or went the other way)
- *     "ownR2Minutes": 15,          // part 2: "moved on its own" = the R2 with BTC on 15m closes (15) or 1-minute returns (1)
+ *     "ownR2Minutes": 1,           // part 2: "moved on its own" = the R2 with BTC on 15m closes (15) or 1-minute returns (1)
  *     "ownSlPct": 1, "ownTpPct": 2,  // SL / TP % for part 2 (its moves run further: tested best at 1 / 2)
  *     "userModes": { "main": "PAPER", "karo": "OFF", "artak": "OFF" },   // OFF | PAPER | REAL
  *     "perUser": { "karo": { "short": true, "long": false, "slPct": 1, "tpPct": 1, "maxOpen": 3,
@@ -42,8 +43,9 @@ export interface V10UserRules {
 
 export interface V10Settings {
   enabled: boolean;
-  /** the entry rule (same for every user: the signals are shared) */
+  /** the entry rule of part 1 (BTC's signal) and of part 2 (the alt's own) -- same for every user: the signals are shared */
   rule: V10Rule;
+  ownRule: V10Rule;
   short: boolean;
   long: boolean;
   slPct: number;
@@ -76,11 +78,11 @@ export function rulesFor(s: V10Settings, userId: string): V10UserRules {
 const isNum = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
 export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V10Settings {
-  const off: V10Settings = { enabled: false, rule: { entry: "atr" }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 15, symbols: [], userModes: new Map(), perUser: new Map() };
+  const off: V10Settings = { enabled: false, rule: { entry: "atrFrozen" }, ownRule: { entry: "atr" }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 1, symbols: [], userModes: new Map(), perUser: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`"v10" must be an object`);
   const v = raw as Record<string, unknown>;
-  const KNOWN = ["enabled", "entry", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
+  const KNOWN = ["enabled", "entry", "ownEntry", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
   for (const k of Object.keys(v)) if (!KNOWN.includes(k)) throw new Error(`"v10.${k}" is not a known setting (${KNOWN.join(", ")}) -- check the spelling`);
   if (typeof v.enabled !== "boolean") throw new Error(`"v10.enabled" must be true or false`);
   if (!v.enabled) return off;
@@ -97,8 +99,12 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
     return v[k] as number;
   };
   const ENTRIES: V10Entry[] = ["atr", "atrFrozen", "oiPeak"];
-  if (v.entry !== undefined && !ENTRIES.includes(v.entry as V10Entry)) throw new Error(`"v10.entry" must be ${ENTRIES.map((e) => `"${e}"`).join(", ")} (got ${JSON.stringify(v.entry)})`);
-  const rule: V10Rule = { entry: (v.entry as V10Entry | undefined) ?? "atr" };
+  const entryOf = (k: string, d: V10Entry): V10Rule => {
+    if (v[k] !== undefined && !ENTRIES.includes(v[k] as V10Entry)) throw new Error(`"v10.${k}" must be ${ENTRIES.map((e) => `"${e}"`).join(", ")} (got ${JSON.stringify(v[k])})`);
+    return { entry: (v[k] as V10Entry | undefined) ?? d };
+  };
+  // Oct 3 tests: BTC part best with the frozen ATR, the alt's own part with Johnny's ATR rule
+  const rule = entryOf("entry", "atrFrozen"), ownRule = entryOf("ownEntry", "atr");
   const short = bool("short", true), long = bool("long", false);
   const slPct = num("slPct", 1, 0.1, 10, "a percent between 0.1 and 10");
   const tpPct = num("tpPct", 1, 0.1, 20, "a percent between 0.1 and 20");
@@ -108,7 +114,7 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
   const btc = bool("btc", true), own = bool("own", false);
   const ownSlPct = num("ownSlPct", 1, 0.1, 10, "a percent between 0.1 and 10");
   const ownTpPct = num("ownTpPct", 2, 0.1, 20, "a percent between 0.1 and 20");
-  const ownR2Minutes = num("ownR2Minutes", 15, 1, 15, "1 or 15");
+  const ownR2Minutes = num("ownR2Minutes", 1, 1, 15, "1 or 15");
   if (ownR2Minutes !== 1 && ownR2Minutes !== 15) throw new Error(`"v10.ownR2Minutes" must be 1 or 15 (got ${ownR2Minutes})`);
 
   let symbols = collectedSymbols.filter((s) => s !== BTC);
@@ -155,5 +161,5 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
       perUser.set(userId, r);
     }
   }
-  return { enabled: true, rule, short, long, slPct, tpPct, picks, rankWindowHours, btc, own, ownSlPct, ownTpPct, ownR2Minutes, symbols, userModes, perUser };
+  return { enabled: true, rule, ownRule, short, long, slPct, tpPct, picks, rankWindowHours, btc, own, ownSlPct, ownTpPct, ownR2Minutes, symbols, userModes, perUser };
 }

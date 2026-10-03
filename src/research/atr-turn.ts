@@ -18,7 +18,7 @@ export interface AtrSignal extends PeakSignal {
   atr: number; backPct: number;
 }
 
-export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: number, opts: { atr?: "live" | "frozen" } = {}): AtrSignal[] {
+export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: number, opts: { atr?: "live" | "frozen"; why?: (t: number, reason: string) => void } = {}): AtrSignal[] {
   const atr = atrBefore(c, n), out: AtrSignal[] = [];
   const accepted: Array<{ t: number; oi: number }> = [];
   let dir: "UP" | "DOWN" | null = null, ext = -1, start = -1, low = -1, peak = -1, signaled = false;
@@ -32,14 +32,27 @@ export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: 
     const makesExtreme = top ? x.high >= c[ext].high : x.low <= c[ext].low;          // for the moves (as oi-peak.ts)
     const newTop = top ? x.high > c[ext].high : x.low < c[ext].low;                   // this candle made a higher top
 
-    // ── the entry, at this candle's close ──
+    // ── the entry, at this candle's close (why: the story tool's "why no entry", nothing else) ──
+    const why = (m: string): void => opts.why?.(x.end, m);
+    const W = top ? "the top" : "the bottom";
+    if (signaled) why("already entered in this move");
+    else if (newTop) why(`this candle made ${W} -> wait for the next one`);
+    else if (!(peak > low)) why("no OI growth in this move yet");
+    else if (ext < low) why(`${W} came before the OI growth`);
     if (!signaled && !newTop && peak > low && ext >= low) {
       const lowOi = c[low].oi1, peakOi = c[peak].oi1;
       const build = (100 * (peakOi - lowOi)) / lowOi;
       const priceMoved = top ? c[peak].close > c[low].close : c[peak].close < c[low].close;
       const back = top ? c[ext].high - x.close : x.close - c[ext].low;
+      const pc = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+      if (!(build > 0)) why("no OI growth in this move yet");
+      else if (!priceMoved) why(`OI grew ${pc(build)} but the price did not go ${top ? "up" : "down"} with it`);
+      else if (!(x.oi1 < peakOi)) why(`OI is not below its peak (growth ${pc(build)})`);
+      else if (!(back >= k * a)) why(`only ${pc((100 * back) / (top ? c[ext].high : c[ext].low))} back from ${W}, 1 ATR = ${pc((100 * a) / x.close)}`);
       if (build > 0 && priceMoved && x.oi1 < peakOi && back >= k * a) {
         const before = accepted.filter((p) => p.t < x.end && p.t >= x.end - windowH * 3_600_000);
+        if (before.length === 0) why(`no earlier move in ${windowH}h to compare (RANK 1)`);
+        else if (!before.every((p) => p.oi < build)) why(`not RANK 1: OI growth ${pc(build)}, an earlier move had ${pc(Math.max(...before.map((p) => p.oi)))} in ${windowH}h`);
         if (before.length > 0 && before.every((p) => p.oi < build)) {
           const extreme = top ? c[ext].high : c[ext].low;
           out.push({
