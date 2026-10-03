@@ -18,11 +18,15 @@ export interface AtrSignal extends PeakSignal {
   atr: number; backPct: number;
 }
 
-export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: number, opts: { atr?: "live" | "frozen"; growth?: "afterLow" | "biggest"; why?: (t: number, reason: string) => void } = {}): AtrSignal[] {
+export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: number, opts: { atr?: "live" | "frozen"; growth?: "afterLow" | "biggest"; topCandleOi?: boolean; why?: (t: number, reason: string) => void } = {}): AtrSignal[] {
   // growth "afterLow" (default): the OI rise after OI's lowest point in the move · "biggest" (Johnny Oct 3, SUI): the
   // biggest OI rise anywhere in the move during which the price also went the move's way -- OI may fall to a new low
   // later (shorts liquidated on the way up), the growth that happened still counts
   const big = opts.growth === "biggest";
+  // Johnny Oct 3: the candle that MADE the top and already closed 1 ATR below it must have OI FALLING inside it (the
+  // shorts' liquidity collected at the very top); else that top gives no entry. The entry is still the next candle.
+  const topOi = opts.topCandleOi !== false;
+  let wick = -1, wickOiUp = false;   // the top candle that closed 1 ATR back, and whether its OI went up
   const atr = atrBefore(c, n), out: AtrSignal[] = [];
   const accepted: Array<{ t: number; oi: number }> = [];
   let dir: "UP" | "DOWN" | null = null, ext = -1, start = -1, low = -1, peak = -1, signaled = false;
@@ -48,9 +52,10 @@ export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: 
     const W = top ? "the top" : "the bottom";
     if (signaled) why("already entered in this move");
     else if (newTop) why(`this candle made ${W} -> wait for the next one`);
+    else if (topOi && wick === ext && wickOiUp) why(`the candle that made ${W} closed 1 ATR back but its OI went UP -> no entry from this ${top ? "top" : "bottom"}`);
     else if (!(P > L && L >= 0)) why("no OI growth in this move yet");
     else if (ext < L) why(`${W} came before the OI growth`);
-    if (!signaled && !newTop && L >= 0 && P > L && ext >= L) {
+    if (!signaled && !newTop && !(topOi && wick === ext && wickOiUp) && L >= 0 && P > L && ext >= L) {
       const lowOi = c[L].oi1, peakOi = c[P].oi1;
       const build = (100 * (peakOi - lowOi)) / lowOi;
       const priceMoved = top ? c[P].close > c[L].close : c[P].close < c[L].close;
@@ -84,7 +89,11 @@ export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: 
     else if (x.oi1 > c[peak].oi1) peak = i;
     grow(i, top);
     // ── the moves: the 15m directional change with the OI rule (as src/research/oi-peak.ts) ──
-    if (makesExtreme) ext = i;
+    if (makesExtreme) {
+      ext = i;
+      const self = top ? x.high - x.close : x.close - x.low;     // this candle's close back from its own top
+      wick = self >= k * a ? i : -1; wickOiUp = x.oi1 >= x.oi0;
+    }
     // Johnny: the candle that made the top itself does not end the move -- wait for the next candle
     if (newTop) continue;
     const back = top ? c[ext].high - x.close : x.close - c[ext].low;
@@ -92,7 +101,7 @@ export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: 
     const moveOi = (ext === i ? x.oi0 : c[ext].oi1) - c[start].oi1, candleOi = x.oi1 - x.oi0;
     if (!(moveOi === 0 || (candleOi !== 0 && Math.sign(candleOi) === -Math.sign(moveOi)))) continue;
     accepted.push({ t: x.end, oi: Math.abs((100 * moveOi) / c[start].oi1) });
-    start = ext; ext = i; dir = top ? "DOWN" : "UP"; signaled = false;
+    start = ext; ext = i; dir = top ? "DOWN" : "UP"; signaled = false; wick = -1;
     low = Math.max(0, start - 1); peak = low;
     for (let j = low; j <= i; j++) { if (c[j].oi1 < c[low].oi1) { low = j; peak = j; } else if (c[j].oi1 > c[peak].oi1) peak = j; }
     mn = Math.max(0, start - 1); bl = bp = -1;

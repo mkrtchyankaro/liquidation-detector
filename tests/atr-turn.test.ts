@@ -112,5 +112,17 @@ scenario("SUI (Oct 3): OI grows with the price, then falls BELOW where it starte
   assert.ok(Math.abs(s[0].buildOiPct - 0.8) < 0.05, `growth ${s[0].buildOiPct}`);
 });
 
+scenario("the candle that MADE the top and closed 1 ATR back must have OI DOWN inside it; with OI up that top gives no entry", () => {
+  const up: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, +3, +1.0], [-0.2, -1], [-0.4, -2], [-0.4, -2]];
+  assert.strictEqual(after(atrSignals(mk(up), 1, 14, 12)).length, 0, "top candle OI up -> no entry");
+  const why = new Map<number, string>();
+  atrSignals(mk(up), 1, 14, 12, { why: (t, m) => why.set(rel(t), m) });
+  assert.match(why.get(6) ?? "", /OI went UP/);
+  assert.strictEqual(after(atrSignals(mk(up), 1, 14, 12, { topCandleOi: false })).length, 1, "without the rule it was an entry");
+  const down: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, -3, +1.0], [-0.2, +1], [-0.4, -2], [-0.4, -2]];
+  const s = after(atrSignals(mk(down), 1, 14, 12));
+  assert.strictEqual(s.length, 1); assert.strictEqual(rel(s[0].t), 6, "top candle OI down -> entry at the NEXT candle, whose own OI may go up");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);

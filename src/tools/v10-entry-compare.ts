@@ -10,6 +10,7 @@
  * net R = R - 2 x fee / SL%.
  *
  *   npx tsx src/tools/v10-entry-compare.ts --pct 1 --tp 2
+ *   "noTopOi" = WITHOUT the rule "the candle that made the top and closed 1 ATR back must have OI down" (as before Oct 3)
  *   "big" = the OI growth measured as the biggest OI rise in the move with the price going the same way (SUI, Oct 3)
  *   --by-coin  every coin's result (A and B apart, worst first; * = a new coin, data since Oct 1)  --new  part B on the new coins too
  *   options: --own 1|15 (part 2 R2 on 1m returns, default / 15m closes)  --window 12  --picks 3  --fee 0.05  --side SHORT|LONG  --without AVAX  --list atr  (prints that rule's trades)
@@ -29,9 +30,10 @@ const DAY = 86_400_000;
 
 const RULES: Array<[string, V10Rule]> = [
   ["atr", { entry: "atr" }],
+  ["atr noTopOi", { entry: "atr", topCandleOi: false }],
   ["atr big", { entry: "atr", growth: "biggest" }],
   ["atrFrozen", { entry: "atrFrozen" }],
-  ["atrFrozen big", { entry: "atrFrozen", growth: "biggest" }],
+  ["atrFrozen noTopOi", { entry: "atrFrozen", topCandleOi: false }],
   ["oiPeak", { entry: "oiPeak" }],
 ];
 
