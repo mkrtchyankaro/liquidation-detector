@@ -6,8 +6,8 @@ import type { V10SignalDoc, V10TradeDoc } from "./v10-repository";
  * V10 messages (plain text). Header "V10 · BTC" (part 1, BTC-led) or "V10 · ALT" (part 2, the alt's own move) on every
  * message so it is never mixed up with V9 or with the other part.
  * 🔻 SHORT entry · 🔺 LONG entry · ✅ TP · ❌ SL · ⚪ other close · ⚠️ not opened. $ figures use THIS user's trade.
- * The story = Johnny's 3 points, 15m, UTC: "atr" entries -- the move with OI up -> the close 1 ATR back from the top
- * -> that candle with OI down; "oiPeak" -- OI up -> OI falls after its peak -> the first red candle with OI down.
+ * The story = Johnny's 3 points, 15m, UTC, mirrored for LONG: "atr" -- OI grew with the price -> OI below its peak ->
+ * the close 1 ATR back from the top (bottom); "oiPeak" -- OI up -> OI falls after its peak -> the first red (green) candle.
  */
 const SEP = "------------------------------";
 const utc = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
@@ -26,20 +26,19 @@ const t15 = (ms: number): string => dhm(ms);
 /** Johnny's 3 points, short, UTC (Oct 3). `who` = whose candles (BTC or the alt). */
 function threePoints(a: V10SignalDoc["turn"], who: string, rankH: number): string[] {
   const top = a.side === "SHORT";
-  const colour = a.label === "NEW LONGS" || a.label === "SHORTS OUT" ? "կանաչ" : "կարմիր";
   if (a.atr !== undefined) {
-    // the ATR entry: the move start -> its top, then the candle that closed 1 ATR back with OI down
+    // the ATR entry (Johnny Oct 3): OI grew with the price -> OI below its peak -> the close 1 ATR back from the top
     const atrPct = (100 * a.atr) / a.extreme;
     return [
-      `1️⃣ ${t15(a.moveStartT)} → ${hm(a.peakT)} · ${who} ${top ? "⬆️" : "⬇️"} ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
-      `2️⃣ ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : a.backPct ?? NaN)} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "atrFrozen" ? ", շարժման սկզբից" : ""}) · OI-ի գագաթից ${sp(a.fromPeakOiPct)}`,
-      `3️⃣ ${hm(a.candleEnd - W)} ${colour} մոմ · OI ${sp(a.candleOiPct)} → entry`,
+      `1️⃣ ${t15(a.moveStartT)} → ${hm(a.extremeT + W)} · ${who} ${top ? "⬆️" : "⬇️"} ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
+      `2️⃣ OI-ի գագաթից հետո OI ${sp(a.fromPeakOiPct)}`,
+      `3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : a.backPct ?? NaN)} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "atrFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
     ];
   }
   return [
     `1️⃣ ${t15(a.moveStartT)} → ${hm(a.peakT)} · ${who} ${top ? "⬆️" : "⬇️"} ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
     `2️⃣ OI-ի գագաթից հետո OI ${sp(a.fromPeakOiPct)}`,
-    `3️⃣ ${hm(a.candleEnd - W)} ${colour} մոմ · OI ${sp(a.candleOiPct)} → entry`,
+    `3️⃣ ${hm(a.candleEnd - W)} ${top ? "կարմիր" : "կանաչ"} մոմ · OI ${sp(a.candleOiPct)} → entry`,
   ];
 }
 

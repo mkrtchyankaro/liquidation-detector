@@ -107,7 +107,7 @@ export class V10LiveService {
     await this.ensureIndexes();
     const s = this.settings;
     if (!s.enabled) log.warn(`[V10_MONITOR_ONLY] v10 is disabled -- no new signals; open REAL V10 trades are still watched (users: ${this.users().map((u) => u.userId).join(",") || "none"})`);
-    log.warn(`[V10_READY] entry=${s.rule.entry}${s.rule.redCandle ? "+red" : ""} ownR2=${s.ownR2Minutes}m short=${s.short} long=${s.long} sl=${s.slPct}% tp=${s.tpPct}% picks=${s.picks} rank=${s.rankWindowHours}h alts=${s.symbols.length} users=${this.users().map((u) => {
+    log.warn(`[V10_READY] entry=${s.rule.entry} ownR2=${s.ownR2Minutes}m short=${s.short} long=${s.long} sl=${s.slPct}% tp=${s.tpPct}% picks=${s.picks} rank=${s.rankWindowHours}h alts=${s.symbols.length} users=${this.users().map((u) => {
       const r = rulesFor(s, u.userId);
       return `${u.userId}:${u.mode}(${[r.short ? "S" : "", r.long ? "L" : ""].join("") || "none"},btc:${r.btc ? `sl${r.slPct}/tp${r.tpPct}` : "off"},alt:${r.own ? `sl${r.ownSlPct}/tp${r.ownTpPct}` : "off"}${r.maxOpen ? `,max${r.maxOpen}` : ""})`;
     }).join(" ") || "(none)"}`);

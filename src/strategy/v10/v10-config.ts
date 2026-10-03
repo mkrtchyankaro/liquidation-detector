@@ -3,10 +3,10 @@
  *
  *   "v10": {
  *     "enabled": true,
- *     "entry": "atr",             // the entry (Oct 3): "atr" = the 15m candle closes 1 ATR back from the top with OI down,
- *                                 //   after a RANK 1 move built with OI up · "atrFrozen" = the same with the ATR from the
- *                                 //   move's start · "oiPeak" = OI low -> OI peak -> the first red candle with OI down
- *     "redCandle": false,         // atr / atrFrozen: the candle must also be red at a top (green at a bottom)
+ *     "entry": "atr",             // the entry (Oct 3): "atr" = OI grew with the price (RANK 1), OI is now below its peak,
+ *                                 //   the 15m candle closes 1 ATR back from the top made by an earlier candle ·
+ *                                 //   "atrFrozen" = the same with the ATR from the move's start ·
+ *                                 //   "oiPeak" = OI low -> OI peak -> the first red candle with OI down
  *     "short": true,              // BTC top (15m DC + OI rule, RANK 1)  -> SHORT the alts that rose most with BTC
  *     "long": false,              // BTC bottom (the mirror)             -> LONG the alts that fell most with BTC
  *     "slPct": 1,                 // SL this % from the entry (against the trade)
@@ -76,11 +76,11 @@ export function rulesFor(s: V10Settings, userId: string): V10UserRules {
 const isNum = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
 export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V10Settings {
-  const off: V10Settings = { enabled: false, rule: { entry: "atr", redCandle: false }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 15, symbols: [], userModes: new Map(), perUser: new Map() };
+  const off: V10Settings = { enabled: false, rule: { entry: "atr" }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 15, symbols: [], userModes: new Map(), perUser: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`"v10" must be an object`);
   const v = raw as Record<string, unknown>;
-  const KNOWN = ["enabled", "entry", "redCandle", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
+  const KNOWN = ["enabled", "entry", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
   for (const k of Object.keys(v)) if (!KNOWN.includes(k)) throw new Error(`"v10.${k}" is not a known setting (${KNOWN.join(", ")}) -- check the spelling`);
   if (typeof v.enabled !== "boolean") throw new Error(`"v10.enabled" must be true or false`);
   if (!v.enabled) return off;
@@ -98,8 +98,7 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
   };
   const ENTRIES: V10Entry[] = ["atr", "atrFrozen", "oiPeak"];
   if (v.entry !== undefined && !ENTRIES.includes(v.entry as V10Entry)) throw new Error(`"v10.entry" must be ${ENTRIES.map((e) => `"${e}"`).join(", ")} (got ${JSON.stringify(v.entry)})`);
-  const rule: V10Rule = { entry: (v.entry as V10Entry | undefined) ?? "atr", redCandle: bool("redCandle", false) };
-  if (rule.redCandle && rule.entry === "oiPeak") throw new Error(`"v10.redCandle" is for "atr" / "atrFrozen" ("oiPeak" always waits for a red candle)`);
+  const rule: V10Rule = { entry: (v.entry as V10Entry | undefined) ?? "atr" };
   const short = bool("short", true), long = bool("long", false);
   const slPct = num("slPct", 1, 0.1, 10, "a percent between 0.1 and 10");
   const tpPct = num("tpPct", 1, 0.1, 20, "a percent between 0.1 and 20");

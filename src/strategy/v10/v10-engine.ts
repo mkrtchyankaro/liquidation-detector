@@ -29,20 +29,19 @@ export type V10Side = "SHORT" | "LONG";
 
 /**
  * Which entry (users.config.json "v10.entry", Oct 3):
- *   "atr"       the 15m candle CLOSES 1 ATR back from the top, with OI falling, after a RANK 1 move built with OI up
- *               (src/research/atr-turn.ts) -- the ATR known before that candle
+ *   "atr"       OI grew with the price (RANK 1), OI is now below its peak, and the 15m candle CLOSES 1 ATR back from
+ *               the top made by an earlier candle (src/research/atr-turn.ts) -- the ATR known before that candle
  *   "atrFrozen" the same, with the ATR of the moment the move began
  *   "oiPeak"    OI low -> OI peak (RANK 1) -> the first red candle with OI down, no ATR distance (src/research/oi-peak.ts)
- * redCandle (atr / atrFrozen only): the candle must also be red at a top / green at a bottom.
  */
 export type V10Entry = "atr" | "atrFrozen" | "oiPeak";
-export interface V10Rule { entry: V10Entry; redCandle: boolean }
+export interface V10Rule { entry: V10Entry }
 
 /** every signal of these candles by the rule (the backtest and live both call this) */
 export function signalsOf(c: Parameters<typeof oiPeakSignals>[0], rankWindowHours: number, rule: V10Rule): Array<PeakSignal | AtrSignal> {
   return rule.entry === "oiPeak"
     ? oiPeakSignals(c, V10_K, V10_ATR_N, rankWindowHours)
-    : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "atrFrozen" ? "frozen" : "live", red: rule.redCandle });
+    : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "atrFrozen" ? "frozen" : "live" });
 }
 
 /** a RANK 1 signal of one symbol (BTC for part 1, the alt itself for part 2) */
@@ -58,7 +57,7 @@ export interface V10Turn {
   /** RANK 1 against how many earlier moves */
   prior: number;
   /** the ATR entries only: the ATR used and how far (%) the close came back from the extreme; the picks' window end */
-  atr?: number; backPct?: number; windowEndT?: number;
+  atr?: number; backPct?: number;
   /** which entry made it */
   entry?: V10Entry;
 }
@@ -71,7 +70,7 @@ const toTurn = (s: PeakSignal | AtrSignal, entry: V10Entry): V10Turn => ({
   candleEnd: s.t, side: s.side, price: s.price, candleOiPct: s.candleOiPct, label: s.label,
   moveStartT: s.startT, peakT: s.peakT, moveOiPct: s.buildOiPct,
   extreme: s.extreme, extremeT: s.extremeT, movePct: s.movePct, fromPeakOiPct: s.fromPeakOiPct, prior: s.prior,
-  ...("atr" in s ? { atr: s.atr, backPct: s.backPct, windowEndT: s.windowEndT } : {}), entry,
+  ...("atr" in s ? { atr: s.atr, backPct: s.backPct } : {}), entry,
 });
 
 /** The signal of `bars` (any symbol) at `candleEnd` by the rule (RANK 1), else null. */
@@ -84,12 +83,12 @@ export function rank1At(bars: readonly MinBar[], candleEnd: number, rankWindowHo
 /** BTC's signal at `candleEnd` (part 1) */
 export const btcRank1At = rank1At;
 
-/** PART 1: the alts that moved most with BTC over BTC's move (oiPeak: OI's low -> the entry; atr: the move's start -> its top). `closes` = each alt's minute closes. */
+/** PART 1: the alts that moved most with BTC over BTC's move from OI's low (the build-up's start) to the entry. `closes` = each alt's minute closes. */
 export function pickAlts(turn: V10Turn, btcCloses: ReadonlyMap<number, number>, closes: ReadonlyMap<string, ReadonlyMap<number, number>>, picks: number): V10Pick[] {
   const up = turn.side === "SHORT"; // a SHORT ends an UP move
   const rows: Array<Omit<V10Pick, "rank">> = [];
   for (const [symbol, m] of closes) {
-    const w = coinInWindow(m, btcCloses, turn.moveStartT, turn.windowEndT ?? turn.candleEnd, up);
+    const w = coinInWindow(m, btcCloses, turn.moveStartT, turn.candleEnd, up);
     const price = priceAt(m, turn.candleEnd);
     if (Number.isFinite(w.x) && Number.isFinite(w.follow) && price > 0) rows.push({ symbol, x: w.x, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, price });
   }
@@ -102,7 +101,8 @@ export function pickAlts(turn: V10Turn, btcCloses: ReadonlyMap<number, number>, 
  *  r2Minutes (Oct 3): the R2 on 15m closes (Johnny: what the chart shows) or on 1-minute returns (the old way). */
 export interface V10OwnMove { how: Exclude<Own, "WITH BTC">; follow: number; coinPct: number; btcPct: number; r2Minutes?: number }
 export function ownMove(turn: V10Turn, altCloses: ReadonlyMap<number, number>, btcCloses: ReadonlyMap<number, number>, r2Minutes: number): V10OwnMove | null {
-  const w = coinInWindow(altCloses, btcCloses, turn.moveStartT, turn.peakT, undefined, r2Minutes);
+  // from where the build-up started (OI's low) to the entry (Johnny Oct 3: look from there to the entry)
+  const w = coinInWindow(altCloses, btcCloses, turn.moveStartT, turn.candleEnd, undefined, r2Minutes);
   // a move too short to measure (fewer than 10 steps) is not "own"
   if (!Number.isFinite(w.follow) || !Number.isFinite(w.pct)) return null;
   const how = ownness(w.follow, w.pct, w.btcPct);
