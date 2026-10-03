@@ -13,6 +13,9 @@
  *   "noTopOi" = WITHOUT the rule "the candle that made the top and closed 1 ATR back must have OI down" (as before Oct 3)
  *   "big" = the OI growth measured as the biggest OI rise in the move with the price going the same way (SUI, Oct 3)
  *   --by-coin  every coin's result (A and B apart, worst first; * = a new coin, data since Oct 1)  --new  part B on the new coins too
+ *   --sl extreme --rr 2   SL at the move's extreme (each coin's own high since the build-up began), TP 2 x that risk; net R
+ *                         uses each trade's own risk for the fees
+ *   "noRed" = without "the entry candle must close red after a top candle that closed 1 ATR back"
  *   options: --own 1|15 (part 2 R2 on 1m returns, default / 15m closes)  --window 12  --picks 3  --fee 0.05  --side SHORT|LONG  --without AVAX  --list atr  (prints that rule's trades)
  */
 import "dotenv/config";
@@ -34,16 +37,26 @@ const RULES: Array<[string, V10Rule]> = [
   ["atr big", { entry: "atr", growth: "biggest" }],
   ["atrFrozen", { entry: "atrFrozen" }],
   ["atrFrozen noTopOi", { entry: "atrFrozen", topCandleOi: false }],
+  ["atr noRed", { entry: "atr", redAfterTop: false }],
+  ["atrFrozen noRed", { entry: "atrFrozen", redAfterTop: false }],
   ["oiPeak", { entry: "oiPeak" }],
 ];
 
-interface Cand { t: number; sym: string; src: "A" | "B"; side: "SHORT" | "LONG"; entry: number; rank: number }
-interface Done extends Cand { tr: Trade; net: number }
+interface Cand { t: number; sym: string; src: "A" | "B"; side: "SHORT" | "LONG"; entry: number; rank: number; ext: number }
+interface Done extends Cand { tr: Trade; net: number; risk: number }
+/** the coin's own extreme (highest high for a SHORT / lowest low for a LONG) between two times, from its minute bars */
+function extremeOf(bars: readonly MinBar[], from: number, to: number, short: boolean): number {
+  let e = short ? -Infinity : Infinity;
+  for (const b of bars) { if (b.t < from) continue; if (b.t >= to) break; e = short ? Math.max(e, b.high) : Math.min(e, b.low); }
+  return e;
+}
 
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const pct = Number(arg("pct", "1")), tpPct = Number(arg("tp", arg("pct", "1"))), win = Number(arg("window", "12"));
   const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "1")), withNew = argv.includes("--new"), byCoin = argv.includes("--by-coin");
+  // --sl extreme (Johnny Oct 3): SL at the move's extreme (the coin's own high since the build-up began), TP = --rr x that risk
+  const slExt = arg("sl", "pct") === "extreme", rrExt = Number(arg("rr", "2"));
   const without = arg("without", "AVAX").toUpperCase().split(",").map((x) => x.trim()).filter(Boolean);
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
@@ -63,40 +76,45 @@ async function main(): Promise<void> {
     const btcC = candles(btc, V10_TF_MIN), altC = new Map([...coins].map(([s, c]) => [s, candles(c.bars, V10_TF_MIN)]));
     const short = (s: string): string => s.replace(/USDT$/, "");
 
-    console.log(`V10 ENTRIES COMPARED · ${side} · SL ${pct}% · TP ${tpPct}% · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`);
+    console.log(`V10 ENTRIES COMPARED · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`);
     console.log(`A = BTC's signal -> ${npicks} picks · B = the alt's own move (${withNew ? "ALL alts, the new ones too" : "old alts only"}, R² on ${own}m) · net R at $10 risk\n`);
-    const head = `${"rule".padEnd(14)} ${"part".padEnd(10)} trades   TP   SL open  win   net R      $  hold`;
+    const head = `${"rule".padEnd(18)} ${"part".padEnd(10)} trades   TP   SL open  win   net R      $  hold`;
     console.log(head);
     for (const [name, rule] of RULES) {
       const cands: Cand[] = [];
       const btcSigs = signalsOf(btcC, win, rule).filter((s) => s.side === side);
       for (const s of btcSigs) {
         const turn = { moveStartT: s.startT, candleEnd: s.t, side: s.side } as V10Turn;
-        for (const p of pickAlts(turn, btcMap, closes, npicks)) cands.push({ t: s.t, sym: p.symbol, src: "A", side: s.side, entry: p.price, rank: p.rank });
+        for (const p of pickAlts(turn, btcMap, closes, npicks))
+          cands.push({ t: s.t, sym: p.symbol, src: "A", side: s.side, entry: p.price, rank: p.rank, ext: extremeOf(coins.get(p.symbol)!.bars, s.startT, s.t, s.side === "SHORT") });
       }
       for (const [sym, c] of coins) {
         if (!c.old && !withNew) continue;
         for (const s of signalsOf(altC.get(sym)!, win, rule).filter((x) => x.side === side)) {
           if (!ownMove({ moveStartT: s.startT, candleEnd: s.t } as V10Turn, c.map, btcMap, own)) continue;
-          cands.push({ t: s.t, sym, src: "B", side: s.side, entry: s.price, rank: 0 });
+          cands.push({ t: s.t, sym, src: "B", side: s.side, entry: s.price, rank: 0, ext: s.extreme });
         }
       }
       cands.sort((a, b) => a.t - b.t || (a.src === "A" ? -1 : 1));
       const busy = new Map<string, number>(), done: Done[] = [];
       for (const c of cands) {
         if ((busy.get(c.sym) ?? 0) > c.t) continue;
-        const sl = c.side === "SHORT" ? c.entry * (1 + pct / 100) : c.entry * (1 - pct / 100);
-        const tr = simTrade(coins.get(c.sym)!.bars, c.t, c.entry, sl, tpPct / pct, c.side === "SHORT" ? "DOWN" : "UP");
+        const sl = slExt ? c.ext : c.side === "SHORT" ? c.entry * (1 + pct / 100) : c.entry * (1 - pct / 100);
+        const risk = (100 * Math.abs(sl - c.entry)) / c.entry;
+        if (!(risk > 0) || (c.side === "SHORT" ? sl <= c.entry : sl >= c.entry)) continue;   // the extreme must be beyond the entry
+        const tr = simTrade(coins.get(c.sym)!.bars, c.t, c.entry, sl, slExt ? rrExt : tpPct / pct, c.side === "SHORT" ? "DOWN" : "UP");
         busy.set(c.sym, tr.exitT);
-        done.push({ ...c, tr, net: tr.r - (2 * fee) / pct });
+        done.push({ ...c, tr, risk, net: tr.r - (2 * fee) / risk });
       }
       const line = (part: string, l: Done[]): string => {
         const tp = l.filter((d) => d.tr.exit === "TP").length, sl = l.filter((d) => d.tr.exit === "SL").length, op = l.length - tp - sl;
         const n = l.reduce((a, d) => a + d.net, 0);
         const hrs = l.filter((d) => d.tr.exit !== "OPEN").map((d) => (d.tr.exitT - d.t) / 3_600_000).sort((a, b) => a - b);
-        return `${name.padEnd(14)} ${part.padEnd(10)} ${String(l.length).padStart(6)} ${String(tp).padStart(4)} ${String(sl).padStart(4)} ${String(op).padStart(4)} ${(tp + sl ? Math.round((100 * tp) / (tp + sl)) : 0).toString().padStart(3)}% ${sp(n).padStart(7)} ${("$" + (n * 10).toFixed(0)).padStart(6)} ${hrs.length ? hrs[Math.floor(hrs.length / 2)].toFixed(1) + "h" : "-"}`;
+        const rs = l.map((d) => d.risk).sort((a, b) => a - b);
+        const riskTxt = slExt && rs.length ? ` · SL median ${rs[Math.floor(rs.length / 2)].toFixed(2)}% (${rs[0].toFixed(2)}–${rs[rs.length - 1].toFixed(2)})` : "";
+        return `${name.padEnd(18)} ${part.padEnd(10)} ${String(l.length).padStart(6)} ${String(tp).padStart(4)} ${String(sl).padStart(4)} ${String(op).padStart(4)} ${(tp + sl ? Math.round((100 * tp) / (tp + sl)) : 0).toString().padStart(3)}% ${sp(n).padStart(7)} ${("$" + (n * 10).toFixed(0)).padStart(6)} ${hrs.length ? hrs[Math.floor(hrs.length / 2)].toFixed(1) + "h" : "-"}${riskTxt}`;
       };
-      console.log(`${name.padEnd(14)} BTC signals: ${btcSigs.length}`);
+      console.log(`${name.padEnd(18)} BTC signals: ${btcSigs.length}`);
       console.log(line("A (BTC)", done.filter((d) => d.src === "A")));
       console.log(line("B (ALT)", done.filter((d) => d.src === "B")));
       console.log(line(`B w/o ${without.join(",")}`, done.filter((d) => d.src === "B" && !without.includes(short(d.sym)))));

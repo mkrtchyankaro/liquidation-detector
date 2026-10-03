@@ -124,5 +124,13 @@ scenario("the candle that MADE the top and closed 1 ATR back must have OI DOWN i
   assert.strictEqual(s.length, 1); assert.strictEqual(rel(s[0].t), 6, "top candle OI down -> entry at the NEXT candle, whose own OI may go up");
 });
 
+scenario("after a top candle that closed 1 ATR back (OI down), the entry candle must close RED -- a green one waits", () => {
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, -3, +1.0], [+0.1, -1, -0.3], [-0.3, -1], [-0.4, -2]];
+  const s = after(atrSignals(mk(rows), 1, 14, 12));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(rel(s[0].t), 7, "candle 5 is green (opened lower, closed up) -> the entry is the red candle 6");
+  assert.strictEqual(rel(after(atrSignals(mk(rows), 1, 14, 12, { redAfterTop: false }))[0].t), 6, "without the rule: the green candle");
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
