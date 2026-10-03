@@ -1,6 +1,7 @@
 /**
  * V10 ENGINE (Johnny, Oct 2-3 2026) -- pure, live-safe. The SAME functions as the backtest
- * (src/research/oi-peak.ts, src/tools/v10-peak-trades.ts), so live signals are exactly the backtested ones.
+ * (src/research/atr-turn.ts / oi-peak.ts, src/tools/v10-entry-compare.ts), so live signals are exactly the backtested ones.
+ * The entry is chosen in users.config.json "v10.entry" (V10Entry below; default "atr"). The "oiPeak" entry:
  *
  * JOHNNY'S RULE, on 15m candles decided at the candle CLOSE (BTC for part 1, the alt itself for part 2):
  *   1  price goes up and OI goes up -- from OI's lowest point to the OI peak; this build-up is RANK 1 (bigger than every
@@ -15,6 +16,7 @@
  */
 import { candles, coinInWindow, ownness, priceAt, type MinBar, type Own } from "../../research/dc15";
 import { oiPeakSignals, type PeakSignal } from "../../research/oi-peak";
+import { atrSignals, type AtrSignal } from "../../research/atr-turn";
 
 export const V10_TF_MIN = 15;
 export const V10_K = 1;
@@ -24,6 +26,24 @@ export const V10_HISTORY_MS = 10 * 24 * 3_600_000;
 const M = 60_000, W = V10_TF_MIN * M;
 
 export type V10Side = "SHORT" | "LONG";
+
+/**
+ * Which entry (users.config.json "v10.entry", Oct 3):
+ *   "atr"       the 15m candle CLOSES 1 ATR back from the top, with OI falling, after a RANK 1 move built with OI up
+ *               (src/research/atr-turn.ts) -- the ATR known before that candle
+ *   "atrFrozen" the same, with the ATR of the moment the move began
+ *   "oiPeak"    OI low -> OI peak (RANK 1) -> the first red candle with OI down, no ATR distance (src/research/oi-peak.ts)
+ * redCandle (atr / atrFrozen only): the candle must also be red at a top / green at a bottom.
+ */
+export type V10Entry = "atr" | "atrFrozen" | "oiPeak";
+export interface V10Rule { entry: V10Entry; redCandle: boolean }
+
+/** every signal of these candles by the rule (the backtest and live both call this) */
+export function signalsOf(c: Parameters<typeof oiPeakSignals>[0], rankWindowHours: number, rule: V10Rule): Array<PeakSignal | AtrSignal> {
+  return rule.entry === "oiPeak"
+    ? oiPeakSignals(c, V10_K, V10_ATR_N, rankWindowHours)
+    : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "atrFrozen" ? "frozen" : "live", red: rule.redCandle });
+}
 
 /** a RANK 1 signal of one symbol (BTC for part 1, the alt itself for part 2) */
 export interface V10Turn {
@@ -37,34 +57,39 @@ export interface V10Turn {
   fromPeakOiPct: number;
   /** RANK 1 against how many earlier moves */
   prior: number;
+  /** the ATR entries only: the ATR used and how far (%) the close came back from the extreme; the picks' window end */
+  atr?: number; backPct?: number; windowEndT?: number;
+  /** which entry made it */
+  entry?: V10Entry;
 }
 
 export interface V10Pick { symbol: string; rank: number; x: number; follow: number; coinPct: number; btcPct: number; price: number }
 
 export type V10BtcTurn = V10Turn;
 
-const toTurn = (s: PeakSignal): V10Turn => ({
+const toTurn = (s: PeakSignal | AtrSignal, entry: V10Entry): V10Turn => ({
   candleEnd: s.t, side: s.side, price: s.price, candleOiPct: s.candleOiPct, label: s.label,
   moveStartT: s.startT, peakT: s.peakT, moveOiPct: s.buildOiPct,
   extreme: s.extreme, extremeT: s.extremeT, movePct: s.movePct, fromPeakOiPct: s.fromPeakOiPct, prior: s.prior,
+  ...("atr" in s ? { atr: s.atr, backPct: s.backPct, windowEndT: s.windowEndT } : {}), entry,
 });
 
-/** The signal of `bars` (any symbol) at `candleEnd` by Johnny's rule (RANK 1), else null. */
-export function rank1At(bars: readonly MinBar[], candleEnd: number, rankWindowHours: number): V10Turn | null {
+/** The signal of `bars` (any symbol) at `candleEnd` by the rule (RANK 1), else null. */
+export function rank1At(bars: readonly MinBar[], candleEnd: number, rankWindowHours: number, rule: V10Rule): V10Turn | null {
   const cut = bars.filter((b) => b.t < candleEnd);
-  const s = oiPeakSignals(candles(cut, V10_TF_MIN), V10_K, V10_ATR_N, rankWindowHours).find((x) => x.t === candleEnd);
-  return s ? toTurn(s) : null;
+  const s = signalsOf(candles(cut, V10_TF_MIN), rankWindowHours, rule).find((x) => x.t === candleEnd);
+  return s ? toTurn(s, rule.entry) : null;
 }
 
 /** BTC's signal at `candleEnd` (part 1) */
 export const btcRank1At = rank1At;
 
-/** PART 1: the alts that moved most with BTC from OI's low to the entry. `closes` = each alt's minute closes. */
+/** PART 1: the alts that moved most with BTC over BTC's move (oiPeak: OI's low -> the entry; atr: the move's start -> its top). `closes` = each alt's minute closes. */
 export function pickAlts(turn: V10Turn, btcCloses: ReadonlyMap<number, number>, closes: ReadonlyMap<string, ReadonlyMap<number, number>>, picks: number): V10Pick[] {
   const up = turn.side === "SHORT"; // a SHORT ends an UP move
   const rows: Array<Omit<V10Pick, "rank">> = [];
   for (const [symbol, m] of closes) {
-    const w = coinInWindow(m, btcCloses, turn.moveStartT, turn.candleEnd, up);
+    const w = coinInWindow(m, btcCloses, turn.moveStartT, turn.windowEndT ?? turn.candleEnd, up);
     const price = priceAt(m, turn.candleEnd);
     if (Number.isFinite(w.x) && Number.isFinite(w.follow) && price > 0) rows.push({ symbol, x: w.x, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, price });
   }

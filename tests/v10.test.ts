@@ -7,6 +7,7 @@ import { candles, type MinBar } from "../src/research/dc15";
 import { oiPeakSignals } from "../src/research/oi-peak";
 import { parseV10Settings, rulesFor, type V10Settings } from "../src/strategy/v10/v10-config";
 import { btcRank1At, levels, ownMove, pickAlts, rank1At, V10_ATR_N, V10_K, V10_TF_MIN } from "../src/strategy/v10/v10-engine";
+const PEAK = { entry: "oiPeak", redCandle: false } as const;
 import { V10LiveService, type V10UserRef } from "../src/strategy/v10/v10-live.service";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "../src/strategy/v10/v10-repository";
 import { formatV10Entry } from "../src/strategy/v10/v10-telegram";
@@ -163,6 +164,10 @@ async function run(): Promise<void> {
     assert.throws(() => settings({ perUser: { main: { ownTP: 2 } } }), /not a known setting/);
     assert.throws(() => settings({ own: "yes" }), /v10.own/);
     assert.strictEqual(parseV10Settings(undefined, ["main"], SYMS).enabled, false);
+    assert.deepStrictEqual(settings().rule, { entry: "atr", redCandle: false }, "default entry = atr (live ATR), no red");
+    assert.deepStrictEqual(settings({ entry: "atrFrozen", redCandle: true }).rule, { entry: "atrFrozen", redCandle: true });
+    assert.throws(() => settings({ entry: "ATR" }), /v10.entry/);
+    assert.throws(() => settings({ entry: "oiPeak", redCandle: true }), /redCandle/);
     assert.throws(() => settings({ userModes: { main: "LIVE" } }), /"OFF", "PAPER" or "REAL"/);
     assert.throws(() => settings({ userModes: { bob: "PAPER" } }), /unknown user "bob"/);
     assert.throws(() => settings({ slPct: 0 }), /v10.slPct/);
@@ -175,7 +180,7 @@ async function run(): Promise<void> {
     const btc = market().get("BTCUSDT")!;
     const research = oiPeakSignals(candles(btc, V10_TF_MIN), V10_K, V10_ATR_N, 12).map((s) => s.t);
     const live: number[] = [];
-    for (let end = T0 + W; end <= btc[btc.length - 1].t + M; end += W) if (btcRank1At(btc, end, 12)) live.push(end);
+    for (let end = T0 + W; end <= btc[btc.length - 1].t + M; end += W) if (btcRank1At(btc, end, 12, PEAK)) live.push(end);
     assert.ok(research.length > 0);
     assert.deepStrictEqual(live, research);
     assert.ok(live.includes(SIGNAL_END), `the big top is a RANK 1 signal (${live.map((x) => (x - T0) / W)})`);
@@ -183,10 +188,10 @@ async function run(): Promise<void> {
 
   await scenario("engine: the top is a SHORT; no look-ahead (future bars never change it); picks = followers by x", () => {
     const mk = market(), btc = mk.get("BTCUSDT")!;
-    const t = btcRank1At(btc, SIGNAL_END, 12)!;
+    const t = btcRank1At(btc, SIGNAL_END, 12, PEAK)!;
     assert.strictEqual(t.side, "SHORT");
     assert.ok(t.moveOiPct > 0 && t.candleOiPct < 0 && t.fromPeakOiPct < 0 && t.label === "LONGS OUT", JSON.stringify(t));
-    assert.deepStrictEqual(btcRank1At(btc.filter((b) => b.t < SIGNAL_END), SIGNAL_END, 12), t);
+    assert.deepStrictEqual(btcRank1At(btc.filter((b) => b.t < SIGNAL_END), SIGNAL_END, 12, PEAK), t);
     const closes = new Map([...mk].filter(([s]) => s !== "BTCUSDT").map(([s, b]) => [s, new Map(b.map((x) => [x.t, x.close]))]));
     const picks = pickAlts(t, new Map(btc.map((b) => [b.t, b.close])), closes, 3);
     assert.deepStrictEqual(picks.map((p) => p.symbol), ["AAAUSDT", "BBBUSDT"], JSON.stringify(picks));
@@ -206,15 +211,15 @@ async function run(): Promise<void> {
 
   await scenario("part 2 engine: the alt's own RANK 1 top, moved on its own; an alt that only follows BTC is not 'own'", () => {
     const mk = calmMarket(), btcCloses = new Map(mk.get("BTCUSDT")!.map((b) => [b.t, b.close]));
-    assert.strictEqual(btcRank1At(mk.get("BTCUSDT")!, SIGNAL_END, 12)?.side !== "SHORT" || true, true);
-    const e = mk.get("EEEUSDT")!, turn = rank1At(e, SIGNAL_END, 12)!;
+    assert.strictEqual(btcRank1At(mk.get("BTCUSDT")!, SIGNAL_END, 12, PEAK)?.side !== "SHORT" || true, true);
+    const e = mk.get("EEEUSDT")!, turn = rank1At(e, SIGNAL_END, 12, PEAK)!;
     assert.strictEqual(turn.side, "SHORT");
     const own = ownMove(turn, new Map(e.map((b) => [b.t, b.close])), btcCloses);
     assert.ok(own && own.follow < 0.5, JSON.stringify(own));
     // AAA is a 2x copy of BTC: whatever turn it has, it is never "own"
     const a = mk.get("AAAUSDT")!;
     for (let end = T0 + 20 * W; end < SIGNAL_END + 4 * W; end += W) {
-      const t = rank1At(a, end, 12);
+      const t = rank1At(a, end, 12, PEAK);
       if (t) assert.strictEqual(ownMove(t, new Map(a.map((b) => [b.t, b.close])), btcCloses), null, `AAA at ${(end - T0) / W}`);
     }
   });
@@ -324,7 +329,7 @@ async function run(): Promise<void> {
     const mirror = (b: MinBar[], p0: number): MinBar[] => b.map((x) => ({ ...x, high: 2 * p0 - x.low, low: 2 * p0 - x.high, close: 2 * p0 - x.close }));
     const btc = mirror(minutes(btcSpecs()), 100);
     const mk = new Map([["BTCUSDT", btc], ["AAAUSDT", alt(btc, 2, 0.02, 10)], ["BBBUSDT", alt(btc, 1, 0.02, 20)], ["CCCUSDT", alt(btc, 0, 3, 30)], ["DDDUSDT", alt(btc, 3, 4, 40)]]);
-    assert.strictEqual(btcRank1At(btc, SIGNAL_END, 12)?.side, "LONG");
+    assert.strictEqual(btcRank1At(btc, SIGNAL_END, 12, PEAK)?.side, "LONG");
     for (const long of [false, true]) {
       const store = fakeStore(), t = tg();
       const svc = new V10LiveService(settings({ long }), () => [{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: t }], loaderOf(mk), store, () => SIGNAL_END + 100_000);
