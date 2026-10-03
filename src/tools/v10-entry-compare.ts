@@ -13,6 +13,7 @@
  *   "noTopOi" = WITHOUT the rule "the candle that made the top and closed 1 ATR back must have OI down" (as before Oct 3)
  *   "big" = the OI growth measured as the biggest OI rise in the move with the price going the same way (SUI, Oct 3)
  *   --by-coin  every coin's result (A and B apart, worst first; * = a new coin, data since Oct 1)  --new  part B on the new coins too
+ *   --tf 60        1-hour candles (default 15); "self" rows = the top candle is the entry if it closes red 1 ATR below its high
  *   --no-minmove   without the live rule "the coin moved more than the TP %" (default: with it)
  *   --sl extreme --rr 2   SL at the move's extreme (each coin's own high since the build-up began), TP 2 x that risk; net R
  *                         uses each trade's own risk for the fees
@@ -35,9 +36,12 @@ const DAY = 86_400_000;
 const RULES: Array<[string, V10Rule]> = [
   ["atr", { entry: "atr" }],
   ["atr noTopOi", { entry: "atr", topCandleOi: false }],
+  ["atr noTopOi self", { entry: "atr", topCandleOi: false, selfTop: true }],
+  ["atr self", { entry: "atr", selfTop: true }],
   ["atr big", { entry: "atr", growth: "biggest" }],
   ["atrFrozen", { entry: "atrFrozen" }],
   ["atrFrozen noTopOi", { entry: "atrFrozen", topCandleOi: false }],
+  ["atrFrozen noTopOi self", { entry: "atrFrozen", topCandleOi: false, selfTop: true }],
   ["atr noRed", { entry: "atr", redAfterTop: false }],
   ["atrFrozen noRed", { entry: "atrFrozen", redAfterTop: false }],
   ["oiPeak", { entry: "oiPeak" }],
@@ -58,6 +62,9 @@ async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const pct = Number(arg("pct", "1")), tpPct = Number(arg("tp", arg("pct", "1"))), win = Number(arg("window", "12"));
   const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "1")), withNew = argv.includes("--new"), byCoin = argv.includes("--by-coin");
+  // --tf 60 (Johnny Oct 3): the same rules on 1-hour candles (ATR 14 of 1h candles); "self" = the top candle itself
+  // is the entry when it closes red 1 ATR below its high (no waiting for the next 1h candle)
+  const tf = Number(arg("tf", String(V10_TF_MIN)));
   // --sl extreme (Johnny Oct 3): SL at the move's extreme (the coin's own high since the build-up began), TP = --rr x that risk
   const slExt = arg("sl", "pct") === "extreme", rrExt = Number(arg("rr", "2"));
   // as live (Oct 3, ETH +0.36%): the coin must have moved MORE than the TP %; --no-minmove = without it
@@ -78,12 +85,12 @@ async function main(): Promise<void> {
       if (bars.length) coins.set(s, { bars, map: new Map(bars.map((b) => [b.t, b.close])), old: bars[0].t <= btc[0].t + DAY });
     }
     const closes = new Map([...coins].map(([s, c]) => [s, c.map]));
-    const btcC = candles(btc, V10_TF_MIN), altC = new Map([...coins].map(([s, c]) => [s, candles(c.bars, V10_TF_MIN)]));
+    const btcC = candles(btc, tf), altC = new Map([...coins].map(([s, c]) => [s, candles(c.bars, tf)]));
     const short = (s: string): string => s.replace(/USDT$/, "");
 
-    console.log(`V10 ENTRIES COMPARED · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`);
+    console.log(`V10 ENTRIES COMPARED · ${tf}m candles · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`);
     console.log(`${minMove > -Infinity ? `only coins that moved MORE than the TP ${tpPct}% (as live) · ` : "no minimum move · "}A = BTC's signal -> ${npicks} picks · B = the alt's own move (${withNew ? "ALL alts, the new ones too" : "old alts only"}, R² on ${own}m) · net R at $10 risk\n`);
-    const head = `${"rule".padEnd(18)} ${"part".padEnd(10)} trades   TP   SL open  win   net R      $  hold`;
+    const head = `${"rule".padEnd(24)} ${"part".padEnd(10)} trades   TP   SL open  win   net R      $  hold`;
     console.log(head);
     for (const [name, rule] of RULES) {
       const cands: Cand[] = [];
@@ -117,9 +124,9 @@ async function main(): Promise<void> {
         const hrs = l.filter((d) => d.tr.exit !== "OPEN").map((d) => (d.tr.exitT - d.t) / 3_600_000).sort((a, b) => a - b);
         const rs = l.map((d) => d.risk).sort((a, b) => a - b);
         const riskTxt = slExt && rs.length ? ` · SL median ${rs[Math.floor(rs.length / 2)].toFixed(2)}% (${rs[0].toFixed(2)}–${rs[rs.length - 1].toFixed(2)})` : "";
-        return `${name.padEnd(18)} ${part.padEnd(10)} ${String(l.length).padStart(6)} ${String(tp).padStart(4)} ${String(sl).padStart(4)} ${String(op).padStart(4)} ${(tp + sl ? Math.round((100 * tp) / (tp + sl)) : 0).toString().padStart(3)}% ${sp(n).padStart(7)} ${("$" + (n * 10).toFixed(0)).padStart(6)} ${hrs.length ? hrs[Math.floor(hrs.length / 2)].toFixed(1) + "h" : "-"}${riskTxt}`;
+        return `${name.padEnd(24)} ${part.padEnd(10)} ${String(l.length).padStart(6)} ${String(tp).padStart(4)} ${String(sl).padStart(4)} ${String(op).padStart(4)} ${(tp + sl ? Math.round((100 * tp) / (tp + sl)) : 0).toString().padStart(3)}% ${sp(n).padStart(7)} ${("$" + (n * 10).toFixed(0)).padStart(6)} ${hrs.length ? hrs[Math.floor(hrs.length / 2)].toFixed(1) + "h" : "-"}${riskTxt}`;
       };
-      console.log(`${name.padEnd(18)} BTC signals: ${btcSigs.length}`);
+      console.log(`${name.padEnd(24)} BTC signals: ${btcSigs.length}`);
       console.log(line("A (BTC)", done.filter((d) => d.src === "A")));
       console.log(line("B (ALT)", done.filter((d) => d.src === "B")));
       console.log(line(`B w/o ${without.join(",")}`, done.filter((d) => d.src === "B" && !without.includes(short(d.sym)))));

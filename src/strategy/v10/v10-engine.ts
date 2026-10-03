@@ -38,7 +38,7 @@ export type V10Side = "SHORT" | "LONG";
  *   "oiPeak"    OI low -> OI peak (RANK 1) -> the first red candle with OI down, no ATR distance (src/research/oi-peak.ts)
  */
 export type V10Entry = "atr" | "atrFrozen" | "oiPeak" | "story" | "storyFrozen";
-export interface V10Rule { entry: V10Entry; /** atr / atrFrozen: how the OI growth is measured (src/research/atr-turn.ts), default "afterLow" */ growth?: "afterLow" | "biggest"; /** tests only: false = without the top-candle OI rule */ topCandleOi?: boolean; /** tests only: false = without "red entry candle after a top candle that closed 1 ATR back" */ redAfterTop?: boolean }
+export interface V10Rule { entry: V10Entry; /** atr / atrFrozen: how the OI growth is measured (src/research/atr-turn.ts), default "afterLow" */ growth?: "afterLow" | "biggest"; /** tests only: false = without the top-candle OI rule */ topCandleOi?: boolean; /** atr entries: the top candle itself is the entry when it closes red 1 ATR below its high (1h) */ selfTop?: boolean; /** tests only: false = without "red entry candle after a top candle that closed 1 ATR back" */ redAfterTop?: boolean }
 
 /** every signal of these candles by the rule (the backtest and live both call this) */
 export function signalsOf(c: Parameters<typeof oiPeakSignals>[0], rankWindowHours: number, rule: V10Rule, why?: (t: number, reason: string) => void): Array<PeakSignal | AtrSignal | StorySignal> {
@@ -46,7 +46,7 @@ export function signalsOf(c: Parameters<typeof oiPeakSignals>[0], rankWindowHour
     return atrStorySignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "storyFrozen" ? "frozen" : "live", why });
   return rule.entry === "oiPeak"
     ? oiPeakSignals(c, V10_K, V10_ATR_N, rankWindowHours)
-    : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "atrFrozen" ? "frozen" : "live", growth: rule.growth, topCandleOi: rule.topCandleOi, redAfterTop: rule.redAfterTop, why });
+    : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "atrFrozen" ? "frozen" : "live", growth: rule.growth, topCandleOi: rule.topCandleOi, redAfterTop: rule.redAfterTop, selfTop: rule.selfTop, why });
 }
 
 /** a RANK 1 signal of one symbol (BTC for part 1, the alt itself for part 2) */

@@ -18,7 +18,7 @@ export interface AtrSignal extends PeakSignal {
   atr: number; backPct: number;
 }
 
-export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: number, opts: { atr?: "live" | "frozen"; growth?: "afterLow" | "biggest"; topCandleOi?: boolean; redAfterTop?: boolean; why?: (t: number, reason: string) => void } = {}): AtrSignal[] {
+export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: number, opts: { atr?: "live" | "frozen"; growth?: "afterLow" | "biggest"; topCandleOi?: boolean; redAfterTop?: boolean; selfTop?: boolean; why?: (t: number, reason: string) => void } = {}): AtrSignal[] {
   // growth "afterLow" (default): the OI rise after OI's lowest point in the move · "biggest" (Johnny Oct 3, SUI): the
   // biggest OI rise anywhere in the move during which the price also went the move's way -- OI may fall to a new low
   // later (shorts liquidated on the way up), the growth that happened still counts
@@ -48,38 +48,43 @@ export function atrSignals(c: readonly Candle[], k: number, n: number, windowH: 
     const top: boolean = dir === "UP";
     const makesExtreme = top ? x.high >= c[ext].high : x.low <= c[ext].low;          // for the moves (as oi-peak.ts)
     const newTop = top ? x.high > c[ext].high : x.low < c[ext].low;                   // this candle made a higher top
+    const turnColour = top ? x.close < x.open : x.close > x.open;
+    // selfTop (Johnny Oct 3, 1h candles -- waiting a whole candle is too long): the candle that MADE the top is itself
+    // the entry when it closes RED at least 1 ATR below its own high
+    const selfOk = !!opts.selfTop && newTop && turnColour && (top ? x.high - x.close : x.close - x.low) >= k * a;
+    const E = selfOk ? i : ext;                                                          // the top the entry measures from
 
     // ── the entry, at this candle's close (why: the story tool's "why no entry", nothing else) ──
     const why = (m: string): void => opts.why?.(x.end, m);
     const W = top ? "the top" : "the bottom";
     if (signaled) why("already entered in this move");
-    else if (newTop) why(`this candle made ${W} -> wait for the next one`);
-    else if (topOi && wick === ext && wickOiUp) why(`the candle that made ${W} closed 1 ATR back but its OI went UP -> no entry from this ${top ? "top" : "bottom"}`);
+    else if (newTop && !selfOk) why(`this candle made ${W} -> wait for the next one`);
+    else if (!selfOk && topOi && wick === ext && wickOiUp) why(`the candle that made ${W} closed 1 ATR back but its OI went UP -> no entry from this ${top ? "top" : "bottom"}`);
     else if (!(P > L && L >= 0)) why("no OI growth in this move yet");
-    else if (ext < L) why(`${W} came before the OI growth`);
-    const turnColour = top ? x.close < x.open : x.close > x.open;
+    else if (E < L) why(`${W} came before the OI growth`);
     if (!signaled && !newTop && !(topOi && wick === ext && wickOiUp) && redAfter && wick === ext && !turnColour)
       why(`the candle that made ${W} closed 1 ATR back -> the entry candle must close ${top ? "red" : "green"}`);
-    if (!signaled && !newTop && !(topOi && wick === ext && wickOiUp) && !(redAfter && wick === ext && !turnColour) && L >= 0 && P > L && ext >= L) {
+    const gate = selfOk || (!newTop && !(topOi && wick === ext && wickOiUp) && !(redAfter && wick === ext && !turnColour));
+    if (!signaled && gate && L >= 0 && P > L && E >= L) {
       const lowOi = c[L].oi1, peakOi = c[P].oi1;
       const build = (100 * (peakOi - lowOi)) / lowOi;
       const priceMoved = top ? c[P].close > c[L].close : c[P].close < c[L].close;
-      const back = top ? c[ext].high - x.close : x.close - c[ext].low;
+      const back = top ? c[E].high - x.close : x.close - c[E].low;
       const pc = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
       if (!(build > 0)) why("no OI growth in this move yet");
       else if (!priceMoved) why(`OI grew ${pc(build)} but the price did not go ${top ? "up" : "down"} with it`);
       else if (!(x.oi1 < peakOi)) why(`OI is not below its peak (growth ${pc(build)})`);
-      else if (!(back >= k * a)) why(`only ${pc((100 * back) / (top ? c[ext].high : c[ext].low))} back from ${W}, 1 ATR = ${pc((100 * a) / x.close)}`);
+      else if (!(back >= k * a)) why(`only ${pc((100 * back) / (top ? c[E].high : c[E].low))} back from ${W}, 1 ATR = ${pc((100 * a) / x.close)}`);
       if (build > 0 && priceMoved && x.oi1 < peakOi && back >= k * a) {
         const before = accepted.filter((p) => p.t < x.end && p.t >= x.end - windowH * 3_600_000);
         if (before.length === 0) why(`no earlier move in ${windowH}h to compare (RANK 1)`);
         else if (!before.every((p) => p.oi < build)) why(`not RANK 1: OI growth ${pc(build)}, an earlier move had ${pc(Math.max(...before.map((p) => p.oi)))} in ${windowH}h`);
         if (before.length > 0 && before.every((p) => p.oi < build)) {
-          const extreme = top ? c[ext].high : c[ext].low;
+          const extreme = top ? c[E].high : c[E].low;
           out.push({
             t: x.end, side: top ? "SHORT" : "LONG", price: x.close,
             startT: c[L].end, startPrice: c[L].close, peakT: c[P].end, buildOiPct: build,
-            extreme, extremeT: c[ext].t, movePct: (100 * (extreme - c[L].close)) / c[L].close,
+            extreme, extremeT: c[E].t, movePct: (100 * (extreme - c[L].close)) / c[L].close,
             fromPeakOiPct: (100 * (x.oi1 - peakOi)) / peakOi,
             candleOiPct: (100 * (x.oi1 - x.oi0)) / x.oi0, label: label(x), prior: before.length,
             atr: a, backPct: (100 * back) / extreme,

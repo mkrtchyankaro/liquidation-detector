@@ -179,5 +179,16 @@ scenario("story (SUI): OI grows with the price, then falls BELOW where it starte
   assert.ok(Math.abs(s[0].buildOiPct - 0.8) < 0.05 && s[0].declineOiPct < -1, JSON.stringify(s[0]));
 });
 
+scenario("selfTop (1h): the candle that MADE the top and closed RED 1 ATR below its own high is itself the entry", () => {
+  // candle 4: opens 1.0 higher (a new high), closes 0.6 below the previous close -> red, 1.7 below its high
+  const rows: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [-0.6, -3, +1.0], [-0.2, -1], [-0.4, -2]];
+  assert.strictEqual(rel(after(atrSignals(mk(rows), 1, 14, 12))[0].t), 6, "without selfTop: the next candle");
+  const s = after(atrSignals(mk(rows), 1, 14, 12, { selfTop: true }));
+  assert.strictEqual(s.length, 1); assert.strictEqual(rel(s[0].t), 5, "with selfTop: the top candle itself");
+  // a GREEN top candle (closes up from its open, still 1 ATR below its high) is not a self entry
+  const green: Array<[number, number, number?]> = [...warm, [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.6, +8], [+0.1, -3, -0.3], [-0.6, -1], [-0.4, -2]];
+  assert.ok(after(atrSignals(mk(green), 1, 14, 12, { selfTop: true })).every((x) => rel(x.t) !== 5));
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
