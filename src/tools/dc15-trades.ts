@@ -59,7 +59,27 @@ interface Cand {
   sl: number;
   riskPct: number;
   rank: number;
+  /** the signal's move was built with OI UP (Johnny's rule: price up + OI up, then the red candle with OI down) */
+  oiUp: boolean;
+  /** how much of the move had come back at the signal: (extreme - price) / (extreme - start) */
+  retrace: number;
 }
+/** of the signal's own turn (BTC's for A, the alt's for B) */
+const turnInfo = (t: {
+  moveOiPct: number;
+  extreme: number;
+  movePct: number;
+  price: number;
+}): { oiUp: boolean; retrace: number } => {
+  const start = t.extreme / (1 + t.movePct / 100);
+  return {
+    oiUp: t.moveOiPct > 0,
+    retrace:
+      Math.abs(t.extreme - start) > 0
+        ? Math.abs(t.extreme - t.price) / Math.abs(t.extreme - start)
+        : NaN,
+  };
+};
 interface Done extends Cand {
   tr: Trade;
   net: number;
@@ -144,6 +164,8 @@ async function main(): Promise<void> {
         sl,
         riskPct: (100 * (sl - entry)) / entry,
         rank: 0,
+        oiUp: true,
+        retrace: NaN,
       };
     };
     const push = (list: Cand[], c: Cand | null): void => {
@@ -193,7 +215,7 @@ async function main(): Promise<void> {
           extremeIn(c.bars, fromT, t.t, "DOWN"),
           NaN,
         );
-        if (c1) c1.rank = ri + 1;
+        if (c1) Object.assign(c1, { rank: ri + 1 }, turnInfo(t));
         push(candA1, c1);
         // A2: in at the alt's own top after BTC's signal
         armed++;
@@ -227,17 +249,16 @@ async function main(): Promise<void> {
           ownness(w.follow, w.pct, w.btcPct) === "WITH BTC"
         )
           continue;
-        push(
-          candB,
-          mk(
-            t.t,
-            sym,
-            "B",
-            t.price,
-            extremeIn(c.bars, t.moveStartT, t.t, "DOWN"),
-            t.atr,
-          ),
+        const cb = mk(
+          t.t,
+          sym,
+          "B",
+          t.price,
+          extremeIn(c.bars, t.moveStartT, t.t, "DOWN"),
+          t.atr,
         );
+        if (cb) Object.assign(cb, turnInfo(t));
+        push(candB, cb);
       }
     }
     // A and B on the same coin at the same time -> one trade
@@ -326,6 +347,26 @@ async function main(): Promise<void> {
             done.filter((d) => d.src !== "B" && d.rank === k),
           ),
         );
+      console.log(
+        "   how much of the move had come back at the entry (retrace):",
+      );
+      for (const s of ["A", "B"]) {
+        const l = done.filter(
+          (d) => d.src === s || (s === "A" && d.src === "A+B"),
+        );
+        console.log(
+          line(
+            ` ${s} <= 1/2`,
+            l.filter((d) => d.retrace <= 0.5),
+          ),
+        );
+        console.log(
+          line(
+            ` ${s} > 1/2`,
+            l.filter((d) => d.retrace > 0.5),
+          ),
+        );
+      }
       if (without.length) {
         const rest = done.filter((d) => !without.includes(d.sym));
         console.log(`   without ${without.join(", ")}:`);
@@ -353,16 +394,28 @@ async function main(): Promise<void> {
           );
       console.log("");
     };
-    for (const [aName, a] of [
-      ["A1 (in at BTC's signal)", candA1],
-      ["A2 (in at the alt's own top)", candA2],
-    ] as Array<[string, Cand[]]>)
-      for (const rr of top ? RRS : [tpPct / pct])
-        run(
-          `${aName} + B · ${top ? `TP ${rr}R` : `SL ${pct}% · TP ${tpPct}%`}`,
-          merge(a, candB),
-          rr,
-        );
+    // Oct 3 (Johnny): his rule only -- the move built with OI UP, the turn candle with OI DOWN -- vs the code so far
+    // (which also took a move built with OI DOWN and waited for a candle with OI UP)
+    const variants: Array<[string, Cand[]]> = argv.includes("--a2")
+      ? [
+          ["A1 (in at BTC's signal)", candA1],
+          ["A2 (in at the alt's own top)", candA2],
+        ]
+      : [["A1 (in at BTC's signal)", candA1]];
+    for (const [aName, a] of variants)
+      for (const [rule, keep] of [
+        ["AS LIVE NOW (both OI cases)", () => true],
+        [
+          "JOHNNY'S RULE ONLY (move OI up -> turn candle OI down)",
+          (c: Cand) => c.oiUp,
+        ],
+      ] as Array<[string, (c: Cand) => boolean]>)
+        for (const rr of top ? RRS : [tpPct / pct])
+          run(
+            `${rule} · ${aName} + B · ${top ? `TP ${rr}R` : `SL ${pct}% · TP ${tpPct}%`}`,
+            merge(a.filter(keep), candB.filter(keep)),
+            rr,
+          );
   } finally {
     await client.close();
   }
