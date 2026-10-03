@@ -3,7 +3,7 @@
  * only the last 10 days of bars) give exactly the same signals as the BACKTEST (Johnny's rule on all history at once,
  * src/research/oi-peak.ts / src/tools/v10-peak-trades.ts)? Prints every signal and any difference.
  *
- *   npx tsx src/tools/v10-parity.ts            options: --entry atrFrozen (part 1)  --own-entry atr (part 2)  --window 12  --picks 3
+ *   npx tsx src/tools/v10-parity.ts            options: --entry oiPeak (part 1)  --own-entry atr (part 2)  --own-top-oi  --no-top-oi  --window 12  --picks 3
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -18,7 +18,9 @@ const utc = (ms: number): string => new Date(ms).toISOString().slice(5, 16).repl
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const win = Number(arg("window", "12")), npicks = Number(arg("picks", "3")), own = Number(arg("own", "1"));
-  const rule: V10Rule = { entry: arg("entry", "atrFrozen") as V10Entry }, ownRule: V10Rule = { entry: arg("own-entry", "atr") as V10Entry };
+  // defaults = the config defaults (Oct 3): BTC part "oiPeak", ALT part "atr" without the top-candle OI rule
+  const rule: V10Rule = { entry: arg("entry", "oiPeak") as V10Entry, topCandleOi: !argv.includes("--no-top-oi") };
+  const ownRule: V10Rule = { entry: arg("own-entry", "atr") as V10Entry, topCandleOi: argv.includes("--own-top-oi") };
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   try {

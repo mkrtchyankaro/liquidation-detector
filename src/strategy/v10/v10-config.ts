@@ -3,11 +3,15 @@
  *
  *   "v10": {
  *     "enabled": true,
- *     "entry": "atrFrozen",       // part 1 (BTC) entry (Oct 3) · "ownEntry": "atr" = part 2 (ALT) entry. Each one of:
+ *     "entry": "oiPeak",          // part 1 (BTC) entry (Oct 3) · "ownEntry": "atr" = part 2 (ALT) entry. Each one of:
  *                                 //   "atr" = OI grew with the price (RANK 1), OI is now below its peak,
  *                                 //   the 15m candle closes 1 ATR back from the top made by an earlier candle ·
  *                                 //   "atrFrozen" = the same with the ATR from the move's start ·
- *                                 //   "oiPeak" = OI low -> OI peak -> the first red candle with OI down
+ *                                 //   "oiPeak" = OI low -> OI peak -> the first red candle with OI down ·
+ *                                 //   "story" / "storyFrozen" = Johnny's 4 points (growth -> OI falls while the price
+ *                                 //   rises -> top -> red candle 1 ATR back)
+ *     "topCandleOi": true, "ownTopCandleOi": false,  // atr entries: a top candle that closed 1 ATR back must have OI down
+ *     (every part: the coin must have moved MORE than the user's TP %, else that coin is not taken)
  *     "short": true,              // BTC top (15m DC + OI rule, RANK 1)  -> SHORT the alts that rose most with BTC
  *     "long": false,              // BTC bottom (the mirror)             -> LONG the alts that fell most with BTC
  *     "slPct": 1,                 // SL this % from the entry (against the trade)
@@ -78,11 +82,11 @@ export function rulesFor(s: V10Settings, userId: string): V10UserRules {
 const isNum = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
 export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V10Settings {
-  const off: V10Settings = { enabled: false, rule: { entry: "atrFrozen" }, ownRule: { entry: "atr" }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 1, symbols: [], userModes: new Map(), perUser: new Map() };
+  const off: V10Settings = { enabled: false, rule: { entry: "oiPeak", topCandleOi: true }, ownRule: { entry: "atr", topCandleOi: false }, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 1, symbols: [], userModes: new Map(), perUser: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`"v10" must be an object`);
   const v = raw as Record<string, unknown>;
-  const KNOWN = ["enabled", "entry", "ownEntry", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
+  const KNOWN = ["enabled", "entry", "ownEntry", "topCandleOi", "ownTopCandleOi", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
   for (const k of Object.keys(v)) if (!KNOWN.includes(k)) throw new Error(`"v10.${k}" is not a known setting (${KNOWN.join(", ")}) -- check the spelling`);
   if (typeof v.enabled !== "boolean") throw new Error(`"v10.enabled" must be true or false`);
   if (!v.enabled) return off;
@@ -103,8 +107,10 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
     if (v[k] !== undefined && !ENTRIES.includes(v[k] as V10Entry)) throw new Error(`"v10.${k}" must be ${ENTRIES.map((e) => `"${e}"`).join(", ")} (got ${JSON.stringify(v[k])})`);
     return { entry: (v[k] as V10Entry | undefined) ?? d };
   };
-  // Oct 3 tests: BTC part best with the frozen ATR, the alt's own part with Johnny's ATR rule
-  const rule = entryOf("entry", "atrFrozen"), ownRule = entryOf("ownEntry", "atr");
+  // Oct 3 tests (SL 1 / TP 2, only coins that moved more than the TP): BTC part best with "oiPeak" (8 trades, 75%,
+  // +9.2R), the alt's own part with "atr" WITHOUT the top-candle OI rule (28 trades, 61%, +20.2R)
+  const rule = { ...entryOf("entry", "oiPeak"), topCandleOi: bool("topCandleOi", true) };
+  const ownRule = { ...entryOf("ownEntry", "atr"), topCandleOi: bool("ownTopCandleOi", false) };
   const short = bool("short", true), long = bool("long", false);
   const slPct = num("slPct", 1, 0.1, 10, "a percent between 0.1 and 10");
   const tpPct = num("tpPct", 1, 0.1, 20, "a percent between 0.1 and 20");
