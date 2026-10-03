@@ -10,6 +10,8 @@
  * net R = R - 2 x fee / SL%.
  *
  *   npx tsx src/tools/v10-entry-compare.ts --pct 1 --tp 2
+ *   "big" = the OI growth measured as the biggest OI rise in the move with the price going the same way (SUI, Oct 3)
+ *   --by-coin  every coin's result (A and B apart, worst first; * = a new coin, data since Oct 1)  --new  part B on the new coins too
  *   options: --own 1|15 (part 2 R2 on 1m returns, default / 15m closes)  --window 12  --picks 3  --fee 0.05  --side SHORT|LONG  --without AVAX  --list atr  (prints that rule's trades)
  */
 import "dotenv/config";
@@ -27,7 +29,9 @@ const DAY = 86_400_000;
 
 const RULES: Array<[string, V10Rule]> = [
   ["atr", { entry: "atr" }],
+  ["atr big", { entry: "atr", growth: "biggest" }],
   ["atrFrozen", { entry: "atrFrozen" }],
+  ["atrFrozen big", { entry: "atrFrozen", growth: "biggest" }],
   ["oiPeak", { entry: "oiPeak" }],
 ];
 
@@ -37,7 +41,7 @@ interface Done extends Cand { tr: Trade; net: number }
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
   const pct = Number(arg("pct", "1")), tpPct = Number(arg("tp", arg("pct", "1"))), win = Number(arg("window", "12"));
-  const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "1"));
+  const npicks = Number(arg("picks", "3")), fee = Number(arg("fee", "0.05")), side = arg("side", "SHORT").toUpperCase(), own = Number(arg("own", "1")), withNew = argv.includes("--new"), byCoin = argv.includes("--by-coin");
   const without = arg("without", "AVAX").toUpperCase().split(",").map((x) => x.trim()).filter(Boolean);
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
@@ -58,7 +62,7 @@ async function main(): Promise<void> {
     const short = (s: string): string => s.replace(/USDT$/, "");
 
     console.log(`V10 ENTRIES COMPARED · ${side} · SL ${pct}% · TP ${tpPct}% · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`);
-    console.log(`A = BTC's signal -> ${npicks} picks · B = the alt's own move (old alts only, R² on ${own}m) · net R at $10 risk\n`);
+    console.log(`A = BTC's signal -> ${npicks} picks · B = the alt's own move (${withNew ? "ALL alts, the new ones too" : "old alts only"}, R² on ${own}m) · net R at $10 risk\n`);
     const head = `${"rule".padEnd(14)} ${"part".padEnd(10)} trades   TP   SL open  win   net R      $  hold`;
     console.log(head);
     for (const [name, rule] of RULES) {
@@ -69,7 +73,7 @@ async function main(): Promise<void> {
         for (const p of pickAlts(turn, btcMap, closes, npicks)) cands.push({ t: s.t, sym: p.symbol, src: "A", side: s.side, entry: p.price, rank: p.rank });
       }
       for (const [sym, c] of coins) {
-        if (!c.old) continue;
+        if (!c.old && !withNew) continue;
         for (const s of signalsOf(altC.get(sym)!, win, rule).filter((x) => x.side === side)) {
           if (!ownMove({ moveStartT: s.startT, candleEnd: s.t } as V10Turn, c.map, btcMap, own)) continue;
           cands.push({ t: s.t, sym, src: "B", side: s.side, entry: s.price, rank: 0 });
@@ -95,6 +99,12 @@ async function main(): Promise<void> {
       console.log(line("B (ALT)", done.filter((d) => d.src === "B")));
       console.log(line(`B w/o ${without.join(",")}`, done.filter((d) => d.src === "B" && !without.includes(short(d.sym)))));
       console.log(line("ALL", done));
+      if (byCoin)
+        for (const src of ["A", "B"] as const) {
+          const l = done.filter((d) => d.src === src);
+          for (const sym of [...new Set(l.map((d) => d.sym))].sort((a, b) => l.filter((d) => d.sym === a).reduce((x, d) => x + d.net, 0) - l.filter((d) => d.sym === b).reduce((x, d) => x + d.net, 0)))
+            console.log(line(` ${src} ${short(sym)}${coins.get(sym)!.old ? "" : "*"}`, l.filter((d) => d.sym === sym)));
+        }
       if (arg("list", "") === name)
         for (const d of done) console.log(`     ${utc(d.t)} ${d.src} ${short(d.sym).padEnd(5)} ${d.src === "A" ? `#${d.rank}` : "  "} entry ${+d.entry.toPrecision(6)} -> ${d.tr.exit.padEnd(4)} ${utc(d.tr.exitT)} net ${sp(d.net)}`);
       console.log("");

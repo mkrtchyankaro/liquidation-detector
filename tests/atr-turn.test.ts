@@ -103,5 +103,14 @@ scenario("why no entry (story tool): the wiggle is 'less than 1 ATR back', the t
   assert.match(w2.get(5) ?? "", /made the top -> wait/);
 });
 
+scenario("SUI (Oct 3): OI grows with the price, then falls BELOW where it started while the price keeps rising (shorts out) -> only 'biggest' growth sees it", () => {
+  const rows: Array<[number, number]> = [...warm, [+0.6, +8], [+0.6, -4], [+0.6, -4], [+0.6, -4], [+0.6, -4], [-0.8, -2], [-0.4, -2], [-0.4, -2]];
+  assert.strictEqual(after(atrSignals(mk(rows), 1, 14, 12)).length, 0, "afterLow: OI's low is now after the growth -> no growth");
+  const s = after(atrSignals(mk(rows), 1, 14, 12, { growth: "biggest" }));
+  assert.strictEqual(s.length, 1, JSON.stringify(s.map((x) => rel(x.t))));
+  assert.strictEqual(rel(s[0].t), 6);
+  assert.ok(Math.abs(s[0].buildOiPct - 0.8) < 0.05, `growth ${s[0].buildOiPct}`);
+});
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
