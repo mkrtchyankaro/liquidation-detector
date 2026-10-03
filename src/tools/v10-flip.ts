@@ -17,7 +17,8 @@
  *
  *   npx tsx src/tools/v10-flip.ts --pct 1 --tp 2
  *   options: --move 2 (the min move to open, default = --tp)  --window 12  --own 1|15  --fee 0.05  --new (new coins too)
- *            --no-rank (LONG flush without RANK 1)  --without AVAX  --list (every trade)  --by-coin
+ *            --no-rank (LONG flush without RANK 1)  --without AVAX  --list 1|2|3 (that flip's trades)  --by-coin
+ * Three exits compared (Johnny Oct 4): 1 = the 15m reversal candle, 2 = the 1h reversal candle, 3 = only the opposite full signal.
  */
 import "dotenv/config";
 import { MongoClient } from "mongodb";
@@ -90,6 +91,8 @@ async function main(): Promise<void> {
     const btc = await load("BTCUSDT");
     const btcMap = new Map(btc.map((b) => [b.t, b.close]));
     const flip: Tr[] = [],
+      flip60: Tr[] = [],
+      flipSig: Tr[] = [],
       fixed: Tr[] = [];
     const per: Array<{ sym: string; short: number; long: number }> = [];
     for (const s of (process.env.SYMBOLS ?? "")
@@ -135,6 +138,16 @@ async function main(): Promise<void> {
         long: sigs.filter((x) => x.side === "LONG").length,
       });
       flip.push(...flipCoin(sym, bars, c, sigs, pct, fee));
+      flip60.push(
+        ...flipCoin(sym, bars, c, sigs, pct, fee, V10_K, V10_ATR_N, {
+          exitCandles: candles(bars, 60),
+        }),
+      );
+      flipSig.push(
+        ...flipCoin(sym, bars, c, sigs, pct, fee, V10_K, V10_ATR_N, {
+          exit: "signal",
+        }),
+      );
       // the same entries, fixed SL / TP, one trade per coin at a time
       let busy = 0;
       for (const g of sigs) {
@@ -184,23 +197,36 @@ async function main(): Promise<void> {
     console.log(
       `signals: SHORT ${per.reduce((a, p) => a + p.short, 0)} · LONG ${per.reduce((a, p) => a + p.long, 0)} · net R at $10 risk · win = net R > 0\n`,
     );
-    console.log(
-      `FLIP (no TP; close on the reversal candle, flip if the opposite full signal is there)`,
+    const block = (title: string, l: readonly Tr[]): void => {
+      console.log(title);
+      console.log(line("all", l));
+      console.log(
+        line(
+          " SHORT",
+          l.filter((d) => d.side === "SHORT"),
+        ),
+      );
+      console.log(
+        line(
+          " LONG",
+          l.filter((d) => d.side === "LONG"),
+        ),
+      );
+      console.log("");
+    };
+    block(
+      "FLIP 1: no TP; close on the 15m reversal candle (1 ATR of 15m), flip if the opposite full signal is there",
+      flip,
     );
-    console.log(line("all", flip));
-    console.log(
-      line(
-        " SHORT",
-        flip.filter((d) => d.side === "SHORT"),
-      ),
+    block(
+      "FLIP 2: no TP; close on the 1h reversal candle (1 ATR of 1h, the candle started after the entry)",
+      flip60,
     );
-    console.log(
-      line(
-        " LONG",
-        flip.filter((d) => d.side === "LONG"),
-      ),
+    block(
+      "FLIP 3: no TP; close ONLY on the SL or the opposite full signal (then flip)",
+      flipSig,
     );
-    console.log(`\nFIXED SL ${pct}% / TP ${tpPct}% on the same entries`);
+    console.log(`FIXED SL ${pct}% / TP ${tpPct}% on the same entries`);
     console.log(line("all", fixed));
     console.log(
       line(
@@ -215,20 +241,22 @@ async function main(): Promise<void> {
       ),
     );
     if (argv.includes("--by-coin")) {
-      console.log(`\nBY COIN (flip net R / fixed net R)`);
+      console.log(`\nBY COIN (net R: flip 1 / flip 2 / flip 3 / fixed)`);
       const sum = (l: readonly Tr[], s: string): number =>
         l.filter((d) => d.sym === s).reduce((a, d) => a + d.net, 0);
       for (const p of [...per].sort(
-        (a, b) => sum(flip, a.sym) - sum(flip, b.sym),
+        (a, b) => sum(fixed, a.sym) - sum(fixed, b.sym),
       ))
         if (p.short + p.long)
           console.log(
-            `  ${p.sym.padEnd(8)} signals S ${p.short} L ${p.long} · flip ${sp(sum(flip, p.sym)).padStart(6)} · fixed ${sp(sum(fixed, p.sym)).padStart(6)}`,
+            `  ${p.sym.padEnd(8)} signals S ${p.short} L ${p.long} · ${[flip, flip60, flipSig, fixed].map((l) => sp(sum(l, p.sym)).padStart(6)).join(" / ")}`,
           );
     }
     if (argv.includes("--list")) {
-      console.log(`\nFLIP TRADES (UTC)`);
-      for (const d of [...flip].sort((a, b) => a.t - b.t))
+      const which = Number(arg("list", "1")),
+        l = which === 2 ? flip60 : which === 3 ? flipSig : flip;
+      console.log(`\nFLIP ${which} TRADES (UTC)`);
+      for (const d of [...l].sort((a, b) => a.t - b.t))
         console.log(
           `  ${utc(d.t)} ${d.sym.padEnd(7)} ${d.side.padEnd(5)} in ${d.entry} -> ${utc(d.exitT)} out ${Number.isFinite(d.exitP) ? +d.exitP.toPrecision(6) : "?"} ${d.exit.padEnd(4)} ${sp(d.net)}R · ${((d.exitT - d.t) / 3_600_000).toFixed(1)}h`,
         );

@@ -30,6 +30,9 @@ export interface FlipTrade {
 
 const M = 60_000;
 
+/** opts.exit: "turn" (default) = the reversal candle closes it; "signal" = only the SL or the opposite full signal.
+ *  opts.exitCandles: the candles the reversal candle is looked for on (default = c, the 15m; e.g. 1h candles) --
+ *  only a candle that STARTED at or after the entry counts; the low / high since the entry is tracked on c. */
 export function flipCoin(
   sym: string,
   bars: readonly MinBar[],
@@ -39,9 +42,12 @@ export function flipCoin(
   fee: number,
   k = 1,
   n = 14,
+  opts: { exit?: "turn" | "signal"; exitCandles?: readonly Candle[] } = {},
 ): FlipTrade[] {
-  const atr = atrBefore(c, n),
-    out: FlipTrade[] = [];
+  const out: FlipTrade[] = [],
+    ec = opts.exitCandles ?? c,
+    eatr = atrBefore(ec, n);
+  const byEnd = new Map(ec.map((x, i) => [x.end, i]));
   const at = new Map<number, FlipSig[]>();
   for (const s of sigs) at.set(s.t, [...(at.get(s.t) ?? []), s]);
   const minuteIdx = (t: number): number => {
@@ -113,18 +119,23 @@ export function flipCoin(
       const p: { side: FlipSide; ext: number } = pos;
       p.ext =
         p.side === "SHORT" ? Math.min(p.ext, x.low) : Math.max(p.ext, x.high);
-      const a = atr[ci];
       const opp = here.find((s) => s.side !== p.side);
       if (opp) {
         close(x.end, x.close, "FLIP");
         open(opp);
         continue;
       }
+      const ei = byEnd.get(x.end),
+        y = ei === undefined ? undefined : ec[ei],
+        a = ei === undefined ? NaN : eatr[ei];
       const turn =
+        opts.exit !== "signal" &&
+        y !== undefined &&
+        y.t >= (pos as Pos).t &&
         a > 0 &&
         (p.side === "SHORT"
-          ? x.close > x.open && x.oi1 > x.oi0 && x.close - p.ext >= k * a
-          : x.close < x.open && x.oi1 < x.oi0 && p.ext - x.close >= k * a);
+          ? y.close > y.open && y.oi1 > y.oi0 && y.close - p.ext >= k * a
+          : y.close < y.open && y.oi1 < y.oi0 && p.ext - y.close >= k * a);
       if (turn) close(x.end, x.close, "TURN");
     } else if (!pos && here.length) open(here[0]);
   }

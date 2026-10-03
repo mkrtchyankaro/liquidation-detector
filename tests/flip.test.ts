@@ -177,5 +177,38 @@ scenario(
   },
 );
 
+scenario(
+  "exit 'signal': the reversal candle does NOT close it, only the SL / the opposite signal",
+  () => {
+    const c = [
+      ...flat(),
+      cand(20, 100, 100.5, 96, 97),
+      cand(21, 97, 99.8, 96.5, 99.5, 100, 103),
+      cand(22, 99.5, 99.8, 98, 98),
+    ];
+    const tr = flipCoin("X", minutes(c), c, [SHORT], 1, 0, 1, 14, {
+      exit: "signal",
+    });
+    assert.deepStrictEqual([tr.length, tr[0].exit], [1, "OPEN"]);
+  },
+);
+scenario(
+  "exitCandles: the reversal is looked for on the given candles (a bigger ATR does not close it)",
+  () => {
+    const c = [
+      ...flat(),
+      cand(20, 100, 100.5, 96, 97),
+      cand(21, 97, 99.8, 96.5, 99.5, 100, 103),
+      cand(22, 99.5, 99.8, 98, 98),
+    ];
+    // the same candles with a 4x range history -> ATR 8: the 3.5 bounce is not 1 ATR
+    const big = c.map((x, i) => (i < 20 ? { ...x, high: 104, low: 96 } : x));
+    const tr = flipCoin("X", minutes(c), c, [SHORT], 1, 0, 1, 14, {
+      exitCandles: big,
+    });
+    assert.strictEqual(tr[0].exit, "OPEN");
+  },
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
