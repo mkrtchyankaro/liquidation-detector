@@ -15,6 +15,7 @@
  *   --by-coin  every coin's result (A and B apart, worst first; * = a new coin, data since Oct 1)  --new  part B on the new coins too
  *   --tf 60        1-hour candles (default 15); "self" rows = the top candle is the entry if it closes red 1 ATR below its high
  *   "A:high" / "B:body" = the entry candle's HIGH (with its wick) / its BODY top must be 1 ATR below the top (not the close)
+ *   --posttop up|down   only entries where OI went up / down in the candle right after the top candle
  *   --h1           only 15m signals inside a 1h move of their direction in which OI grew with the price (1h context)
  *   --no-minmove   without the live rule "the coin moved more than the TP %" (default: with it)
  *   --sl extreme --rr 2   SL at the move's extreme (each coin's own high since the build-up began), TP 2 x that risk; net R
@@ -25,7 +26,7 @@
 import "dotenv/config";
 import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
-import { candles, type MinBar } from "../research/dc15";
+import { candles, type Candle, type MinBar } from "../research/dc15";
 import { simTrade, type Trade } from "../research/sltp";
 import { h1Context, inH1Growth } from "../research/atr-turn";
 import {
@@ -116,6 +117,20 @@ async function main(): Promise<void> {
   const tf = Number(arg("tf", String(V10_TF_MIN)));
   // --h1 (Johnny Oct 3): take a 15m signal only inside a 1h move of its direction in which OI grew with the price
   const h1 = argv.includes("--h1");
+  // --posttop up|down (Johnny Oct 3): keep only entries where, in the candle RIGHT AFTER the top candle, OI went up
+  // (big sellers opening new shorts after the shorts' liquidity was collected) / went down. Known at the entry: that
+  // candle is closed by then (the entry candle is after the top).
+  const postTop = arg("posttop", "");
+  const postTopOk = (
+    cs: readonly Candle[],
+    extremeT: number,
+    t: number,
+  ): boolean => {
+    if (!postTop) return true;
+    const n = cs.find((x) => x.t === extremeT + tf * 60_000);
+    if (!n || n.end > t) return false;
+    return postTop === "up" ? n.oi1 > n.oi0 : n.oi1 < n.oi0;
+  };
   // --sl extreme (Johnny Oct 3): SL at the move's extreme (the coin's own high since the build-up began), TP = --rr x that risk
   const slExt = arg("sl", "pct") === "extreme",
     rrExt = Number(arg("rr", "2"));
@@ -178,7 +193,7 @@ async function main(): Promise<void> {
     const short = (s: string): string => s.replace(/USDT$/, "");
 
     console.log(
-      `V10 ENTRIES COMPARED · ${tf}m candles${h1 ? " INSIDE a 1h growth (OI up with the price on 1h)" : ""} · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`,
+      `V10 ENTRIES COMPARED · ${tf}m candles${postTop ? ` · ONLY entries where OI went ${postTop.toUpperCase()} in the candle right after the top` : ""}${h1 ? " INSIDE a 1h growth (OI up with the price on 1h)" : ""} · ${side} · ${slExt ? `SL at the extreme · TP ${rrExt}R` : `SL ${pct}% · TP ${tpPct}%`} · fee ${fee}%/side · RANK 1 ${win}h · ${utc(btc[0].t)} -> ${utc(btc[btc.length - 1].t)} UTC`,
     );
     console.log(
       `${minMove > -Infinity ? `only coins that moved MORE than the TP ${tpPct}% (as live) · ` : "no minimum move · "}A = BTC's signal -> ${npicks} picks · B = the alt's own move (${withNew ? "ALL alts, the new ones too" : "old alts only"}, R² on ${own}m) · net R at $10 risk\n`,
@@ -190,6 +205,7 @@ async function main(): Promise<void> {
       const btcSigs = signalsOf(btcC, win, rule).filter((s) => s.side === side);
       for (const s of btcSigs) {
         if (h1 && !inH1Growth(btcH1, s.t, s.side)) continue;
+        if (!postTopOk(btcC, s.extremeT, s.t)) continue;
         const turn = {
           moveStartT: s.startT,
           candleEnd: s.t,
@@ -218,6 +234,7 @@ async function main(): Promise<void> {
           (x) => x.side === side,
         )) {
           if (h1 && !inH1Growth(altH1.get(sym)!, s.t, s.side)) continue;
+          if (!postTopOk(altC.get(sym)!, s.extremeT, s.t)) continue;
           if (
             !ownMove(
               { moveStartT: s.startT, candleEnd: s.t } as V10Turn,
