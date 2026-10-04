@@ -12,7 +12,7 @@
  *
  *   npx tsx src/tools/v10-book-study.ts --check AVAXUSDT 2026-10-03   the file's first lines (are the files there? columns?)
  *   npx tsx src/tools/v10-book-study.ts --pct 1 --tp 2
- *   options: --side SHORT|LONG  --window 12  --picks 3  --own 1|15  --fee 0.05
+ *   options: --side SHORT|LONG  --window 12  --picks 3  --own 1|15  --fee 0.05  --new (the new coins too, as part "N")
  */
 import "dotenv/config";
 import * as fs from "fs";
@@ -93,7 +93,7 @@ interface Bk {
 interface Row {
   t: number;
   sym: string;
-  src: "A" | "B";
+  src: "A" | "B" | "N";
   side: "SHORT" | "LONG";
   entry: number;
   tr: Trade;
@@ -291,7 +291,7 @@ async function main(): Promise<void> {
     interface Cand {
       t: number;
       sym: string;
-      src: "A" | "B";
+      src: "A" | "B" | "N";
       side: "SHORT" | "LONG";
       entry: number;
       startT: number;
@@ -318,7 +318,8 @@ async function main(): Promise<void> {
             topT: s.extremeT,
           });
     for (const [sym, c] of coins) {
-      if (!c.old) continue;
+      // --new (Oct 4): the new coins too, as part "N"
+      if (!c.old && !argv.includes("--new")) continue;
       for (const s of signalsOf(c.c, win, {
         entry: "atr",
         topCandleOi: false,
@@ -339,7 +340,7 @@ async function main(): Promise<void> {
           cands.push({
             t: s.t,
             sym,
-            src: "B",
+            src: c.old ? "B" : "N",
             side: s.side,
             entry: s.price,
             startT: s.startT,
@@ -419,7 +420,9 @@ async function main(): Promise<void> {
     }
     const closed = rows.filter((r) => r.tr.exit !== "OPEN" && r.b);
     const stat = (name: string, keep: (b: Bk) => boolean): void => {
-      for (const src of ["A", "B", "ALL"] as const) {
+      for (const src of (argv.includes("--new")
+        ? ["A", "B", "N", "ALL"]
+        : ["A", "B", "ALL"]) as Array<"A" | "B" | "N" | "ALL">) {
         const l = closed.filter(
           (r) => (src === "ALL" || r.src === src) && keep(r.b!),
         );
