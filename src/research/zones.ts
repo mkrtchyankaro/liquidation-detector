@@ -245,3 +245,80 @@ export function sdZones(
   }
   return out;
 }
+
+/** how far the price went away from the zone after each of its touches (in ATR), until -- after fully leaving the
+ *  zone -- it came back into it (or the data ended) */
+export function reactions(
+  c: readonly ZCandle[],
+  z: Zone,
+  atr: number,
+): number[] {
+  return z.pivots.map((p) => {
+    let far = 0,
+      left = false;
+    for (let j = p.i + 1; j < c.length; j++) {
+      const x = c[j];
+      if (p.kind === "TOP") {
+        far = Math.max(far, z.lo - x.low);
+        if (x.high < z.lo) left = true;
+        else if (left) break;
+      } else {
+        far = Math.max(far, x.high - z.hi);
+        if (x.low > z.hi) left = true;
+        else if (left) break;
+      }
+    }
+    return far / atr;
+  });
+}
+
+export interface ZoneQuality {
+  res: number;
+  sup: number;
+  resD: number;
+  supD: number;
+  react: number;
+  width: number;
+  life: number;
+  score: number;
+}
+/** the measured quality of a zone (src/tools/zone-scan.ts) */
+export function zoneQuality(
+  c: readonly ZCandle[],
+  z: Zone,
+  atr: number,
+): ZoneQuality {
+  const DAY = 86_400_000,
+    tops = z.pivots.filter((p) => p.kind === "TOP"),
+    bots = z.pivots.filter((p) => p.kind === "BOTTOM");
+  const span = (l: Pivot[]): number =>
+    l.length > 1 ? (l[l.length - 1].t - l[0].t) / DAY : 0;
+  const r = [...reactions(c, z, atr)].sort((a, b) => a - b),
+    react = r.length ? r[Math.floor(r.length / 2)] : NaN;
+  return {
+    res: tops.length,
+    sup: bots.length,
+    resD: span(tops),
+    supD: span(bots),
+    react,
+    width: (z.hi - z.lo) / atr,
+    life: (z.lastT - z.pivots[0].t) / DAY,
+    score: react * Math.min(tops.length, bots.length),
+  };
+}
+
+/** the main zone the way src/tools/zones.ts picks it: the zone touched last that has 3+ points */
+export function mainZone(
+  c: readonly ZCandle[],
+  tol = 0.8,
+  maxWidth = 2 * tol,
+): { z: Zone; atr: number } | null {
+  if (c.length < 30) return null;
+  const a = atrSeries(c, 14),
+    atr = a[a.length - 1];
+  const zs = zones(pivots(c, 1, 14), atr, tol, 2, maxWidth);
+  const z = zs
+    .filter((x) => x.pivots.length >= 3)
+    .sort((x, y) => y.lastT - x.lastT)[0];
+  return z ? { z, atr } : null;
+}
