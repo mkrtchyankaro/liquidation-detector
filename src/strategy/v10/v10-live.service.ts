@@ -16,7 +16,7 @@ import {
 import { simTrade } from "../../research/sltp";
 import type { MinBar } from "../../research/dc15";
 import { estimateFeesUsd } from "../v9/v9-fees";
-import { BTC, rulesFor, type V10Settings } from "./v10-config";
+import { BTC, NEW_COIN_DAYS, rulesFor, type V10Settings } from "./v10-config";
 import {
   btcRank1At,
   lastCandleEnd,
@@ -41,6 +41,7 @@ import {
   type V10BookSource,
   type V10BookView,
 } from "./v10-book";
+import { zoneWall, type V10ZoneSource, type V10ZoneView } from "./v10-zone";
 
 const log = childLogger({ mod: "v10-live" });
 
@@ -134,7 +135,6 @@ const STUCK_ENTRY_MS = 5 * M;
 const MAX_CLOSE_REPORT_ATTEMPTS = 8;
 const ALT_LEAD_MS = 10 * M;
 const ALT_WAIT_MS = 5 * M;
-const OWN_HISTORY_SLACK_MS = 24 * 60 * M;
 const FAILSAFE_NOTE = "entry without its SL -- closed at market";
 const BOOK_LATE_MS = 4 * M; // a snapshot taken later than this after the close is not "at the close"
 const RETRY_ALERT = 20; // x 15 s = 5 min      // wait up to 5 min after the close for every alt's last minute     // alts' bars from a little before BTC's move start (priceAt looks back up to 6 min)
@@ -161,6 +161,8 @@ export class V10LiveService {
     private readonly now: () => number = Date.now,
     /** Oct 4: the order book at every 15m close -- recorded and shown in the entry message, never changes a trade */
     private readonly book: V10BookSource | null = null,
+    /** Oct 4: the 4h zone at the signal -- shown in the entry message and kept on the row, never changes a trade */
+    private readonly zone: V10ZoneSource | null = null,
   ) {}
 
   private async ensureIndexes(): Promise<boolean> {
@@ -189,11 +191,11 @@ export class V10LiveService {
         })`,
       );
     log.warn(
-      `[V10_READY] entry=${s.rule.entry} ownEntry=${s.ownRule.entry} ownR2=${s.ownR2Minutes}m short=${s.short} long=${s.long} sl=${s.slPct}% tp=${s.tpPct}% picks=${s.picks} rank=${s.rankWindowHours}h alts=${s.symbols.length} users=${
+      `[V10_READY] entry=${s.rule.entry} ownEntry=${s.ownRule.entry} ownLongEntry=${s.ownLongRule.entry} ownR2=${s.ownR2Minutes}m short=${s.short} long=${s.long} sl=${s.slPct}% tp=${s.tpPct}% picks=${s.picks} rank=${s.rankWindowHours}h alts=${s.symbols.length} users=${
         this.users()
           .map((u) => {
             const r = rulesFor(s, u.userId);
-            return `${u.userId}:${u.mode}(${[r.short ? "S" : "", r.long ? "L" : ""].join("") || "none"},btc:${r.btc ? `sl${r.slPct}/tp${r.tpPct}` : "off"},alt:${r.own ? `sl${r.ownSlPct}/tp${r.ownTpPct}` : "off"}${r.maxOpen ? `,max${r.maxOpen}` : ""})`;
+            return `${u.userId}:${u.mode}(${[r.short ? "S" : "", r.long ? "L" : ""].join("") || "none"},btc:${r.btc ? `sl${r.slPct}/tp${r.tpPct}` : "off"},alt:${r.own ? `sl${r.ownSlPct}/tp${r.ownTpPct}${r.ownLong ? "+L" : ""}` : "off"}${r.maxOpen ? `,max${r.maxOpen}` : ""})`;
           })
           .join(" ") || "(none)"
       }`,
@@ -306,6 +308,26 @@ export class V10LiveService {
     }
   }
 
+  /** the coin's 4h zone known at the signal; null when unknown -- never throws */
+  private async zoneFor(
+    sig: V10SignalDoc,
+    p: V10Pick,
+  ): Promise<V10ZoneView | null | undefined> {
+    if (!this.zone) return undefined;
+    try {
+      return await this.zone.at(p.symbol, sig.turn.candleEnd, p.price);
+    } catch (err) {
+      log.warn(
+        {
+          symbol: p.symbol,
+          err: err instanceof Error ? err.message : String(err),
+        },
+        "[V10_ZONE_FAILED] -- the message goes without it",
+      );
+      return undefined;
+    }
+  }
+
   // ── 1. signal ────────────────────────────────────────────────────────────────────────────────────────────────
   private async checkSignal(): Promise<void> {
     const now = this.now(),
@@ -328,6 +350,11 @@ export class V10LiveService {
       );
       return;
     }
+    // Oct 4: the BTC-led part runs only while some user takes it ("btc": false everywhere -> not even computed)
+    const btcOn = this.users().some(
+      (u) => u.mode !== "OFF" && rulesFor(this.settings, u.userId).btc,
+    );
+    if (!btcOn) this.handled.add(end);
     const btcDone =
       this.handled.has(end) || (await this.checkBtcSignal(end, now, btc));
     // part 2 only after part 1 decided this candle (part 1 has the priority on a coin)
@@ -432,12 +459,13 @@ export class V10LiveService {
       if (this.handledOwn.has(key)) continue;
       try {
         const bars = await this.load(s, end - V10_HISTORY_MS, end);
-        // only alts with the same history as BTC (the research rule: its data starts within a day of BTC's) -- a coin
-        // added recently has too few moves of its own to compare with (Oct 2: UNI, collected for 1.5 days)
-        if (!bars.length || bars[0].t > btc[0].t + OWN_HISTORY_SLACK_MS) {
+        if (!bars.length) {
           this.handledOwn.add(key);
           continue;
         }
+        // Oct 4: a coin with less than NEW_COIN_DAYS of our data is "new" -- its signals are made too, each user decides
+        // (newShort / newLong; before: new coins were never part 2)
+        const newCoin = bars[0].t > end - NEW_COIN_DAYS * 24 * 60 * M + 60 * M;
         const last = bars[bars.length - 1];
         // the alt's last minute not written yet (but it had data in the last hour) -> retried next minute, a little
         if (
@@ -450,53 +478,77 @@ export class V10LiveService {
         this.handledOwn.add(key);
         if (this.handledOwn.size > 5000)
           this.handledOwn = new Set([...this.handledOwn].slice(-2500));
-        const turn = rank1At(
-          bars,
-          end,
-          this.settings.rankWindowHours,
-          this.settings.ownRule,
-        );
-        if (!turn) continue;
-        const own = ownMove(
-          turn,
-          new Map(bars.map((b) => [b.t, b.close])),
-          btcCloses,
-          this.settings.ownR2Minutes,
-        );
-        if (!own) {
-          log.info(
-            { symbol: s, candleEnd: new Date(end).toISOString() },
-            "[V10_ALT_TURN_WITH_BTC] -- not a part-2 signal",
+        // Oct 4: SHORTs by ownRule, LONGs by ownLongRule ("flush" by default); each side decided on its own
+        const turns = [
+          rank1At(
+            bars,
+            end,
+            this.settings.rankWindowHours,
+            this.settings.ownRule,
+            "SHORT",
+          ),
+          rank1At(
+            bars,
+            end,
+            this.settings.rankWindowHours,
+            this.settings.ownLongRule,
+            "LONG",
+          ),
+        ];
+        for (const turn of turns) {
+          if (!turn) continue;
+          const own = ownMove(
+            turn,
+            new Map(bars.map((b) => [b.t, b.close])),
+            btcCloses,
+            this.settings.ownR2Minutes,
           );
-          continue;
+          if (!own) {
+            log.info(
+              {
+                symbol: s,
+                side: turn.side,
+                candleEnd: new Date(end).toISOString(),
+              },
+              "[V10_ALT_TURN_WITH_BTC] -- not a part-2 signal",
+            );
+            continue;
+          }
+          const signalId = `v10alt-${new Date(end).toISOString().slice(0, 16)}-${s.replace(/USDT$/, "")}-${turn.side}`;
+          const pick: V10Pick = {
+            symbol: s,
+            rank: 1,
+            x: own.btcPct !== 0 ? own.coinPct / own.btcPct : NaN,
+            follow: own.follow,
+            coinPct: own.coinPct,
+            btcPct: own.btcPct,
+            price: turn.price,
+          };
+          const sig: V10SignalDoc = {
+            signalId,
+            kind: "OWN",
+            side: turn.side,
+            symbol: s,
+            turn,
+            own,
+            picks: [pick],
+            rankWindowHours: this.settings.rankWindowHours,
+            createdAt: new Date(now),
+            ...(newCoin ? { newCoin: true } : {}),
+          };
+          if (!(await this.store.insertSignal(sig))) continue;
+          log.warn(
+            {
+              signalId,
+              side: turn.side,
+              entry: turn.entry,
+              how: own.how,
+              follow: own.follow,
+            },
+            "[V10_ALT_SIGNAL]",
+          );
+          await this.openForAll(sig);
         }
-        const signalId = `v10alt-${new Date(end).toISOString().slice(0, 16)}-${s.replace(/USDT$/, "")}-${turn.side}`;
-        const pick: V10Pick = {
-          symbol: s,
-          rank: 1,
-          x: own.btcPct !== 0 ? own.coinPct / own.btcPct : NaN,
-          follow: own.follow,
-          coinPct: own.coinPct,
-          btcPct: own.btcPct,
-          price: turn.price,
-        };
-        const sig: V10SignalDoc = {
-          signalId,
-          kind: "OWN",
-          side: turn.side,
-          symbol: s,
-          turn,
-          own,
-          picks: [pick],
-          rankWindowHours: this.settings.rankWindowHours,
-          createdAt: new Date(now),
-        };
-        if (!(await this.store.insertSignal(sig))) continue;
-        log.warn(
-          { signalId, side: turn.side, how: own.how, follow: own.follow },
-          "[V10_ALT_SIGNAL]",
-        );
-        await this.openForAll(sig);
       } catch (err) {
         this.handledOwn.delete(key); // retried next minute (until the candle is stale)
         log.error(
@@ -509,10 +561,11 @@ export class V10LiveService {
 
   private async openForAll(sig: V10SignalDoc): Promise<void> {
     for (const p of sig.picks) {
-      const book = await this.bookFor(sig, p.symbol);
+      const book = await this.bookFor(sig, p.symbol),
+        zone = await this.zoneFor(sig, p);
       await Promise.all(
         this.users().map((u) =>
-          this.openTrade(u, sig, p, book).catch((err) =>
+          this.openTrade(u, sig, p, book, zone).catch((err) =>
             log.error(
               {
                 userId: u.userId,
@@ -533,11 +586,17 @@ export class V10LiveService {
     sig: V10SignalDoc,
     p: V10Pick,
     bookView: V10BookView | null = null,
+    zoneView: V10ZoneView | null | undefined = undefined,
   ): Promise<void> {
     if (u.mode === "OFF") return;
     const r = rulesFor(this.settings, u.userId);
     if (sig.kind === "BTC" ? !r.btc : !r.own) return; // this user does not take this part
-    if (sig.side === "SHORT" ? !r.short : !r.long) return; // ... or this side
+    if (
+      sig.side === "SHORT"
+        ? !r.short
+        : !(sig.kind === "OWN" ? r.ownLong : r.long)
+    )
+      return; // ... or this side (ALT LONGs: ownLong, Oct 4)
     const rules =
       sig.kind === "BTC"
         ? { ...r }
@@ -582,6 +641,7 @@ export class V10LiveService {
       entryInProgress: true,
       entryStartedAt: null,
       ...(bookView ? { book: bookView } : {}),
+      ...(zoneView !== undefined ? { zone4h: zoneView } : {}),
     };
     const skip = async (
       reason: string,
@@ -618,10 +678,44 @@ export class V10LiveService {
         false,
       );
 
-    const open = await this.store.findOpenTrades();
-    if (open.some((t) => t.userId === u.userId && t.symbol === p.symbol))
+    // Oct 4: new coins -- per user and side
+    if (
+      sig.newCoin &&
+      (sig.side === "SHORT" ? !rules.newShort : !rules.newLong)
+    )
       return skip(
-        `a V10 trade on ${p.symbol} is already open for this user`,
+        `${p.symbol} is a new coin (less than ${NEW_COIN_DAYS} days of data) -- new${sig.side === "SHORT" ? "Short" : "Long"} is off for this user`,
+        false,
+      );
+    // Oct 4: the 4h zone filters (per user; off = the zone is only shown)
+    if (sig.side === "SHORT" && rules.zoneFilterShort) {
+      const w = zoneWall(zoneView, "SHORT", p.price, lv.tp);
+      if (w)
+        return skip(
+          `ZONE: a 4h zone ${+w.lo.toPrecision(5)} – ${+w.hi.toPrecision(5)} lies between the entry and the TP -- zoneFilterShort`,
+          false,
+        );
+    }
+    if (sig.side === "LONG" && rules.zoneFilterLong) {
+      const d = zoneView?.strongBelowAtr;
+      if (d === undefined || d === null || d > rules.zoneLongMaxAtr)
+        return skip(
+          `ZONE: ${d === undefined ? "the 4h zones are unknown" : d === null ? "no strong 4h zone under the entry" : `the strong 4h zone under the entry is ${d.toFixed(1)} ATR away (> ${rules.zoneLongMaxAtr})`} -- zoneFilterLong`,
+          false,
+        );
+    }
+
+    const open = await this.store.findOpenTrades();
+    // Oct 4: LONG and SHORT are independent -- one open trade per coin per SIDE (REAL: the account check below still
+    // refuses a coin that has any position, so a REAL account never holds both)
+    if (
+      open.some(
+        (t) =>
+          t.userId === u.userId && t.symbol === p.symbol && t.side === sig.side,
+      )
+    )
+      return skip(
+        `a V10 ${sig.side} on ${p.symbol} is already open for this user`,
         false,
       );
     if (rules.maxOpen !== null) {

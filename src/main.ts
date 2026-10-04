@@ -35,6 +35,7 @@ import {
   type V10UserRef,
 } from "./strategy/v10/v10-live.service";
 import { V10BookRecorder } from "./strategy/v10/v10-book";
+import { V10ZoneFinder } from "./strategy/v10/v10-zone";
 import { V10Repository } from "./strategy/v10/v10-repository";
 
 const log = childLogger({ mod: "main" });
@@ -290,6 +291,7 @@ async function main(): Promise<void> {
           new V10Repository(mongo.db),
           Date.now,
           new V10BookRecorder(mongo.db),
+          new V10ZoneFinder(),
         )
       : null;
   if (v10)

@@ -2,6 +2,7 @@ import { fmtPrice, fmtQty, fmtUsd } from "../v9/v9-telegram";
 import { estimateFeesUsd } from "../v9/v9-fees";
 import type { V10SignalDoc, V10TradeDoc } from "./v10-repository";
 import { formatBookLines } from "./v10-book";
+import { formatZoneLine } from "./v10-zone";
 
 /**
  * V10 messages (plain text). Header "V10 · BTC" (part 1, BTC-led) or "V10 · ALT" (part 2, the alt's own move) on every
@@ -34,6 +35,14 @@ function threePoints(
   rankH: number,
 ): string[] {
   const top = a.side === "SHORT";
+  if (a.entry === "flush") {
+    // Oct 4, the ALT LONG: a fall with OI DOWN (longs closed / liquidated, RANK 1), then a candle with OI UP 1 ATR off the low
+    const back = (100 * (a.price - a.extreme)) / a.extreme;
+    return [
+      `1️⃣ ${t15(a.moveStartT)} → ${hm(a.extremeT + W)} · ${who} ${top ? "⬆️" : "⬇️"} ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} (դիրքերը փակվեցին · RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
+      `2️⃣ ${hm(a.candleEnd - W)} մոմ · OI ${sp(a.candleOiPct)} (նոր դիրքեր) · փակվեց ${top ? "գագաթից" : "հատակից"} ${sp(top ? -back : back)} (≥ 1 ATR) → entry`,
+    ];
+  }
   if (a.declineOiPct !== undefined && a.atr !== undefined) {
     // the "story" entry (Johnny Oct 3): growth -> OI falls while the price still goes on -> the red candle 1 ATR back
     const atrPct = (100 * a.atr) / a.extreme;
@@ -110,6 +119,9 @@ export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
       ? v10OwnStory(sig, t)
       : v10Story(sig, t, sig.picks.length)),
     ...("book" in t ? ["", ...formatBookLines(t.book, t.side)] : []),
+    ...("zone4h" in t
+      ? ["", formatZoneLine(t.zone4h, { side: t.side, entry, tp })]
+      : []),
   ].join("\n");
 }
 

@@ -1,6 +1,7 @@
 import type { Db } from "mongodb";
 import type { V10OwnMove, V10Pick, V10Side, V10Turn } from "./v10-engine";
 import type { V10BookView } from "./v10-book";
+import type { V10ZoneView } from "./v10-zone";
 
 /**
  * V10 storage -- its own collections, never V9's:
@@ -27,6 +28,8 @@ export interface V10SignalDoc {
   picks: V10Pick[];
   rankWindowHours: number;
   createdAt: Date;
+  /** Oct 4: the coin had less than NEW_COIN_DAYS of our data */
+  newCoin?: boolean;
 }
 
 export type V10TradeState = "OPEN" | "CLOSED" | "FAILED" | "SKIPPED";
@@ -85,6 +88,8 @@ export interface V10TradeDoc {
   retries?: number;
   /** Oct 4: the order book within 1% at the top candle's close and at the entry (recorded only) */
   book?: V10BookView;
+  /** Oct 4: the coin's 4h zone at the signal (null = no zone found) -- recorded only */
+  zone4h?: V10ZoneView | null;
 }
 
 export interface V10Store {

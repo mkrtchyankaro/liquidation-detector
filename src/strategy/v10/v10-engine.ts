@@ -185,16 +185,18 @@ const toTurn = (
   entry,
 });
 
-/** The signal of `bars` (any symbol) at `candleEnd` by the rule (RANK 1), else null. */
+/** The signal of `bars` (any symbol) at `candleEnd` by the rule (RANK 1), else null. `side`: only that side (Oct 4: the
+ *  ALT part takes its SHORTs from one rule and its LONGs from "flush"). */
 export function rank1At(
   bars: readonly MinBar[],
   candleEnd: number,
   rankWindowHours: number,
   rule: V10Rule,
+  side?: V10Side,
 ): V10Turn | null {
   const cut = bars.filter((b) => b.t < candleEnd);
   const s = signalsOf(candles(cut, V10_TF_MIN), rankWindowHours, rule).find(
-    (x) => x.t === candleEnd,
+    (x) => x.t === candleEnd && (!side || x.side === side),
   );
   return s ? toTurn(s, rule.entry) : null;
 }
