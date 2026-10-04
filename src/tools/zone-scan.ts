@@ -12,7 +12,7 @@
  * Sorted by react x (the smaller of res and sup) -- a strong flip needs both roles AND real reactions.
  *
  *   npx tsx src/tools/zone-scan.ts
- *   options: --days 90  --tol 0.8  --symbols XRPUSDT,SOLUSDT (default: SYMBOLS from .env)
+ *   options: --days 90  --tol 0.8  --max-width 1.6 (ATR; default 2 x tol: points never chain into a zone taller than that)  --symbols XRPUSDT,SOLUSDT (default: SYMBOLS from .env)
  */
 import "dotenv/config";
 import axios from "axios";
@@ -64,7 +64,8 @@ const median = (v: number[]): number => {
 
 async function main(): Promise<void> {
   const days = Number(arg("days", "90")),
-    tol = Number(arg("tol", "0.8"));
+    tol = Number(arg("tol", "0.8")),
+    maxW = Number(arg("max-width", String(2 * tol)));
   const syms = (
     argv.includes("--symbols")
       ? arg("symbols", "")
@@ -111,7 +112,7 @@ async function main(): Promise<void> {
       const atrS = atrSeries(c, 14),
         atr = atrS[atrS.length - 1],
         price = Number(raw[raw.length - 1][4]);
-      const zs = zones(pivots(c, 1, 14), atr, tol, 2);
+      const zs = zones(pivots(c, 1, 14), atr, tol, 2, maxW);
       const z = zs
         .filter((x) => x.pivots.length >= 3)
         .sort((a, b) => b.lastT - a.lastT)[0];
@@ -141,7 +142,7 @@ async function main(): Promise<void> {
   }
   rows.sort((a, b) => b.score - a.score);
   console.log(
-    `4h MAIN ZONES · ${days} days · ${rows.length} coins · score = median reaction (ATR) x min(touches from below, from above)\n`,
+    `4h MAIN ZONES · ${days} days · zone height at most ${maxW} ATR · ${rows.length} coins · score = median reaction (ATR) x min(touches from below, from above)\n`,
   );
   console.log(
     `  coin        zone                          price      res sup  resD  supD  react  width  life  score  role`,

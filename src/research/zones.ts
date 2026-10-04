@@ -96,17 +96,25 @@ export function pivots(c: readonly ZCandle[], k = 1, n = 14): Pivot[] {
 }
 
 /** turning points close in price -> zones (tol in ATR: the last ATR of the data) */
+/** maxWidth (ATR, optional): a zone never grows taller than that -- without it, close points chain into one zone
+ *  however tall (SUI Oct 4: a 35% "zone" made of a whole range) */
 export function zones(
   ps: readonly Pivot[],
   atr: number,
   tol = 0.5,
   minPivots = 2,
+  maxWidth = Infinity,
 ): Zone[] {
   const sorted = [...ps].sort((a, b) => a.body - b.body),
     groups: Pivot[][] = [];
   for (const p of sorted) {
     const g = groups[groups.length - 1];
-    if (g && p.body - g[g.length - 1].body <= tol * atr) g.push(p);
+    if (
+      g &&
+      p.body - g[g.length - 1].body <= tol * atr &&
+      p.body - g[0].body <= maxWidth * atr
+    )
+      g.push(p);
     else groups.push([p]);
   }
   return groups
