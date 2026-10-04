@@ -29,6 +29,7 @@
  *     "zoneFilterShort": false,     // Oct 4: no SHORT when a 4h zone lies between the entry and the TP (also per user)
  *     "zoneFilterLong": false,      // Oct 4: a LONG only with a STRONG 4h zone (flip 2+/2+, >= 10 days) under the entry
  *     "zoneLongMaxAtr": 7,          //   within this many 4h ATRs (the test's median) (also per user)
+ *     "bookFilterShort": false,     // Oct 4: no SHORT when the bids' share within 1% grew from the top to the entry (📚 ⚠️)
  *     "excludeSymbols": ["ETHUSDT"],// Oct 4: no signals from these coins (their data is still collected)
  *     "ownLongEntry": "flush",     // part 2 LONG rule: "flush" (default: a fall with OI DOWN, RANK 1, then a candle with
  *                                 //   OI UP closing 1 ATR above the low) or "same" (the mirror of ownEntry)
@@ -67,6 +68,9 @@ export interface V10UserRules {
   zoneFilterShort: boolean;
   zoneFilterLong: boolean;
   zoneLongMaxAtr: number;
+  /** Oct 4 order book filter: no SHORT when, from the top candle's close to the entry, the bids' share within 1% GREW
+   *  (⚠️ someone defends the price below; test: 34% / -2.2R vs 74% / +21.1R). Unknown book = not blocked. */
+  bookFilterShort: boolean;
 }
 
 /** a coin with less than this many days of our data is "new" (Oct 4) */
@@ -88,6 +92,7 @@ export interface V10Settings {
   zoneFilterShort: boolean;
   zoneFilterLong: boolean;
   zoneLongMaxAtr: number;
+  bookFilterShort: boolean;
   short: boolean;
   long: boolean;
   slPct: number;
@@ -127,6 +132,7 @@ export function rulesFor(s: V10Settings, userId: string): V10UserRules {
     zoneFilterShort: o.zoneFilterShort ?? s.zoneFilterShort,
     zoneFilterLong: o.zoneFilterLong ?? s.zoneFilterLong,
     zoneLongMaxAtr: o.zoneLongMaxAtr ?? s.zoneLongMaxAtr,
+    bookFilterShort: o.bookFilterShort ?? s.bookFilterShort,
   };
 }
 
@@ -149,6 +155,7 @@ export function parseV10Settings(
     zoneFilterShort: false,
     zoneFilterLong: false,
     zoneLongMaxAtr: 7,
+    bookFilterShort: false,
     short: true,
     long: false,
     slPct: 1,
@@ -179,6 +186,7 @@ export function parseV10Settings(
     "zoneFilterShort",
     "zoneFilterLong",
     "zoneLongMaxAtr",
+    "bookFilterShort",
     "excludeSymbols",
     "topCandleOi",
     "ownTopCandleOi",
@@ -277,6 +285,7 @@ export function parseV10Settings(
     50,
     "a number of 4h ATRs between 0.1 and 50",
   );
+  const bookFilterShort = bool("bookFilterShort", false);
   const short = bool("short", true),
     long = bool("long", false);
   const slPct = num("slPct", 1, 0.1, 10, "a percent between 0.1 and 10");
@@ -400,6 +409,7 @@ export function parseV10Settings(
         "zoneFilterShort",
         "zoneFilterLong",
         "zoneLongMaxAtr",
+        "bookFilterShort",
       ];
       for (const k of Object.keys(p))
         if (!PU.includes(k))
@@ -416,6 +426,7 @@ export function parseV10Settings(
         "newLong",
         "zoneFilterShort",
         "zoneFilterLong",
+        "bookFilterShort",
       ] as const)
         if (p[k] !== undefined) {
           if (typeof p[k] !== "boolean")
@@ -480,6 +491,7 @@ export function parseV10Settings(
     zoneFilterShort,
     zoneFilterLong,
     zoneLongMaxAtr,
+    bookFilterShort,
     short,
     long,
     slPct,

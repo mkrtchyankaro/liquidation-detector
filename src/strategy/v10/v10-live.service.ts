@@ -696,6 +696,16 @@ export class V10LiveService {
           false,
         );
     }
+    // Oct 4: the order book filter -- the bids' share within 1% grew from the top to the entry (unknown = not blocked)
+    if (
+      sig.side === "SHORT" &&
+      rules.bookFilterShort &&
+      bookView?.grew === true
+    )
+      return skip(
+        `BOOK: the buyers' share within 1% grew from the top to the entry (${bookView.supportTopPct?.toFixed(1)}% -> ${bookView.supportNowPct?.toFixed(1)}%) -- someone defends the price below -- bookFilterShort`,
+        false,
+      );
     if (sig.side === "LONG" && rules.zoneFilterLong) {
       const d = zoneView?.strongBelowAtr;
       if (d === undefined || d === null || d > rules.zoneLongMaxAtr)

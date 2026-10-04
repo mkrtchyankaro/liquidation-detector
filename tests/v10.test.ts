@@ -159,12 +159,13 @@ async function run(): Promise<void> {
     const s = settings({ perUser: { karo: { long: true, slPct: 1.5, maxOpen: 2 } } });
     assert.deepStrictEqual([s.short, s.long, s.slPct, s.tpPct, s.picks, s.rankWindowHours], [true, false, 1, 1, 3, 12]);
     assert.deepStrictEqual(s.symbols, ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]);
-    assert.deepStrictEqual(rulesFor(s, "karo"), { short: true, long: true, slPct: 1.5, tpPct: 1, maxOpen: 2, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: true, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7 });
-    assert.deepStrictEqual(rulesFor(s, "main"), { short: true, long: false, slPct: 1, tpPct: 1, maxOpen: null, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: false, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7 });
+    assert.deepStrictEqual(rulesFor(s, "karo"), { short: true, long: true, slPct: 1.5, tpPct: 1, maxOpen: 2, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: true, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false });
+    assert.deepStrictEqual(rulesFor(s, "main"), { short: true, long: false, slPct: 1, tpPct: 1, maxOpen: null, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: false, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false });
     // Oct 4: new coins, zone filters, excluded symbols
     const z = settings({ zoneFilterLong: true, perUser: { karo: { newShort: true, zoneFilterShort: true, zoneLongMaxAtr: 5 } } });
     assert.deepStrictEqual([rulesFor(z, "main").zoneFilterLong, rulesFor(z, "karo").newShort, rulesFor(z, "karo").zoneFilterShort, rulesFor(z, "karo").zoneLongMaxAtr, rulesFor(z, "main").zoneLongMaxAtr], [true, true, true, 5, 7]);
     assert.throws(() => settings({ perUser: { karo: { zoneLongMaxAtr: 0 } } }), /zoneLongMaxAtr/);
+    assert.deepStrictEqual([rulesFor(settings({ perUser: { karo: { bookFilterShort: true } } }), "karo").bookFilterShort, rulesFor(settings(), "karo").bookFilterShort], [true, false]);
     assert.deepStrictEqual(settings({ excludeSymbols: ["aaausdt"] }).symbols, ["BBBUSDT", "CCCUSDT", "DDDUSDT"]);
     assert.throws(() => settings({ excludeSymbols: ["ZZZUSDT"] }), /does not collect/);
     // Oct 4: ALT LONGs -- "ownLong" (block or per user; absent = follow "long"), the rule "flush" by default
@@ -574,6 +575,18 @@ async function run(): Promise<void> {
     assert.strictEqual(store.trades[0].state, "SKIPPED");
     assert.strictEqual(bx.st.created.length, 0);
     assert.ok(t.msgs[0].includes("already reached the SL"), t.msgs[0]);
+  });
+
+  await scenario("bookFilterShort (Oct 4): the buyers' share grew from the top to the entry -> no SHORT for that user; the others still take it", async () => {
+    const snap = (symbol: string, end: number, bid1: number, ask1: number): V10BookSnap => ({ symbol, candleEnd: end, t: end, mid: 1, bid1, ask1, bid2: bid1, ask2: ask1, covered1: true, covered2: true });
+    const book: V10BookSource = { record: async (_e, syms) => syms.length, get: async (symbol, end) => (end === SIGNAL_END ? snap(symbol, end, 60, 40) : snap(symbol, end, 50, 50)) };
+    const store = fakeStore();
+    const users: V10UserRef[] = [{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }, { userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }];
+    await new V10LiveService(settings2({ perUser: { main: { own: true }, karo: { own: true, bookFilterShort: true } } }), () => users, loaderOf(calmMarket()), store, () => SIGNAL_END + 100_000, book).onMinute();
+    const alt = store.trades.filter((t) => t.kind === "OWN");
+    assert.ok(alt.length === 2 && alt.every((t) => t.book?.grew === true), JSON.stringify(alt.map((t) => t.book)));
+    assert.deepStrictEqual(alt.map((t) => `${t.userId}:${t.state}`).sort(), ["karo:SKIPPED", "main:OPEN"]);
+    assert.ok(/BOOK: the buyers' share within 1% grew/.test(alt.find((t) => t.userId === "karo")!.failureReason ?? ""));
   });
 
   await scenario("new coins (Oct 4: < 7 days of our data): the signal is made; the trade only with newShort / newLong (per user)", async () => {
