@@ -158,6 +158,16 @@ async function main(): Promise<void> {
     );
 
   if (argv.includes("--detail")) {
+    console.log(
+      `  every ${mainTf} zone (2+ touches) in the period, high to low:`,
+    );
+    for (const z of [...zs].sort((x, y) => y.hi - x.hi)) {
+      const first = z.pivots[0].t,
+        last = z.lastT;
+      console.log(
+        `   ${f(z.lo)} – ${f(z.hi)} · ${z.tops} from below (tops) · ${z.bottoms} from above (bottoms) · ${z.flip === "UP" ? "FLIP up" : z.flip === "DOWN" ? "FLIP down" : "-"} · ${day(first)} .. ${day(last)}`,
+      );
+    }
     if (main)
       for (const p of main.pivots)
         console.log(
