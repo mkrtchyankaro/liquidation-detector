@@ -322,3 +322,27 @@ export function mainZone(
     .sort((x, y) => y.lastT - x.lastT)[0];
   return z ? { z, atr } : null;
 }
+
+/**
+ * ONE ZONE PER 10 DAYS (Johnny, Oct 4 2026): of the zones whose touches are all within the last `days` days (4h
+ * candles closed by then), the ONE touched the most times (3+); a tie -> the one touched last. The turning points are
+ * found on all the candles given (for the ATR), only those of the last `days` days are kept.
+ */
+export function zoneOfDays(
+  c: readonly ZCandle[],
+  days = 10,
+  tol = 0.8,
+  maxWidth = 2 * tol,
+): { z: Zone; atr: number } | null {
+  if (c.length < 30) return null;
+  const a = atrSeries(c, 14),
+    atr = a[a.length - 1];
+  const last = c[c.length - 1],
+    W = c.length > 1 ? last.t - c[c.length - 2].t : 0,
+    from = last.t + W - days * 86_400_000;
+  const ps = pivots(c, 1, 14).filter((p) => p.t >= from);
+  const z = zones(ps, atr, tol, 3, maxWidth).sort(
+    (x, y) => y.pivots.length - x.pivots.length || y.lastT - x.lastT,
+  )[0];
+  return z ? { z, atr } : null;
+}

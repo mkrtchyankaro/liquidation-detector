@@ -7,6 +7,7 @@ import {
   sdZones,
   zones,
   atrSeries,
+  zoneOfDays,
   type ZCandle,
 } from "../src/research/zones";
 
@@ -69,6 +70,33 @@ scenario(
     assert.deepStrictEqual([z.tops, z.bottoms, z.flip], [3, 1, "UP"]);
     assert.ok(z.hi - z.lo < 1, `${z.lo}-${z.hi}`);
     assert.ok(z.wickHi > z.hi, "the wicks are shown beside the body zone");
+  },
+);
+scenario(
+  "one zone per 10 days: the most-touched zone of the last 10 days; old touches outside the 10 days are not counted",
+  () => {
+    // ~110 touched 4 times (resistance x3, then support once), ~102 touched 3 times; all within the last 10 days (60 x 4h)
+    const closes = [
+      ...Array.from({ length: 16 }, (_, i) => 100 + (i % 2)),
+      ...go(100, 110, 5),
+      ...go(110, 102, 4),
+      ...go(102, 110.3, 4),
+      ...go(110.3, 101, 4),
+      ...go(101, 109.8, 4),
+      ...go(109.8, 103, 4),
+      ...go(103, 120, 6),
+      ...go(120, 110.2, 5),
+      ...go(110.2, 121, 5),
+    ];
+    const c = path(closes);
+    const r = zoneOfDays(c, 10)!;
+    assert.ok(
+      r && r.z.lo <= 110.3 && r.z.hi >= 109.8,
+      JSON.stringify(r?.z && [r.z.lo, r.z.hi]),
+    );
+    assert.strictEqual(r.z.pivots.length, 4);
+    // with only the last 3 days the touches at ~110 from before are dropped -> no zone of 3+ touches
+    assert.strictEqual(zoneOfDays(c, 3), null);
   },
 );
 scenario(
