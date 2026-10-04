@@ -2,7 +2,13 @@
  * Zones of interest (bodies, 1-ATR turns). Usage: npx tsx tests/zones.test.ts
  */
 import * as assert from "assert";
-import { pivots, zones, atrSeries, type ZCandle } from "../src/research/zones";
+import {
+  pivots,
+  sdZones,
+  zones,
+  atrSeries,
+  type ZCandle,
+} from "../src/research/zones";
 
 let passed = 0,
   failed = 0;
@@ -77,6 +83,38 @@ scenario(
       !ps.some((p) => p.kind === "TOP" && p.body >= 109),
       JSON.stringify(ps),
     );
+  },
+);
+
+scenario(
+  "supply / demand: small-body base before a strong candle; supply = highest wick .. lowest body; broken on a close above",
+  () => {
+    const D = 86_400_000,
+      k = (
+        i: number,
+        o: number,
+        h: number,
+        l: number,
+        cl: number,
+      ): ZCandle => ({ t: i * D, open: o, high: h, low: l, close: cl });
+    const c: ZCandle[] = Array.from({ length: 16 }, (_, i) =>
+      k(i, 100, 101, 99, 100 + (i % 2 ? 0.5 : -0.5)),
+    ); // ATR ~2
+    c.push(k(16, 100, 108, 99.5, 107.5)); // a strong green candle up (a leg-out from the warm-up)
+    c.push(k(17, 107.5, 110, 106, 108)); // base: small bodies, long wicks
+    c.push(k(18, 108, 111, 106.5, 107.6));
+    c.push(k(19, 107.6, 107.8, 101, 101.5)); // the strong drop: body 6.1 of range 6.8, >= ATR -> SUPPLY from the base
+    c.push(k(20, 101.5, 104, 101, 103));
+    const z = sdZones(c).find((x) => x.kind === "SUPPLY")!;
+    assert.ok(z, JSON.stringify(sdZones(c)));
+    assert.deepStrictEqual(
+      [z.lo, z.hi, z.baseN, z.brokenT],
+      [107.5, 111, 2, null],
+    );
+    c.push(k(21, 103, 108, 102.5, 107.8)); // into the zone (touch), not beyond its top
+    c.push(k(22, 107.8, 112, 107, 111.5)); // a close above 111 -> broken
+    const z2 = sdZones(c).find((x) => x.kind === "SUPPLY")!;
+    assert.deepStrictEqual([z2.touches, z2.brokenT], [1, 22 * D]);
   },
 );
 
