@@ -1,40 +1,76 @@
 /**
- * ZONES OF INTEREST -- Binance 4h candles (Johnny's friend, Oct 4 2026). Read-only: Binance public klines, no keys,
- * no database. The rule: src/research/zones.ts (turning points by the 1-ATR rule on the candle BODIES, close ones
- * grouped into zones, a zone that was resistance and became support = a flip).
+ * ZONES OF INTEREST -- Binance candles, 4h and daily (Johnny's friend, Oct 4 2026). Read-only: Binance public klines,
+ * no keys, no database. The rule: src/research/zones.ts (turning points by the 1-ATR rule on the candle BODIES, close
+ * ones grouped into zones, a zone that was resistance and became support = a flip).
  *
- *   npx tsx src/tools/zones.ts --symbol XRPUSDT
- *   options: --tf 4h (1h, 1d ...)  --days 90  --k 1 (ATR for a turn)  --tol 0.5 (ATR: how close points join one zone)
- *            --min 2 (points for a zone)
+ *   npx tsx src/tools/zones.ts --symbol XRPUSDT                 4h and daily, the friend's view
+ *   options: --tf 4h,1d (any of 15m 1h 4h 1d 1w)  --days (history; default 4h 90, 1d 240, 1h 30, 15m 10, 1w 730)
+ *            --range (days for the range's high / low; default 4h 30, 1d 60, 1h 7, 15m 2, 1w 180)
+ *            --k 1 (ATR for a turn)  --tol 0.8 (ATR: how close points join one zone)  --all (every zone, also single points)
+ * The output per timeframe:
+ *   MAIN ZONE  the zone touched last that has >= 3 points (tops + bottoms), its role and every touch
+ *   ABOVE / BELOW  the nearest zones (>= 2 points) over / under the price
+ *   RANGE      the highest top and the lowest bottom (bodies) of the last --range days: the edges of the range
  */
 import axios from "axios";
-import { atrSeries, pivots, zones, type ZCandle } from "../research/zones";
+import {
+  atrSeries,
+  pivots,
+  zones,
+  type Zone,
+  type ZCandle,
+} from "../research/zones";
 
 const argv = process.argv.slice(2);
 const arg = (n: string, d: string): string => {
   const i = argv.indexOf(`--${n}`);
   return i >= 0 ? argv[i + 1] : d;
 };
-const utc = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("T", " ");
+const utc = (ms: number, tf: string): string =>
+  new Date(ms)
+    .toISOString()
+    .slice(5, tf === "1d" || tf === "1w" ? 10 : 16)
+    .replace("T", " ");
 const fapi = axios.create({
   baseURL: process.env.BINANCE_FAPI_URL ?? "https://fapi.binance.com",
   timeout: 20_000,
 });
+const DAY = 86_400_000;
+const DAYS: Record<string, number> = {
+  "15m": 10,
+  "1h": 30,
+  "4h": 90,
+  "1d": 240,
+  "1w": 730,
+};
+const RANGE: Record<string, number> = {
+  "15m": 2,
+  "1h": 7,
+  "4h": 30,
+  "1d": 60,
+  "1w": 180,
+};
 
-async function main(): Promise<void> {
-  const sym = arg("symbol", "XRPUSDT").toUpperCase(),
-    tf = arg("tf", "4h"),
-    days = Number(arg("days", "90"));
+const role = (z: Zone): string =>
+  z.flip === "UP"
+    ? "FLIP: was resistance -> now support"
+    : z.flip === "DOWN"
+      ? "FLIP: was support -> now resistance"
+      : z.tops
+        ? "resistance"
+        : "support";
+
+async function one(sym: string, tf: string): Promise<void> {
+  const days = Number(arg("days", String(DAYS[tf] ?? 90))),
+    rangeDays = Number(arg("range", String(RANGE[tf] ?? 30)));
   const k = Number(arg("k", "1")),
-    tol = Number(arg("tol", "0.5")),
-    min = Number(arg("min", "2"));
+    tol = Number(arg("tol", "0.8"));
   const rows: unknown[][] = (
     await fapi.get("/fapi/v1/klines", {
       params: {
         symbol: sym,
         interval: tf,
-        startTime: Date.now() - days * 86_400_000,
+        startTime: Date.now() - days * DAY,
         limit: 1500,
       },
     })
@@ -49,68 +85,90 @@ async function main(): Promise<void> {
       low: Number(r[3]),
       close: Number(r[4]),
     }));
-  if (c.length < 30) throw new Error(`only ${c.length} candles`);
+  if (c.length < 30) {
+    console.log(
+      `${sym} ${tf}: only ${c.length} candles -- use a longer --days`,
+    );
+    return;
+  }
   const atr = atrSeries(c, 14),
     a = atr[atr.length - 1],
     price = Number(rows[rows.length - 1][4]);
   const ps = pivots(c, k, 14),
-    zs = zones(ps, a, tol, min);
+    all = zones(ps, a, tol, 1),
+    zs = all.filter((z) => z.pivots.length >= 2);
   const dp = Math.max(4, -Math.floor(Math.log10(price)) + 4),
     f = (v: number): string => v.toFixed(dp);
   const pct = (v: number): string =>
     `${v >= price ? "+" : ""}${((100 * (v - price)) / price).toFixed(2)}%`;
+  const span = (z: Zone): string => `${f(z.lo)} – ${f(z.hi)}`;
+  const where = (z: Zone): string =>
+    price > z.hi
+      ? `${pct(z.hi)} under the price`
+      : price < z.lo
+        ? `${pct(z.lo)} over the price`
+        : "THE PRICE IS INSIDE";
+
   console.log(
-    `${sym} · ${tf} · ${utc(c[0].t)} -> ${utc(c[c.length - 1].t)} UTC (${c.length} closed candles) · now ${price} · ATR ${f(a)} (${((100 * a) / price).toFixed(2)}%)`,
+    `══ ${sym} · ${tf} · ${utc(c[0].t, tf)} -> ${utc(c[c.length - 1].t, tf)} UTC (${c.length} closed candles) · now ${price} · ATR ${((100 * a) / price).toFixed(2)}%`,
   );
-  console.log(
-    `turning points: ${ps.length} (1 ATR on the bodies) · zones (>= ${min} points within ${tol} ATR): ${zs.length}\n`,
-  );
-  console.log(
-    `  zone (bodies)              wicks                 points  tops bottoms  role now                last touch      from now`,
-  );
-  const role = (z: (typeof zs)[number]): string =>
-    z.flip === "UP"
-      ? "FLIP: was resist -> support"
-      : z.flip === "DOWN"
-        ? "FLIP: was support -> resist"
-        : z.tops
-          ? "resistance"
-          : "support";
-  for (const z of [...zs].sort((x, y) => y.hi - x.hi)) {
-    const where =
-      price > z.hi
-        ? `below ${pct(z.hi)}`
-        : price < z.lo
-          ? `above ${pct(z.lo)}`
-          : "PRICE INSIDE";
+  const main =
+    [...zs]
+      .filter((z) => z.pivots.length >= 3)
+      .sort((x, y) => y.lastT - x.lastT)[0] ??
+    [...zs].sort((x, y) => y.lastT - x.lastT)[0];
+  if (main) {
     console.log(
-      `  ${f(z.lo)} – ${f(z.hi)}   (${f(z.wickLo)} – ${f(z.wickHi)})   ${String(z.pivots.length).padStart(4)}   ${String(z.tops).padStart(3)} ${String(z.bottoms).padStart(6)}   ${role(z).padEnd(27)} ${utc(z.lastT)}    ${where}`,
+      `MAIN ZONE   ${span(main)}  (wicks ${f(main.wickLo)} – ${f(main.wickHi)}) · ${role(main)} · ${main.pivots.length} touches · ${where(main)}`,
     );
-  }
-  const latest = [...zs].sort((x, y) => y.lastT - x.lastT)[0];
-  const below = zs.filter((z) => z.hi < price).sort((x, y) => y.hi - x.hi)[0],
-    above = zs.filter((z) => z.lo > price).sort((x, y) => x.lo - y.lo)[0];
-  console.log(
-    `\nTHE LATEST ZONE (touched last): ${latest ? `${f(latest.lo)} – ${f(latest.hi)} · ${role(latest)} · ${latest.pivots.length} points` : "none"}`,
-  );
-  if (latest)
-    for (const p of latest.pivots)
+    for (const p of main.pivots)
       console.log(
-        `   ${utc(p.t)} UTC  ${p.kind === "TOP" ? "top    (hit from below)" : "bottom (hit from above)"}  body ${f(p.body)} · wick ${f(p.wick)}`,
+        `              ${utc(p.t, tf)}  ${p.kind === "TOP" ? "hit from below, went down" : "hit from above, went up "}  body ${f(p.body)} · wick ${f(p.wick)}`,
       );
+  } else console.log(`MAIN ZONE   none (no zone with 2+ touches)`);
+  const above = zs
+    .filter((z) => z.lo > price && z !== main)
+    .sort((x, y) => x.lo - y.lo)
+    .slice(0, 2);
+  const below = zs
+    .filter((z) => z.hi < price && z !== main)
+    .sort((x, y) => y.hi - x.hi)
+    .slice(0, 2);
+  for (const z of above)
+    console.log(
+      `ABOVE       ${span(z)} · ${role(z)} · ${z.pivots.length} touches · last ${utc(z.lastT, tf)} · ${where(z)}`,
+    );
+  for (const z of below)
+    console.log(
+      `BELOW       ${span(z)} · ${role(z)} · ${z.pivots.length} touches · last ${utc(z.lastT, tf)} · ${where(z)}`,
+    );
+  const recent = ps.filter((p) => p.t >= c[c.length - 1].t - rangeDays * DAY);
+  const hi = recent
+      .filter((p) => p.kind === "TOP")
+      .sort((x, y) => y.body - x.body)[0],
+    lo = recent
+      .filter((p) => p.kind === "BOTTOM")
+      .sort((x, y) => x.body - y.body)[0];
   console.log(
-    `nearest zone BELOW the price: ${below ? `${f(below.lo)} – ${f(below.hi)} (${pct(below.hi)})` : "none"}`,
+    `RANGE (${rangeDays}d) top ${hi ? `${f(hi.body)} (wick ${f(hi.wick)}, ${utc(hi.t, tf)}) ${pct(hi.body)}` : "none"} · bottom ${lo ? `${f(lo.body)} (wick ${f(lo.wick)}, ${utc(lo.t, tf)}) ${pct(lo.body)}` : "none"}`,
   );
-  console.log(
-    `nearest zone ABOVE the price: ${above ? `${f(above.lo)} – ${f(above.hi)} (${pct(above.lo)})` : "none"}`,
-  );
-  if (argv.includes("--points")) {
-    console.log(`\nALL TURNING POINTS`);
-    for (const p of ps)
+  if (argv.includes("--all")) {
+    console.log(`  every zone (single points too):`);
+    for (const z of [...all].sort((x, y) => y.hi - x.hi))
       console.log(
-        `   ${utc(p.t)}  ${p.kind.padEnd(6)} body ${f(p.body)} wick ${f(p.wick)}`,
+        `   ${span(z)}  ${String(z.pivots.length).padStart(2)} touches (${z.tops} from below, ${z.bottoms} from above) · ${role(z).padEnd(36)} last ${utc(z.lastT, tf)} · ${where(z)}`,
       );
   }
+  console.log("");
+}
+
+async function main(): Promise<void> {
+  const sym = arg("symbol", "XRPUSDT").toUpperCase();
+  for (const tf of arg("tf", "4h,1d")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean))
+    await one(sym, tf);
 }
 main().catch((err) => {
   console.error(err instanceof Error ? err.message : err);
