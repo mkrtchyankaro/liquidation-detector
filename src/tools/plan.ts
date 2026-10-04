@@ -22,6 +22,7 @@ import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
 import { candles, type MinBar } from "../research/dc15";
 import { impulseLongs } from "../research/oi-impulse";
+import { flushSignals } from "../research/atr-turn";
 import { simTrade } from "../research/sltp";
 import {
   atrSeries,
@@ -34,6 +35,8 @@ import {
   moveOf,
   ownMove,
   signalsOf,
+  V10_ATR_N,
+  V10_K,
   type V10Turn,
 } from "../strategy/v10/v10-engine";
 
@@ -120,6 +123,14 @@ async function main(): Promise<void> {
     const btc = await load("BTCUSDT"),
       btcMap = new Map(btc.map((b) => [b.t, b.close]));
     const rows: Row[] = [];
+    const cut: Array<{
+        sym: string;
+        side: "LONG" | "SHORT";
+        t: number;
+        exit: string;
+        net: number;
+      }> = [],
+      overlaps: string[] = [];
     for (const s of (process.env.SYMBOLS ?? "")
       .split(",")
       .map((x) => x.trim().toUpperCase())
@@ -183,7 +194,80 @@ async function main(): Promise<void> {
               kind: `LONG ${lb}h`,
               price: g.price,
             });
-      for (const kind of ["SHORT", "LONG 12h", "LONG 24h"]) {
+      // the flush LONG (Oct 3 test): a fall with OI down (RANK 1), then a candle with OI up closing 1 ATR above the low
+      for (const g of flushSignals(c, V10_K, V10_ATR_N, win, {
+        rank: true,
+        side: "LONG",
+      }))
+        if (
+          own(g.startT, g.t) &&
+          moveOf({ kind: "OWN", side: "LONG", turn: g }, { coinPct: NaN }) >
+            tpPct
+        )
+          sigs.push({
+            t: g.t,
+            side: "LONG",
+            kind: "LONG flush",
+            price: g.price,
+          });
+      // Johnny Oct 4: what if a new signal of the OTHER side closes the open trade at once (and opens its own)?
+      {
+        const both = sigs
+          .filter((x) => x.kind === "SHORT" || x.kind === "LONG flush")
+          .sort((a, b) => a.t - b.t);
+        let pos: {
+          side: "LONG" | "SHORT";
+          t: number;
+          entry: number;
+          exitT: number;
+          exit: string;
+          r: number;
+        } | null = null;
+        const done = (exit: string, r: number): void => {
+          cut.push({
+            sym: s.replace(/USDT$/, ""),
+            side: pos!.side,
+            t: pos!.t,
+            exit,
+            net: r - (2 * fee) / pct,
+          });
+          pos = null;
+        };
+        for (const g of both) {
+          if (pos && pos.exitT <= g.t) done(pos.exit, pos.r);
+          if (pos && pos.side === g.side) continue;
+          if (pos) {
+            const sg = pos.side === "LONG" ? 1 : -1,
+              r = (sg * (g.price - pos.entry)) / ((pos.entry * pct) / 100);
+            overlaps.push(
+              `  ${utc(g.t)} ${s.replace(/USDT$/, "").padEnd(6)} ${pos.side} open since ${utc(pos.t)} (alone it would end ${pos.exit} ${sp(pos.r)}R) -> the ${g.side} signal closes it at ${sp(r)}R`,
+            );
+            done("CUT", r);
+          }
+          const sl =
+            g.side === "SHORT"
+              ? g.price * (1 + pct / 100)
+              : g.price * (1 - pct / 100);
+          const tr = simTrade(
+            bars,
+            g.t,
+            g.price,
+            sl,
+            tpPct / pct,
+            g.side === "SHORT" ? "DOWN" : "UP",
+          );
+          pos = {
+            side: g.side,
+            t: g.t,
+            entry: g.price,
+            exitT: tr.exitT,
+            exit: tr.exit,
+            r: tr.r,
+          };
+        }
+        if (pos) done((pos as { exit: string }).exit, (pos as { r: number }).r);
+      }
+      for (const kind of ["SHORT", "LONG 12h", "LONG 24h", "LONG flush"]) {
         let busy = 0; // each kind traded on its own (one trade per coin at a time), so the kinds can be compared
         for (const g of sigs
           .filter((x) => x.kind === kind)
@@ -252,7 +336,7 @@ async function main(): Promise<void> {
       const x = v.filter(Number.isFinite).sort((a, b) => a - b);
       return x.length ? x[Math.floor(x.length / 2)] : NaN;
     };
-    for (const kind of ["SHORT", "LONG 12h", "LONG 24h"]) {
+    for (const kind of ["SHORT", "LONG 12h", "LONG 24h", "LONG flush"]) {
       const l = closed.filter((r) => r.kind === kind);
       console.log(`${argv.includes("--list") ? "\n" : ""}── ${kind} ──`);
       console.log(line("all", l));
@@ -305,7 +389,7 @@ async function main(): Promise<void> {
     console.log(
       `\nTHE PLAN TOGETHER (SHORT no strong wall + LONG 12h / 24h no strong wall), one coin may hold one of each`,
     );
-    for (const lb of ["LONG 12h", "LONG 24h"])
+    for (const lb of ["LONG 12h", "LONG 24h", "LONG flush"])
       console.log(
         line(
           `SHORT + ${lb}`,
@@ -314,6 +398,21 @@ async function main(): Promise<void> {
           ),
         ),
       );
+    console.log(
+      `\nSHORT + LONG flush on the same coin: ${overlaps.length} times a signal of the other side came while a trade was open`,
+    );
+    for (const o of overlaps) console.log(o);
+    const c2 = cut.filter((x) => x.exit !== "OPEN"),
+      tp2 = c2.filter((x) => x.net > 0).length;
+    console.log(
+      line(
+        "independent (both may be open together)",
+        closed.filter((r) => r.kind === "SHORT" || r.kind === "LONG flush"),
+      ),
+    );
+    console.log(
+      `  ${"the other side's signal closes the trade".padEnd(42)} ${String(c2.length).padStart(3)} trades · won ${String(tp2).padStart(3)} · lost ${String(c2.length - tp2).padStart(3)} · net ${sp(c2.reduce((a, x) => a + x.net, 0)).padStart(7)}R`,
+    );
   } finally {
     await client.close();
   }
