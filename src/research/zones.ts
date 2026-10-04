@@ -139,7 +139,8 @@ export function zones(
 
 /**
  * SUPPLY / DEMAND ZONES (the standard method, Oct 4 2026 -- agreed with Johnny):
- *   leg-out  a strong candle: its body is more than half its range AND at least 1 ATR (the ATR before it)
+ *   leg-out  1..3 decisive candles of one colour in a row (body more than half the range) whose bodies add up to
+ *            at least 1 ATR (the ATR before the leg) -- a drop made of a few candles counts, not only one big candle
  *   base     the 1..maxBase candles right before it whose body is at most half their range (indecision); none ->
  *            the one candle before the leg-out
  *   supply (a strong drop out of the base):  top = the base's highest wick (distal), bottom = its lowest body (proximal)
@@ -160,10 +161,11 @@ export interface SDZone {
 
 export function sdZones(
   c: readonly ZCandle[],
-  opts: { n?: number; maxBase?: number; from?: number } = {},
+  opts: { n?: number; maxBase?: number; maxLeg?: number; from?: number } = {},
 ): SDZone[] {
   const n = opts.n ?? 14,
     maxBase = opts.maxBase ?? 5,
+    maxLeg = opts.maxLeg ?? 3,
     from = opts.from ?? -Infinity;
   const atr = atrSeries(c, n),
     out: SDZone[] = [];
@@ -171,22 +173,32 @@ export function sdZones(
     range = (x: ZCandle): number => x.high - x.low;
   const small = (x: ZCandle): boolean =>
     range(x) > 0 && body(x) <= 0.5 * range(x);
-  const leg = (k: number): boolean =>
-    k >= 1 &&
-    atr[k - 1] > 0 &&
-    range(c[k]) > 0 &&
-    body(c[k]) > 0.5 * range(c[k]) &&
-    body(c[k]) >= atr[k - 1];
+  const decisive = (x: ZCandle): boolean =>
+    range(x) > 0 && body(x) > 0.5 * range(x);
+  const red = (x: ZCandle): boolean => x.close < x.open;
   for (let i = 1; i < c.length; i++) {
+    // the leg-out STARTS at i: a decisive candle right after a non-decisive one or one of the other colour
     const x = c[i];
-    if (x.t < from || !leg(i)) continue;
-    // the 2nd, 3rd ... strong candle of the same move is a continuation, not a new leg-out
-    if (leg(i - 1) && c[i - 1].close < c[i - 1].open === x.close < x.open)
-      continue;
+    if (x.t < from || !decisive(x) || !(atr[i - 1] > 0)) continue;
+    if (decisive(c[i - 1]) && red(c[i - 1]) === red(x)) continue;
+    // the leg: up to maxLeg decisive candles of the same colour in a row; it counts once their bodies add up to 1 ATR
+    let e = i,
+      moved = body(x);
+    while (
+      moved < atr[i - 1] &&
+      e + 1 < c.length &&
+      e + 1 - i < maxLeg &&
+      decisive(c[e + 1]) &&
+      red(c[e + 1]) === red(x)
+    ) {
+      e++;
+      moved += body(c[e]);
+    }
+    if (moved < atr[i - 1]) continue;
     let s = i;
     while (s - 1 >= 0 && i - (s - 1) <= maxBase && small(c[s - 1])) s--;
     const base = s < i ? c.slice(s, i) : [c[i - 1]];
-    const down = x.close < x.open;
+    const down = red(x);
     const z: SDZone = down
       ? {
           kind: "SUPPLY",
@@ -194,7 +206,7 @@ export function sdZones(
           hi: Math.max(...base.map((b) => b.high)),
           t: base[0].t,
           baseN: base.length,
-          legT: x.t,
+          legT: c[e].t,
           brokenT: null,
           touches: 0,
         }
@@ -204,12 +216,14 @@ export function sdZones(
           hi: Math.max(...base.map((b) => Math.max(b.open, b.close))),
           t: base[0].t,
           baseN: base.length,
-          legT: x.t,
+          legT: c[e].t,
           brokenT: null,
           touches: 0,
         };
+    // known once the leg's last candle closed: breaks and touches are counted after it
+    const i0 = e;
     let inside = false;
-    for (let j = i + 1; j < c.length; j++) {
+    for (let j = i0 + 1; j < c.length; j++) {
       const y = c[j];
       if (z.kind === "SUPPLY" ? y.close > z.hi : y.close < z.lo) {
         z.brokenT = y.t;

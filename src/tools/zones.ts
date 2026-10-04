@@ -2,7 +2,9 @@
  * ZONES -- the friend's view in 3 lines (Johnny, Oct 4 2026). Read-only: Binance public klines, no keys, no database.
  *   4h MAIN ZONE   src/research/zones.ts zones(): turning points (1 ATR, bodies) close to each other (0.8 ATR) --
  *                  the zone touched last with 3+ points (the flip zone, body to body)
- *   1d ABOVE/BELOW src/research/zones.ts sdZones(): the standard supply / demand zones -- a base of small-body
+ *   1d TOP/BOTTOM  over the days the 4h zone exists (its first touch -> the end): highest body .. highest wick,
+ *                  lowest wick .. lowest body
+ *   1d ABOVE/BELOW src/research/zones.ts sdZones() over the same days: the standard supply / demand zones -- a base of small-body
  *                  candles before a strong candle (body > half its range and >= 1 ATR); supply = highest wick ..
  *                  lowest body, demand = lowest wick .. highest body; the nearest one not broken, above / below the price
  *
@@ -113,8 +115,9 @@ async function main(): Promise<void> {
       .filter((z) => z.pivots.length >= 3)
       .sort((x, y) => y.lastT - x.lastT)[0] ??
     zs.sort((x, y) => y.lastT - x.lastT)[0];
-  // 1d supply / demand made inside the period, not broken by `to`
-  const sd = sdZones(o.c, { from }).filter((z) => z.brokenT === null);
+  // 1d (Johnny Oct 4): the daily view is taken over the days the 4h zone EXISTS -- from its first touch to the end
+  const life = main ? Math.floor(main.pivots[0].t / DAY) * DAY : from;
+  const sd = sdZones(o.c, { from: life }).filter((z) => z.brokenT === null);
   const above = sd
     .filter((z) => z.kind === "SUPPLY" && z.lo > price)
     .sort((x, y) => x.lo - y.lo)[0];
@@ -122,12 +125,26 @@ async function main(): Promise<void> {
     .filter((z) => z.kind === "DEMAND" && z.hi < price)
     .sort((x, y) => y.hi - x.hi)[0];
   const inside = sd.filter((z) => z.lo <= price && price <= z.hi);
+  // the edges of those days: the top zone = the highest body .. the highest wick, the bottom zone = the lowest wick .. the lowest body
+  const days = o.c.filter((x) => x.t >= life);
+  const topBody = Math.max(...days.map((x) => Math.max(x.open, x.close))),
+    topWick = Math.max(...days.map((x) => x.high));
+  const botBody = Math.min(...days.map((x) => Math.min(x.open, x.close))),
+    botWick = Math.min(...days.map((x) => x.low));
+  const when = (v: number, key: (x: ZCandle) => number): string =>
+    day(days.find((x) => key(x) === v)?.t ?? NaN);
 
   console.log(
     `${sym} · ${day(from)} → ${day(Math.min(to, Date.now()))} UTC · price ${price}`,
   );
   console.log(
     `${mainTf} main zone:   ${main ? `${f(main.lo)} – ${f(main.hi)}  (${main.pivots.length} touches${main.flip === "UP" ? ", was resistance, now support" : main.flip === "DOWN" ? ", was support, now resistance" : ""})` : "none"}`,
+  );
+  console.log(
+    `${outerTf} top:          ${f(topBody)} – ${f(topWick)}  (the highest body ${when(topBody, (x) => Math.max(x.open, x.close))} .. the highest wick ${when(topWick, (x) => x.high)}, since ${day(life)}, the 4h zone's first touch)`,
+  );
+  console.log(
+    `${outerTf} bottom:       ${f(botWick)} – ${f(botBody)}  (the lowest wick ${when(botWick, (x) => x.low)} .. the lowest body ${when(botBody, (x) => Math.min(x.open, x.close))})`,
   );
   console.log(
     `${outerTf} above:        ${above ? `${f(above.lo)} – ${f(above.hi)}  (supply, ${day(above.t)}, ${pct(above.lo)})` : "none (no unbroken supply zone above in this period)"}`,
@@ -146,8 +163,10 @@ async function main(): Promise<void> {
         console.log(
           `   ${mainTf} ${day(p.t)}  ${p.kind === "TOP" ? "hit from below" : "hit from above"}  body ${f(p.body)} · wick ${f(p.wick)}`,
         );
-    console.log(`  every ${outerTf} supply / demand zone made in the period:`);
-    for (const z of sdZones(o.c, { from }))
+    console.log(
+      `  every ${outerTf} supply / demand zone made since ${day(life)}:`,
+    );
+    for (const z of sdZones(o.c, { from: life }))
       console.log(
         `   ${z.kind.padEnd(6)} ${f(z.lo)} – ${f(z.hi)} · base ${day(z.t)} (${z.baseN} candle${z.baseN > 1 ? "s" : ""}) · leg ${day(z.legT)} · touched ${z.touches}x · ${z.brokenT ? `broken ${day(z.brokenT)}` : "not broken"}`,
       );

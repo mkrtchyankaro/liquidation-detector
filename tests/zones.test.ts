@@ -118,5 +118,29 @@ scenario(
   },
 );
 
+scenario(
+  "supply from a drop made of several medium candles (none alone 1 ATR, together more)",
+  () => {
+    const D = 86_400_000,
+      k = (
+        i: number,
+        o: number,
+        h: number,
+        l: number,
+        cl: number,
+      ): ZCandle => ({ t: i * D, open: o, high: h, low: l, close: cl });
+    const c: ZCandle[] = Array.from({ length: 16 }, (_, i) =>
+      k(i, 100, 101, 99, 100 + (i % 2 ? 0.5 : -0.5)),
+    ); // ATR ~2
+    c.push(k(16, 100, 103, 99.5, 100.3)); // base: a small body, long wicks (with the quiet candles before it)
+    c.push(k(17, 100.3, 100.5, 98.9, 99.1)); // -1.2 (decisive, < 1 ATR)
+    c.push(k(18, 99.1, 99.2, 97.8, 97.9)); // -1.2 -> together 2.4 >= ATR
+    c.push(k(19, 97.9, 98.5, 97.5, 98.2));
+    const z = sdZones(c).find((x) => x.kind === "SUPPLY");
+    assert.ok(z, JSON.stringify(sdZones(c)));
+    assert.deepStrictEqual([z!.lo, z!.hi, z!.legT], [99.5, 103, 18 * D]);
+  },
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
