@@ -31,9 +31,14 @@ export function atrSignals(
     redAfterTop?: boolean;
     selfTop?: boolean;
     far?: "close" | "high" | "body";
+    firstChance?: boolean;
     why?: (t: number, reason: string) => void;
   } = {},
 ): AtrSignal[] {
+  // firstChance (Johnny, Oct 5 -- ADA 10-04 22:30): the FIRST candle that closes 1 ATR back from the top (all else met)
+  // decides: OI below its peak -> the entry; OI NOT below its peak (still rising: new positions piling in) -> that top
+  // is CANCELLED, no later entry from it (a later one is late). A new top gives a new first chance.
+  let burned = false; // reset by a NEW top (a higher high) or the move's end -- equal highs are the same top
   // growth "afterLow" (default): the OI rise after OI's lowest point in the move · "biggest" (Johnny Oct 3, SUI): the
   // biggest OI rise anywhere in the move during which the price also went the move's way -- OI may fall to a new low
   // later (shorts liquidated on the way up), the growth that happened still counts
@@ -190,13 +195,31 @@ export function atrSignals(
         why(
           `OI grew ${pc(build)} but the price did not go ${top ? "up" : "down"} with it`,
         );
+      else if (opts.firstChance && burned)
+        why(
+          `firstChance: the first candle 1 ATR back from ${W} had OI not below its peak -> this ${top ? "top" : "bottom"} is cancelled`,
+        );
       else if (!(x.oi1 < peakOi))
         why(`OI is not below its peak (growth ${pc(build)})`);
       else if (!(back >= k * a))
         why(
           `only ${pc((100 * back) / (top ? c[E].high : c[E].low))} back from ${W}, 1 ATR = ${pc((100 * a) / x.close)}`,
         );
-      if (build > 0 && priceMoved && x.oi1 < peakOi && back >= k * a) {
+      if (
+        opts.firstChance &&
+        build > 0 &&
+        priceMoved &&
+        back >= k * a &&
+        !(x.oi1 < peakOi)
+      )
+        burned = true;
+      if (
+        build > 0 &&
+        priceMoved &&
+        x.oi1 < peakOi &&
+        back >= k * a &&
+        !(opts.firstChance && burned)
+      ) {
         const before = accepted.filter(
           (p) => p.t < x.end && p.t >= x.end - windowH * 3_600_000,
         );
@@ -238,6 +261,7 @@ export function atrSignals(
     } else if (x.oi1 > c[peak].oi1) peak = i;
     grow(i, top);
     // ── the moves: the 15m directional change with the OI rule (as src/research/oi-peak.ts) ──
+    if (newTop) burned = false;
     if (makesExtreme) {
       ext = i;
       const self = top ? x.high - x.close : x.close - x.low; // this candle's close back from its own top
@@ -289,6 +313,7 @@ export function atrSignals(
     dir = top ? "DOWN" : "UP";
     signaled = false;
     wick = -1;
+    burned = false;
     low = Math.max(0, start - 1);
     peak = low;
     for (let j = low; j <= i; j++) {
@@ -606,10 +631,18 @@ export function flushSignals(
   k: number,
   n: number,
   windowH: number,
-  opts: { rank?: boolean; green?: boolean; side?: "LONG" | "SHORT" } = {},
+  opts: {
+    rank?: boolean;
+    green?: boolean;
+    side?: "LONG" | "SHORT";
+    firstChance?: boolean;
+  } = {},
 ): PeakSignal[] {
   const want = opts.side ?? "LONG",
     rank = opts.rank !== false;
+  // firstChance (Johnny, Oct 5): the FIRST candle that closes 1 ATR off the low decides -- if OI was still falling then
+  // (an earlier candle closed 1 ATR above the low without ending the move), the bottom is cancelled: no later entry
+  const atr = opts.firstChance ? atrBefore(c, n) : [];
   const W = c.length > 0 ? c[0].end - c[0].t : 0;
   const idx = new Map(c.map((x, i) => [x.t, i]));
   const out: PeakSignal[] = [];
@@ -625,6 +658,21 @@ export function flushSignals(
     const x = c[i];
     if (opts.green && !(side === "LONG" ? x.close > x.open : x.close < x.open))
       continue;
+    if (opts.firstChance) {
+      // from the FIRST candle that touched the extreme (equal lows later are the same bottom)
+      let e0 = e;
+      for (let j = s; j <= e; j++)
+        if (side === "LONG" ? c[j].low <= t.extreme : c[j].high >= t.extreme) {
+          e0 = j;
+          break;
+        }
+      let early = false;
+      for (let j = e0 + 1; j < i && !early; j++)
+        early =
+          (side === "LONG" ? c[j].close - t.extreme : t.extreme - c[j].close) >=
+          k * atr[j];
+      if (early) continue;
+    }
     out.push({
       t: t.t,
       side,

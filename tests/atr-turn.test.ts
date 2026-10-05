@@ -622,5 +622,93 @@ scenario(
   },
 );
 
+scenario(
+  "firstChance (Johnny Oct 5, ADA): the FIRST candle 1 ATR back from the top has OI still rising -> the top is cancelled; live waits and enters later",
+  () => {
+    const rows: Array<[number, number]> = [
+      ...warm,
+      [+0.6, +8],
+      [+0.6, +8],
+      [+0.6, +8],
+      [+0.6, +8],
+      [-0.8, +3],
+      [-0.4, -5],
+      [-0.4, -5],
+    ];
+    const now = after(atrSignals(mk(rows), 1, 14, 12, { topCandleOi: false }));
+    assert.strictEqual(now.length, 1, JSON.stringify(now.map((x) => rel(x.t))));
+    assert.strictEqual(
+      rel(now[0].t),
+      6,
+      "live: waits until OI is below its peak",
+    );
+    assert.strictEqual(
+      after(
+        atrSignals(mk(rows), 1, 14, 12, {
+          topCandleOi: false,
+          firstChance: true,
+        }),
+      ).length,
+      0,
+      "firstChance: cancelled",
+    );
+    // the first 1-ATR candle with OI already below its peak -> the same entry either way
+    const ok: Array<[number, number]> = [
+      ...warm,
+      [+0.6, +8],
+      [+0.6, +8],
+      [+0.6, +8],
+      [+0.6, +8],
+      [-0.8, -3],
+      [-0.4, -2],
+    ];
+    assert.deepStrictEqual(
+      after(
+        atrSignals(mk(ok), 1, 14, 12, {
+          topCandleOi: false,
+          firstChance: true,
+        }),
+      ).map((x) => rel(x.t)),
+      after(atrSignals(mk(ok), 1, 14, 12, { topCandleOi: false })).map((x) =>
+        rel(x.t),
+      ),
+    );
+  },
+);
+scenario(
+  "firstChance flush LONG: a candle closed 1 ATR above the low while OI still fell -> the bottom is cancelled",
+  () => {
+    const rows: Array<[number, number]> = [
+      ...warm,
+      [-0.6, -8],
+      [-0.6, -8],
+      [-0.6, -8],
+      [-0.6, -8],
+      [+0.8, -2],
+      [+0.4, +3],
+      [+0.4, +1],
+    ];
+    const now = after(flushSignals(mk(rows), 1, 14, 12));
+    assert.strictEqual(now.length, 1, JSON.stringify(now.map((x) => rel(x.t))));
+    assert.strictEqual(
+      after(flushSignals(mk(rows), 1, 14, 12, { firstChance: true })).length,
+      0,
+    );
+    const clean: Array<[number, number]> = [
+      ...warm,
+      [-0.6, -8],
+      [-0.6, -8],
+      [-0.6, -8],
+      [-0.6, -8],
+      [+0.8, +3],
+      [+0.4, +1],
+    ];
+    assert.strictEqual(
+      after(flushSignals(mk(clean), 1, 14, 12, { firstChance: true })).length,
+      1,
+    );
+  },
+);
+
 console.log(`\n${passed} passed, ${failed} failed`);
 if (failed) process.exit(1);
