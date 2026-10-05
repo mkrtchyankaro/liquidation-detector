@@ -118,11 +118,6 @@ export function formatOwnEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
   const start = a.extreme / (1 + a.movePct / 100), gb = (100 * (a.extreme - entry)) / (a.extreme - start);
   out.push(`📏 ${short ? "բարձրացել է" : "իջել է"} ${Math.abs(a.movePct).toFixed(2)}%`);
   if (Number.isFinite(gb)) out.push(`📏 հետ է եկել ${gb.toFixed(0)}%${gb >= 50 ? " ⚠️" : ""}`);
-  // 🕯 Oct 5: a candle against the turn between the top (bottom) and the entry
-  if (sig.against) {
-    const what = short ? "գագաթից հետո կանաչ մոմ OI ⬇️" : "հատակից հետո կարմիր մոմ OI ⬆️";
-    out.push(sig.against.length ? `🕯 ${what}՝ ${sig.against.map((x) => `${hm(x.t)} (${sp(x.oiPct)})`).join(", ")} ⚠️` : `🕯 ${what}՝ չկա ✅`);
-  }
   // 📖 the story
   const o = sig.own;
   out.push("", "📖 Պատմություն");
