@@ -1,7 +1,7 @@
 import { fmtPrice, fmtQty, fmtUsd } from "../v9/v9-telegram";
 import { estimateFeesUsd } from "../v9/v9-fees";
 import type { V10SignalDoc, V10TradeDoc } from "./v10-repository";
-import { formatBookLines } from "./v10-book";
+import { formatBookLines, formatWallLines } from "./v10-book";
 import { formatZoneLine } from "./v10-zone";
 
 /**
@@ -12,28 +12,21 @@ import { formatZoneLine } from "./v10-zone";
  * the close 1 ATR back from the top (bottom); "oiPeak" -- OI up -> OI falls after its peak -> the first red (green) candle.
  */
 const SEP = "------------------------------";
-const utc = (ms: number): string =>
-  new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+const utc = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 const hm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
-const dhm = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("T", " ");
+const dhm = (ms: number): string => new Date(ms).toISOString().slice(5, 16).replace("T", " ");
 const sp = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 const coin = (s: string): string => s.replace(/USDT$/, "");
 const W = 15 * 60_000;
 
 /** "V10 · BTC" / "V10 · ALT" */
-export const v10Head = (t: { kind?: string }): string =>
-  `V10 · ${t.kind === "OWN" ? "ALT" : "BTC"}`;
+export const v10Head = (t: { kind?: string }): string => `V10 · ${t.kind === "OWN" ? "ALT" : "BTC"}`;
 
 /** "10-03 01:30" -- every time in UTC */
 const t15 = (ms: number): string => dhm(ms);
 
 /** Johnny's 3 points, short, UTC (Oct 3). `who` = whose candles (BTC or the alt). */
-function threePoints(
-  a: V10SignalDoc["turn"],
-  who: string,
-  rankH: number,
-): string[] {
+function threePoints(a: V10SignalDoc["turn"], who: string, rankH: number): string[] {
   const top = a.side === "SHORT";
   if (a.entry === "flush") {
     // Oct 4, the ALT LONG: a fall with OI DOWN (longs closed / liquidated, RANK 1), then a candle with OI UP 1 ATR off the low
@@ -49,7 +42,7 @@ function threePoints(
     return [
       `1️⃣ ${t15(a.moveStartT)} → ${hm(a.peakT)} · ${who} · OI ${sp(a.moveOiPct)} · գինը ${sp(a.buildPricePct ?? NaN)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
       `2️⃣ ${hm(a.peakT)} → ${hm(a.topT ?? a.extremeT + W)} · OI ${sp(a.declineOiPct)} · գինը ${sp(a.declinePricePct ?? NaN)} → ${top ? "գագաթ" : "հատակ"}`,
-      `3️⃣ ${hm(a.candleEnd - W)} ${top ? "կարմիր" : "կանաչ"} մոմ · ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : (a.backPct ?? NaN))} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "storyFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
+      `3️⃣ ${hm(a.candleEnd - W)} ${top ? "կարմիր" : "կանաչ"} մոմ · ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : a.backPct ?? NaN)} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "storyFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
     ];
   }
   if (a.atr !== undefined) {
@@ -58,7 +51,7 @@ function threePoints(
     return [
       `1️⃣ ${t15(a.moveStartT)} → ${hm(a.extremeT + W)} · ${who} ${top ? "⬆️" : "⬇️"} ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
       `2️⃣ OI-ի գագաթից հետո OI ${sp(a.fromPeakOiPct)}`,
-      `3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : (a.backPct ?? NaN))} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "atrFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
+      `3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : a.backPct ?? NaN)} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "atrFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
     ];
   }
   return [
@@ -69,10 +62,7 @@ function threePoints(
 }
 
 /** part 2: the alt moved on its own */
-export function v10OwnStory(
-  sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">,
-  t: Pick<V10TradeDoc, "symbol" | "side">,
-): string[] {
+export function v10OwnStory(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">, t: Pick<V10TradeDoc, "symbol" | "side">): string[] {
   const o = sig.own;
   return [
     `📖 ${coin(t.symbol)} · 15m · UTC`,
@@ -82,11 +72,7 @@ export function v10OwnStory(
 }
 
 /** part 1: BTC's 3 points, then this alt with BTC */
-export function v10Story(
-  sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">,
-  t: Pick<V10TradeDoc, "symbol" | "side" | "pick">,
-  picks: number,
-): string[] {
+export function v10Story(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">, t: Pick<V10TradeDoc, "symbol" | "side" | "pick">, picks: number): string[] {
   return [
     `📖 BTC · 15m · UTC`,
     ...threePoints(sig.turn, "BTC", sig.rankWindowHours),
@@ -94,12 +80,20 @@ export function v10Story(
   ];
 }
 
+/** Oct 5 (Johnny, ADA 10-04 20:15): where the move started vs the entry and the TP -- the min move is measured to the
+ *  top, so after a deep pullback the TP can lie beyond the move's start (it asks back more than the whole move) */
+export function roomLine(turn: Pick<V10SignalDoc["turn"], "extreme" | "movePct">, side: "LONG" | "SHORT", entry: number, tp: number | null): string[] {
+  const start = turn.extreme / (1 + turn.movePct / 100);
+  if (!(start > 0) || !(entry > 0)) return [];
+  const short = side === "SHORT", left = ((short ? 1 : -1) * 100 * (entry - start)) / start;
+  const beyond = tp === null ? null : short ? tp < start : tp > start;
+  const ch = short ? left : -left;   // the price change from the start to the entry, signed
+  return [`📏 Շարժման սկիզբ ${fmtPrice(start)} · սկզբից մինչև մուտք ${ch >= 0 ? "+" : ""}${ch.toFixed(2)}%${beyond === null ? "" : beyond ? " · ⚠️ TP-ն շարժման սկզբից էլ անդին է" : " · TP-ն շարժման մեջ է ✅"}`];
+}
+
 export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
-  const long = t.side === "LONG",
-    risk = t.actualRiskUsd ?? t.plannedRiskUsd;
-  const entry = t.entryPrice!,
-    sl = t.slPrice!,
-    tp = t.tpPrice;
+  const long = t.side === "LONG", risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+  const entry = t.entryPrice!, sl = t.slPrice!, tp = t.tpPrice;
   const notional = t.quantity !== null ? entry * t.quantity : NaN;
   const fees = estimateFeesUsd(notional);
   const pctOf = (p: number): string => sp((100 * (p - entry)) / entry);
@@ -115,30 +109,22 @@ export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
     `Position ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)})`,
     `Fees ≈ ${fmtUsd(fees.tp, false)} at TP · ${fmtUsd(fees.sl, false)} at SL`,
     ``,
-    ...(sig.kind === "OWN"
-      ? v10OwnStory(sig, t)
-      : v10Story(sig, t, sig.picks.length)),
+    ...(sig.kind === "OWN" ? v10OwnStory(sig, t) : v10Story(sig, t, sig.picks.length)),
+    ...(sig.kind === "OWN" ? roomLine(sig.turn, t.side, entry, tp) : []),
     ...("book" in t ? ["", ...formatBookLines(t.book, t.side)] : []),
-    ...("zone4h" in t
-      ? ["", formatZoneLine(t.zone4h, { side: t.side, entry, tp })]
-      : []),
+    ...("book" in t && t.book?.walls ? ["", ...formatWallLines(t.book, { side: t.side, entry, tp })] : []),
+    ...("zone4h" in t ? ["", formatZoneLine(t.zone4h, { side: t.side, entry, tp })] : []),
   ].join("\n");
 }
 
 const REASON: Record<string, string> = {
-  TP_FILLED: "✅ TAKE PROFIT",
-  SL_FILLED: "❌ STOP LOSS",
-  POSITION_CLOSED_EXTERNALLY: "⚪ CLOSED OUTSIDE THE BOT",
-  CLOSED_NO_FILLS_FOUND: "⚪ CLOSED (no fills found)",
-  FAILSAFE_CLOSED: "⚪ FAIL-SAFE CLOSE (no SL found)",
-  MANUAL_CLOSE: "⚪ CLOSED BY HAND",
+  TP_FILLED: "✅ TAKE PROFIT", SL_FILLED: "❌ STOP LOSS",
+  POSITION_CLOSED_EXTERNALLY: "⚪ CLOSED OUTSIDE THE BOT", CLOSED_NO_FILLS_FOUND: "⚪ CLOSED (no fills found)",
+  FAILSAFE_CLOSED: "⚪ FAIL-SAFE CLOSE (no SL found)", MANUAL_CLOSE: "⚪ CLOSED BY HAND",
 };
 
 export function formatV10Close(t: V10TradeDoc): string {
-  const held =
-    t.closedAt !== null
-      ? Math.max(0, Math.round((t.closedAt - t.createdAt) / 60_000))
-      : null;
+  const held = t.closedAt !== null ? Math.max(0, Math.round((t.closedAt - t.createdAt) / 60_000)) : null;
   return [
     `${REASON[t.closeReason ?? ""] ?? "⚪ CLOSED"} · ${v10Head(t)} · ${t.symbol} · ${t.side} · ${t.mode}`,
     SEP,
@@ -150,18 +136,7 @@ export function formatV10Close(t: V10TradeDoc): string {
   ].join("\n");
 }
 
-export function formatV10Failure(
-  t: Pick<
-    V10TradeDoc,
-    | "symbol"
-    | "side"
-    | "mode"
-    | "orderSignalId"
-    | "failureReason"
-    | "state"
-    | "kind"
-  >,
-): string {
+export function formatV10Failure(t: Pick<V10TradeDoc, "symbol" | "side" | "mode" | "orderSignalId" | "failureReason" | "state" | "kind">): string {
   return [
     `⚠️ ${v10Head(t)} · ${t.symbol} · ${t.side} · ${t.mode} · ${t.state === "SKIPPED" ? "NOT OPENED (skipped)" : "NOT OPENED"}`,
     SEP,
