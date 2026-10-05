@@ -88,7 +88,8 @@ export function roomLine(turn: Pick<V10SignalDoc["turn"], "extreme" | "movePct">
   const short = side === "SHORT", left = ((short ? 1 : -1) * 100 * (entry - start)) / start;
   const beyond = tp === null ? null : short ? tp < start : tp > start;
   const ch = short ? left : -left;   // the price change from the start to the entry, signed
-  return [`📏 Շարժման սկիզբ ${fmtPrice(start)} · սկզբից մինչև մուտք ${ch >= 0 ? "+" : ""}${ch.toFixed(2)}%${beyond === null ? "" : beyond ? " · ⚠️ TP-ն շարժման սկզբից էլ անդին է" : " · TP-ն շարժման մեջ է ✅"}`];
+  const gb = (100 * (turn.extreme - entry)) / (turn.extreme - start);
+  return [`📏 Շարժման սկիզբ ${fmtPrice(start)} · սկզբից մինչև մուտք ${ch >= 0 ? "+" : ""}${ch.toFixed(2)}% · շարժման ${Number.isFinite(gb) ? gb.toFixed(0) : "?"}%-ն արդեն հետ է եկել${short && gb >= 50 ? " ⚠️" : ""}${beyond === null ? "" : beyond ? " · ⚠️ TP-ն շարժման սկզբից էլ անդին է" : " · TP-ն շարժման մեջ է ✅"}`];
 }
 
 export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {

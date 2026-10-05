@@ -7,7 +7,7 @@ import { simTrade } from "../../research/sltp";
 import type { MinBar } from "../../research/dc15";
 import { estimateFeesUsd } from "../v9/v9-fees";
 import { BTC, NEW_COIN_DAYS, rulesFor, type V10Settings } from "./v10-config";
-import { btcRank1At, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick } from "./v10-engine";
+import { btcRank1At, givebackPct, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick } from "./v10-engine";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "./v10-repository";
 import { formatV10Close, formatV10Entry, formatV10Failure, v10Head } from "./v10-telegram";
 import { bookView as makeBookView, type V10BookSource, type V10BookView } from "./v10-book";
@@ -322,6 +322,11 @@ export class V10LiveService {
     const moved = moveOf(sig, p);
     if (!(moved > rules.tpPct)) return skip(`the move was only ${moved.toFixed(2)}%, not more than the TP ${rules.tpPct}% -- a quiet market, not taken`, false);
 
+    // Oct 5: the price already gave back too much of its move at the entry (the giveback test's top quarter) -- per user
+    if (sig.side === "SHORT" && sig.kind === "OWN" && rules.maxGivebackShort !== null) {
+      const gb = givebackPct(sig.turn, p.price);
+      if (gb >= rules.maxGivebackShort) return skip(`GIVEBACK: the price already gave back ${gb.toFixed(0)}% of its move (>= ${rules.maxGivebackShort}%) -- late -- maxGivebackShort`, false);
+    }
     // Oct 4: new coins -- per user and side
     if (sig.newCoin && (sig.side === "SHORT" ? !rules.newShort : !rules.newLong)) return skip(`${p.symbol} is a new coin (less than ${NEW_COIN_DAYS} days of data) -- new${sig.side === "SHORT" ? "Short" : "Long"} is off for this user`, false);
     // Oct 4: the 4h zone filters (per user; off = the zone is only shown)

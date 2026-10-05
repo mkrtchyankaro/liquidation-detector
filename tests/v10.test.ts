@@ -159,14 +159,19 @@ async function run(): Promise<void> {
     const s = settings({ perUser: { karo: { long: true, slPct: 1.5, maxOpen: 2 } } });
     assert.deepStrictEqual([s.short, s.long, s.slPct, s.tpPct, s.picks, s.rankWindowHours], [true, false, 1, 1, 3, 12]);
     assert.deepStrictEqual(s.symbols, ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]);
-    assert.deepStrictEqual(rulesFor(s, "karo"), { short: true, long: true, slPct: 1.5, tpPct: 1, maxOpen: 2, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: true, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false });
-    assert.deepStrictEqual(rulesFor(s, "main"), { short: true, long: false, slPct: 1, tpPct: 1, maxOpen: null, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: false, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false });
+    assert.deepStrictEqual(rulesFor(s, "karo"), { short: true, long: true, slPct: 1.5, tpPct: 1, maxOpen: 2, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: true, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null });
+    assert.deepStrictEqual(rulesFor(s, "main"), { short: true, long: false, slPct: 1, tpPct: 1, maxOpen: null, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: false, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null });
     // Oct 4: new coins, zone filters, excluded symbols
     const z = settings({ zoneFilterLong: true, perUser: { karo: { newShort: true, zoneFilterShort: true, zoneLongMaxAtr: 5 } } });
     assert.deepStrictEqual([rulesFor(z, "main").zoneFilterLong, rulesFor(z, "karo").newShort, rulesFor(z, "karo").zoneFilterShort, rulesFor(z, "karo").zoneLongMaxAtr, rulesFor(z, "main").zoneLongMaxAtr], [true, true, true, 5, 7]);
     assert.throws(() => settings({ perUser: { karo: { zoneLongMaxAtr: 0 } } }), /zoneLongMaxAtr/);
     assert.deepStrictEqual([rulesFor(settings({ perUser: { karo: { bookFilterShort: true } } }), "karo").bookFilterShort, rulesFor(settings(), "karo").bookFilterShort], [true, false]);
     assert.deepStrictEqual(settings({ excludeSymbols: ["aaausdt"] }).symbols, ["BBBUSDT", "CCCUSDT", "DDDUSDT"]);
+    // Oct 5: maxGivebackShort -- block default, per user, null = off, bad values refused
+    const g = settings({ maxGivebackShort: 50, perUser: { main: { maxGivebackShort: null }, karo: { maxGivebackShort: 40 } } });
+    assert.deepStrictEqual([rulesFor(g, "main").maxGivebackShort, rulesFor(g, "karo").maxGivebackShort, rulesFor(settings({ maxGivebackShort: 50 }), "karo").maxGivebackShort], [null, 40, 50]);
+    assert.throws(() => settings({ maxGivebackShort: 0 }), /maxGivebackShort" must be a percent between 1 and 100/);
+    assert.throws(() => settings({ perUser: { karo: { maxGivebackShort: "50" } } }), /perUser.karo.maxGivebackShort" must be a percent/);
     assert.throws(() => settings({ excludeSymbols: ["ZZZUSDT"] }), /does not collect/);
     // Oct 4: ALT LONGs -- "ownLong" (block or per user; absent = follow "long"), the rule "flush" by default
     assert.deepStrictEqual(settings().ownLongRule, { entry: "flush", flushRank: true });
@@ -587,6 +592,19 @@ async function run(): Promise<void> {
     assert.ok(alt.length === 2 && alt.every((t) => t.book?.grew === true), JSON.stringify(alt.map((t) => t.book)));
     assert.deepStrictEqual(alt.map((t) => `${t.userId}:${t.state}`).sort(), ["karo:SKIPPED", "main:OPEN"]);
     assert.ok(/BOOK: the buyers' share within 1% grew/.test(alt.find((t) => t.userId === "karo")!.failureReason ?? ""));
+  });
+
+  await scenario("maxGivebackShort (Oct 5): the price already gave back too much of its move -> no SHORT for that user; the others still take it", async () => {
+    const users: V10UserRef[] = [{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }, { userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }];
+    const run = async (karo: number): Promise<V10TradeDoc[]> => {
+      const store = fakeStore();
+      await new V10LiveService(settings2({ perUser: { main: { own: true }, karo: { own: true, maxGivebackShort: karo } } }), () => users, loaderOf(calmMarket()), store, () => SIGNAL_END + 100_000).onMinute();
+      return store.trades.filter((t) => t.kind === "OWN" && t.side === "SHORT");
+    };
+    const low = await run(1);   // any pullback is >= 1% of the move -> skipped
+    assert.deepStrictEqual(low.map((t) => `${t.userId}:${t.state}`).sort(), ["karo:SKIPPED", "main:OPEN"]);
+    assert.ok(/GIVEBACK: the price already gave back \d+% of its move \(>= 1%\)/.test(low.find((t) => t.userId === "karo")!.failureReason ?? ""), low.find((t) => t.userId === "karo")!.failureReason);
+    assert.deepStrictEqual((await run(100)).map((t) => `${t.userId}:${t.state}`).sort(), ["karo:OPEN", "main:OPEN"]);
   });
 
   await scenario("new coins (Oct 4: < 7 days of our data): the signal is made; the trade only with newShort / newLong (per user)", async () => {

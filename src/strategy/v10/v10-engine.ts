@@ -14,30 +14,16 @@
  *   ownness: BTC went the other way, or BTC explains less than half of its minute moves).
  * Only bars that closed before the candle end are used (`bars` is cut here, whatever the caller passes).
  */
-import {
-  candles,
-  coinInWindow,
-  ownness,
-  priceAt,
-  type MinBar,
-  type Own,
-} from "../../research/dc15";
+import { candles, coinInWindow, ownness, priceAt, type MinBar, type Own } from "../../research/dc15";
 import { oiPeakSignals, type PeakSignal } from "../../research/oi-peak";
-import {
-  atrSignals,
-  atrStorySignals,
-  flushSignals,
-  type AtrSignal,
-  type StorySignal,
-} from "../../research/atr-turn";
+import { atrSignals, atrStorySignals, flushSignals, type AtrSignal, type StorySignal } from "../../research/atr-turn";
 
 export const V10_TF_MIN = 15;
 export const V10_K = 1;
 export const V10_ATR_N = 14;
 /** history used for the moves (RANK 1 comparison) -- long enough to settle into the same moves as the backtest */
 export const V10_HISTORY_MS = 10 * 24 * 3_600_000;
-const M = 60_000,
-  W = V10_TF_MIN * M;
+const M = 60_000, W = V10_TF_MIN * M;
 
 export type V10Side = "SHORT" | "LONG";
 
@@ -51,153 +37,58 @@ export type V10Side = "SHORT" | "LONG";
  *               atrStorySignals) · "storyFrozen" = the same with the ATR from the move's start
  *   "oiPeak"    OI low -> OI peak (RANK 1) -> the first red candle with OI down, no ATR distance (src/research/oi-peak.ts)
  */
-export type V10Entry =
-  | "atr"
-  | "atrFrozen"
-  | "oiPeak"
-  | "story"
-  | "storyFrozen"
-  | "flush";
-export interface V10Rule {
-  entry: V10Entry;
-  /** atr / atrFrozen: how the OI growth is measured (src/research/atr-turn.ts), default "afterLow" */ growth?:
-    | "afterLow"
-    | "biggest";
-  /** tests only: false = without the top-candle OI rule */ topCandleOi?: boolean;
-  /** atr entries: the top candle itself is the entry when it closes red 1 ATR below its high (1h) */ selfTop?: boolean;
-  /** atr entries: what must be 1 ATR from the top -- the close (default), the high, the body top */ far?:
-    | "close"
-    | "high"
-    | "body";
-  /** "flush" (tests): RANK 1 on (default true), the turn candle green (default false) */ flushRank?: boolean;
-  flushGreen?: boolean;
-  /** tests only: false = without "red entry candle after a top candle that closed 1 ATR back" */ redAfterTop?: boolean;
-}
+export type V10Entry = "atr" | "atrFrozen" | "oiPeak" | "story" | "storyFrozen" | "flush";
+export interface V10Rule { entry: V10Entry; /** atr / atrFrozen: how the OI growth is measured (src/research/atr-turn.ts), default "afterLow" */ growth?: "afterLow" | "biggest"; /** tests only: false = without the top-candle OI rule */ topCandleOi?: boolean; /** atr entries: the top candle itself is the entry when it closes red 1 ATR below its high (1h) */ selfTop?: boolean; /** atr entries: what must be 1 ATR from the top -- the close (default), the high, the body top */ far?: "close" | "high" | "body"; /** "flush" (tests): RANK 1 on (default true), the turn candle green (default false) */ flushRank?: boolean; flushGreen?: boolean; /** tests only: false = without "red entry candle after a top candle that closed 1 ATR back" */ redAfterTop?: boolean }
 
 /** every signal of these candles by the rule (the backtest and live both call this) */
-export function signalsOf(
-  c: Parameters<typeof oiPeakSignals>[0],
-  rankWindowHours: number,
-  rule: V10Rule,
-  why?: (t: number, reason: string) => void,
-): Array<PeakSignal | AtrSignal | StorySignal> {
+export function signalsOf(c: Parameters<typeof oiPeakSignals>[0], rankWindowHours: number, rule: V10Rule, why?: (t: number, reason: string) => void): Array<PeakSignal | AtrSignal | StorySignal> {
   if (rule.entry === "flush")
-    return [
-      ...flushSignals(c, V10_K, V10_ATR_N, rankWindowHours, {
-        rank: rule.flushRank,
-        green: rule.flushGreen,
-        side: "LONG",
-      }),
-      ...flushSignals(c, V10_K, V10_ATR_N, rankWindowHours, {
-        rank: rule.flushRank,
-        green: rule.flushGreen,
-        side: "SHORT",
-      }),
-    ].sort((a, b) => a.t - b.t);
+    return [...flushSignals(c, V10_K, V10_ATR_N, rankWindowHours, { rank: rule.flushRank, green: rule.flushGreen, side: "LONG" }),
+            ...flushSignals(c, V10_K, V10_ATR_N, rankWindowHours, { rank: rule.flushRank, green: rule.flushGreen, side: "SHORT" })].sort((a, b) => a.t - b.t);
   if (rule.entry === "story" || rule.entry === "storyFrozen")
-    return atrStorySignals(c, V10_K, V10_ATR_N, rankWindowHours, {
-      atr: rule.entry === "storyFrozen" ? "frozen" : "live",
-      why,
-    });
+    return atrStorySignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "storyFrozen" ? "frozen" : "live", why });
   return rule.entry === "oiPeak"
     ? oiPeakSignals(c, V10_K, V10_ATR_N, rankWindowHours)
-    : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, {
-        atr: rule.entry === "atrFrozen" ? "frozen" : "live",
-        growth: rule.growth,
-        topCandleOi: rule.topCandleOi,
-        redAfterTop: rule.redAfterTop,
-        selfTop: rule.selfTop,
-        far: rule.far,
-        why,
-      });
+    : atrSignals(c, V10_K, V10_ATR_N, rankWindowHours, { atr: rule.entry === "atrFrozen" ? "frozen" : "live", growth: rule.growth, topCandleOi: rule.topCandleOi, redAfterTop: rule.redAfterTop, selfTop: rule.selfTop, far: rule.far, why });
 }
 
 /** a RANK 1 signal of one symbol (BTC for part 1, the alt itself for part 2) */
 export interface V10Turn {
   /** 3: the entry candle's close, the price then, the candle */
-  candleEnd: number;
-  side: V10Side;
-  price: number;
-  candleOiPct: number;
-  label: string;
+  candleEnd: number; side: V10Side; price: number; candleOiPct: number; label: string;
   /** 1: the moment OI was lowest (a candle close) and the OI peak moment; the build-up in % */
-  moveStartT: number;
-  peakT: number;
-  moveOiPct: number;
+  moveStartT: number; peakT: number; moveOiPct: number;
   /** the price's extreme so far (high / low) and its candle (open time), the price move from 1 to it */
-  extreme: number;
-  extremeT: number;
-  movePct: number;
+  extreme: number; extremeT: number; movePct: number;
   /** 2: OI from the peak to the entry */
   fromPeakOiPct: number;
   /** RANK 1 against how many earlier moves */
   prior: number;
   /** the ATR entries only: the ATR used and how far (%) the close came back from the extreme; the picks' window end */
-  atr?: number;
-  backPct?: number;
+  atr?: number; backPct?: number;
   /** the "story" entries: the price while OI grew, OI and the price from OI's peak to the top, the top candle's close */
-  buildPricePct?: number;
-  declineOiPct?: number;
-  declinePricePct?: number;
-  topT?: number;
+  buildPricePct?: number; declineOiPct?: number; declinePricePct?: number; topT?: number;
   /** which entry made it */
   entry?: V10Entry;
 }
 
-export interface V10Pick {
-  symbol: string;
-  rank: number;
-  x: number;
-  follow: number;
-  coinPct: number;
-  btcPct: number;
-  price: number;
-}
+export interface V10Pick { symbol: string; rank: number; x: number; follow: number; coinPct: number; btcPct: number; price: number }
 
 export type V10BtcTurn = V10Turn;
 
-const toTurn = (
-  s: PeakSignal | AtrSignal | StorySignal,
-  entry: V10Entry,
-): V10Turn => ({
-  candleEnd: s.t,
-  side: s.side,
-  price: s.price,
-  candleOiPct: s.candleOiPct,
-  label: s.label,
-  moveStartT: s.startT,
-  peakT: s.peakT,
-  moveOiPct: s.buildOiPct,
-  extreme: s.extreme,
-  extremeT: s.extremeT,
-  movePct: s.movePct,
-  fromPeakOiPct: s.fromPeakOiPct,
-  prior: s.prior,
+const toTurn = (s: PeakSignal | AtrSignal | StorySignal, entry: V10Entry): V10Turn => ({
+  candleEnd: s.t, side: s.side, price: s.price, candleOiPct: s.candleOiPct, label: s.label,
+  moveStartT: s.startT, peakT: s.peakT, moveOiPct: s.buildOiPct,
+  extreme: s.extreme, extremeT: s.extremeT, movePct: s.movePct, fromPeakOiPct: s.fromPeakOiPct, prior: s.prior,
   ...("atr" in s ? { atr: s.atr, backPct: s.backPct } : {}),
-  ...("declineOiPct" in s
-    ? {
-        buildPricePct: s.buildPricePct,
-        declineOiPct: s.declineOiPct,
-        declinePricePct: s.declinePricePct,
-        topT: s.topT,
-      }
-    : {}),
-  entry,
+  ...("declineOiPct" in s ? { buildPricePct: s.buildPricePct, declineOiPct: s.declineOiPct, declinePricePct: s.declinePricePct, topT: s.topT } : {}), entry,
 });
 
 /** The signal of `bars` (any symbol) at `candleEnd` by the rule (RANK 1), else null. `side`: only that side (Oct 4: the
  *  ALT part takes its SHORTs from one rule and its LONGs from "flush"). */
-export function rank1At(
-  bars: readonly MinBar[],
-  candleEnd: number,
-  rankWindowHours: number,
-  rule: V10Rule,
-  side?: V10Side,
-): V10Turn | null {
+export function rank1At(bars: readonly MinBar[], candleEnd: number, rankWindowHours: number, rule: V10Rule, side?: V10Side): V10Turn | null {
   const cut = bars.filter((b) => b.t < candleEnd);
-  const s = signalsOf(candles(cut, V10_TF_MIN), rankWindowHours, rule).find(
-    (x) => x.t === candleEnd && (!side || x.side === side),
-  );
+  const s = signalsOf(candles(cut, V10_TF_MIN), rankWindowHours, rule).find((x) => x.t === candleEnd && (!side || x.side === side));
   return s ? toTurn(s, rule.entry) : null;
 }
 
@@ -205,87 +96,47 @@ export function rank1At(
 export const btcRank1At = rank1At;
 
 /** PART 1: the alts that moved most with BTC over BTC's move from OI's low (the build-up's start) to the entry. `closes` = each alt's minute closes. */
-export function pickAlts(
-  turn: V10Turn,
-  btcCloses: ReadonlyMap<number, number>,
-  closes: ReadonlyMap<string, ReadonlyMap<number, number>>,
-  picks: number,
-): V10Pick[] {
+export function pickAlts(turn: V10Turn, btcCloses: ReadonlyMap<number, number>, closes: ReadonlyMap<string, ReadonlyMap<number, number>>, picks: number): V10Pick[] {
   const up = turn.side === "SHORT"; // a SHORT ends an UP move
   const rows: Array<Omit<V10Pick, "rank">> = [];
   for (const [symbol, m] of closes) {
     const w = coinInWindow(m, btcCloses, turn.moveStartT, turn.candleEnd, up);
     const price = priceAt(m, turn.candleEnd);
-    if (Number.isFinite(w.x) && Number.isFinite(w.follow) && price > 0)
-      rows.push({
-        symbol,
-        x: w.x,
-        follow: w.follow,
-        coinPct: w.pct,
-        btcPct: w.btcPct,
-        price,
-      });
+    if (Number.isFinite(w.x) && Number.isFinite(w.follow) && price > 0) rows.push({ symbol, x: w.x, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, price });
   }
   if (!rows.length) return [];
-  const med = [...rows].map((r) => r.follow).sort((a, b) => a - b)[
-    Math.floor(rows.length / 2)
-  ];
-  return rows
-    .filter((r) => r.follow >= med)
-    .sort((a, b) => b.x - a.x)
-    .slice(0, picks)
-    .map((r, i) => ({ ...r, rank: i + 1 }));
+  const med = [...rows].map((r) => r.follow).sort((a, b) => a - b)[Math.floor(rows.length / 2)];
+  return rows.filter((r) => r.follow >= med).sort((a, b) => b.x - a.x).slice(0, picks).map((r, i) => ({ ...r, rank: i + 1 }));
 }
 
 /** PART 2: was the alt's build-up its OWN move? null = BTC's doing (not a part-2 signal).
  *  r2Minutes (Oct 3): the R2 on 15m closes (Johnny: what the chart shows) or on 1-minute returns (the old way). */
-export interface V10OwnMove {
-  how: Exclude<Own, "WITH BTC">;
-  follow: number;
-  coinPct: number;
-  btcPct: number;
-  r2Minutes?: number;
-}
-export function ownMove(
-  turn: V10Turn,
-  altCloses: ReadonlyMap<number, number>,
-  btcCloses: ReadonlyMap<number, number>,
-  r2Minutes: number,
-): V10OwnMove | null {
+export interface V10OwnMove { how: Exclude<Own, "WITH BTC">; follow: number; coinPct: number; btcPct: number; r2Minutes?: number }
+export function ownMove(turn: V10Turn, altCloses: ReadonlyMap<number, number>, btcCloses: ReadonlyMap<number, number>, r2Minutes: number): V10OwnMove | null {
   // from where the build-up started (OI's low) to the entry (Johnny Oct 3: look from there to the entry)
-  const w = coinInWindow(
-    altCloses,
-    btcCloses,
-    turn.moveStartT,
-    turn.candleEnd,
-    undefined,
-    r2Minutes,
-  );
+  const w = coinInWindow(altCloses, btcCloses, turn.moveStartT, turn.candleEnd, undefined, r2Minutes);
   // a move too short to measure (fewer than 10 steps) is not "own"
   if (!Number.isFinite(w.follow) || !Number.isFinite(w.pct)) return null;
   const how = ownness(w.follow, w.pct, w.btcPct);
-  return how === "WITH BTC"
-    ? null
-    : { how, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, r2Minutes };
+  return how === "WITH BTC" ? null : { how, follow: w.follow, coinPct: w.pct, btcPct: w.btcPct, r2Minutes };
 }
 
 /** How far the coin went in the signal's direction (%, positive = the move we trade against): the BTC part -> the pick's
  *  own move with BTC (to its extreme); the ALT part -> the alt's move from its OI low to the top. Must be > the TP. */
-export function moveOf(
-  sig: { kind: "BTC" | "OWN"; side: V10Side; turn: Pick<V10Turn, "movePct"> },
-  p: Pick<V10Pick, "coinPct">,
-): number {
+export function moveOf(sig: { kind: "BTC" | "OWN"; side: V10Side; turn: Pick<V10Turn, "movePct"> }, p: Pick<V10Pick, "coinPct">): number {
   const m = sig.kind === "BTC" ? p.coinPct : sig.turn.movePct;
   return sig.side === "SHORT" ? m : -m;
 }
 
+/** Oct 5: how much (%) of its move (the move's start -> the extreme) the price had already given back at `price`;
+ *  NaN when unknown. movePct is measured from the start candle's close, so start = extreme / (1 + movePct). */
+export function givebackPct(turn: Pick<V10Turn, "extreme" | "movePct">, price: number): number {
+  const start = turn.extreme / (1 + turn.movePct / 100), span = turn.extreme - start;
+  return span !== 0 && Number.isFinite(span) ? (100 * (turn.extreme - price)) / span : NaN;
+}
+
 /** SL / TP prices for a side, from the entry and this user's percents */
-export function levels(
-  side: V10Side,
-  entry: number,
-  slPct: number,
-  tpPct: number,
-): { sl: number; tp: number } {
+export function levels(side: V10Side, entry: number, slPct: number, tpPct: number): { sl: number; tp: number } {
   return side === "SHORT"
     ? { sl: entry * (1 + slPct / 100), tp: entry * (1 - tpPct / 100) }
     : { sl: entry * (1 - slPct / 100), tp: entry * (1 + tpPct / 100) };
