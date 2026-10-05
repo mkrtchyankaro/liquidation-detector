@@ -92,7 +92,81 @@ export function roomLine(turn: Pick<V10SignalDoc["turn"], "extreme" | "movePct">
   return [`📏 Շարժման սկիզբ ${fmtPrice(start)} · սկզբից մինչև մուտք ${ch >= 0 ? "+" : ""}${ch.toFixed(2)}% · շարժման ${Number.isFinite(gb) ? gb.toFixed(0) : "?"}%-ն արդեն հետ է եկել${short && gb >= 50 ? " ⚠️" : ""}${beyond === null ? "" : beyond ? " · ⚠️ TP-ն շարժման սկզբից էլ անդին է" : " · TP-ն շարժման մեջ է ✅"}`];
 }
 
+const arrow = (v: number): string => (Number.isFinite(v) ? `${v >= 0 ? "⬆️" : "⬇️"}${Math.abs(v).toFixed(2)}%` : "n/a");
+
+/** Oct 5 (Johnny's layout): the ALT entry message, compact. SHORT measures from the top (գագաթ), LONG from the bottom
+ *  (հատակ). The 4h zone in the TP's way is a WARNING only when it is a FLIP built over >= 10 days (the "strong" one). */
+export function formatOwnEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
+  const long = t.side === "LONG", short = !long, risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+  const entry = t.entryPrice!, sl = t.slPrice!, tp = t.tpPrice, a = sig.turn;
+  const notional = t.quantity !== null ? entry * t.quantity : NaN;
+  const fees = estimateFeesUsd(notional);
+  const pctOf = (p: number): string => sp((100 * (p - entry)) / entry);
+  const rr = tp !== null ? Math.abs(tp - entry) / Math.abs(entry - sl) : NaN;
+  const ext = short ? "գագաթ" : "հատակ";
+  const out: string[] = [
+    `${long ? "🔺" : "🔻"} ${coin(t.symbol)} · ${t.side} · ${t.mode} · ${hm(t.createdAt)} UTC · V10`,
+    `Entry ${fmtPrice(entry)}`,
+    `TP    ${tp !== null ? `${fmtPrice(tp)} (${pctOf(tp)}) ${fmtUsd(risk * rr)}` : `n/a${t.binance?.tpFailureReason ? ` -- ${t.binance.tpFailureReason}` : ""}`}`,
+    `SL    ${fmtPrice(sl)} (${pctOf(sl)}) ${fmtUsd(-risk)}`,
+    `Risk ${fmtUsd(risk, false)} · RR ${Number.isFinite(rr) ? rr.toFixed(2) : "n/a"}`,
+    `Position ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)})`,
+    `Fees ≈ ${fmtUsd(fees.tp, false)} at TP · ${fmtUsd(fees.sl, false)} at SL`,
+    ``,
+  ];
+  // 📏 the move and how much of it was given back at the entry
+  const start = a.extreme / (1 + a.movePct / 100), gb = (100 * (a.extreme - entry)) / (a.extreme - start);
+  out.push(`📏 ${short ? "բարձրացել է" : "իջել է"} ${Math.abs(a.movePct).toFixed(2)}%`);
+  if (Number.isFinite(gb)) out.push(`📏 հետ է եկել ${gb.toFixed(0)}%${short && gb >= 50 ? " ⚠️" : ""}`);
+  // 📖 the story
+  const o = sig.own;
+  out.push("", "📖 Պատմություն");
+  out.push(`1️⃣ ${t15(a.moveStartT)} → ${hm(a.extremeT + W)} · Գին ${arrow(a.movePct)}, OI ${arrow(a.moveOiPct)}`);
+  if (a.entry === "flush") {
+    const back = (100 * (a.price - a.extreme)) / a.extreme;
+    out.push(`2️⃣ ${hm(a.candleEnd - W)} մոմ · OI ${arrow(a.candleOiPct)} (նոր դիրքեր)`);
+    out.push(`3️⃣ փակվեց հատակից ${arrow(back)} (≥ 1 ATR)`);
+  } else {
+    out.push(`2️⃣ OI-ի գագաթից հետո OI ${arrow(a.fromPeakOiPct)}`);
+    const back = a.backPct ?? NaN, atrPct = a.atr !== undefined ? (100 * a.atr) / a.extreme : NaN;
+    out.push(`3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${ext}ից ${arrow(short ? -back : back)}${Number.isFinite(atrPct) ? ` (≥ 1 ATR = ${atrPct.toFixed(2)}%)` : ""}`);
+  }
+  if (o) out.push(`₿ ${sp(o.btcPct)} · R² ${o.follow.toFixed(2)}`);
+  // 📚 the limit orders
+  const b = "book" in t ? t.book : undefined;
+  if (b && b.now && b.supportNowPct !== null) {
+    const split = (sup: number): string => { const bids = short ? sup : 100 - sup; return `գնորդ ${Math.round(bids)}% · վաճառող ${Math.round(100 - bids)}%`; };
+    out.push("", "📚 Լիմիտ օրդեր");
+    if (b.supportTopPct !== null) out.push(`${ext} – ${split(b.supportTopPct)}`);
+    out.push(`մուտք – ${split(b.supportNowPct)}${b.grew === true ? " ⚠️" : b.grew === false ? " ✅" : ""}`);
+    const w = b.walls, rel = (x: number): string => sp((100 * (x - entry)) / entry);
+    if (w?.bids.length) out.push(`ներքևում գնորդ՝ ${usdShort(w.bids[0].usd)} ${fmtPrice(w.bids[0].price)} (${rel(w.bids[0].price)})`);
+    if (w?.asks.length) out.push(`վերևում վաճառող՝ ${usdShort(w.asks[0].usd)} ${fmtPrice(w.asks[0].price)} (${rel(w.asks[0].price)})`);
+  } else if (b !== undefined) out.push("", "📚 Լիմիտ օրդեր՝ տվյալ չկա");
+  // 🧱 the 4h zone
+  if ("zone4h" in t) {
+    const z = t.zone4h;
+    out.push("", "🧱 4h զոնա");
+    if (!z) out.push("չկա (3+ դիպչումով զոնա չգտնվեց)");
+    else {
+      out.push(`${fmtPrice(z.lo)} – ${fmtPrice(z.hi)} · ${z.flip ? "FLIP ✅" : "FLIP չէ"}`);
+      if (z.strongBelowAtr !== undefined) out.push(z.strongBelowAtr === null ? "FLIP զոնա ներքևում՝ չկա" : `FLIP զոնա ներքևում՝ ${z.strongBelowAtr.toFixed(1)} ATR`);
+      if (tp !== null && z.zones) {
+        const inWay = z.zones.filter((x) => (short ? x.hi >= tp && x.lo < entry : x.lo <= tp && x.hi > entry));
+        const strong = inWay.find((x) => x.strong);
+        if (strong) out.push(`⚠️ TP-ի ճանապարհին FLIP զոնա՝ ${fmtPrice(strong.lo)} – ${fmtPrice(strong.hi)}`);
+        else if (inWay.length) out.push(`TP-ի ճանապարհին զոնա՝ ${fmtPrice(inWay[0].lo)} – ${fmtPrice(inWay[0].hi)} (FLIP չէ)`);
+        else out.push("TP-ի ճանապարհին զոնա չկա ✅");
+      }
+    }
+  }
+  out.push("", `🆔 ${t.orderSignalId}`);
+  return out.join("\n");
+}
+const usdShort = (v: number): string => (v >= 1e6 ? `$${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v / 1e3).toFixed(0)}k` : `$${v.toFixed(0)}`);
+
 export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
+  if (sig.kind === "OWN") return formatOwnEntry(sig, t);
   const long = t.side === "LONG", risk = t.actualRiskUsd ?? t.plannedRiskUsd;
   const entry = t.entryPrice!, sl = t.slPrice!, tp = t.tpPrice;
   const notional = t.quantity !== null ? entry * t.quantity : NaN;
@@ -110,8 +184,7 @@ export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
     `Position ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)})`,
     `Fees ≈ ${fmtUsd(fees.tp, false)} at TP · ${fmtUsd(fees.sl, false)} at SL`,
     ``,
-    ...(sig.kind === "OWN" ? v10OwnStory(sig, t) : v10Story(sig, t, sig.picks.length)),
-    ...(sig.kind === "OWN" ? roomLine(sig.turn, t.side, entry, tp) : []),
+    ...v10Story(sig, t, sig.picks.length),
     ...("book" in t ? ["", ...formatBookLines(t.book, t.side)] : []),
     ...("book" in t && t.book?.walls ? ["", ...formatWallLines(t.book, { side: t.side, entry, tp })] : []),
     ...("zone4h" in t ? ["", formatZoneLine(t.zone4h, { side: t.side, entry, tp })] : []),

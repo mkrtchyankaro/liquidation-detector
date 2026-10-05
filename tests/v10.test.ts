@@ -266,7 +266,7 @@ async function run(): Promise<void> {
     assert.ok(Math.abs(t.slPrice! / t.entryPrice! - 1.01) < 1e-9 && Math.abs(t.tpPrice! / t.entryPrice! - 0.98) < 1e-9);
     assert.strictEqual(karoTg.msgs.length, 0);
     const m = mainTg.msgs[0];
-    assert.ok(m.startsWith("🔻 V10 · ALT · EEEUSDT · SHORT (SELL) · PAPER") && m.includes("📖 EEE") && m.includes("(-2.00%)") && m.includes("BTC-ն այդ ընթացքում"), m);
+    assert.ok(m.startsWith("🔻 EEE · SHORT · PAPER · ") && m.includes(" UTC · V10") && m.includes("📖 Պատմություն") && m.includes("(-2.00%)") && m.includes("📏 բարձրացել է") && m.includes("📏 հետ է եկել") && m.includes("₿ ") && m.includes("🆔 "), m);
     if (process.env.SHOW) console.log(m);
   });
 

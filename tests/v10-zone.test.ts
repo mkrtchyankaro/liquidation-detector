@@ -57,8 +57,14 @@ async function run(): Promise<void> {
       closedAt: null, exitPrice: null, pnlUsd: null, pnlR: null, feesUsd: null, closeReason: null, failureReason: null, closeAttempts: 0, entryInProgress: false, entryStartedAt: null,
       zone4h: { lo: 0.3994, hi: 0.4215, res: 7, sup: 2, flip: true, distAtr: 3.2 } } as V10TradeDoc;
     const m = formatV10Entry(sig, t);
-    assert.ok(m.startsWith("🔺 V10 · ALT · ONDOUSDT · LONG (BUY) · PAPER"), m);
-    assert.ok(m.includes("⬇️ -7.70% · OI -7.20% (դիրքերը փակվեցին · RANK 1 · 8 շարժում / 12ժ)") && m.includes("OI +1.20% (նոր դիրքեր) · փակվեց հատակից +1.74%") && m.includes("🧱 4h զոնա 0.3994 – 0.4215 · FLIP ✅"), m);
+    assert.ok(m.startsWith("🔺 ONDO · LONG · PAPER · 10:00 UTC · V10"), m);
+    assert.ok(m.includes("📏 իջել է 7.70%") && m.includes("Գին ⬇️7.70%, OI ⬇️7.20%") && m.includes("մոմ · OI ⬆️1.20% (նոր դիրքեր)") && m.includes("3️⃣ փակվեց հատակից ⬆️1.74% (≥ 1 ATR)"), m);
+    assert.ok(m.includes("🧱 4h զոնա\n0.39940 – 0.42150 · FLIP ✅") || m.includes("🧱 4h զոնա\n0.3994 – 0.4215 · FLIP ✅"), m);
+    // the zone in the TP's way: a warning only when it is a FLIP built over >= 10 days
+    const withZones = (strong: boolean): string => formatV10Entry(sig, { ...t, zone4h: { ...t.zone4h!, zones: [{ lo: 0.485, hi: 0.488, strong }] } } as V10TradeDoc);
+    assert.ok(withZones(true).includes("⚠️ TP-ի ճանապարհին FLIP զոնա՝"), withZones(true));
+    assert.ok(withZones(false).includes("TP-ի ճանապարհին զոնա՝") && withZones(false).includes("(FLIP չէ)") && !withZones(false).includes("⚠️ TP-ի"), withZones(false));
+    assert.ok(formatV10Entry(sig, { ...t, zone4h: { ...t.zone4h!, zones: [] } } as V10TradeDoc).includes("TP-ի ճանապարհին զոնա չկա ✅"));
     if (process.env.SHOW) console.log(m);
   });
   console.log(`\n${passed} passed, ${failed} failed`);
