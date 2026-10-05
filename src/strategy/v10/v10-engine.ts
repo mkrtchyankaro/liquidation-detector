@@ -92,6 +92,27 @@ export function rank1At(bars: readonly MinBar[], candleEnd: number, rankWindowHo
   return s ? toTurn(s, rule.entry) : null;
 }
 
+/** Oct 5 (Johnny: "the most important"): the candles AFTER the top (bottom) and BEFORE the entry candle that go against
+ *  the turn -- SHORT: a GREEN candle with OI DOWN (shorts closing / squeezed while the price still rose = buyers still in
+ *  control); LONG: a RED candle with OI UP (new shorts piling in at the low). Test (oi-candle-test.ts, all coins): the
+ *  SHORTs with such a candle won 1 of 9 (-6.9R); the LONGs 2 of 6. The top = the FIRST candle that touched it (equal
+ *  highs later are the same top). Pure; closed candles only. Returns [] when there is none. */
+export function againstCandles(bars: readonly MinBar[], turn: Pick<V10Turn, "side" | "candleEnd" | "extreme" | "extremeT" | "moveStartT">): Array<{ t: number; oiPct: number }> {
+  const c = candles(bars.filter((b) => b.t < turn.candleEnd), V10_TF_MIN);
+  const i = c.findIndex((x) => x.end === turn.candleEnd), e = c.findIndex((x) => x.t === turn.extremeT);
+  if (i < 0 || e < 0) return [];
+  const short = turn.side === "SHORT";
+  let e0 = e;
+  const s0 = c.findIndex((x) => x.t >= turn.moveStartT);
+  for (let j = s0 >= 0 && s0 <= e ? s0 : e; j <= e; j++) if (short ? c[j].high >= turn.extreme : c[j].low <= turn.extreme) { e0 = j; break; }
+  const out: Array<{ t: number; oiPct: number }> = [];
+  for (let j = e0 + 1; j < i; j++) {
+    const x = c[j], up = x.oi1 > x.oi0, down = x.oi1 < x.oi0;
+    if (short ? x.close > x.open && down : x.close < x.open && up) out.push({ t: x.t, oiPct: x.oi0 > 0 ? (100 * (x.oi1 - x.oi0)) / x.oi0 : NaN });
+  }
+  return out;
+}
+
 /** BTC's signal at `candleEnd` (part 1) */
 export const btcRank1At = rank1At;
 

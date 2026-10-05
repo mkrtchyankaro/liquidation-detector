@@ -65,6 +65,10 @@ async function run(): Promise<void> {
     assert.ok(withZones(true).includes("⚠️ TP-ի ճանապարհին FLIP զոնա՝"), withZones(true));
     assert.ok(withZones(false).includes("TP-ի ճանապարհին զոնա՝") && withZones(false).includes("(FLIP չէ)") && !withZones(false).includes("⚠️ TP-ի"), withZones(false));
     assert.ok(formatV10Entry(sig, { ...t, zone4h: { ...t.zone4h!, zones: [] } } as V10TradeDoc).includes("TP-ի ճանապարհին զոնա չկա ✅"));
+    // 🕯 Oct 5: the candles against the turn (a LONG: red with OI up after the bottom)
+    const ag = formatV10Entry({ ...sig, against: [{ t: t0 - 2 * W, oiPct: 0.14 }] } as V10SignalDoc, t);
+    assert.ok(ag.includes("🕯 հատակից հետո կարմիր մոմ OI ⬆️՝ 09:30 (+0.14%) ⚠️"), ag);
+    assert.ok(formatV10Entry({ ...sig, against: [] } as V10SignalDoc, t).includes("🕯 հատակից հետո կարմիր մոմ OI ⬆️՝ չկա ✅"));
     if (process.env.SHOW) console.log(m);
   });
   console.log(`\n${passed} passed, ${failed} failed`);

@@ -17,29 +17,21 @@ export const V10_TRADES = "v10_trades";
 export type V10Kind = "BTC" | "OWN";
 
 export interface V10SignalDoc {
-  signalId: string;
-  kind: V10Kind;
-  side: V10Side;
+  signalId: string; kind: V10Kind; side: V10Side;
   /** the symbol whose turn gave the signal: BTCUSDT for BTC, the alt for OWN */
   symbol: string;
   turn: V10Turn;
   /** OWN only: how the alt moved without BTC */
   own?: V10OwnMove;
-  picks: V10Pick[];
-  rankWindowHours: number;
-  createdAt: Date;
+  picks: V10Pick[]; rankWindowHours: number; createdAt: Date;
   /** Oct 4: the coin had less than NEW_COIN_DAYS of our data */
   newCoin?: boolean;
+  /** Oct 5: the candles against the turn between the top (bottom) and the entry (engine againstCandles); absent = unknown */
+  against?: Array<{ t: number; oiPct: number }>;
 }
 
 export type V10TradeState = "OPEN" | "CLOSED" | "FAILED" | "SKIPPED";
-export type V10CloseReason =
-  | "MANUAL_CLOSE"
-  | "TP_FILLED"
-  | "SL_FILLED"
-  | "POSITION_CLOSED_EXTERNALLY"
-  | "CLOSED_NO_FILLS_FOUND"
-  | "FAILSAFE_CLOSED";
+export type V10CloseReason = "MANUAL_CLOSE" | "TP_FILLED" | "SL_FILLED" | "POSITION_CLOSED_EXTERNALLY" | "CLOSED_NO_FILLS_FOUND" | "FAILSAFE_CLOSED";
 
 export interface V10TradeDoc {
   /** `${signalId}:${symbol}:${userId}` */
@@ -65,14 +57,7 @@ export interface V10TradeDoc {
   quantity: number | null;
   plannedRiskUsd: number;
   actualRiskUsd: number | null;
-  binance: {
-    entryClientOrderId?: string;
-    slAlgoId?: number;
-    slClientAlgoId?: string;
-    tpOrderId?: number;
-    tpClientOrderId?: string;
-    tpFailureReason?: string;
-  } | null;
+  binance: { entryClientOrderId?: string; slAlgoId?: number; slClientAlgoId?: string; tpOrderId?: number; tpClientOrderId?: string; tpFailureReason?: string } | null;
   closedAt: number | null;
   exitPrice: number | null;
   pnlUsd: number | null;
@@ -103,15 +88,10 @@ export interface V10Store {
   /** does this user have a REAL V9 trade open on this symbol? */
   hasOpenV9Trade(userId: string, symbol: string): Promise<boolean>;
   /** when a REAL V9 trade of this user, still open on this symbol, was opened at or after `after` (ms), else null */
-  openV9TradeSince(
-    userId: string,
-    symbol: string,
-    after: number,
-  ): Promise<number | null>;
+  openV9TradeSince(userId: string, symbol: string, after: number): Promise<number | null>;
 }
 
-const isDup = (err: unknown): boolean =>
-  (err as { code?: number })?.code === 11000;
+const isDup = (err: unknown): boolean => (err as { code?: number })?.code === 11000;
 
 export class V10Repository implements V10Store {
   constructor(private readonly getDb: () => Promise<Db | null>) {}
@@ -124,87 +104,35 @@ export class V10Repository implements V10Store {
 
   async ensureIndexes(): Promise<void> {
     const db = await this.db();
-    await db
-      .collection(V10_SIGNALS)
-      .createIndex({ signalId: 1 }, { unique: true });
-    await db
-      .collection(V10_TRADES)
-      .createIndex({ tradeId: 1 }, { unique: true });
-    await db
-      .collection(V10_TRADES)
-      .createIndex({ state: 1, userId: 1, symbol: 1 });
+    await db.collection(V10_SIGNALS).createIndex({ signalId: 1 }, { unique: true });
+    await db.collection(V10_TRADES).createIndex({ tradeId: 1 }, { unique: true });
+    await db.collection(V10_TRADES).createIndex({ state: 1, userId: 1, symbol: 1 });
   }
 
   async insertSignal(doc: V10SignalDoc): Promise<boolean> {
-    try {
-      await (await this.db())
-        .collection<V10SignalDoc>(V10_SIGNALS)
-        .insertOne({ ...doc });
-      return true;
-    } catch (err) {
-      if (isDup(err)) return false;
-      throw err;
-    }
+    try { await (await this.db()).collection<V10SignalDoc>(V10_SIGNALS).insertOne({ ...doc }); return true; }
+    catch (err) { if (isDup(err)) return false; throw err; }
   }
 
   async insertTrade(doc: V10TradeDoc): Promise<boolean> {
-    try {
-      await (await this.db())
-        .collection<V10TradeDoc>(V10_TRADES)
-        .insertOne({ ...doc });
-      return true;
-    } catch (err) {
-      if (isDup(err)) return false;
-      throw err;
-    }
+    try { await (await this.db()).collection<V10TradeDoc>(V10_TRADES).insertOne({ ...doc }); return true; }
+    catch (err) { if (isDup(err)) return false; throw err; }
   }
 
-  async updateTrade(
-    tradeId: string,
-    fields: Partial<V10TradeDoc>,
-  ): Promise<void> {
-    await (await this.db())
-      .collection<V10TradeDoc>(V10_TRADES)
-      .updateOne({ tradeId }, { $set: fields });
+  async updateTrade(tradeId: string, fields: Partial<V10TradeDoc>): Promise<void> {
+    await (await this.db()).collection<V10TradeDoc>(V10_TRADES).updateOne({ tradeId }, { $set: fields });
   }
 
   async findOpenTrades(): Promise<V10TradeDoc[]> {
-    return (await this.db())
-      .collection<V10TradeDoc>(V10_TRADES)
-      .find({ state: "OPEN" }, { projection: { _id: 0 } })
-      .toArray() as Promise<V10TradeDoc[]>;
+    return (await this.db()).collection<V10TradeDoc>(V10_TRADES).find({ state: "OPEN" }, { projection: { _id: 0 } }).toArray() as Promise<V10TradeDoc[]>;
   }
 
-  async openV9TradeSince(
-    userId: string,
-    symbol: string,
-    after: number,
-  ): Promise<number | null> {
-    const t = await (
-      await this.db()
-    )
-      .collection("v9_trades")
-      .find({
-        state: "OPEN",
-        mode: "REAL",
-        userId,
-        symbol,
-        createdAt: { $gte: after },
-      })
-      .sort({ createdAt: 1 })
-      .limit(1)
-      .toArray();
+  async openV9TradeSince(userId: string, symbol: string, after: number): Promise<number | null> {
+    const t = await (await this.db()).collection("v9_trades").find({ state: "OPEN", mode: "REAL", userId, symbol, createdAt: { $gte: after } }).sort({ createdAt: 1 }).limit(1).toArray();
     return t.length ? Number(t[0].createdAt) : null;
   }
 
   async hasOpenV9Trade(userId: string, symbol: string): Promise<boolean> {
-    return (
-      (await (await this.db())
-        .collection("v9_trades")
-        .countDocuments(
-          { state: "OPEN", mode: "REAL", userId, symbol },
-          { limit: 1 },
-        )) > 0
-    );
+    return (await (await this.db()).collection("v9_trades").countDocuments({ state: "OPEN", mode: "REAL", userId, symbol }, { limit: 1 })) > 0;
   }
 }

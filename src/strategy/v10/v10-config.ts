@@ -32,6 +32,9 @@
  *     "bookFilterShort": false,     // Oct 4: no SHORT when the bids' share within 1% grew from the top to the entry (📚 ⚠️)
  *     "maxGivebackShort": 50,       // Oct 5: no SHORT when the price already gave back >= this % of its move at the entry
  *                                 //   (top - entry) / (top - the move's start); absent / null = off (also per user)
+ *     "maxGivebackLong": 50,        // Oct 5: the same for the LONGs (the bottom); absent / null = off (also per user)
+ *     "oiCandleShort": false,       // Oct 5: no SHORT when, after the top and before the entry, a GREEN candle had OI DOWN
+ *     "oiCandleLong": false,        // Oct 5: no LONG when, after the bottom and before the entry, a RED candle had OI UP
  *     "excludeSymbols": ["ETHUSDT"],// Oct 4: no signals from these coins (their data is still collected)
  *     "ownLongEntry": "flush",     // part 2 LONG rule: "flush" (default: a fall with OI DOWN, RANK 1, then a candle with
  *                                 //   OI UP closing 1 ATR above the low) or "same" (the mirror of ownEntry)
@@ -67,6 +70,10 @@ export interface V10UserRules {
   /** Oct 5 (giveback test: the top quarter -- >= ~50% given back -- won 29-33%, negative; the rest positive): no SHORT
    *  when, at the entry, the price already gave back at least this % of its move; null = off */
   maxGivebackShort: number | null;
+  /** Oct 5: the same for the LONGs; null = off */
+  maxGivebackLong: number | null;
+  /** Oct 5 (oi-candle-test.ts): no trade when a candle against the turn came between the top (bottom) and the entry */
+  oiCandleShort: boolean; oiCandleLong: boolean;
 }
 
 /** a coin with less than this many days of our data is "new" (Oct 4) */
@@ -83,7 +90,7 @@ export interface V10Settings {
   /** part 2 LONGs on / off for everyone (null = follow "long") */
   ownLong: boolean | null;
   /** Oct 4 block defaults of the per-user switches */
-  newShort: boolean; newLong: boolean; zoneFilterShort: boolean; zoneFilterLong: boolean; zoneLongMaxAtr: number; bookFilterShort: boolean; maxGivebackShort: number | null;
+  newShort: boolean; newLong: boolean; zoneFilterShort: boolean; zoneFilterLong: boolean; zoneLongMaxAtr: number; bookFilterShort: boolean; maxGivebackShort: number | null; maxGivebackLong: number | null; oiCandleShort: boolean; oiCandleLong: boolean;
   short: boolean;
   long: boolean;
   slPct: number;
@@ -115,17 +122,19 @@ export function rulesFor(s: V10Settings, userId: string): V10UserRules {
     zoneFilterShort: o.zoneFilterShort ?? s.zoneFilterShort, zoneFilterLong: o.zoneFilterLong ?? s.zoneFilterLong, zoneLongMaxAtr: o.zoneLongMaxAtr ?? s.zoneLongMaxAtr,
     bookFilterShort: o.bookFilterShort ?? s.bookFilterShort,
     maxGivebackShort: o.maxGivebackShort !== undefined ? o.maxGivebackShort : s.maxGivebackShort,
+    maxGivebackLong: o.maxGivebackLong !== undefined ? o.maxGivebackLong : s.maxGivebackLong,
+    oiCandleShort: o.oiCandleShort ?? s.oiCandleShort, oiCandleLong: o.oiCandleLong ?? s.oiCandleLong,
   };
 }
 
 const isNum = (v: unknown, lo: number, hi: number): v is number => typeof v === "number" && Number.isFinite(v) && v >= lo && v <= hi;
 
 export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], collectedSymbols: readonly string[]): V10Settings {
-  const off: V10Settings = { enabled: false, rule: { entry: "oiPeak", topCandleOi: true }, ownRule: { entry: "atr", topCandleOi: false }, ownLongRule: { entry: "flush", flushRank: true }, ownLong: null, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 1, symbols: [], userModes: new Map(), perUser: new Map() };
+  const off: V10Settings = { enabled: false, rule: { entry: "oiPeak", topCandleOi: true }, ownRule: { entry: "atr", topCandleOi: false }, ownLongRule: { entry: "flush", flushRank: true }, ownLong: null, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null, maxGivebackLong: null, oiCandleShort: false, oiCandleLong: false, short: true, long: false, slPct: 1, tpPct: 1, picks: 3, rankWindowHours: 12, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownR2Minutes: 1, symbols: [], userModes: new Map(), perUser: new Map() };
   if (raw === undefined || raw === null) return off;
   if (typeof raw !== "object" || Array.isArray(raw)) throw new Error(`"v10" must be an object`);
   const v = raw as Record<string, unknown>;
-  const KNOWN = ["enabled", "entry", "ownEntry", "ownLongEntry", "ownLong", "newShort", "newLong", "zoneFilterShort", "zoneFilterLong", "zoneLongMaxAtr", "bookFilterShort", "maxGivebackShort", "excludeSymbols", "topCandleOi", "ownTopCandleOi", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
+  const KNOWN = ["enabled", "entry", "ownEntry", "ownLongEntry", "ownLong", "newShort", "newLong", "zoneFilterShort", "zoneFilterLong", "zoneLongMaxAtr", "bookFilterShort", "maxGivebackShort", "maxGivebackLong", "oiCandleShort", "oiCandleLong", "excludeSymbols", "topCandleOi", "ownTopCandleOi", "short", "long", "slPct", "tpPct", "picks", "rankWindowHours", "btc", "own", "ownSlPct", "ownTpPct", "ownR2Minutes", "symbols", "userModes", "perUser"];
   for (const k of Object.keys(v)) if (!KNOWN.includes(k)) throw new Error(`"v10.${k}" is not a known setting (${KNOWN.join(", ")}) -- check the spelling`);
   if (typeof v.enabled !== "boolean") throw new Error(`"v10.enabled" must be true or false`);
   if (!v.enabled) return off;
@@ -164,6 +173,8 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
     return x;
   };
   const maxGivebackShort = giveback(v.maxGivebackShort, "v10.maxGivebackShort");
+  const maxGivebackLong = giveback(v.maxGivebackLong, "v10.maxGivebackLong");
+  const oiCandleShort = bool("oiCandleShort", false), oiCandleLong = bool("oiCandleLong", false);
   const short = bool("short", true), long = bool("long", false);
   const slPct = num("slPct", 1, 0.1, 10, "a percent between 0.1 and 10");
   const tpPct = num("tpPct", 1, 0.1, 20, "a percent between 0.1 and 20");
@@ -211,9 +222,9 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
       if (!knownUserIds.includes(userId)) throw new Error(`"v10.perUser" has unknown user "${userId}" (known: ${knownUserIds.join(", ")})`);
       if (typeof o !== "object" || o === null || Array.isArray(o)) throw new Error(`"v10.perUser.${userId}" must be an object`);
       const p = o as Record<string, unknown>, r: Partial<V10UserRules> = {};
-      const PU = ["short", "long", "slPct", "tpPct", "maxOpen", "btc", "own", "ownSlPct", "ownTpPct", "ownLong", "newShort", "newLong", "zoneFilterShort", "zoneFilterLong", "zoneLongMaxAtr", "bookFilterShort", "maxGivebackShort"];
+      const PU = ["short", "long", "slPct", "tpPct", "maxOpen", "btc", "own", "ownSlPct", "ownTpPct", "ownLong", "newShort", "newLong", "zoneFilterShort", "zoneFilterLong", "zoneLongMaxAtr", "bookFilterShort", "maxGivebackShort", "maxGivebackLong", "oiCandleShort", "oiCandleLong"];
       for (const k of Object.keys(p)) if (!PU.includes(k)) throw new Error(`"v10.perUser.${userId}.${k}" is not a known setting (${PU.join(", ")})`);
-      for (const k of ["short", "long", "btc", "own", "ownLong", "newShort", "newLong", "zoneFilterShort", "zoneFilterLong", "bookFilterShort"] as const) if (p[k] !== undefined) {
+      for (const k of ["short", "long", "btc", "own", "ownLong", "newShort", "newLong", "zoneFilterShort", "zoneFilterLong", "bookFilterShort", "oiCandleShort", "oiCandleLong"] as const) if (p[k] !== undefined) {
         if (typeof p[k] !== "boolean") throw new Error(`"v10.perUser.${userId}.${k}" must be true or false`);
         r[k] = p[k] as boolean;
       }
@@ -223,6 +234,7 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
       if (p.ownTpPct !== undefined) { if (!isNum(p.ownTpPct, 0.1, 20)) throw new Error(`"v10.perUser.${userId}.ownTpPct" must be a percent between 0.1 and 20`); r.ownTpPct = p.ownTpPct; }
       if (p.zoneLongMaxAtr !== undefined) { if (!isNum(p.zoneLongMaxAtr, 0.1, 50)) throw new Error(`"v10.perUser.${userId}.zoneLongMaxAtr" must be a number of 4h ATRs between 0.1 and 50`); r.zoneLongMaxAtr = p.zoneLongMaxAtr; }
       if (p.maxGivebackShort !== undefined) r.maxGivebackShort = giveback(p.maxGivebackShort, `v10.perUser.${userId}.maxGivebackShort`);
+      if (p.maxGivebackLong !== undefined) r.maxGivebackLong = giveback(p.maxGivebackLong, `v10.perUser.${userId}.maxGivebackLong`);
       if (p.maxOpen !== undefined) {
         if (!isNum(p.maxOpen, 1, 50) || !Number.isInteger(p.maxOpen)) throw new Error(`"v10.perUser.${userId}.maxOpen" must be a whole number between 1 and 50`);
         r.maxOpen = p.maxOpen;
@@ -230,5 +242,5 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
       perUser.set(userId, r);
     }
   }
-  return { enabled: true, rule, ownRule, ownLongRule, ownLong, newShort, newLong, zoneFilterShort, zoneFilterLong, zoneLongMaxAtr, bookFilterShort, maxGivebackShort, short, long, slPct, tpPct, picks, rankWindowHours, btc, own, ownSlPct, ownTpPct, ownR2Minutes, symbols, userModes, perUser };
+  return { enabled: true, rule, ownRule, ownLongRule, ownLong, newShort, newLong, zoneFilterShort, zoneFilterLong, zoneLongMaxAtr, bookFilterShort, maxGivebackShort, maxGivebackLong, oiCandleShort, oiCandleLong, short, long, slPct, tpPct, picks, rankWindowHours, btc, own, ownSlPct, ownTpPct, ownR2Minutes, symbols, userModes, perUser };
 }

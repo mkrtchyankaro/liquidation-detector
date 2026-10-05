@@ -7,7 +7,7 @@ import { simTrade } from "../../research/sltp";
 import type { MinBar } from "../../research/dc15";
 import { estimateFeesUsd } from "../v9/v9-fees";
 import { BTC, NEW_COIN_DAYS, rulesFor, type V10Settings } from "./v10-config";
-import { btcRank1At, givebackPct, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick } from "./v10-engine";
+import { againstCandles, btcRank1At, givebackPct, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick } from "./v10-engine";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "./v10-repository";
 import { formatV10Close, formatV10Entry, formatV10Failure, v10Head } from "./v10-telegram";
 import { bookView as makeBookView, type V10BookSource, type V10BookView } from "./v10-book";
@@ -270,7 +270,8 @@ export class V10LiveService {
           if (!own) { log.info({ symbol: s, side: turn.side, candleEnd: new Date(end).toISOString() }, "[V10_ALT_TURN_WITH_BTC] -- not a part-2 signal"); continue; }
           const signalId = `v10alt-${new Date(end).toISOString().slice(0, 16)}-${s.replace(/USDT$/, "")}-${turn.side}`;
           const pick: V10Pick = { symbol: s, rank: 1, x: own.btcPct !== 0 ? own.coinPct / own.btcPct : NaN, follow: own.follow, coinPct: own.coinPct, btcPct: own.btcPct, price: turn.price };
-          const sig: V10SignalDoc = { signalId, kind: "OWN", side: turn.side, symbol: s, turn, own, picks: [pick], rankWindowHours: this.settings.rankWindowHours, createdAt: new Date(now), ...(newCoin ? { newCoin: true } : {}) };
+          const against = againstCandles(bars, turn);
+          const sig: V10SignalDoc = { signalId, kind: "OWN", side: turn.side, symbol: s, turn, own, picks: [pick], rankWindowHours: this.settings.rankWindowHours, createdAt: new Date(now), against, ...(newCoin ? { newCoin: true } : {}) };
           if (!(await this.store.insertSignal(sig))) continue;
           log.warn({ signalId, side: turn.side, entry: turn.entry, how: own.how, follow: own.follow }, "[V10_ALT_SIGNAL]");
           await this.openForAll(sig);
@@ -323,9 +324,15 @@ export class V10LiveService {
     if (!(moved > rules.tpPct)) return skip(`the move was only ${moved.toFixed(2)}%, not more than the TP ${rules.tpPct}% -- a quiet market, not taken`, false);
 
     // Oct 5: the price already gave back too much of its move at the entry (the giveback test's top quarter) -- per user
-    if (sig.side === "SHORT" && sig.kind === "OWN" && rules.maxGivebackShort !== null) {
+    const maxGb = sig.side === "SHORT" ? rules.maxGivebackShort : rules.maxGivebackLong;
+    if (sig.kind === "OWN" && maxGb !== null) {
       const gb = givebackPct(sig.turn, p.price);
-      if (gb >= rules.maxGivebackShort) return skip(`GIVEBACK: the price already gave back ${gb.toFixed(0)}% of its move (>= ${rules.maxGivebackShort}%) -- late -- maxGivebackShort`, false);
+      if (gb >= maxGb) return skip(`GIVEBACK: the price already gave back ${gb.toFixed(0)}% of its move (>= ${maxGb}%) -- late -- maxGiveback${sig.side === "SHORT" ? "Short" : "Long"}`, false);
+    }
+    // Oct 5: a candle against the turn between the top (bottom) and the entry -- per user and side; unknown = not blocked
+    if (sig.kind === "OWN" && sig.against?.length && (sig.side === "SHORT" ? rules.oiCandleShort : rules.oiCandleLong)) {
+      const w = sig.against.map((a) => `${new Date(a.t).toISOString().slice(11, 16)} OI ${a.oiPct >= 0 ? "+" : ""}${a.oiPct.toFixed(2)}%`).join(", ");
+      return skip(`OI CANDLE: ${sig.side === "SHORT" ? "a GREEN candle with OI DOWN after the top" : "a RED candle with OI UP after the bottom"} (${w}) -- oiCandle${sig.side === "SHORT" ? "Short" : "Long"}`, false);
     }
     // Oct 4: new coins -- per user and side
     if (sig.newCoin && (sig.side === "SHORT" ? !rules.newShort : !rules.newLong)) return skip(`${p.symbol} is a new coin (less than ${NEW_COIN_DAYS} days of data) -- new${sig.side === "SHORT" ? "Short" : "Long"} is off for this user`, false);

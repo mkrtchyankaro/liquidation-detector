@@ -6,7 +6,7 @@ import * as assert from "assert";
 import { candles, type MinBar } from "../src/research/dc15";
 import { oiPeakSignals } from "../src/research/oi-peak";
 import { parseV10Settings, rulesFor, type V10Settings } from "../src/strategy/v10/v10-config";
-import { btcRank1At, levels, moveOf, ownMove, pickAlts, rank1At, V10_ATR_N, V10_K, V10_TF_MIN } from "../src/strategy/v10/v10-engine";
+import { againstCandles, btcRank1At, levels, moveOf, ownMove, pickAlts, rank1At, V10_ATR_N, V10_K, V10_TF_MIN } from "../src/strategy/v10/v10-engine";
 const PEAK = { entry: "oiPeak" } as const;
 import { V10LiveService, type V10UserRef } from "../src/strategy/v10/v10-live.service";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "../src/strategy/v10/v10-repository";
@@ -155,12 +155,32 @@ function fakeBinance(book: number, clock: () => number = () => SIGNAL_END + 100_
 async function run(): Promise<void> {
   console.log("V10 (BTC-led alts)");
 
+  await scenario("againstCandles (Oct 5): SHORT -- a GREEN candle with OI DOWN after the top and before the entry; LONG -- a RED candle with OI UP after the bottom", () => {
+    const t0 = Date.UTC(2026, 9, 5, 0, 0), W15 = 15 * 60_000;
+    // one candle = two minute bars (open = the first close, close = the second); [open, close, high, low, oi0, oi1]
+    const mk = (rows: Array<[number, number, number, number, number, number]>): MinBar[] => rows.flatMap(([o, c, h, l, a, b], k) => [
+      { t: t0 + k * W15, high: Math.max(o, h), low: Math.min(o, l), close: o, oiFirst: a, oiLast: a },
+      { t: t0 + k * W15 + 60_000, high: h, low: l, close: c, oiFirst: a, oiLast: b }]);
+    // 0 start, 1 up, 2 TOP (high 110), 3 GREEN with OI DOWN, 4 red, 5 entry candle
+    const bars = mk([[100, 102, 102, 100, 1000, 1010], [102, 106, 106, 102, 1010, 1030], [106, 108, 110, 106, 1030, 1050], [107, 108, 108.5, 107, 1050, 1040], [108, 106, 108, 106, 1040, 1035], [106, 104, 106, 104, 1035, 1020]]);
+    const turn = { side: "SHORT" as const, candleEnd: t0 + 6 * W15, extreme: 110, extremeT: t0 + 2 * W15, moveStartT: t0 };
+    const a = againstCandles(bars, turn);
+    assert.deepStrictEqual(a.map((x) => (x.t - t0) / W15), [3]);
+    assert.ok(Math.abs(a[0].oiPct - (100 * -10) / 1050) < 1e-9);
+    // the candle 3 red instead -> nothing against
+    const clean = mk([[100, 102, 102, 100, 1000, 1010], [102, 106, 106, 102, 1010, 1030], [106, 108, 110, 106, 1030, 1050], [108, 107, 108.5, 107, 1050, 1040], [108, 106, 108, 106, 1040, 1035], [106, 104, 106, 104, 1035, 1020]]);
+    assert.deepStrictEqual(againstCandles(clean, turn), []);
+    // LONG mirror: 2 = BOTTOM (low 90), 3 = RED with OI UP
+    const lb = mk([[100, 98, 100, 98, 1000, 990], [98, 94, 98, 94, 990, 970], [94, 92, 94, 90, 970, 950], [93, 92, 93, 91.5, 950, 960], [92, 94, 94, 92, 960, 965], [94, 96, 96, 94, 965, 980]]);
+    assert.deepStrictEqual(againstCandles(lb, { side: "LONG", candleEnd: t0 + 6 * W15, extreme: 90, extremeT: t0 + 2 * W15, moveStartT: t0 }).map((x) => (x.t - t0) / W15), [3]);
+  });
+
   await scenario("config: defaults, perUser overrides, clear errors on typos", () => {
     const s = settings({ perUser: { karo: { long: true, slPct: 1.5, maxOpen: 2 } } });
     assert.deepStrictEqual([s.short, s.long, s.slPct, s.tpPct, s.picks, s.rankWindowHours], [true, false, 1, 1, 3, 12]);
     assert.deepStrictEqual(s.symbols, ["AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"]);
-    assert.deepStrictEqual(rulesFor(s, "karo"), { short: true, long: true, slPct: 1.5, tpPct: 1, maxOpen: 2, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: true, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null });
-    assert.deepStrictEqual(rulesFor(s, "main"), { short: true, long: false, slPct: 1, tpPct: 1, maxOpen: null, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: false, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null });
+    assert.deepStrictEqual(rulesFor(s, "karo"), { short: true, long: true, slPct: 1.5, tpPct: 1, maxOpen: 2, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: true, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null, maxGivebackLong: null, oiCandleShort: false, oiCandleLong: false });
+    assert.deepStrictEqual(rulesFor(s, "main"), { short: true, long: false, slPct: 1, tpPct: 1, maxOpen: null, btc: true, own: false, ownSlPct: 1, ownTpPct: 2, ownLong: false, newShort: false, newLong: false, zoneFilterShort: false, zoneFilterLong: false, zoneLongMaxAtr: 7, bookFilterShort: false, maxGivebackShort: null, maxGivebackLong: null, oiCandleShort: false, oiCandleLong: false });
     // Oct 4: new coins, zone filters, excluded symbols
     const z = settings({ zoneFilterLong: true, perUser: { karo: { newShort: true, zoneFilterShort: true, zoneLongMaxAtr: 5 } } });
     assert.deepStrictEqual([rulesFor(z, "main").zoneFilterLong, rulesFor(z, "karo").newShort, rulesFor(z, "karo").zoneFilterShort, rulesFor(z, "karo").zoneLongMaxAtr, rulesFor(z, "main").zoneLongMaxAtr], [true, true, true, 5, 7]);
@@ -172,6 +192,9 @@ async function run(): Promise<void> {
     assert.deepStrictEqual([rulesFor(g, "main").maxGivebackShort, rulesFor(g, "karo").maxGivebackShort, rulesFor(settings({ maxGivebackShort: 50 }), "karo").maxGivebackShort], [null, 40, 50]);
     assert.throws(() => settings({ maxGivebackShort: 0 }), /maxGivebackShort" must be a percent between 1 and 100/);
     assert.throws(() => settings({ perUser: { karo: { maxGivebackShort: "50" } } }), /perUser.karo.maxGivebackShort" must be a percent/);
+    const oc = settings({ oiCandleShort: true, maxGivebackLong: 50, perUser: { main: { oiCandleShort: false, maxGivebackLong: null }, karo: { oiCandleLong: true } } });
+    assert.deepStrictEqual([rulesFor(oc, "main").oiCandleShort, rulesFor(oc, "karo").oiCandleShort, rulesFor(oc, "karo").oiCandleLong, rulesFor(oc, "main").oiCandleLong, rulesFor(oc, "main").maxGivebackLong, rulesFor(oc, "karo").maxGivebackLong], [false, true, true, false, null, 50]);
+    assert.throws(() => settings({ perUser: { karo: { oiCandleShort: "yes" } } }), /oiCandleShort" must be true or false/);
     assert.throws(() => settings({ excludeSymbols: ["ZZZUSDT"] }), /does not collect/);
     // Oct 4: ALT LONGs -- "ownLong" (block or per user; absent = follow "long"), the rule "flush" by default
     assert.deepStrictEqual(settings().ownLongRule, { entry: "flush", flushRank: true });
@@ -605,6 +628,27 @@ async function run(): Promise<void> {
     assert.deepStrictEqual(low.map((t) => `${t.userId}:${t.state}`).sort(), ["karo:SKIPPED", "main:OPEN"]);
     assert.ok(/GIVEBACK: the price already gave back \d+% of its move \(>= 1%\)/.test(low.find((t) => t.userId === "karo")!.failureReason ?? ""), low.find((t) => t.userId === "karo")!.failureReason);
     assert.deepStrictEqual((await run(100)).map((t) => `${t.userId}:${t.state}`).sort(), ["karo:OPEN", "main:OPEN"]);
+  });
+
+  await scenario("oiCandleShort (Oct 5): the signal keeps the candles against the turn; the user with the switch skips when there are any", async () => {
+    const users: V10UserRef[] = [{ userId: "main", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }, { userId: "karo", mode: "PAPER", riskUsd: 10, binanceRest: null, telegram: null }];
+    const store = fakeStore();
+    await new V10LiveService(settings2({ perUser: { main: { own: true }, karo: { own: true, oiCandleShort: true } } }), () => users, loaderOf(calmMarket()), store, () => SIGNAL_END + 100_000).onMinute();
+    const sig = store.signals.find((x) => x.kind === "OWN" && x.side === "SHORT")!;
+    assert.ok(sig && Array.isArray(sig.against), "the signal row keeps 'against'");
+    const tr = store.trades.filter((t) => t.kind === "OWN" && t.side === "SHORT");
+    const karo = tr.find((t) => t.userId === "karo")!, main = tr.find((t) => t.userId === "main")!;
+    assert.strictEqual(main.state, "OPEN");
+    if (sig.against!.length) assert.ok(karo.state === "SKIPPED" && /OI CANDLE: a GREEN candle with OI DOWN after the top/.test(karo.failureReason ?? ""), karo.failureReason ?? "");
+    else assert.strictEqual(karo.state, "OPEN");
+    // forced: the same signal with a candle against it -> karo skips
+    const store2 = fakeStore();
+    const svc = new V10LiveService(settings2({ perUser: { main: { own: true }, karo: { own: true, oiCandleShort: true } } }), () => users, loaderOf(calmMarket()), store2, () => SIGNAL_END + 100_000);
+    const orig = store2.insertSignal.bind(store2);
+    store2.insertSignal = async (x: V10SignalDoc) => { if (x.kind === "OWN" && x.side === "SHORT") x.against = [{ t: SIGNAL_END - 30 * 60_000, oiPct: -0.2 }]; return orig(x); };
+    await svc.onMinute();
+    const k2 = store2.trades.find((t) => t.kind === "OWN" && t.side === "SHORT" && t.userId === "karo");
+    assert.ok(k2 && k2.state === "SKIPPED" && /OI CANDLE/.test(k2.failureReason ?? ""), JSON.stringify(k2));
   });
 
   await scenario("new coins (Oct 4: < 7 days of our data): the signal is made; the trade only with newShort / newLong (per user)", async () => {
