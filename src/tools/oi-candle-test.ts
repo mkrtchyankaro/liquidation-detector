@@ -7,6 +7,8 @@
  *            S3 = S1 + S2
  *   LONG   the mirror: after the bottom candle and before the entry candle NO RED candle with OI UP (new shorts piling in
  *          at the low)   L1 = that · L2 = L1 + the entry candle green with OI up
+ *   GIVEBACK (Johnny: "I don't want to take part in those") -- both sides: no trade when the price already gave back >= 50%
+ *          of its move (start -> top / bottom) at the entry; shown alone and together with the rules above
  * Trades: SL --pct / TP --tp from the entry, minute by minute (same minute = SL), one trade at a time per coin; each
  * rule simulated on its own.
  *
@@ -89,6 +91,7 @@ async function main(): Promise<void> {
       price: number;
       e1: boolean;
       e2: boolean;
+      gb: number;
       why: string;
     }
     const sigs: Sig[] = [];
@@ -135,6 +138,9 @@ async function main(): Promise<void> {
             bad.push(`${utc(c[j].t).slice(6)} OI ${sp(oiPct(c[j]))}%`);
         const e1 = x.close < x.open && x.oi1 < x.oi0;
         const why = `entry ${x.close < x.open ? "red" : "green"} OI ${sp(oiPct(x))}% · ${bad.length ? `green + OI down after the top: ${bad.join(", ")}` : "no green + OI down after the top"}`;
+        const gb =
+          (100 * (g.extreme - g.price)) /
+          (g.extreme - g.extreme / (1 + g.movePct / 100));
         sigs.push({
           sym: s,
           isNew,
@@ -144,7 +150,8 @@ async function main(): Promise<void> {
           price: g.price,
           e1,
           e2: bad.length === 0,
-          why,
+          gb,
+          why: `${why} · given back ${gb.toFixed(0)}%`,
         });
       }
       for (const g of flushSignals(c, V10_K, V10_ATR_N, win, {
@@ -169,6 +176,9 @@ async function main(): Promise<void> {
             bad.push(`${utc(c[j].t).slice(6)} OI ${sp(oiPct(c[j]))}%`);
         const e1 = x.close > x.open && x.oi1 > x.oi0;
         const why = `entry ${x.close > x.open ? "green" : "red"} OI ${sp(oiPct(x))}% · ${bad.length ? `red + OI up after the bottom: ${bad.join(", ")}` : "no red + OI up after the bottom"}`;
+        const gb =
+          (100 * (g.extreme - g.price)) /
+          (g.extreme - g.extreme / (1 + g.movePct / 100));
         sigs.push({
           sym: s,
           isNew,
@@ -178,7 +188,8 @@ async function main(): Promise<void> {
           price: g.price,
           e1,
           e2: bad.length === 0,
-          why,
+          gb,
+          why: `${why} · given back ${gb.toFixed(0)}%`,
         });
       }
     }
@@ -260,6 +271,25 @@ async function main(): Promise<void> {
         ),
       );
       console.log(line("3: 1 + 2", f3));
+      const g = (x: Sig): boolean => x.gb < 50;
+      console.log(
+        line(
+          "G: given back < 50% (alone)",
+          run((x) => x.side === side && g(x)),
+        ),
+      );
+      console.log(
+        line(
+          "2 + G",
+          run((x) => x.side === side && x.e2 && g(x)),
+        ),
+      );
+      console.log(
+        line(
+          "1 + 2 + G (everything)",
+          run((x) => x.side === side && x.e1 && x.e2 && g(x)),
+        ),
+      );
       console.log(line("  dropped by 2 (in NOW only)", dropped(all, f2)));
       list(dropped(all, f2));
       console.log(line("  kept by 2", f2));
