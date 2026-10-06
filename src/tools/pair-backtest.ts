@@ -18,6 +18,10 @@
  *
  *   npx tsx src/tools/pair-backtest.ts
  *   options: --days 60  --pct 1  --tp 2  --window 12  --gb 50  --fee 0.05  --list
+ *            --wick    (Johnny, Oct 6) the SL on the WICK -- the top's high (SHORT) / the bottom's low (LONG) -- and the TP
+ *                      at --rr R (default 2) from the entry; the min move is then that TP in %: the move to the extreme
+ *                      must be bigger than the TP distance (not a fixed --tp %). Fees count in each trade's own R.
+ *            --rr 2    the TP in R for --wick
  *            --tf 60   the candle in minutes (Oct 6: the same strategy on 1h candles; default 15 = live). The RANK window
  *                      stays --window hours, the ATR 14 candles of that size; the SL / TP stay --pct / --tp
  *            --from 2026-09-22 --to 2026-10-05   only the trades entered in [from, to) are counted (the data still starts
@@ -109,6 +113,7 @@ interface Tr {
   exitT: number;
   exit: string;
   net: number;
+  slPct?: number;
 }
 
 async function main(): Promise<void> {
@@ -117,6 +122,9 @@ async function main(): Promise<void> {
     tpPct = Number(arg("tp", "2")),
     win = Number(arg("window", "12")),
     tf = Number(arg("tf", "15"));
+  const wick = argv.includes("--wick"),
+    rr = Number(arg("rr", "2"));
+  const slPcts: number[] = [];
   const gbMax = Number(arg("gb", "50")),
     fee = Number(arg("fee", "0.05"));
   const to = Math.floor(Date.now() / (15 * M)) * 15 * M,
@@ -152,11 +160,11 @@ async function main(): Promise<void> {
       ...atrSignals(c, V10_K, V10_ATR_N, win, {
         atr: "live",
         topCandleOi: false,
-      }).filter((g) => g.side === "SHORT" && g.movePct > tpPct),
+      }).filter((g) => g.side === "SHORT" && (wick || g.movePct > tpPct)),
       ...flushSignals(c, V10_K, V10_ATR_N, win, {
         rank: true,
         side: "LONG",
-      }).filter((g) => -g.movePct > tpPct),
+      }).filter((g) => wick || -g.movePct > tpPct),
     ].sort((a, b) => a.t - b.t);
     const busy = { LONG: 0, SHORT: 0 };
     let n = 0;
@@ -184,26 +192,33 @@ async function main(): Promise<void> {
       )
         continue;
       if (busy[g.side] > g.t) continue;
+      // --wick: SL on the extreme, TP rr x that risk; the move must be bigger than the TP distance
+      const slPct = wick
+        ? (100 * Math.abs(g.extreme - g.price)) / g.price
+        : pct;
+      if (wick && !(slPct > 0 && Math.abs(g.movePct) > rr * slPct)) continue;
       const sl =
         g.side === "SHORT"
-          ? g.price * (1 + pct / 100)
-          : g.price * (1 - pct / 100);
+          ? g.price * (1 + slPct / 100)
+          : g.price * (1 - slPct / 100);
       const tr = simTrade(
         bars,
         g.t,
         g.price,
         sl,
-        tpPct / pct,
+        wick ? rr : tpPct / pct,
         g.side === "SHORT" ? "DOWN" : "UP",
       );
       busy[g.side] = tr.exitT;
+      slPcts.push(slPct);
       trades.push({
         sym: sym.replace(/USDT$/, ""),
         side: g.side,
         t: g.t,
         exitT: tr.exitT,
         exit: tr.exit,
-        net: tr.r - (2 * fee) / pct,
+        net: tr.r - (2 * fee) / slPct,
+        slPct,
       });
       n++;
     }
@@ -240,9 +255,17 @@ async function main(): Promise<void> {
   );
 
   console.log(
-    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · ${tf}m candles${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · SL ${pct}% · TP ${tpPct}% · given back < ${gbMax}% · fee ${fee}%/side`,
+    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · ${tf}m candles${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · ${wick ? `SL on the wick · TP ${rr}R · the move > the TP distance` : `SL ${pct}% · TP ${tpPct}%`} · given back < ${gbMax}% · fee ${fee}%/side`,
   );
-  console.log(`coins (trades): ${counts.join(", ")}\n`);
+  console.log(`coins (trades): ${counts.join(", ")}`);
+  if (wick && slPcts.length) {
+    const x = [...slPcts].sort((a, b) => a - b),
+      q = (p: number): string => x[Math.floor(p * (x.length - 1))].toFixed(2);
+    console.log(
+      `the SL distance (wick): min ${q(0)}% · quarter ${q(0.25)}% · median ${q(0.5)}% · 3 quarters ${q(0.75)}% · max ${q(1)}%`,
+    );
+  }
+  console.log("");
   const line = (name: string, l: Tr[]): string => {
     const d = l.filter((x) => x.exit !== "OPEN"),
       tp = d.filter((x) => x.exit === "TP").length;
@@ -264,6 +287,39 @@ async function main(): Promise<void> {
       line(
         "  LONG",
         l.filter((x) => x.side === "LONG"),
+      ),
+    );
+  }
+
+  // --wick: by the SL's size (the data's own quartiles)
+  if (wick && trades.length) {
+    const x = trades.map((t) => t.slPct!).sort((a, b) => a - b),
+      q1 = x[Math.floor(x.length / 4)],
+      q2 = x[Math.floor(x.length / 2)],
+      q3 = x[Math.floor((3 * x.length) / 4)];
+    console.log(`\nALL by the SL's size:`);
+    console.log(
+      line(
+        `  SL < ${q1.toFixed(2)}%`,
+        trades.filter((t) => t.slPct! < q1),
+      ),
+    );
+    console.log(
+      line(
+        `  ${q1.toFixed(2)} .. ${q2.toFixed(2)}%`,
+        trades.filter((t) => t.slPct! >= q1 && t.slPct! < q2),
+      ),
+    );
+    console.log(
+      line(
+        `  ${q2.toFixed(2)} .. ${q3.toFixed(2)}%`,
+        trades.filter((t) => t.slPct! >= q2 && t.slPct! < q3),
+      ),
+    );
+    console.log(
+      line(
+        `  SL >= ${q3.toFixed(2)}%`,
+        trades.filter((t) => t.slPct! >= q3),
       ),
     );
   }
