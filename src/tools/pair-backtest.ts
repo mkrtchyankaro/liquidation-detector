@@ -18,6 +18,9 @@
  *
  *   npx tsx src/tools/pair-backtest.ts
  *   options: --days 60  --pct 1  --tp 2  --window 12  --gb 50  --fee 0.05  --list
+ *            --from 2026-09-22 --to 2026-10-05   only the trades entered in [from, to) are counted (the data still starts
+ *            --days before, for the 12h RANK and the ATR) -- to compare with our own DB's tests on the same days
+ *            --trades   every trade of the ALL book (to compare signal by signal with src/tools/oi-split-test.ts --list)
  */
 import "dotenv/config";
 import * as fs from "fs";
@@ -204,6 +207,18 @@ async function main(): Promise<void> {
     counts.push(`${sym.replace(/USDT$/, "")} ${n}`);
   }
   trades.sort((a, b) => a.t - b.t);
+  // --from / --to: count only the trades entered in that window
+  const wFrom = argv.includes("--from")
+    ? Date.parse(`${arg("from", "")}T00:00:00Z`)
+    : -Infinity;
+  const wTo = argv.includes("--to")
+    ? Date.parse(`${arg("to", "")}T00:00:00Z`)
+    : Infinity;
+  if (argv.includes("--from") || argv.includes("--to")) {
+    const keep = trades.filter((t) => t.t >= wFrom && t.t < wTo);
+    trades.length = 0;
+    trades.push(...keep);
+  }
 
   // the books
   const replay = (ok: (t: Tr, open: Tr[]) => boolean): Tr[] => {
@@ -222,7 +237,7 @@ async function main(): Promise<void> {
   );
 
   console.log(
-    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · SL ${pct}% · TP ${tpPct}% · given back < ${gbMax}% · fee ${fee}%/side`,
+    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days)${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · SL ${pct}% · TP ${tpPct}% · given back < ${gbMax}% · fee ${fee}%/side`,
   );
   console.log(`coins (trades): ${counts.join(", ")}\n`);
   const line = (name: string, l: Tr[]): string => {
@@ -287,6 +302,13 @@ async function main(): Promise<void> {
     `\nPAIR book by day: ${byDay.size} days with trades · plus days ${dayNets.filter((x) => x > 0).length} · minus days ${dayNets.filter((x) => x < 0).length} · worst day ${sp(Math.min(...dayNets))}R · best day ${sp(Math.max(...dayNets))}R`,
   );
 
+  if (argv.includes("--trades")) {
+    console.log("\nevery trade (ALL book):");
+    for (const t of trades)
+      console.log(
+        `  ${utc(t.t)} ${t.side.padEnd(5)} ${t.sym.padEnd(6)} ${t.exit.padEnd(4)} ${sp(t.net).padStart(6)}R`,
+      );
+  }
   if (argv.includes("--list")) {
     console.log("\nthe pairs:");
     for (const p of pairs)
