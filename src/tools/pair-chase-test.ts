@@ -352,6 +352,69 @@ async function main(): Promise<void> {
         `  move >= ${n} ATR · pair TP +${tp}%   ${sp(sum(tr), 0).padStart(6)}$ │ ${wk.map((v) => `${sp(v, 0).padStart(5)}$`).join(" ")} │ weeks + ${wk.filter((v) => v > 0).length}/${wk.length} │ alone +1%: ${cnt("leg 1 alone +1%")} · alone -1%: ${cnt("leg 1 alone -1%")} · pair +${tp}%: ${cnt(`pair +${tp}%`)} · pair -2%: ${cnt("pair -2%")} · open: ${cnt("OPEN")}`,
       );
     }
+  // Oct 6: after a 1h signal the price went 1% AGAINST us 61-69% of the time -> is it continuation? Every signal on its
+  // own (one at a time per coin), +1% / -1% on the minute high / low (both in one minute = the loss), OUR side vs the
+  // REVERSED side (enter the way the move was going), LONG and SHORT signals apart, per week.
+  console.log(
+    `\n── EVERY SIGNAL ALONE, +1% / -1%: our side vs REVERSED (with the move) · $ on one $${legUsd} leg · weeks by the exit ──`,
+  );
+  const alone = (
+    nAtr: number,
+    side: "LONG" | "SHORT" | "ALL",
+    rev: boolean,
+  ): Array<{ t1: number; pnl: number }> => {
+    const out: Array<{ t1: number; pnl: number }> = [],
+      busy = new Map<string, number>();
+    for (const g of sigs) {
+      if (
+        g.moveAtr < nAtr ||
+        (side !== "ALL" && g.side !== side) ||
+        (busy.get(g.sym) ?? 0) > g.t
+      )
+        continue;
+      const l: Leg = {
+          sym: g.sym,
+          side: rev ? (g.side === "LONG" ? "SHORT" : "LONG") : g.side,
+          t: g.t,
+          price: g.price,
+        },
+        b = bars.get(g.sym)!;
+      for (let t = g.t; t < to; t += M) {
+        const k = b.get(t);
+        if (!k) continue;
+        const worst = l.side === "LONG" ? pctOf(l, k.low) : pctOf(l, k.high),
+          best = l.side === "LONG" ? pctOf(l, k.high) : pctOf(l, k.low);
+        if (worst <= -1) {
+          out.push({ t1: t + M, pnl: -1 - 2 * fee });
+          busy.set(g.sym, t + M);
+          break;
+        }
+        if (best >= 1) {
+          out.push({ t1: t + M, pnl: 1 - 2 * fee });
+          busy.set(g.sym, t + M);
+          break;
+        }
+      }
+    }
+    return out;
+  };
+  for (const n of [2, 3, 4])
+    for (const side of ["ALL", "SHORT", "LONG"] as const)
+      for (const rev of [false, true]) {
+        const r = alone(n, side, rev),
+          w = r.filter((x) => x.pnl > 0).length;
+        const wk = weeks.map(([a, b]) =>
+          usd(
+            r
+              .filter((x) => x.t1 > a && x.t1 <= b)
+              .reduce((s2, x) => s2 + x.pnl, 0),
+          ),
+        );
+        const sideName = side === "ALL" ? "all signals" : `${side} signals`;
+        console.log(
+          `  >= ${n} ATR · ${sideName.padEnd(13)} · ${rev ? "REVERSED" : "our side"} ${sp(usd(r.reduce((s2, x) => s2 + x.pnl, 0)), 0).padStart(6)}$ │ ${wk.map((v) => `${sp(v, 0).padStart(5)}$`).join(" ")} │ weeks + ${wk.filter((v) => v > 0).length}/${wk.length} │ ${r.length} trades · +1% first ${r.length ? Math.round((100 * w) / r.length) : 0}%`,
+        );
+      }
   if (argv.includes("--list")) {
     console.log(`\nevery trade · move >= 3 ATR · pair TP +1%:`);
     for (const x of run(3, 1)) {
