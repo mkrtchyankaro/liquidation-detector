@@ -22,6 +22,12 @@
  *                      at --rr R (default 2) from the entry; the min move is then that TP in %: the move to the extreme
  *                      must be bigger than the TP distance (not a fixed --tp %). Fees count in each trade's own R.
  *            --rr 2    the TP in R for --wick
+ *            --liq     (Johnny, Oct 6) only the trades inside the period OUR DB has liquidations for that coin (each coin
+ *                      its own start: from its first liq_raw_events row; the move must start after it), and for each
+ *                      trade the liquidations ($, our forceOrder stream: at most 1 per second per coin -> lower than real)
+ *                      in 4 phases -- the move (start -> the extreme candle), the extreme candle, the extreme -> the entry,
+ *                      the first 2h after the entry (hindsight) -- each side, also as a multiple of the coin's average
+ *                      hourly liquidations; TP vs SL split at the median of each (no number made up) + every trade listed
  *            --tf 60   the candle in minutes (Oct 6: the same strategy on 1h candles; default 15 = live). The RANK window
  *                      stays --window hours, the ATR 14 candles of that size; the SL / TP stay --pct / --tp
  *            --from 2026-09-22 --to 2026-10-05   only the trades entered in [from, to) are counted (the data still starts
@@ -35,6 +41,7 @@ import { candles, type MinBar } from "../research/dc15";
 import { atrSignals, flushSignals } from "../research/atr-turn";
 import { simTrade } from "../research/sltp";
 import { klines, oiSnapshots, type Kline } from "../research/binance-history";
+import { MongoClient } from "mongodb";
 import {
   againstCandles,
   givebackPct,
@@ -106,6 +113,18 @@ function minuteBars(k: Kline[], snap: Map<number, number>): MinBar[] {
   }));
 }
 
+interface Liq {
+  t: number;
+  usd: number;
+  long: boolean;
+}
+/** liquidations of one phase: $ of the longs / shorts liquidated, and both as a multiple of the coin's average hour */
+interface LiqPhase {
+  longs: number;
+  shorts: number;
+  xL: number;
+  xS: number;
+}
 interface Tr {
   sym: string;
   side: "LONG" | "SHORT";
@@ -114,6 +133,7 @@ interface Tr {
   exit: string;
   net: number;
   slPct?: number;
+  liq?: { move: LiqPhase; ext: LiqPhase; back: LiqPhase; after: LiqPhase };
 }
 
 async function main(): Promise<void> {
@@ -138,6 +158,13 @@ async function main(): Promise<void> {
     btcMap = new Map(btc.map((b) => [b.t, b.close]));
   const trades: Tr[] = [],
     counts: string[] = [];
+  // --liq: our own liquidation stream from the DB
+  const liqMode = argv.includes("--liq");
+  const mongo = liqMode ? new MongoClient(process.env.MONGO_URI ?? "") : null;
+  if (mongo) await mongo.connect();
+  const liqCol = mongo
+    ?.db(process.env.MONGO_OWN_DB ?? "liquidation_detector")
+    .collection("liq_raw_events");
   for (const sym of syms) {
     let bars: MinBar[];
     try {
@@ -154,6 +181,59 @@ async function main(): Promise<void> {
       counts.push(`${sym}: too little data (${bars.length} minutes)`);
       continue;
     }
+    // --liq: the coin's liquidations (sorted), its first one, its average hourly $ over the period it has
+    let liqs: Liq[] = [],
+      liqFrom = -Infinity,
+      perHour = NaN;
+    if (liqCol) {
+      liqs = (
+        await liqCol
+          .find({
+            symbol: sym,
+            victim: { $in: ["LONG", "SHORT"] },
+            timestamp: { $gte: from, $lt: to },
+          })
+          .project({ timestamp: 1, victim: 1, quoteQty: 1 })
+          .sort({ timestamp: 1 })
+          .toArray()
+      )
+        .map((r) => ({
+          t: Number(r.timestamp),
+          usd: Number(r.quoteQty),
+          long: r.victim === "LONG",
+        }))
+        .filter((x) => x.usd > 0);
+      if (!liqs.length) {
+        counts.push(`${sym.replace(/USDT$/, "")}: no liquidations in our DB`);
+        continue;
+      }
+      liqFrom = liqs[0].t;
+      perHour =
+        liqs.reduce((a, x) => a + x.usd, 0) /
+        Math.max(1, (to - liqFrom) / 3_600_000);
+    }
+    const phase = (a: number, b: number): LiqPhase => {
+      let lo = 0,
+        hi = liqs.length;
+      while (lo < hi) {
+        const m = (lo + hi) >> 1;
+        if (liqs[m].t < a) lo = m + 1;
+        else hi = m;
+      }
+      let longs = 0,
+        shorts = 0;
+      for (let k = lo; k < liqs.length && liqs[k].t < b; k++) {
+        if (liqs[k].long) longs += liqs[k].usd;
+        else shorts += liqs[k].usd;
+      }
+      const hrs = Math.max(1 / 60, (b - a) / 3_600_000);
+      return {
+        longs,
+        shorts,
+        xL: longs / (perHour * hrs),
+        xS: shorts / (perHour * hrs),
+      };
+    };
     const map = new Map(bars.map((b) => [b.t, b.close])),
       c = candles(bars, tf);
     const sigs = [
@@ -192,6 +272,7 @@ async function main(): Promise<void> {
       )
         continue;
       if (busy[g.side] > g.t) continue;
+      if (liqMode && g.startT < liqFrom) continue; // the move must be inside the period we have liquidations for
       // --wick: SL on the extreme, TP rr x that risk; the move must be bigger than the TP distance
       const slPct = wick
         ? (100 * Math.abs(g.extreme - g.price)) / g.price
@@ -219,6 +300,16 @@ async function main(): Promise<void> {
         exit: tr.exit,
         net: tr.r - (2 * fee) / slPct,
         slPct,
+        ...(liqMode
+          ? {
+              liq: {
+                move: phase(g.startT, g.extremeT),
+                ext: phase(g.extremeT, g.extremeT + tf * M),
+                back: phase(g.extremeT + tf * M, g.t),
+                after: phase(g.t, g.t + 2 * 3_600_000),
+              },
+            }
+          : {}),
       });
       n++;
     }
@@ -339,6 +430,87 @@ async function main(): Promise<void> {
   const ended = pairs.filter((p) => p.a.exit !== "OPEN" && p.b.exit !== "OPEN");
   const both = (e: string): number =>
     ended.filter((p) => p.a.exit === e && p.b.exit === e).length;
+  // --liq: what the liquidations say about TP vs SL
+  if (liqMode) {
+    const med = (v: number[]): number => {
+      const x = v.filter(Number.isFinite).sort((a, b) => a - b);
+      return x.length ? x[Math.floor(x.length / 2)] : NaN;
+    };
+    const usd = (v: number): string =>
+      v >= 1e6
+        ? `${(v / 1e6).toFixed(1)}M`
+        : v >= 1e3
+          ? `${(v / 1e3).toFixed(0)}k`
+          : v.toFixed(0);
+    for (const side of ["SHORT", "LONG"] as const) {
+      const l = trades.filter(
+        (t) => t.side === side && t.liq && t.exit !== "OPEN",
+      );
+      if (!l.length) continue;
+      // "with" = the side liquidated BY the move (a SHORT's rise liquidates shorts; a LONG's fall liquidates longs)
+      const w = (p: LiqPhase): number => (side === "SHORT" ? p.xS : p.xL),
+        o = (p: LiqPhase): number => (side === "SHORT" ? p.xL : p.xS);
+      const feats: Array<[string, (t: Tr) => number]> = [
+        [
+          `the move: ${side === "SHORT" ? "shorts" : "longs"} liquidated (x avg hour)`,
+          (t) => w(t.liq!.move),
+        ],
+        [
+          `the move: ${side === "SHORT" ? "longs" : "shorts"} liquidated`,
+          (t) => o(t.liq!.move),
+        ],
+        [
+          `the ${side === "SHORT" ? "top" : "bottom"} candle: ${side === "SHORT" ? "shorts" : "longs"} liquidated`,
+          (t) => w(t.liq!.ext),
+        ],
+        [
+          `the ${side === "SHORT" ? "top" : "bottom"} candle: ${side === "SHORT" ? "longs" : "shorts"} liquidated`,
+          (t) => o(t.liq!.ext),
+        ],
+        [
+          `${side === "SHORT" ? "top" : "bottom"} -> entry: ${side === "SHORT" ? "longs" : "shorts"} liquidated`,
+          (t) => o(t.liq!.back),
+        ],
+        [
+          `${side === "SHORT" ? "top" : "bottom"} -> entry: ${side === "SHORT" ? "shorts" : "longs"} liquidated`,
+          (t) => w(t.liq!.back),
+        ],
+        [
+          `AFTER the entry 2h (hindsight): ${side === "SHORT" ? "shorts" : "longs"} liquidated`,
+          (t) => w(t.liq!.after),
+        ],
+      ];
+      console.log(`\n── ${side} with our liquidations (${l.length} trades) ──`);
+      console.log(line("all", l));
+      for (const [name, f] of feats) {
+        const m = med(l.map(f));
+        console.log(
+          `  ${name} -- median ${Number.isFinite(m) ? m.toFixed(2) : "n/a"}`,
+        );
+        console.log(
+          line(
+            `    >= median`,
+            l.filter((t) => f(t) >= m),
+          ),
+        );
+        console.log(
+          line(
+            `    <  median`,
+            l.filter((t) => f(t) < m),
+          ),
+        );
+      }
+      for (const t of l) {
+        const L = t.liq!,
+          f = (p: LiqPhase): string => `L ${usd(p.longs)} S ${usd(p.shorts)}`;
+        console.log(
+          `      ${utc(t.t)} ${t.sym.padEnd(6)} ${t.exit.padEnd(4)} ${sp(t.net).padStart(6)}R · move ${f(L.move)} · ext ${f(L.ext)} · ext->entry ${f(L.back)} · after 2h ${f(L.after)}`,
+        );
+      }
+    }
+    await mongo?.close();
+  }
+
   console.log(
     `\nPAIRS (a LONG and a SHORT open at the same time): ${pairs.length}`,
   );
