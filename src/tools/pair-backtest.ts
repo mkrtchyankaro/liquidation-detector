@@ -36,6 +36,12 @@
  *                      is never an entry candle. No candle against the turn among the closed ones after the extreme.
  *            --slip 0.05  (with --touch) % lost on the entry (a stop order fills a little worse than the level) and
  *                      again on every SL exit (a stop-market slips) -- default 0.05
+ *            --excursion  (Johnny, Oct 6: "did we find the right top / bottom, and how far did the price go?") -- for
+ *                      EVERY signal that passes the live filters (no one-at-a-time, no SL / TP): over the next --hours h
+ *                      (default 24) the most the price went OUR way and AGAINST us from the entry; whether the extreme
+ *                      (the top / bottom) held or was broken, and when; the most it went our way BEFORE the extreme broke
+ *                      (what a stop on the wick could have caught); the move from the extreme itself. Shown as % and in
+ *                      R (R = the entry -> the extreme). Quartiles over all signals, per side; --list for each signal.
  *            --tf 60   the candle in minutes (Oct 6: the same strategy on 1h candles; default 15 = live). The RANK window
  *                      stays --window hours, the ATR 14 candles of that size; the SL / TP stay --pct / --tp
  *            --from 2026-09-22 --to 2026-10-05   only the trades entered in [from, to) are counted (the data still starts
@@ -292,6 +298,19 @@ async function main(): Promise<void> {
     btcMap = new Map(btc.map((b) => [b.t, b.close]));
   const trades: Tr[] = [],
     counts: string[] = [];
+  const excursions: Array<{
+    sym: string;
+    side: "LONG" | "SHORT";
+    t: number;
+    fav: number;
+    adv: number;
+    favBefore: number;
+    broke: boolean;
+    brokeH: number;
+    fromExt: number;
+    rPct: number;
+    movePct: number;
+  }> = [];
   // --liq: our own liquidation stream from the DB
   const liqMode = argv.includes("--liq");
   const mongo = liqMode ? new MongoClient(process.env.MONGO_URI ?? "") : null;
@@ -410,6 +429,54 @@ async function main(): Promise<void> {
           : againstCandles(bars, turn, tf).length)
       )
         continue;
+      // --excursion: measure the path after every signal, no trade simulation
+      if (argv.includes("--excursion")) {
+        const H = Number(arg("hours", "24")) * 3_600_000,
+          sg = g.side === "LONG" ? 1 : -1,
+          e0 = g.price;
+        let lo = 0,
+          hi = bars.length;
+        while (lo < hi) {
+          const m = (lo + hi) >> 1;
+          if (bars[m].t < g.t) lo = m + 1;
+          else hi = m;
+        }
+        let fav = 0,
+          adv = 0,
+          favBefore = 0,
+          brokeT = NaN,
+          fromExt = 0;
+        for (let m = lo; m < bars.length && bars[m].t < g.t + H; m++) {
+          const b = bars[m],
+            f = sg > 0 ? b.high : b.low,
+            a = sg > 0 ? b.low : b.high;
+          if (
+            !Number.isFinite(brokeT) &&
+            (sg > 0 ? a < g.extreme : a > g.extreme)
+          )
+            brokeT = b.t;
+          fav = Math.max(fav, (sg * 100 * (f - e0)) / e0);
+          adv = Math.max(adv, (-sg * 100 * (a - e0)) / e0);
+          if (!Number.isFinite(brokeT))
+            favBefore = Math.max(favBefore, (sg * 100 * (f - e0)) / e0);
+          fromExt = Math.max(fromExt, (sg * 100 * (f - g.extreme)) / g.extreme);
+        }
+        const rPct = (100 * Math.abs(e0 - g.extreme)) / e0;
+        excursions.push({
+          sym: sym.replace(/USDT$/, ""),
+          side: g.side,
+          t: g.t,
+          fav,
+          adv,
+          favBefore,
+          broke: Number.isFinite(brokeT),
+          brokeH: (brokeT - g.t) / 3_600_000,
+          fromExt,
+          rPct,
+          movePct: Math.abs(g.movePct),
+        });
+        continue;
+      }
       if (busy[g.side] > g.t) continue;
       if (liqMode && g.startT < liqFrom) continue; // the move must be inside the period we have liquidations for
       // --wick: SL on the extreme, TP rr x that risk; the move must be bigger than the TP distance
@@ -458,6 +525,93 @@ async function main(): Promise<void> {
     counts.push(`${sym.replace(/USDT$/, "")} ${n}`);
   }
   trades.sort((a, b) => a.t - b.t);
+  if (argv.includes("--excursion")) {
+    const hours = Number(arg("hours", "24"));
+    console.log(
+      `EXCURSIONS AFTER EVERY SIGNAL · the live rules · ${tf}m candles · Binance history ${dayStr(from)} -> ${utc(to)} UTC · the next ${hours}h`,
+    );
+    console.log(
+      `fav = the most the price went OUR way from the entry · adv = the most AGAINST us · R = the entry -> the extreme (the wick)`,
+    );
+    console.log(
+      `"before the break" = the most our way before the price went beyond the top / bottom (a stop on the wick would still be alive)\n`,
+    );
+    const q = (v: number[], p: number): number => {
+      const x = v.filter(Number.isFinite).sort((a, b) => a - b);
+      return x.length
+        ? x[Math.min(x.length - 1, Math.floor(p * x.length))]
+        : NaN;
+    };
+    const row = (name: string, v: number[], d = 2): string =>
+      `  ${name.padEnd(44)} quarter ${q(v, 0.25).toFixed(d).padStart(6)} · median ${q(v, 0.5).toFixed(d).padStart(6)} · 3 quarters ${q(v, 0.75).toFixed(d).padStart(6)}`;
+    for (const side of ["LONG", "SHORT"] as const) {
+      const l = excursions.filter((x) => x.side === side);
+      if (!l.length) continue;
+      const held = l.filter((x) => !x.broke).length;
+      console.log(`── ${side} · ${l.length} signals ──`);
+      console.log(
+        row(
+          "the move before the signal %",
+          l.map((x) => x.movePct),
+        ),
+      );
+      console.log(
+        row(
+          "R: entry -> the extreme %",
+          l.map((x) => x.rPct),
+        ),
+      );
+      console.log(
+        row(
+          `fav: most OUR way in ${hours}h %`,
+          l.map((x) => x.fav),
+        ),
+      );
+      console.log(
+        row(
+          `adv: most AGAINST us in ${hours}h %`,
+          l.map((x) => x.adv),
+        ),
+      );
+      console.log(
+        row(
+          `fav in R`,
+          l.map((x) => x.fav / x.rPct),
+        ),
+      );
+      console.log(
+        row(
+          `fav BEFORE the extreme broke, in R`,
+          l.map((x) => x.favBefore / x.rPct),
+        ),
+      );
+      console.log(
+        row(
+          `from the extreme itself, most our way %`,
+          l.map((x) => x.fromExt),
+        ),
+      );
+      console.log(
+        `  the ${side === "LONG" ? "bottom" : "top"} HELD for ${hours}h: ${held} of ${l.length} (${Math.round((100 * held) / l.length)}%) · broken: ${l.length - held}, median after ${q(
+          l.filter((x) => x.broke).map((x) => x.brokeH),
+          0.5,
+        ).toFixed(1)}h`,
+      );
+      for (const R of [1, 1.5, 2, 3]) {
+        const n = l.filter((x) => x.favBefore / x.rPct >= R).length;
+        console.log(
+          `  reached ${R}R before the ${side === "LONG" ? "bottom" : "top"} broke: ${n} of ${l.length} (${Math.round((100 * n) / l.length)}%)`,
+        );
+      }
+      if (argv.includes("--list"))
+        for (const x of l.sort((a, b) => a.t - b.t))
+          console.log(
+            `      ${utc(x.t)} ${x.sym.padEnd(6)} move ${x.movePct.toFixed(2)}% · R ${x.rPct.toFixed(2)}% · fav ${x.fav.toFixed(2)}% (${(x.fav / x.rPct).toFixed(1)}R) · adv ${x.adv.toFixed(2)}% · before break ${(x.favBefore / x.rPct).toFixed(1)}R · ${x.broke ? `broken after ${x.brokeH.toFixed(1)}h` : "held"}`,
+          );
+      console.log("");
+    }
+    return;
+  }
   // --from / --to: count only the trades entered in that window
   const wFrom = argv.includes("--from")
     ? Date.parse(`${arg("from", "")}T00:00:00Z`)
