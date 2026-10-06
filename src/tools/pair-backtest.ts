@@ -34,6 +34,8 @@
  *                      OI and RANK 1 come from the CLOSED candles before; at the touch minute -- SHORT: OI below the
  *                      move's peak; LONG: OI above the last close's (new positions). A candle that makes a new extreme
  *                      is never an entry candle. No candle against the turn among the closed ones after the extreme.
+ *            --slip 0.05  (with --touch) % lost on the entry (a stop order fills a little worse than the level) and
+ *                      again on every SL exit (a stop-market slips) -- default 0.05
  *            --tf 60   the candle in minutes (Oct 6: the same strategy on 1h candles; default 15 = live). The RANK window
  *                      stays --window hours, the ATR 14 candles of that size; the SL / TP stay --pct / --tp
  *            --from 2026-09-22 --to 2026-10-05   only the trades entered in [from, to) are counted (the data still starts
@@ -121,7 +123,17 @@ function touchSignals(
   win: number,
   k: number,
   n: number,
+  snap: Map<number, number>,
 ): TouchSig[] {
+  // the OI KNOWN at a moment: the last 5-minute snapshot at or before it (the minute bars' OI is interpolated toward the
+  // NEXT snapshot -- up to 5 minutes ahead -- so it must not be used for a decision inside a candle)
+  const oiKnown = (t: number): number => {
+    for (let x = Math.floor(t / F5) * F5; x > t - 3_600_000; x -= F5) {
+      const v = snap.get(x);
+      if (v !== undefined) return v;
+    }
+    return NaN;
+  };
   const atr = atrBefore(c, n),
     acc = turns(c, k, n, true).filter((x) => x.accepted),
     out: TouchSig[] = [];
@@ -183,7 +195,8 @@ function touchSignals(
       const b = bars[m];
       if (up ? b.high > ext : b.low < ext) break;
       if (up ? b.low <= level : b.high >= level) {
-        const oiOk = up ? b.oiLast < peak : b.oiLast > c[i - 1].oi1;
+        const oiNow = oiKnown(b.t + 60_000);
+        const oiOk = up ? oiNow < peak : oiNow > c[i - 1].oi1;
         if (!oiOk) break;
         let against = false;
         for (let j = e + 1; j < i; j++)
@@ -261,6 +274,7 @@ async function main(): Promise<void> {
     tpPct = Number(arg("tp", "2")),
     win = Number(arg("window", "12")),
     tf = Number(arg("tf", "15"));
+  const slip = argv.includes("--touch") ? Number(arg("slip", "0.05")) : 0;
   const touch = argv.includes("--touch"),
     wick = touch || argv.includes("--wick"),
     rr = Number(arg("rr", "2"));
@@ -287,9 +301,10 @@ async function main(): Promise<void> {
     .collection("liq_raw_events");
   for (const sym of syms) {
     let bars: MinBar[];
+    let snap = new Map<number, number>();
     try {
-      const k = await minutes(sym, from, to),
-        snap = await oiSnapshots(sym, from, to, "5m");
+      const k = await minutes(sym, from, to);
+      snap = await oiSnapshots(sym, from, to, "5m");
       bars = minuteBars(k, snap).filter((b) => b.oiFirst > 0 && b.oiLast > 0);
     } catch (err) {
       counts.push(
@@ -357,7 +372,7 @@ async function main(): Promise<void> {
     const map = new Map(bars.map((b) => [b.t, b.close])),
       c = candles(bars, tf);
     const sigs = touch
-      ? touchSignals(c, bars, win, V10_K, V10_ATR_N)
+      ? touchSignals(c, bars, win, V10_K, V10_ATR_N, snap)
       : [
           ...atrSignals(c, V10_K, V10_ATR_N, win, {
             atr: "live",
@@ -398,18 +413,21 @@ async function main(): Promise<void> {
       if (busy[g.side] > g.t) continue;
       if (liqMode && g.startT < liqFrom) continue; // the move must be inside the period we have liquidations for
       // --wick: SL on the extreme, TP rr x that risk; the move must be bigger than the TP distance
-      const slPct = wick
-        ? (100 * Math.abs(g.extreme - g.price)) / g.price
-        : pct;
+      // --touch: the entry fills `slip` % worse than the level
+      const entry =
+        g.side === "SHORT"
+          ? g.price * (1 - slip / 100)
+          : g.price * (1 + slip / 100);
+      const slPct = wick ? (100 * Math.abs(g.extreme - entry)) / entry : pct;
       if (wick && !(slPct > 0 && Math.abs(g.movePct) > rr * slPct)) continue;
       const sl =
         g.side === "SHORT"
-          ? g.price * (1 + slPct / 100)
-          : g.price * (1 - slPct / 100);
+          ? entry * (1 + slPct / 100)
+          : entry * (1 - slPct / 100);
       const tr = simTrade(
         bars,
         g.t,
-        g.price,
+        entry,
         sl,
         wick ? rr : tpPct / pct,
         g.side === "SHORT" ? "DOWN" : "UP",
@@ -422,7 +440,7 @@ async function main(): Promise<void> {
         t: g.t,
         exitT: tr.exitT,
         exit: tr.exit,
-        net: tr.r - (2 * fee) / slPct,
+        net: tr.r - (2 * fee) / slPct - (tr.exit === "SL" ? slip / slPct : 0),
         slPct,
         ...(liqMode
           ? {
@@ -470,7 +488,7 @@ async function main(): Promise<void> {
   );
 
   console.log(
-    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · ${tf}m candles${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · ${touch ? "TOUCH entry (1 ATR back, inside the candle) · " : ""}${wick ? `SL on the wick · TP ${rr}R · the move > the TP distance` : `SL ${pct}% · TP ${tpPct}%`} · given back < ${gbMax}% · fee ${fee}%/side`,
+    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · ${tf}m candles${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · ${touch ? `TOUCH entry (1 ATR back, inside the candle, slip ${slip}%) · ` : ""}${wick ? `SL on the wick · TP ${rr}R · the move > the TP distance` : `SL ${pct}% · TP ${tpPct}%`} · given back < ${gbMax}% · fee ${fee}%/side`,
   );
   console.log(`coins (trades): ${counts.join(", ")}`);
   if (wick && slPcts.length) {
@@ -502,6 +520,30 @@ async function main(): Promise<void> {
       line(
         "  LONG",
         l.filter((x) => x.side === "LONG"),
+      ),
+    );
+  }
+
+  // by month (is it one good stretch, or every month?)
+  const months = [
+    ...new Set(trades.map((t) => new Date(t.t).toISOString().slice(0, 7))),
+  ].sort();
+  console.log(`\nALL by month:`);
+  for (const mo of months) {
+    const l = trades.filter(
+      (t) => new Date(t.t).toISOString().slice(0, 7) === mo,
+    );
+    console.log(line(`  ${mo} all`, l));
+    console.log(
+      line(
+        `  ${mo} SHORT`,
+        l.filter((t) => t.side === "SHORT"),
+      ),
+    );
+    console.log(
+      line(
+        `  ${mo} LONG`,
+        l.filter((t) => t.side === "LONG"),
       ),
     );
   }
