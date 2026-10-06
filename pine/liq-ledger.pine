@@ -1,0 +1,282 @@
+//@version=6
+// LIQUIDATION LEDGER — where the open positions sit and where they get liquidated (Johnny, Oct 6 2026).
+// The same logic as src/research/liq-ledger.ts, on the chart, live. Visual only: no entries, no orders.
+// Use on a Binance USDT-M perpetual (e.g. BINANCE:ALGOUSDT.P), 15m chart (5m works, 1m may be too slow).
+//
+// Start N days back (or at a date) and walk bar by bar to now, keeping a book of the open positions by ENTRY price
+// (every open long has an open short against it, so both books hold the same amount):
+//   start      the OI at that bar, spread over the prices of the day before by volume (the real entries are unknown)
+//   OI up      new longs AND new shorts at the bar's close
+//   closes     the positions that close are the ones the price moved AWAY from:
+//                bar closed UP   -> entries BELOW the close (longs take profit, shorts stop out)
+//                bar closed DOWN -> entries ABOVE the close
+//              (if there are not enough of those, the rest closes evenly from everyone)
+//   hand-over  (Johnny) price up, OI flat: the longs below took profit and NEW buyers took their place higher.
+//              "OI + volume": opens N = (V + dOI)/2 and closes C = (V − dOI)/2 per side every bar.
+//              "OI only":     N = max(0, dOI), C = max(0, −dOI)   (what the usual heatmaps do)
+//   liquidated every book is split evenly over 10/25/50/100x; a long at entry e dies at e·(1 − 1/L + mmr),
+//              a short at e·(1 + 1/L − mmr). When the price reaches it, it BURNS (red); a real liquidation also lowers
+//              OI, so that part is not closed a second time.
+// Drawn on the last bar:
+//   ⚪ white boxes = the biggest bands of liquidations still ALIVE above (shorts) and below (longs) the price
+//   🔴 red boxes   = the biggest bands the price already BURNED since the start
+//   ◆ OI min       = the lowest OI of the last 30 days (a "cleaner" moment to start from: many positions were gone)
+indicator("Liquidation ledger (OI + volume)", shorttitle = "LIQLEDGER", overlay = true, max_boxes_count = 500, max_lines_count = 50, max_labels_count = 100)
+
+const int DAY = 86400000
+
+// ───────────── inputs ─────────────
+G1 = "Start"
+daysBack  = input.int(5, "Start: days back", minval = 1, maxval = 60, group = G1)
+useDate   = input.bool(false, "Start at a date instead (UTC)", group = G1)
+startDate = input.time(timestamp("01 Oct 2026 00:00 +0000"),"Start date", group = G1)
+G2 = "Model"
+model    = input.string("OI + volume", "Model", options = ["OI + volume", "OI only"], group = G2)
+mmrPct   = input.float(0.0, "Maintenance margin %", minval = 0, step = 0.1, group = G2)
+binPct   = input.float(0.25, "Bin size %", minval = 0.05, step = 0.05, group = G2)
+oiSymIn  = input.string("", "OI symbol (empty = auto: <chart>.P_OI)", group = G2)
+oiInUsd  = input.bool(false, "OI data is in USD (not coins)", group = G2)
+G3 = "Drawing"
+bandPct  = input.float(0.5, "Band width %", minval = 0.1, step = 0.1, group = G3)
+topN     = input.int(5, "Bands each side", minval = 1, maxval = 20, group = G3)
+showBurn = input.bool(true, "Show burned (red)", group = G3)
+showMin  = input.bool(true, "Mark the lowest OI (30 days)", group = G3)
+extendR  = input.int(30, "Extend boxes right (bars)", minval = 0, group = G3)
+aliveCol = input.color(#2962ff, "Alive color", group = G3)
+burnCol  = input.color(#ff2d2d, "Burned color", group = G3)
+
+// ───────────── OI ─────────────
+tk    = str.contains(syminfo.ticker, ".P") ? syminfo.ticker : syminfo.ticker + ".P"
+oiSym = oiSymIn != "" ? oiSymIn : syminfo.prefix + ":" + tk + "_OI"
+oiRaw = request.security(oiSym, timeframe.period, close, ignore_invalid_symbol = true)
+oiC   = oiInUsd ? oiRaw / close : oiRaw          // coins (contracts)
+
+// ───────────── the ledger ─────────────
+var array<int> TIERS = array.from(10, 25, 50, 100)
+var int   T  = 4
+var float LO = 0.5     // the book covers 0.5× .. 2× the price at the start
+var float K  = math.log(1 + binPct / 100)
+var int   N  = int(math.ceil(math.log(4.0) / K))
+var array<float> L     = array.new<float>(4 * N, 0.0)   // [tier*N + bin] longs by entry
+var array<float> S     = array.new<float>(4 * N, 0.0)   // shorts by entry
+var array<float> burnL = array.new<float>(N, 0.0)       // burned longs by liquidation price
+var array<float> burnS = array.new<float>(N, 0.0)
+var array<float> prof  = array.new<float>(N, 0.0)       // the volume profile of the day before the start
+var float base      = na
+var bool  seeded    = false
+var float prevClose = na
+var float lastOi    = na
+var float oiStart   = na
+var int   startT    = useDate ? startDate : last_bar_time - daysBack * DAY
+var int   seedT     = na
+
+idx(float p) =>
+    na(base) or na(p) or p <= 0 ? -1 : int(math.floor(math.log(p / base) / K))
+inRange(int i) =>
+    i >= 0 and i < N
+priceOf(int i) =>
+    base * math.exp((i + 0.5) * K)
+
+addPos(int i, float q) =>
+    if inRange(i) and q > 0
+        part = q / T
+        for j = 0 to T - 1
+            L.set(j * N + i, L.get(j * N + i) + part)
+            S.set(j * N + i, S.get(j * N + i) + part)
+
+// close q from one book: first from the entries the price moved away from
+closeBook(array<float> book, float q, int cut, bool up) =>
+    if q > 0
+        float avail = 0.0
+        float all   = 0.0
+        for j = 0 to T - 1
+            for i = 0 to N - 1
+                v = book.get(j * N + i)
+                if v > 0
+                    all += v
+                    if (up and i < cut) or (not up and i > cut)
+                        avail += v
+        f1   = avail > 0 ? math.min(1.0, q / avail) : 0.0
+        rest = q - f1 * avail
+        left = all - f1 * avail
+        f2   = rest > 0 and left > 0 ? math.min(1.0, rest / left) : 0.0
+        if f1 > 0 or f2 > 0
+            for j = 0 to T - 1
+                for i = 0 to N - 1
+                    v = book.get(j * N + i)
+                    if v > 0
+                        away = (up and i < cut) or (not up and i > cut)
+                        book.set(j * N + i, v * (away ? 1 - f1 : 1.0) * (1 - f2))
+
+// the volume profile of the day before the start
+if not seeded and time >= startT - DAY and time < startT
+    if na(base)
+        base := close * LO
+    b = idx(hlc3)
+    if inRange(b)
+        prof.set(b, prof.get(b) + volume)
+
+// seed at the first bar of the start
+if not seeded and time >= startT and not na(oiC)
+    if na(base)
+        base := close * LO
+    float tot = prof.sum()
+    if tot > 0
+        for i = 0 to N - 1
+            pv = prof.get(i)
+            if pv > 0
+                addPos(i, oiC * pv / tot)
+    else
+        addPos(idx(close), oiC)
+    seeded    := true
+    seedT     := time
+    prevClose := close
+    lastOi    := oiC
+    oiStart   := oiC
+else if seeded
+    dOi = na(oiC) or na(lastOi) ? 0.0 : oiC - lastOi
+    mmr = mmrPct / 100
+    // 1. burned: the liquidation prices this bar reached
+    float bL = 0.0
+    float bS = 0.0
+    for j = 0 to T - 1
+        lev = TIERS.get(j)
+        fL  = 1 - 1.0 / lev + mmr
+        fS  = 1 + 1.0 / lev - mmr
+        // longs: entry * fL >= low  -> entries from idx(low / fL) up
+        iL = math.max(0, idx(low / fL))
+        if iL <= N - 1
+            for i = iL to N - 1
+                v = L.get(j * N + i)
+                if v > 0 and priceOf(i) * fL >= low
+                    lb = idx(priceOf(i) * fL)
+                    if inRange(lb)
+                        burnL.set(lb, burnL.get(lb) + v)
+                    bL += v
+                    L.set(j * N + i, 0.0)
+        // shorts: entry * fS <= high -> entries up to idx(high / fS)
+        iS = math.min(N - 1, idx(high / fS))
+        if iS >= 0
+            for i = 0 to iS
+                v = S.get(j * N + i)
+                if v > 0 and priceOf(i) * fS <= high
+                    sb = idx(priceOf(i) * fS)
+                    if inRange(sb)
+                        burnS.set(sb, burnS.get(sb) + v)
+                    bS += v
+                    S.set(j * N + i, 0.0)
+    // 2. opens / closes per side
+    nOpen  = model == "OI only" ? math.max(0.0, dOi) : math.max(0.0, (volume + dOi) / 2)
+    nClose = model == "OI only" ? math.max(0.0, -dOi) : math.max(0.0, (volume - dOi) / 2)
+    up  = not (close < prevClose)
+    cut = idx(close)
+    closeBook(L, nClose - bL, cut, up)
+    closeBook(S, nClose - bS, cut, up)
+    // 3. new positions at the close
+    addPos(cut, nOpen)
+    prevClose := close
+    if not na(oiC)
+        lastOi := oiC
+
+// the lowest OI of the last 30 days (for choosing a start)
+var array<int>   oiT = array.new<int>()
+var array<float> oiV = array.new<float>()
+if not na(oiC) and time >= last_bar_time - 30 * DAY
+    oiT.push(time)
+    oiV.push(oiC)
+
+// ───────────── drawing (last bar) ─────────────
+fmtUsd(float x) =>
+    x >= 1e6 ? "$" + str.tostring(x / 1e6, "#.##") + "M" : x >= 1e3 ? "$" + str.tostring(x / 1e3, "#.#") + "k" : "$" + str.tostring(x, "#")
+
+var array<box>   boxes  = array.new<box>()
+var array<label> labels = array.new<label>()
+var line startLine = na
+var table info = table.new(position.top_right, 2, 6, bgcolor = color.new(#1e2329, 10), border_width = 1)
+
+// the biggest bands of a by-liquidation-price array ($ = qty × price) on one side of the price; draws them
+drawBands(array<float> byLiq, bool above, bool burned, int leftT, int rightT) =>
+    bw = math.log(1 + bandPct / 100)
+    NB = int(math.ceil(math.log(4.0) / bw)) + 1
+    bands = array.new<float>(NB, 0.0)
+    for i = 0 to N - 1
+        v = byLiq.get(i)
+        if v > 0
+            p  = priceOf(i)
+            ok = burned or (above ? p > close : p < close)
+            if ok
+                bi = int(math.floor(math.log(p / base) / bw))
+                if bi >= 0 and bi < NB
+                    bands.set(bi, bands.get(bi) + v * p)
+    float total = bands.sum()
+    float mx    = bands.max()
+    if total > 0
+        sorted = bands.sort_indices(order.descending)
+        for r = 0 to math.min(topN, NB) - 1
+            bi = sorted.get(r)
+            v  = bands.get(bi)
+            if v > 0
+                p0  = base * math.exp(bi * bw)
+                p1  = base * math.exp((bi + 1) * bw)
+                rel = v / mx
+                col = burned ? color.new(burnCol, int(85 - 55 * rel)) : color.new(aliveCol, int(85 - 60 * rel))
+                pct = (p0 + p1) / 2 / close * 100 - 100
+                txt = (burned ? "🔴 " : "⚪ ") + fmtUsd(v) + " · " + str.tostring(100 * v / total, "#") + "% · " + (pct >= 0 ? "+" : "") + str.tostring(pct, "#.##") + "%"
+                boxes.push(box.new(leftT, p1, rightT, p0, xloc = xloc.bar_time, border_color = burned ? color.new(burnCol, 40) : color.new(aliveCol, 40), bgcolor = col, text = txt, text_color = burned ? burnCol : aliveCol, text_size = size.small, text_halign = text.align_right))
+
+if barstate.islast
+    for b in boxes
+        b.delete()
+    boxes.clear()
+    for lb in labels
+        lb.delete()
+    labels.clear()
+    line.delete(startLine)
+    if seeded
+        // the liquidation prices of the alive positions
+        aliveL = array.new<float>(N, 0.0)
+        aliveS = array.new<float>(N, 0.0)
+        mmr = mmrPct / 100
+        for j = 0 to T - 1
+            lev = TIERS.get(j)
+            for i = 0 to N - 1
+                vl = L.get(j * N + i)
+                if vl > 0
+                    b = idx(priceOf(i) * (1 - 1.0 / lev + mmr))
+                    if inRange(b)
+                        aliveL.set(b, aliveL.get(b) + vl)
+                vs = S.get(j * N + i)
+                if vs > 0
+                    b = idx(priceOf(i) * (1 + 1.0 / lev - mmr))
+                    if inRange(b)
+                        aliveS.set(b, aliveS.get(b) + vs)
+        barMs  = time_close - time
+        rightT = time + extendR * barMs
+        if showBurn
+            burned = array.new<float>(N, 0.0)
+            for i = 0 to N - 1
+                burned.set(i, burnL.get(i) + burnS.get(i))
+            drawBands(burned, true, true, seedT, time)
+        drawBands(aliveS, true, false, seedT, rightT)
+        drawBands(aliveL, false, false, seedT, rightT)
+        startLine := line.new(seedT, close, seedT, close * 1.001, xloc = xloc.bar_time, extend = extend.both, color = color.new(#f0b90b, 40), style = line.style_dashed)
+        labels.push(label.new(seedT, high, "start " + str.format_time(seedT, "MM-dd HH:mm", "UTC"), xloc = xloc.bar_time, style = label.style_label_down, color = color.new(#f0b90b, 20), textcolor = color.black, size = size.small))
+        table.cell(info, 0, 0, "model", text_color = color.gray, text_size = size.small)
+        table.cell(info, 1, 0, model, text_color = color.white, text_size = size.small)
+        table.cell(info, 0, 1, "start (UTC)", text_color = color.gray, text_size = size.small)
+        table.cell(info, 1, 1, str.format_time(seedT, "MM-dd HH:mm", "UTC"), text_color = color.white, text_size = size.small)
+        table.cell(info, 0, 2, "OI start → now", text_color = color.gray, text_size = size.small)
+        table.cell(info, 1, 2, str.tostring(oiStart, format.volume) + " → " + str.tostring(lastOi, format.volume), text_color = color.white, text_size = size.small)
+        table.cell(info, 0, 3, "burned longs / shorts", text_color = color.gray, text_size = size.small)
+        float bLu = 0.0
+        float bSu = 0.0
+        for i = 0 to N - 1
+            bLu += burnL.get(i) * priceOf(i)
+            bSu += burnS.get(i) * priceOf(i)
+        table.cell(info, 1, 3, "≈" + fmtUsd(bLu) + " / ≈" + fmtUsd(bSu), text_color = #ffb3b3, text_size = size.small)
+    else
+        table.cell(info, 0, 0, "no OI data", text_color = color.red, text_size = size.small)
+        table.cell(info, 1, 0, oiSym, text_color = color.white, text_size = size.small)
+    if showMin and oiV.size() > 0
+        mi = oiV.indexof(oiV.min())
+        labels.push(label.new(oiT.get(mi), low, "◆ OI min 30d\n" + str.format_time(oiT.get(mi), "MM-dd HH:mm", "UTC"), xloc = xloc.bar_time, style = label.style_label_up, color = color.new(#2962ff, 20), textcolor = color.white, size = size.small))
