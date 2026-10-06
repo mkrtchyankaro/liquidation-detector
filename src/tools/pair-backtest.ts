@@ -28,6 +28,12 @@
  *                      in 4 phases -- the move (start -> the extreme candle), the extreme candle, the extreme -> the entry,
  *                      the first 2h after the entry (hindsight) -- each side, also as a multiple of the coin's average
  *                      hourly liquidations; TP vs SL split at the median of each (no number made up) + every trade listed
+ *            --touch   (Johnny, Oct 6) do NOT wait for the candle's close: the entry is the MINUTE the price first gets
+ *                      1 ATR back from the extreme (SHORT: the top's high - 1 ATR; LONG: the bottom's low + 1 ATR), at that
+ *                      price; SL on the wick (the extreme) = 1 ATR, TP --rr R (implies --wick). Live-safe: the move, its
+ *                      OI and RANK 1 come from the CLOSED candles before; at the touch minute -- SHORT: OI below the
+ *                      move's peak; LONG: OI above the last close's (new positions). A candle that makes a new extreme
+ *                      is never an entry candle. No candle against the turn among the closed ones after the extreme.
  *            --tf 60   the candle in minutes (Oct 6: the same strategy on 1h candles; default 15 = live). The RANK window
  *                      stays --window hours, the ATR 14 candles of that size; the SL / TP stay --pct / --tp
  *            --from 2026-09-22 --to 2026-10-05   only the trades entered in [from, to) are counted (the data still starts
@@ -37,7 +43,13 @@
 import "dotenv/config";
 import * as fs from "fs";
 import * as path from "path";
-import { candles, type MinBar } from "../research/dc15";
+import {
+  atrBefore,
+  candles,
+  turns,
+  type Candle,
+  type MinBar,
+} from "../research/dc15";
 import { atrSignals, flushSignals } from "../research/atr-turn";
 import { simTrade } from "../research/sltp";
 import { klines, oiSnapshots, type Kline } from "../research/binance-history";
@@ -92,6 +104,113 @@ async function minutes(
   return out;
 }
 
+/** --touch signals (see the header): the move from the closed candles, the entry at the minute it gets 1 ATR back */
+interface TouchSig {
+  side: "LONG" | "SHORT";
+  t: number;
+  price: number;
+  extreme: number;
+  extremeT: number;
+  startT: number;
+  movePct: number;
+  against: boolean;
+}
+function touchSignals(
+  c: readonly Candle[],
+  bars: readonly MinBar[],
+  win: number,
+  k: number,
+  n: number,
+): TouchSig[] {
+  const atr = atrBefore(c, n),
+    acc = turns(c, k, n, true).filter((x) => x.accepted),
+    out: TouchSig[] = [];
+  const idx = new Map(c.map((x, i) => [x.t, i]));
+  const firstMin = (t: number): number => {
+    let lo = 0,
+      hi = bars.length;
+    while (lo < hi) {
+      const m = (lo + hi) >> 1;
+      if (bars[m].t < t) lo = m + 1;
+      else hi = m;
+    }
+    return lo;
+  };
+  const done = new Set<string>();
+  for (let i = 1; i < c.length; i++) {
+    if (!(atr[i] > 0)) continue;
+    // the current move = since the last accepted turn that closed before this candle
+    let last = -1;
+    for (let j = acc.length - 1; j >= 0; j--)
+      if (acc[j].t <= c[i].t) {
+        last = j;
+        break;
+      }
+    if (last < 0) continue;
+    const tr = acc[last],
+      s0 = idx.get(tr.extremeT);
+    if (s0 === undefined || s0 >= i) continue;
+    const up = tr.newDir === "UP"; // the current move's direction
+    let e = s0;
+    for (let j = s0; j < i; j++)
+      if (up ? c[j].high >= c[e].high : c[j].low <= c[e].low) e = j;
+    const ext = up ? c[e].high : c[e].low,
+      side: "LONG" | "SHORT" = up ? "SHORT" : "LONG";
+    const key = `${s0}|${side}`;
+    if (done.has(key)) continue;
+    const moveOi = c[e].oi1 - c[s0].oi1,
+      moveOiPct = (100 * moveOi) / c[s0].oi1;
+    // SHORT: OI grew with the rise; LONG (flush): OI fell with the fall
+    if (up ? !(moveOi > 0) : !(moveOi < 0)) continue;
+    // RANK 1 against the accepted moves of the window before
+    const before = acc.filter(
+      (x) => x.t < c[i].t && x.t >= c[i].t - win * 3_600_000,
+    );
+    if (
+      !before.length ||
+      !before.every((x) => Math.abs(x.moveOiPct) < Math.abs(moveOiPct))
+    )
+      continue;
+    const level = up ? ext - k * atr[i] : ext + k * atr[i];
+    let peak = -Infinity;
+    for (let j = s0; j < i; j++) peak = Math.max(peak, c[j].oi1);
+    // the minutes of this candle: a new extreme -> not this candle; else the first touch of the level
+    for (
+      let m = firstMin(c[i].t);
+      m < bars.length && bars[m].t < c[i].end;
+      m++
+    ) {
+      const b = bars[m];
+      if (up ? b.high > ext : b.low < ext) break;
+      if (up ? b.low <= level : b.high >= level) {
+        const oiOk = up ? b.oiLast < peak : b.oiLast > c[i - 1].oi1;
+        if (!oiOk) break;
+        let against = false;
+        for (let j = e + 1; j < i; j++)
+          if (
+            up
+              ? c[j].close > c[j].open && c[j].oi1 < c[j].oi0
+              : c[j].close < c[j].open && c[j].oi1 > c[j].oi0
+          )
+            against = true;
+        out.push({
+          side,
+          t: b.t + 60_000,
+          price: level,
+          extreme: ext,
+          extremeT: c[e].t,
+          startT: c[s0].t,
+          movePct: (100 * (ext - c[s0].close)) / c[s0].close,
+          against,
+        });
+        done.add(key);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 /** minute bars with OI interpolated between the 5-minute snapshots (oiFirst = OI at t, oiLast = OI at t + 1m) */
 function minuteBars(k: Kline[], snap: Map<number, number>): MinBar[] {
   const oi = (x: number): number => {
@@ -142,7 +261,8 @@ async function main(): Promise<void> {
     tpPct = Number(arg("tp", "2")),
     win = Number(arg("window", "12")),
     tf = Number(arg("tf", "15"));
-  const wick = argv.includes("--wick"),
+  const touch = argv.includes("--touch"),
+    wick = touch || argv.includes("--wick"),
     rr = Number(arg("rr", "2"));
   const slPcts: number[] = [];
   const gbMax = Number(arg("gb", "50")),
@@ -236,16 +356,18 @@ async function main(): Promise<void> {
     };
     const map = new Map(bars.map((b) => [b.t, b.close])),
       c = candles(bars, tf);
-    const sigs = [
-      ...atrSignals(c, V10_K, V10_ATR_N, win, {
-        atr: "live",
-        topCandleOi: false,
-      }).filter((g) => g.side === "SHORT" && (wick || g.movePct > tpPct)),
-      ...flushSignals(c, V10_K, V10_ATR_N, win, {
-        rank: true,
-        side: "LONG",
-      }).filter((g) => wick || -g.movePct > tpPct),
-    ].sort((a, b) => a.t - b.t);
+    const sigs = touch
+      ? touchSignals(c, bars, win, V10_K, V10_ATR_N)
+      : [
+          ...atrSignals(c, V10_K, V10_ATR_N, win, {
+            atr: "live",
+            topCandleOi: false,
+          }).filter((g) => g.side === "SHORT" && (wick || g.movePct > tpPct)),
+          ...flushSignals(c, V10_K, V10_ATR_N, win, {
+            rank: true,
+            side: "LONG",
+          }).filter((g) => wick || -g.movePct > tpPct),
+        ].sort((a, b) => a.t - b.t);
     const busy = { LONG: 0, SHORT: 0 };
     let n = 0;
     for (const g of sigs) {
@@ -268,7 +390,9 @@ async function main(): Promise<void> {
         continue;
       if (
         !(givebackPct(turn, g.price) < gbMax) ||
-        againstCandles(bars, turn, tf).length
+        (touch
+          ? (g as TouchSig).against
+          : againstCandles(bars, turn, tf).length)
       )
         continue;
       if (busy[g.side] > g.t) continue;
@@ -346,7 +470,7 @@ async function main(): Promise<void> {
   );
 
   console.log(
-    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · ${tf}m candles${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · ${wick ? `SL on the wick · TP ${rr}R · the move > the TP distance` : `SL ${pct}% · TP ${tpPct}%`} · given back < ${gbMax}% · fee ${fee}%/side`,
+    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · ${tf}m candles${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · ${touch ? "TOUCH entry (1 ATR back, inside the candle) · " : ""}${wick ? `SL on the wick · TP ${rr}R · the move > the TP distance` : `SL ${pct}% · TP ${tpPct}%`} · given back < ${gbMax}% · fee ${fee}%/side`,
   );
   console.log(`coins (trades): ${counts.join(", ")}`);
   if (wick && slPcts.length) {
