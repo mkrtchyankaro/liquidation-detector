@@ -18,6 +18,8 @@
  *
  *   npx tsx src/tools/pair-backtest.ts
  *   options: --days 60  --pct 1  --tp 2  --window 12  --gb 50  --fee 0.05  --list
+ *            --tf 60   the candle in minutes (Oct 6: the same strategy on 1h candles; default 15 = live). The RANK window
+ *                      stays --window hours, the ATR 14 candles of that size; the SL / TP stay --pct / --tp
  *            --from 2026-09-22 --to 2026-10-05   only the trades entered in [from, to) are counted (the data still starts
  *            --days before, for the 12h RANK and the ATR) -- to compare with our own DB's tests on the same days
  *            --trades   every trade of the ALL book (to compare signal by signal with src/tools/oi-split-test.ts --list)
@@ -113,7 +115,8 @@ async function main(): Promise<void> {
   const days = Number(arg("days", "60")),
     pct = Number(arg("pct", "1")),
     tpPct = Number(arg("tp", "2")),
-    win = Number(arg("window", "12"));
+    win = Number(arg("window", "12")),
+    tf = Number(arg("tf", "15"));
   const gbMax = Number(arg("gb", "50")),
     fee = Number(arg("fee", "0.05"));
   const to = Math.floor(Date.now() / (15 * M)) * 15 * M,
@@ -144,7 +147,7 @@ async function main(): Promise<void> {
       continue;
     }
     const map = new Map(bars.map((b) => [b.t, b.close])),
-      c = candles(bars, 15);
+      c = candles(bars, tf);
     const sigs = [
       ...atrSignals(c, V10_K, V10_ATR_N, win, {
         atr: "live",
@@ -177,7 +180,7 @@ async function main(): Promise<void> {
         continue;
       if (
         !(givebackPct(turn, g.price) < gbMax) ||
-        againstCandles(bars, turn).length
+        againstCandles(bars, turn, tf).length
       )
         continue;
       if (busy[g.side] > g.t) continue;
@@ -237,7 +240,7 @@ async function main(): Promise<void> {
   );
 
   console.log(
-    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days)${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · SL ${pct}% · TP ${tpPct}% · given back < ${gbMax}% · fee ${fee}%/side`,
+    `NEW STRATEGY ON BINANCE HISTORY · ${dayStr(from)} -> ${utc(to)} UTC (${days} days) · ${tf}m candles${Number.isFinite(wFrom) || Number.isFinite(wTo) ? ` · counted: trades entered ${Number.isFinite(wFrom) ? dayStr(wFrom) : "start"} -> ${Number.isFinite(wTo) ? dayStr(wTo) : "now"}` : ""} · SL ${pct}% · TP ${tpPct}% · given back < ${gbMax}% · fee ${fee}%/side`,
   );
   console.log(`coins (trades): ${counts.join(", ")}\n`);
   const line = (name: string, l: Tr[]): string => {
