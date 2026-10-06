@@ -97,6 +97,35 @@ function minuteBars(k: Kline[], snap: Map<number, number>): MinBar[] {
   }));
 }
 
+/** minute high / low / close of one coin in flat arrays (60 days x 23 coins as Maps of objects is too big for a 1 GB server) */
+class MinuteStore {
+  private readonly hi: Float64Array;
+  private readonly lo: Float64Array;
+  private readonly cl: Float64Array;
+  constructor(
+    private readonly t0: number,
+    n: number,
+  ) {
+    this.hi = new Float64Array(n).fill(NaN);
+    this.lo = new Float64Array(n).fill(NaN);
+    this.cl = new Float64Array(n).fill(NaN);
+  }
+  set(b: { t: number; high: number; low: number; close: number }): void {
+    const i = (b.t - this.t0) / M;
+    if (i >= 0 && i < this.cl.length) {
+      this.hi[i] = b.high;
+      this.lo[i] = b.low;
+      this.cl[i] = b.close;
+    }
+  }
+  get(t: number): { high: number; low: number; close: number } | undefined {
+    const i = (t - this.t0) / M;
+    if (!(i >= 0 && i < this.cl.length) || !Number.isFinite(this.cl[i]))
+      return undefined;
+    return { high: this.hi[i], low: this.lo[i], close: this.cl[i] };
+  }
+}
+
 interface Sig {
   sym: string;
   side: "LONG" | "SHORT";
@@ -136,7 +165,7 @@ async function main(): Promise<void> {
   if (!syms.length) throw new Error("SYMBOLS not set");
   const btc = await minutes("BTCUSDT", from, to),
     btcMap = new Map(btc.map((b) => [b.t, b.close]));
-  const bars = new Map<string, Map<number, MinBar>>(),
+  const bars = new Map<string, MinuteStore>(),
     sigs: Sig[] = [],
     notes: string[] = [];
   for (const sym of syms) {
@@ -156,7 +185,9 @@ async function main(): Promise<void> {
       notes.push(`${sym}: too little data`);
       continue;
     }
-    bars.set(sym, new Map(mb.map((b) => [b.t, b])));
+    const store = new MinuteStore(from, Math.ceil((to - from) / M) + 1);
+    for (const b of mb) store.set(b);
+    bars.set(sym, store);
     const map = new Map(mb.map((b) => [b.t, b.close])),
       c = candles(mb, tf),
       atr = atrBefore(c, V10_ATR_N),
