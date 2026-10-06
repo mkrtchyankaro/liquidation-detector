@@ -142,12 +142,13 @@ async function main(): Promise<void> {
     rb: number,
     n: number,
     mode: "MOMENTUM" | "REVERSAL",
+    off = 0,
   ): Result => {
     const periods: Period[] = [];
     let held: { longs: string[]; shorts: string[] } = { longs: [], shorts: [] };
     // rebalance times aligned to the rebalance length (e.g. 24h -> 00:00 UTC)
     for (
-      let t = Math.ceil(testFrom / (rb * H)) * rb * H;
+      let t = Math.ceil((testFrom - off * H) / (rb * H)) * rb * H + off * H;
       t + rb * H <= now;
       t += rb * H
     ) {
@@ -274,6 +275,28 @@ async function main(): Promise<void> {
         )!,
       ),
     );
+  // Oct 6: is it the hour or the idea? the daily setups rebalanced at every hour of the day (0 = 00:00 UTC)
+  console.log(
+    `\n── the daily ones at EVERY rebalance hour (UTC) -- real if it works at most hours, luck if only at one ──`,
+  );
+  for (const [lb, n] of [
+    [4, 3],
+    [1, 3],
+    [4, 1],
+    [1, 1],
+    [24, 3],
+  ] as const) {
+    const rs = Array.from({ length: 24 }, (_, h) =>
+      run(lb, 24, n, "MOMENTUM", h),
+    );
+    console.log(
+      `  MOM look ${String(lb).padStart(2)}h · every 24h · ${n}+${n}: positive at ${rs.filter((r) => sum(r.periods) > 0).length}/24 hours · median ${sp([...rs.map((r) => sum(r.periods))].sort((a, b) => a - b)[12], 1)}% · every week + at ${rs.filter((r) => weeks.every(([a, b]) => sum(r.periods.filter((x) => x.t >= a && x.t < b)) > 0)).length}/24`,
+    );
+    for (let h = 0; h < 24; h += 4)
+      console.log(
+        `  ${row({ ...rs[h], name: `   at ${String(h).padStart(2, "0")}:00` })}`,
+      );
+  }
   console.log(
     `\n${results.length} combinations tried -- the best of many is partly luck`,
   );
