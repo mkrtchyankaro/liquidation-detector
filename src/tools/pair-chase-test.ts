@@ -212,7 +212,10 @@ async function main(): Promise<void> {
 
   const pctOf = (l: Leg, p: number): number =>
     l.side === "LONG" ? 100 * (p / l.price - 1) : 100 * (1 - p / l.price);
-  const run = (nAtr: number, pairTp: number): Trade[] => {
+  const flip = (x: "LONG" | "SHORT"): "LONG" | "SHORT" =>
+    x === "LONG" ? "SHORT" : "LONG";
+  // rev (Oct 6): every leg entered WITH the move (the signal's side flipped) -- the continuation
+  const run = (nAtr: number, pairTp: number, rev = false): Trade[] => {
     const S = sigs.filter((s) => s.moveAtr >= nAtr),
       out: Trade[] = [];
     let i = 0;
@@ -221,7 +224,7 @@ async function main(): Promise<void> {
         b1 = bars.get(first.sym)!,
         l1: Leg = {
           sym: first.sym,
-          side: first.side,
+          side: rev ? flip(first.side) : first.side,
           t: first.t,
           price: first.price,
         };
@@ -234,12 +237,17 @@ async function main(): Promise<void> {
           const s = S[j++];
           if (
             s.t < first.t ||
-            s.side === l1.side ||
+            (rev ? flip(s.side) : s.side) === l1.side ||
             s.sym === l1.sym ||
             !bars.get(s.sym)!.get(s.t)
           )
             continue;
-          const l2: Leg = { sym: s.sym, side: s.side, t: s.t, price: s.price },
+          const l2: Leg = {
+              sym: s.sym,
+              side: rev ? flip(s.side) : s.side,
+              t: s.t,
+              price: s.price,
+            },
             b2 = bars.get(s.sym)!;
           for (let u = s.t; u < to; u += M) {
             const x1 = b1.get(u),
@@ -340,18 +348,19 @@ async function main(): Promise<void> {
   console.log(
     `signals passing the rules: ${sigs.length} (SHORT ${sigs.filter((s) => s.side === "SHORT").length} · LONG ${sigs.filter((s) => s.side === "LONG").length}) · weeks by the exit: ${weeks.map(([a]) => utc(a).slice(0, 5)).join(" | ")}\n`,
   );
-  for (const n of [2, 3, 4])
-    for (const tp of [1, 2]) {
-      const tr = run(n, tp),
-        sum = (l: Trade[]): number => usd(l.reduce((a, x) => a + x.pnl, 0));
-      const wk = weeks.map(([a, b]) =>
-        sum(tr.filter((x) => x.t1 > a && x.t1 <= b)),
-      );
-      const cnt = (h: string): number => tr.filter((x) => x.how === h).length;
-      console.log(
-        `  move >= ${n} ATR · pair TP +${tp}%   ${sp(sum(tr), 0).padStart(6)}$ │ ${wk.map((v) => `${sp(v, 0).padStart(5)}$`).join(" ")} │ weeks + ${wk.filter((v) => v > 0).length}/${wk.length} │ alone +1%: ${cnt("leg 1 alone +1%")} · alone -1%: ${cnt("leg 1 alone -1%")} · pair +${tp}%: ${cnt(`pair +${tp}%`)} · pair -2%: ${cnt("pair -2%")} · open: ${cnt("OPEN")}`,
-      );
-    }
+  for (const rev of [false, true])
+    for (const n of [2, 3, 4])
+      for (const tp of [1, 2]) {
+        const tr = run(n, tp, rev),
+          sum = (l: Trade[]): number => usd(l.reduce((a, x) => a + x.pnl, 0));
+        const wk = weeks.map(([a, b]) =>
+          sum(tr.filter((x) => x.t1 > a && x.t1 <= b)),
+        );
+        const cnt = (h: string): number => tr.filter((x) => x.how === h).length;
+        console.log(
+          `  ${rev ? "WITH the move" : "our side     "} · move >= ${n} ATR · pair TP +${tp}%   ${sp(sum(tr), 0).padStart(6)}$ │ ${wk.map((v) => `${sp(v, 0).padStart(5)}$`).join(" ")} │ weeks + ${wk.filter((v) => v > 0).length}/${wk.length} │ alone +1%: ${cnt("leg 1 alone +1%")} · alone -1%: ${cnt("leg 1 alone -1%")} · pair +${tp}%: ${cnt(`pair +${tp}%`)} · pair -2%: ${cnt("pair -2%")} · open: ${cnt("OPEN")}`,
+        );
+      }
   // Oct 6: after a 1h signal the price went 1% AGAINST us 61-69% of the time -> is it continuation? Every signal on its
   // own (one at a time per coin), +1% / -1% on the minute high / low (both in one minute = the loss), OUR side vs the
   // REVERSED side (enter the way the move was going), LONG and SHORT signals apart, per week.
@@ -416,8 +425,8 @@ async function main(): Promise<void> {
         );
       }
   if (argv.includes("--list")) {
-    console.log(`\nevery trade · move >= 3 ATR · pair TP +1%:`);
-    for (const x of run(3, 1)) {
+    console.log(`\nevery trade · WITH the move · move >= 3 ATR · pair TP +1%:`);
+    for (const x of run(3, 1, true)) {
       const L = x.legs
         .map(
           (l, k) =>
