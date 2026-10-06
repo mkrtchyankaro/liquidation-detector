@@ -126,12 +126,15 @@ class MinuteStore {
   }
 }
 
+/** moveExt = start -> extreme %, moveEntry = start -> the entry price % (Johnny Oct 6: must be > the TP) */
 interface Sig {
   sym: string;
   side: "LONG" | "SHORT";
   t: number;
   price: number;
   moveAtr: number;
+  moveExt: number;
+  moveEntry: number;
 }
 interface Leg {
   sym: string;
@@ -234,6 +237,10 @@ async function main(): Promise<void> {
         t: g.t,
         price: g.price,
         moveAtr: Math.abs(g.extreme - start) / a,
+        moveExt: (100 * Math.abs(g.extreme - start)) / start,
+        moveEntry:
+          (100 * (g.side === "SHORT" ? g.price - start : start - g.price)) /
+          start,
       });
     }
   }
@@ -402,12 +409,14 @@ async function main(): Promise<void> {
     nAtr: number,
     side: "LONG" | "SHORT" | "ALL",
     rev: boolean,
+    keep: (g: Sig) => boolean = () => true,
   ): Array<{ t1: number; pnl: number }> => {
     const out: Array<{ t1: number; pnl: number }> = [],
       busy = new Map<string, number>();
     for (const g of sigs) {
       if (
         g.moveAtr < nAtr ||
+        !keep(g) ||
         (side !== "ALL" && g.side !== side) ||
         (busy.get(g.sym) ?? 0) > g.t
       )
@@ -453,6 +462,32 @@ async function main(): Promise<void> {
         const sideName = side === "ALL" ? "all signals" : `${side} signals`;
         console.log(
           `  >= ${n} ATR · ${sideName.padEnd(13)} · ${rev ? "REVERSED" : "our side"} ${sp(usd(r.reduce((s2, x) => s2 + x.pnl, 0)), 0).padStart(6)}$ │ ${wk.map((v) => `${sp(v, 0).padStart(5)}$`).join(" ")} │ weeks + ${wk.filter((v) => v > 0).length}/${wk.length} │ ${r.length} trades · +1% first ${r.length ? Math.round((100 * w) / r.length) : 0}%`,
+        );
+      }
+  // Oct 6 (Johnny): the move must be bigger than the TP (1%) -- measured to the extreme (live now) or to the ENTRY price
+  console.log(
+    `\n── THE MOVE vs THE TP (1%): start -> extreme > 1% (as live) · start -> ENTRY > 1% (Johnny) · no move rule · +1% / -1% each signal alone ──`,
+  );
+  const rules: Array<[string, (g: Sig) => boolean]> = [
+    ["no move rule", () => true],
+    ["start->extreme > 1%", (g) => g.moveExt > 1],
+    ["start->ENTRY > 1%", (g) => g.moveEntry > 1],
+  ];
+  for (const [name, keep] of rules)
+    for (const side of ["ALL", "SHORT", "LONG"] as const)
+      for (const rev of [false, true]) {
+        const r = alone(0, side, rev, keep),
+          w = r.filter((x) => x.pnl > 0).length;
+        const wk = weeks.map(([a, b]) =>
+          usd(
+            r
+              .filter((x) => x.t1 > a && x.t1 <= b)
+              .reduce((s2, x) => s2 + x.pnl, 0),
+          ),
+        );
+        const sideName = side === "ALL" ? "all signals" : `${side} signals`;
+        console.log(
+          `  ${name.padEnd(20)} · ${sideName.padEnd(13)} · ${rev ? "REVERSED" : "our side"} ${sp(usd(r.reduce((s2, x) => s2 + x.pnl, 0)), 0).padStart(6)}$ │ ${wk.map((v) => `${sp(v, 0).padStart(5)}$`).join(" ")} │ weeks + ${wk.filter((v) => v > 0).length}/${wk.length} │ ${r.length} trades · +1% first ${r.length ? Math.round((100 * w) / r.length) : 0}%`,
         );
       }
   if (argv.includes("--list")) {
