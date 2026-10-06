@@ -297,6 +297,62 @@ async function main(): Promise<void> {
         `  ${row({ ...rs[h], name: `   at ${String(h).padStart(2, "0")}:00` })}`,
       );
   }
+  // Oct 6: take the hour's luck out -- the capital split into equal sleeves, each rebalanced daily at its own hour
+  // (6 sleeves: 00/04/08/12/16/20 UTC; 24 sleeves: every hour), each held 24h; the whole = the sum of the sleeves
+  console.log(
+    `\n── SLEEVES: the capital split, each part rebalanced daily at its own hour (no picking the lucky hour) ──`,
+  );
+  const sleeves = (
+    lb: number,
+    n: number,
+    hours: number[],
+  ): { eq: (T: number) => number; name: string } => {
+    const rs = hours.map((h) => run(lb, 24, n, "MOMENTUM", h));
+    const curves = rs.map((r) => {
+      let e = 1;
+      return r.periods.map((x) => ({ t: x.t + 24 * H, e: (e *= 1 + x.ret) }));
+    });
+    const eq = (T: number): number =>
+      curves.reduce((a, c) => {
+        let v = 1;
+        for (const x of c) {
+          if (x.t > T) break;
+          v = x.e;
+        }
+        return a + v;
+      }, 0) / curves.length;
+    return {
+      eq,
+      name: `MOM look ${String(lb).padStart(2)}h · 3+3 · ${hours.length} sleeves`.replace(
+        "3+3",
+        `${n}+${n}`,
+      ),
+    };
+  };
+  for (const [lb, n] of [
+    [4, 3],
+    [1, 3],
+    [4, 1],
+    [1, 1],
+  ] as const)
+    for (const hrs of [
+      [0, 4, 8, 12, 16, 20],
+      Array.from({ length: 24 }, (_, h) => h),
+    ]) {
+      const sl = sleeves(lb, n, hrs),
+        end = sl.eq(now);
+      const wk = weeks.map(([a, b]) => 100 * (sl.eq(b) / sl.eq(a) - 1));
+      let peak = 1,
+        m = 0;
+      for (let T = testFrom; T <= now; T += H) {
+        const v = sl.eq(T);
+        peak = Math.max(peak, v);
+        m = Math.min(m, v / peak - 1);
+      }
+      console.log(
+        `  ${sl.name.padEnd(34)} ${sp(100 * (end - 1)).padStart(8)}% │ ${wk.map((v) => `${sp(v, 1).padStart(6)}%`).join(" ")} │ weeks + ${wk.filter((v) => v > 0).length}/${wk.length} │ worst dd ${(100 * m).toFixed(1).padStart(6)}%`,
+      );
+    }
   console.log(
     `\n${results.length} combinations tried -- the best of many is partly luck`,
   );
