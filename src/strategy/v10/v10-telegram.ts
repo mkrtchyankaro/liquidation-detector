@@ -19,6 +19,11 @@ const dhm = (ms: number): string =>
   new Date(ms).toISOString().slice(5, 16).replace("T", " ");
 const sp = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 const coin = (s: string): string => s.replace(/USDT$/, "");
+/** "07.10.2026 12:00" (UTC) -- the date too: in Armenia it can already be the next day */
+const dmy = (ms: number): string => {
+  const d = new Date(ms).toISOString();
+  return `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(0, 4)} ${d.slice(11, 16)}`;
+};
 const W = 15 * 60_000;
 
 /** "V10 · BTC" / "V10 · ALT" / "V10 · WALL" */
@@ -248,36 +253,26 @@ export function formatWallEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
     sl = t.slPrice!,
     tp = t.tpPrice;
   const notional = t.quantity !== null ? entry * t.quantity : NaN;
-  const fees = estimateFeesUsd(notional);
   const pctOf = (p: number): string => sp((100 * (p - entry)) / entry);
   const rr = tp !== null ? Math.abs(tp - entry) / Math.abs(entry - sl) : NaN;
   const out: string[] = [
-    `${long ? "🔺" : "🔻"} ${coin(t.symbol)} · ${t.side} · ${t.mode} · ${hm(t.createdAt)} UTC · ${v10Head(t)}`,
+    `${long ? "🔺" : "🔻"} ${coin(t.symbol)} · ${t.side} · ${t.mode} · ${v10Head(t)}`,
+    `📅 ${dmy(t.createdAt)} UTC`,
     `Entry ${fmtPrice(entry)}`,
     `TP    ${tp !== null ? `${fmtPrice(tp)} (${pctOf(tp)}) ${fmtUsd(risk * rr)}` : `n/a${t.binance?.tpFailureReason ? ` -- ${t.binance.tpFailureReason}` : ""}`}`,
-    `SL    ${fmtPrice(sl)} (${pctOf(sl)}) ${fmtUsd(-risk)}  ← ${long ? "ներքևի պատի ամենաներքևը" : "վերևի պատի ամենավերևը"}`,
-    `Risk ${fmtUsd(risk, false)} · RR ${Number.isFinite(rr) ? rr.toFixed(2) : "n/a"}`,
-    `Position ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)})`,
-    `Fees ≈ ${fmtUsd(fees.tp, false)} at TP · ${fmtUsd(fees.sl, false)} at SL`,
+    `SL    ${fmtPrice(sl)} (${pctOf(sl)}) ${fmtUsd(-risk)}`,
+    `RR ${Number.isFinite(rr) ? rr.toFixed(2) : "n/a"} · ${fmtQty(t.quantity)} ${coin(t.symbol)} (${fmtUsd(notional, false)})`,
   ];
-  if (t.timeoutAt !== undefined)
-    out.push(
-      `⏱ բաց է մնում մինչև ${dhm(t.timeoutAt)} UTC, հետո փակվում է MARKET-ով`,
-    );
+  if (t.timeoutAt !== undefined) out.push(`⏱ փակում՝ ${dmy(t.timeoutAt)} UTC`);
   if (w) {
-    out.push("", "🧱 Պատեր (լիկվիդացիաներից)");
+    out.push("", "🧱 Պատեր");
     out.push(
       `վերևի  ${fmtPrice(w.walls.upper.lo)} – ${fmtPrice(w.walls.upper.hi)}`,
     );
     out.push(
       `ներքևի ${fmtPrice(w.walls.lower.lo)} – ${fmtPrice(w.walls.lower.hi)}`,
     );
-    out.push(
-      `դիպավ ${dhm(w.touchedAt)} · 1h մոմը (${hm(w.hs)}–${hm(w.candleEnd)}) ամբողջությամբ փակվեց պատից դուրս ${fmtPrice(w.entry)}`,
-    );
-    out.push(
-      `տեղ մինչև ${long ? "վերևի պատի ամենավերևը" : "ներքևի պատի ամենաներքևը"}՝ ${w.roomX.toFixed(2)} × stop`,
-    );
+    out.push(`տեղ՝ ${w.roomX.toFixed(2)} × SL`);
   }
   out.push(
     "",
@@ -340,6 +335,7 @@ export function formatV10Close(t: V10TradeDoc): string {
     `${REASON[t.closeReason ?? ""] ?? "⚪ CLOSED"} · ${v10Head(t)} · ${t.symbol} · ${t.side} · ${t.mode}`,
     SEP,
     `🆔 ${t.orderSignalId}`,
+    ...(t.closedAt !== null ? [`📅 ${dmy(t.closedAt)} UTC`] : []),
     `Entry     ${fmtPrice(t.entryPrice)}`,
     `Exit      ${fmtPrice(t.exitPrice)}`,
     `Net PnL   ${fmtUsd(t.pnlUsd)}${t.pnlR !== null ? `  (${t.pnlR >= 0 ? "+" : ""}${t.pnlR.toFixed(2)}R, fees included)` : ""}`,
