@@ -38,6 +38,8 @@
  *   --h1 --rrtest  (Oct 7) WICK, room >= 1.33x, the TP three ways: fixed --tp % · RR (TP = --rr x the SL distance) ·
  *        RR + BREAKEVEN (once the price went --be R our way, the SL moves to the entry +0.1% -- the fees are covered).
  *        Results also in R: the position is sized by the SL, so 1R = the $ risked (e.g. $50).
+ *   --h1 --betest  (Oct 7) WICK, room >= 1.33x, TP --tp % (2): as now · + BREAKEVEN at 1R · SL <= --maxsl % (1.5) ·
+ *        SL <= 1.5% + BREAKEVEN
  *
  *   npx tsx src/tools/wall-trade-test.ts
  *   options: --symbols SOLUSDT,XRPUSDT,...  (default: the 8 coins)  --list (every trade)  --h1
@@ -185,33 +187,53 @@ async function main(): Promise<void> {
     ratio: number;
     tpR?: number;
     beR?: number;
+    maxSl?: number;
   }
+  const MAXSL = Number(arg("maxsl", "1.5"));
   const RR = Number(arg("rr", "2")),
     BE = Number(arg("be", "1"));
-  const VARIANTS: Var[] = argv.includes("--rrtest")
+  const VARIANTS: Var[] = argv.includes("--betest")
     ? [
         { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
-        { v: `WICK RR ${RR}`, kind: "WICK", ratio: 1.33, tpR: RR },
+        { v: `WICK TP ${TPP}% + BE at 1R`, kind: "WICK", ratio: 1.33, beR: 1 },
         {
-          v: `WICK RR ${RR} + BE at ${BE}R`,
+          v: `WICK TP ${TPP}% SL<=${MAXSL}%`,
           kind: "WICK",
           ratio: 1.33,
-          tpR: RR,
-          beR: BE,
+          maxSl: MAXSL,
+        },
+        {
+          v: `WICK TP ${TPP}% SL<=${MAXSL}% + BE`,
+          kind: "WICK",
+          ratio: 1.33,
+          maxSl: MAXSL,
+          beR: 1,
         },
       ]
-    : (
-        [
-          ["BODY", 1.33],
-          ["BODY", 1.5],
-          ["WICK", 1.33],
-          ["WICK", 1.5],
-        ] as const
-      ).map(([kind, ratio]) => ({
-        v: `${kind} room>=${ratio}x stop`,
-        kind,
-        ratio,
-      }));
+    : argv.includes("--rrtest")
+      ? [
+          { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
+          { v: `WICK RR ${RR}`, kind: "WICK", ratio: 1.33, tpR: RR },
+          {
+            v: `WICK RR ${RR} + BE at ${BE}R`,
+            kind: "WICK",
+            ratio: 1.33,
+            tpR: RR,
+            beR: BE,
+          },
+        ]
+      : (
+          [
+            ["BODY", 1.33],
+            ["BODY", 1.5],
+            ["WICK", 1.33],
+            ["WICK", 1.5],
+          ] as const
+        ).map(([kind, ratio]) => ({
+          v: `${kind} room>=${ratio}x stop`,
+          kind,
+          ratio,
+        }));
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     for (const sym of syms) {
@@ -289,7 +311,7 @@ async function main(): Promise<void> {
         console.log(
           `\n═══ ${sym} · 1h rule · from ${utc(testFrom)} UTC${newCoin ? " · NEW coin" : ""} ═══`,
         );
-        for (const { v, kind, ratio, tpR, beR } of VARIANTS) {
+        for (const { v, kind, ratio, tpR, beR, maxSl } of VARIANTS) {
           const tpPct = TPP,
             res: HT[] = [];
           let pos: HT | null = null,
@@ -339,7 +361,7 @@ async function main(): Promise<void> {
               kind,
               tpPct,
               roomRatio: ratio,
-              maxStopPct: MAXSTOP,
+              maxStopPct: Math.min(MAXSTOP, maxSl ?? Infinity),
               ...(tpR !== undefined ? { tpR } : {}),
             });
             for (const k of st.skips)
@@ -374,7 +396,7 @@ async function main(): Promise<void> {
               );
           const sm = res.reduce((a, p) => a + p.net, 0);
           console.log(
-            `  ${v.padEnd(22)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped: TP beyond the other wall ${noRoom}, room < ${ratio}x stop ${bigStop}${pos ? ` · OPEN NOW ${(pos as HT).dir} ${utc((pos as HT).t)} entry ${px((pos as HT).entry)} stop ${px((pos as HT).stop)} tp ${px((pos as HT).tp)}` : ""}`,
+            `  ${v.padEnd(22)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped: TP beyond the other wall ${noRoom}, room < ${ratio}x stop${maxSl !== undefined ? ` or SL > ${maxSl}%` : ""} ${bigStop}${pos ? ` · OPEN NOW ${(pos as HT).dir} ${utc((pos as HT).t)} entry ${px((pos as HT).entry)} stop ${px((pos as HT).stop)} tp ${px((pos as HT).tp)}` : ""}`,
           );
           hAll.push(...res);
         }
