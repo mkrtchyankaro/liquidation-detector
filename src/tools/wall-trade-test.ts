@@ -18,8 +18,16 @@
  *          out after 24h at the close if neither · fee 0.1% per trade · after a trade a new touch is needed
  *   Liquidations exist from our first event (~09-23), so trades start 2 days after that.
  *
+ *   --h1  JOHNNY'S 1h RULE instead (BOUNCE only, no room filter): a 1h candle touches a wall, then a CLOSED 1h candle is
+ *        outside it on the room side -- two kinds tried: BODY (open and close outside) / WICK (the whole candle outside)
+ *        -> enter at that close, back into the room (from the upper wall SHORT, from the lower wall LONG):
+ *          stop = the far edge of that wall (upper wall: its top · lower wall: its bottom)
+ *          take profit = a fixed 1% or 1.5%, and only if that price is still inside the other wall's far edge
+ *                        (SHORT: entry - TP >= the lower wall's bottom · LONG: entry + TP <= the upper wall's top)
+ *          out after 24h at the close if neither · fee 0.1%
+ *
  *   npx tsx src/tools/wall-trade-test.ts
- *   options: --symbols SOLUSDT,XRPUSDT,...  (default: the 8 coins)  --list (every trade)
+ *   options: --symbols SOLUSDT,XRPUSDT,...  (default: the 8 coins)  --list (every trade)  --h1
  */
 import "dotenv/config";
 import axios from "axios";
@@ -112,6 +120,18 @@ interface Walls {
   mode: number;
   fs: number;
 }
+interface HT {
+  sym: string;
+  v: string;
+  t: number;
+  dir: "LONG" | "SHORT";
+  entry: number;
+  stop: number;
+  tp: number;
+  res: "TP" | "STOP" | "24h";
+  net: number;
+  risk: number;
+}
 interface Trade {
   sym: string;
   t: number;
@@ -140,6 +160,14 @@ async function main(): Promise<void> {
   const client = new MongoClient(process.env.MONGO_URI);
   await client.connect();
   const all: Trade[] = [];
+  const h1 = argv.includes("--h1"),
+    hAll: HT[] = [];
+  const VARIANTS = [
+    ["BODY", 1],
+    ["BODY", 1.5],
+    ["WICK", 1],
+    ["WICK", 1.5],
+  ] as const;
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     for (const sym of syms) {
@@ -246,6 +274,119 @@ async function main(): Promise<void> {
         };
       };
 
+      if (h1) {
+        const memo = new Map<number, Walls | null>();
+        const wAt = (t: number): Walls | null => {
+          if (!memo.has(t)) memo.set(t, wallsAt(t));
+          return memo.get(t) ?? null;
+        };
+        const s0 = firstIdx(q, testFrom);
+        console.log(`\n═══ ${sym} · 1h rule · from ${utc(testFrom)} UTC ═══`);
+        for (const [kind, tpPct] of VARIANTS) {
+          const v = `${kind} TP ${tpPct}%`,
+            res: HT[] = [];
+          let pos: HT | null = null,
+            touched = { lower: false, upper: false },
+            noRoom = 0;
+          let prevKey = "";
+          for (let j = s0; j < q.length; j++) {
+            const x = q[j];
+            if (pos) {
+              const p: HT = pos,
+                long = p.dir === "LONG";
+              const hitS = long ? x.l <= p.stop : x.h >= p.stop,
+                hitT = long ? x.h >= p.tp : x.l <= p.tp;
+              const out = hitS
+                ? p.stop
+                : hitT
+                  ? p.tp
+                  : x.t + Q15 - p.t >= D
+                    ? x.c
+                    : NaN;
+              if (Number.isFinite(out)) {
+                p.res = hitS ? "STOP" : hitT ? "TP" : "24h";
+                p.net =
+                  (100 * (long ? out - p.entry : p.entry - out)) / p.entry -
+                  FEE;
+                res.push(p);
+                pos = null;
+                touched = { lower: false, upper: false };
+              }
+              continue;
+            }
+            if ((x.t + Q15) % H !== 0) continue; // act only when a 1h candle closes
+            const hs = x.t + Q15 - H,
+              k0 = firstIdx(q, hs);
+            if (q[k0]?.t !== hs) continue;
+            const c = {
+              o: q[k0].o,
+              h: Math.max(...q.slice(k0, j + 1).map((y) => y.h)),
+              l: Math.min(...q.slice(k0, j + 1).map((y) => y.l)),
+              c: x.c,
+            };
+            const W = wAt(hs);
+            if (!W || !W.lower || !W.upper) continue;
+            const key = `${W.lower.lo}|${W.lower.hi}|${W.upper.lo}|${W.upper.hi}`;
+            if (key !== prevKey) {
+              touched = { lower: false, upper: false };
+              prevKey = key;
+            }
+            const lw = W.lower,
+              uw = W.upper;
+            // upper wall -> SHORT
+            const inU = c.h >= uw.lo && c.l <= uw.hi,
+              inL = c.l <= lw.hi && c.h >= lw.lo;
+            const outU =
+              kind === "BODY"
+                ? Math.max(c.o, c.c) < uw.lo && (touched.upper || inU)
+                : c.h < uw.lo && touched.upper;
+            const outL =
+              kind === "BODY"
+                ? Math.min(c.o, c.c) > lw.hi && (touched.lower || inL)
+                : c.l > lw.hi && touched.lower;
+            if (inU) touched.upper = true;
+            if (inL) touched.lower = true;
+            for (const short of [true, false]) {
+              if (short ? !outU : !outL) continue;
+              const entry = c.c,
+                stop = short ? uw.hi : lw.lo,
+                tp = short
+                  ? entry * (1 - tpPct / 100)
+                  : entry * (1 + tpPct / 100);
+              if (short ? tp < lw.lo : tp > uw.hi) {
+                noRoom++;
+                if (short) touched.upper = false;
+                else touched.lower = false;
+                continue;
+              }
+              pos = {
+                sym,
+                v,
+                t: x.t + Q15,
+                dir: short ? "SHORT" : "LONG",
+                entry,
+                stop,
+                tp,
+                res: "24h",
+                net: 0,
+                risk: (100 * Math.abs(stop - entry)) / entry,
+              };
+              break;
+            }
+          }
+          if (list)
+            for (const p of res)
+              console.log(
+                `  [${v}] ${utc(p.t)} ${p.dir.padEnd(5)} entry ${px(p.entry).padEnd(8)} stop ${px(p.stop).padEnd(8)} (-${p.risk.toFixed(2)}%) tp ${px(p.tp).padEnd(8)} -> ${p.res.padEnd(4)} ${sp(p.net)}%`,
+              );
+          const sm = res.reduce((a, p) => a + p.net, 0);
+          console.log(
+            `  ${v.padEnd(12)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped (TP beyond the other wall) ${noRoom}${pos ? " · 1 open now" : ""}`,
+          );
+          hAll.push(...res);
+        }
+        continue;
+      }
       const trades: Trade[] = [];
       let W: Walls | null = null,
         wHour = -1,
@@ -372,6 +513,47 @@ async function main(): Promise<void> {
     await client.close();
   }
 
+  if (h1) {
+    console.log(`\n═══ ALL COINS · 1h rule (fee ${FEE}% in) ═══`);
+    for (const [kind, tpPct] of VARIANTS) {
+      const v = `${kind} TP ${tpPct}%`,
+        l = hAll.filter((p) => p.v === v),
+        sm = l.reduce((a, p) => a + p.net, 0),
+        w = l.filter((p) => p.net > 0).length;
+      console.log(
+        `  ${v.padEnd(12)} ${String(l.length).padStart(3)} trades · win ${l.length ? Math.round((100 * w) / l.length) : 0}% · avg ${l.length ? sp(sm / l.length) : "n/a"}% · sum ${sp(sm, 1)}% · per $1000 per trade ${sp(sm * 10, 0)}$`,
+      );
+      const wk = new Map<number, HT[]>();
+      for (const p of l) {
+        const d = new Date(p.t),
+          mon =
+            Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) -
+            ((d.getUTCDay() + 6) % 7) * D;
+        wk.set(mon, [...(wk.get(mon) ?? []), p]);
+      }
+      for (const [mon, ll] of [...wk].sort((a, b) => a[0] - b[0]))
+        console.log(
+          `      week of ${new Date(mon).toISOString().slice(5, 10)}: ${ll.length} trades · sum ${sp(
+            ll.reduce((a, p) => a + p.net, 0),
+            1,
+          )}%`,
+        );
+      const coins = [...new Set(l.map((p) => p.sym))]
+        .map(
+          (c) =>
+            `${c.replace("USDT", "")} ${sp(
+              l.filter((p) => p.sym === c).reduce((a, p) => a + p.net, 0),
+              1,
+            )}`,
+        )
+        .join(" · ");
+      console.log(`      by coin: ${coins}`);
+    }
+    console.log(
+      `(walls rebuilt every hour from the past only · a check, not proof)`,
+    );
+    return;
+  }
   const line = (name: string, l: Trade[]): void => {
     const s = l.reduce((a, p) => a + p.net, 0),
       w = l.filter((p) => p.net > 0).length;
