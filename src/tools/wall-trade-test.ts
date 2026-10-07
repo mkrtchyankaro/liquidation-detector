@@ -24,7 +24,9 @@
  *          stop = the far edge of that wall (upper wall: its top · lower wall: its bottom)
  *          take profit = a fixed --tp % (1.5), and only if that price is still inside the other wall's far edge
  *                        (SHORT: entry - TP >= the lower wall's bottom · LONG: entry + TP <= the upper wall's top)
- *          NO trade when the stop is more than --maxstop % (1) away -- the entry would be in the middle of the market
+ *          ROOM RULE: the distance entry -> the other wall's far edge must be >= --ratio x the distance entry -> stop
+ *                     (tried 1.33 and 1.5) -- otherwise no trade · optional --maxstop % (off by default)
+ *          BTC and ETH are left out (they do not follow the walls)
  *          out after 24h at the close if neither · fee 0.1%
  *        every trade also notes what happened at the wall before the entry (only past data), to compare -- not filters:
  *          OI at the wall  = OI change from the first touch to the entry (our minute_bars) -- rose / fell
@@ -160,7 +162,8 @@ interface Trade {
 
 async function main(): Promise<void> {
   if (!process.env.MONGO_URI) throw new Error("MONGO_URI not set");
-  const syms = arg(
+  const SKIP = ["BTCUSDT", "ETHUSDT"];
+  const syms0 = arg(
     "symbols",
     argv.includes("--h1") && process.env.SYMBOLS
       ? process.env.SYMBOLS
@@ -169,6 +172,9 @@ async function main(): Promise<void> {
     .split(",")
     .map((x) => x.trim().toUpperCase())
     .filter(Boolean);
+  const syms = argv.includes("--h1")
+    ? syms0.filter((x) => !SKIP.includes(x))
+    : syms0;
   const list = argv.includes("--list");
   const now = Math.floor(Date.now() / Q15) * Q15;
   const client = new MongoClient(process.env.MONGO_URI);
@@ -177,10 +183,12 @@ async function main(): Promise<void> {
   const h1 = argv.includes("--h1"),
     hAll: HT[] = [];
   const TPP = Number(arg("tp", "1.5")),
-    MAXSTOP = Number(arg("maxstop", "1"));
+    MAXSTOP = Number(arg("maxstop", "1000"));
   const VARIANTS = [
-    ["BODY", TPP],
-    ["WICK", TPP],
+    ["BODY", 1.33],
+    ["BODY", 1.5],
+    ["WICK", 1.33],
+    ["WICK", 1.5],
   ] as const;
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
@@ -325,8 +333,9 @@ async function main(): Promise<void> {
         console.log(
           `\n═══ ${sym} · 1h rule · from ${utc(testFrom)} UTC${newCoin ? " · NEW coin" : ""} ═══`,
         );
-        for (const [kind, tpPct] of VARIANTS) {
-          const v = `${kind} TP ${tpPct}%`,
+        for (const [kind, ratio] of VARIANTS) {
+          const tpPct = TPP,
+            v = `${kind} room>=${ratio}x stop`,
             res: HT[] = [];
           let pos: HT | null = null,
             touched = { lower: false, upper: false },
@@ -417,7 +426,8 @@ async function main(): Promise<void> {
                 drop();
                 continue;
               }
-              if (risk > MAXSTOP) {
+              const roomDist = short ? entry - lw.lo : uw.hi - entry;
+              if (risk > MAXSTOP || roomDist < ratio * Math.abs(stop - entry)) {
                 bigStop++;
                 drop();
                 continue;
@@ -450,7 +460,7 @@ async function main(): Promise<void> {
               );
           const sm = res.reduce((a, p) => a + p.net, 0);
           console.log(
-            `  ${v.padEnd(12)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped: TP beyond the other wall ${noRoom}, stop > ${MAXSTOP}% ${bigStop}${pos ? ` · OPEN NOW ${(pos as HT).dir} ${utc((pos as HT).t)} entry ${px((pos as HT).entry)} stop ${px((pos as HT).stop)} tp ${px((pos as HT).tp)}` : ""}`,
+            `  ${v.padEnd(22)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped: TP beyond the other wall ${noRoom}, room < ${ratio}x stop ${bigStop}${pos ? ` · OPEN NOW ${(pos as HT).dir} ${utc((pos as HT).t)} entry ${px((pos as HT).entry)} stop ${px((pos as HT).stop)} tp ${px((pos as HT).tp)}` : ""}`,
           );
           hAll.push(...res);
         }
@@ -583,14 +593,16 @@ async function main(): Promise<void> {
   }
 
   if (h1) {
-    console.log(`\n═══ ALL COINS · 1h rule (fee ${FEE}% in) ═══`);
-    for (const [kind, tpPct] of VARIANTS) {
-      const v = `${kind} TP ${tpPct}%`,
+    console.log(
+      `\n═══ ALL COINS (no BTC / ETH) · 1h rule · TP ${TPP}% · stop = the wall's far edge (fee ${FEE}% in) ═══`,
+    );
+    for (const [kind, ratio] of VARIANTS) {
+      const v = `${kind} room>=${ratio}x stop`,
         l = hAll.filter((p) => p.v === v),
         sm = l.reduce((a, p) => a + p.net, 0),
         w = l.filter((p) => p.net > 0).length;
       console.log(
-        `  ${v.padEnd(12)} ${String(l.length).padStart(3)} trades · win ${l.length ? Math.round((100 * w) / l.length) : 0}% · avg ${l.length ? sp(sm / l.length) : "n/a"}% · sum ${sp(sm, 1)}% · per $1000 per trade ${sp(sm * 10, 0)}$`,
+        `\n  ${v.padEnd(22)} ${String(l.length).padStart(3)} trades · win ${l.length ? Math.round((100 * w) / l.length) : 0}% · avg ${l.length ? sp(sm / l.length) : "n/a"}% · sum ${sp(sm, 1)}% · per $1000 per trade ${sp(sm * 10, 0)}$`,
       );
       const wk = new Map<number, HT[]>();
       for (const p of l) {
@@ -648,12 +660,12 @@ async function main(): Promise<void> {
         l.filter((p) => p.oiStay <= 0),
       );
       ln(
-        "OI in the signal hour FELL",
-        l.filter((p) => p.oiSig < 0),
+        "stop <= 1%",
+        l.filter((p) => p.risk <= 1),
       );
       ln(
-        "OI in the signal hour rose",
-        l.filter((p) => p.oiSig >= 0),
+        "stop > 1%",
+        l.filter((p) => p.risk > 1),
       );
       const med =
         l.map((p) => p.sq).sort((a, b) => a - b)[Math.floor(l.length / 2)] ?? 0;
@@ -665,9 +677,21 @@ async function main(): Promise<void> {
         "squeeze liq <= median",
         l.filter((p) => p.sq <= med),
       );
+      const cm = new Map<string, number>();
+      for (const c of new Set(l.map((p) => p.sym))) {
+        const v2 = l
+          .filter((p) => p.sym === c)
+          .map((p) => p.sq)
+          .sort((x, y) => x - y);
+        cm.set(c, v2[Math.floor(v2.length / 2)]);
+      }
       ln(
-        "OI wall rose + signal hour fell",
-        l.filter((p) => p.oiStay > 0 && p.oiSig < 0),
+        "squeeze > the coin's own median",
+        l.filter((p) => p.sq > (cm.get(p.sym) ?? 0)),
+      );
+      ln(
+        "squeeze <= the coin's own median",
+        l.filter((p) => p.sq <= (cm.get(p.sym) ?? 0)),
       );
     }
     console.log(
