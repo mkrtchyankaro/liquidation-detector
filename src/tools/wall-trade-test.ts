@@ -35,6 +35,10 @@
  *                            (upper wall: SHORTS liquidated · lower wall: LONGS) -- above / below the median
  *        default coins with --h1: all SYMBOLS (new coins have ~5 days of our liquidations, trades start 2 days in)
  *
+ *   --h1 --rrtest  (Oct 7) WICK, room >= 1.33x, the TP three ways: fixed --tp % · RR (TP = --rr x the SL distance) ·
+ *        RR + BREAKEVEN (once the price went --be R our way, the SL moves to the entry +0.1% -- the fees are covered).
+ *        Results also in R: the position is sized by the SL, so 1R = the $ risked (e.g. $50).
+ *
  *   npx tsx src/tools/wall-trade-test.ts
  *   options: --symbols SOLUSDT,XRPUSDT,...  (default: the 8 coins)  --list (every trade)  --h1
  */
@@ -42,6 +46,11 @@ import "dotenv/config";
 import axios from "axios";
 import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
+import {
+  hourCandle,
+  wallsAt as engineWallsAt,
+  WallTracker,
+} from "../strategy/v10/wall-engine";
 
 const argv = process.argv.slice(2);
 const arg = (n: string, d: string): string => {
@@ -57,9 +66,7 @@ const M = 60_000,
   H = 60 * M,
   D = 24 * H,
   Q15 = 15 * M;
-const K = 2.5,
-  BIN = 0.25,
-  DEPTH = 0.75,
+const DEPTH = 0.75,
   FEE = 0.1,
   ROOM = 2;
 const fapi = axios.create({
@@ -107,19 +114,6 @@ async function kl(
   }
   return out;
 }
-const atrOf = (k: C[], n = 14): number => {
-  let s = 0,
-    c = 0;
-  for (let i = Math.max(1, k.length - n); i < k.length; i++) {
-    s += Math.max(
-      k[i].h - k[i].l,
-      Math.abs(k[i].h - k[i - 1].c),
-      Math.abs(k[i].l - k[i - 1].c),
-    );
-    c++;
-  }
-  return c ? s / c : NaN;
-};
 interface Wall {
   lo: number;
   hi: number;
@@ -138,9 +132,10 @@ interface HT {
   entry: number;
   stop: number;
   tp: number;
-  res: "TP" | "STOP" | "24h";
+  res: "TP" | "STOP" | "BE" | "24h";
   net: number;
   risk: number;
+  beOn?: boolean;
   oiStay: number;
   oiSig: number;
   sq: number;
@@ -184,12 +179,39 @@ async function main(): Promise<void> {
     hAll: HT[] = [];
   const TPP = Number(arg("tp", "1.5")),
     MAXSTOP = Number(arg("maxstop", "1000"));
-  const VARIANTS = [
-    ["BODY", 1.33],
-    ["BODY", 1.5],
-    ["WICK", 1.33],
-    ["WICK", 1.5],
-  ] as const;
+  interface Var {
+    v: string;
+    kind: "WICK" | "BODY";
+    ratio: number;
+    tpR?: number;
+    beR?: number;
+  }
+  const RR = Number(arg("rr", "2")),
+    BE = Number(arg("be", "1"));
+  const VARIANTS: Var[] = argv.includes("--rrtest")
+    ? [
+        { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
+        { v: `WICK RR ${RR}`, kind: "WICK", ratio: 1.33, tpR: RR },
+        {
+          v: `WICK RR ${RR} + BE at ${BE}R`,
+          kind: "WICK",
+          ratio: 1.33,
+          tpR: RR,
+          beR: BE,
+        },
+      ]
+    : (
+        [
+          ["BODY", 1.33],
+          ["BODY", 1.5],
+          ["WICK", 1.33],
+          ["WICK", 1.5],
+        ] as const
+      ).map(([kind, ratio]) => ({
+        v: `${kind} room>=${ratio}x stop`,
+        kind,
+        ratio,
+      }));
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     for (const sym of syms) {
@@ -226,75 +248,9 @@ async function main(): Promise<void> {
         return a;
       };
 
-      const wallsAt = (t: number): Walls | null => {
-        const dd = d1.filter((x) => x.t + D <= t).slice(-15),
-          hh = h4.filter((x) => x.t + 4 * H <= t);
-        if (dd.length < 15 || hh.length < 15) return null;
-        const atrD = atrOf(dd),
-          atr4 = atrOf(hh.slice(-15)),
-          w = BIN * atr4;
-        let lo = Infinity,
-          hi = -Infinity,
-          i = hh.length - 1;
-        for (; i >= 0 && hh[i].t >= t - 30 * D; i--) {
-          const nlo = Math.min(lo, hh[i].c),
-            nhi = Math.max(hi, hh[i].c);
-          if (nhi - nlo > K * atrD) break;
-          lo = nlo;
-          hi = nhi;
-        }
-        const fs = hh[Math.min(hh.length - 1, i + 1)].t;
-        const time = new Map<number, number>(),
-          lL = new Map<number, number>(),
-          lS = new Map<number, number>();
-        for (let j = firstIdx(q, fs); j < q.length && q[j].t + Q15 <= t; j++) {
-          const b = Math.floor(q[j].c / w);
-          time.set(b, (time.get(b) ?? 0) + 1);
-        }
-        for (
-          let j = firstIdx(liqs, fs);
-          j < liqs.length && liqs[j].t < t;
-          j++
-        ) {
-          const b = Math.floor(liqs[j].p / w),
-            m = liqs[j].long ? lL : lS;
-          m.set(b, (m.get(b) ?? 0) + liqs[j].usd);
-        }
-        if (!time.size) return null;
-        let mode = 0,
-          mt = -1;
-        for (const [b, v] of time)
-          if (v > mt) {
-            mt = v;
-            mode = b;
-          }
-        const grow = (m: Map<number, number>, below: boolean): Wall | null => {
-          let pk = NaN,
-            pv = 0;
-          for (const [b, v] of m)
-            if ((below ? b < mode : b > mode) && v > pv) {
-              pv = v;
-              pk = b;
-            }
-          if (!(pv > 0)) return null;
-          let a = pk,
-            z = pk;
-          while ((m.get(a - 1) ?? 0) >= (2 / 3) * pv && (below || a - 1 > mode))
-            a--;
-          while (
-            (m.get(z + 1) ?? 0) >= (2 / 3) * pv &&
-            (!below || z + 1 < mode)
-          )
-            z++;
-          return { lo: a * w, hi: (z + 1) * w };
-        };
-        return {
-          lower: grow(lL, true),
-          upper: grow(lS, false),
-          mode: mode * w,
-          fs,
-        };
-      };
+      // the walls: the SAME code as the live bot (src/strategy/v10/wall-engine.ts)
+      const wallsAt = (t: number): Walls | null =>
+        engineWallsAt({ d1, h4, q15: q, liqs }, t);
 
       if (h1) {
         const memo = new Map<number, Walls | null>();
@@ -333,16 +289,13 @@ async function main(): Promise<void> {
         console.log(
           `\n═══ ${sym} · 1h rule · from ${utc(testFrom)} UTC${newCoin ? " · NEW coin" : ""} ═══`,
         );
-        for (const [kind, ratio] of VARIANTS) {
+        for (const { v, kind, ratio, tpR, beR } of VARIANTS) {
           const tpPct = TPP,
-            v = `${kind} room>=${ratio}x stop`,
             res: HT[] = [];
           let pos: HT | null = null,
-            touched = { lower: false, upper: false },
             noRoom = 0,
             bigStop = 0;
-          let since = { lower: NaN, upper: NaN };
-          let prevKey = "";
+          const tracker = new WallTracker();
           for (let j = s0; j < q.length; j++) {
             const x = q[j];
             if (pos) {
@@ -358,100 +311,61 @@ async function main(): Promise<void> {
                     ? x.c
                     : NaN;
               if (Number.isFinite(out)) {
-                p.res = hitS ? "STOP" : hitT ? "TP" : "24h";
+                p.res = hitS ? (p.beOn ? "BE" : "STOP") : hitT ? "TP" : "24h";
                 p.net =
                   (100 * (long ? out - p.entry : p.entry - out)) / p.entry -
                   FEE;
                 res.push(p);
                 pos = null;
-                touched = { lower: false, upper: false };
-                since = { lower: NaN, upper: NaN };
+                tracker.reset();
+              } else if (beR !== undefined && !p.beOn) {
+                // breakeven: the price went beR x the first risk our way -> from the next candle the SL is at the entry +0.1%
+                const r0 = (p.risk / 100) * p.entry;
+                if (
+                  long ? x.h >= p.entry + beR * r0 : x.l <= p.entry - beR * r0
+                ) {
+                  p.stop = long ? p.entry * 1.001 : p.entry * 0.999;
+                  p.beOn = true;
+                }
               }
               continue;
             }
             if ((x.t + Q15) % H !== 0) continue; // act only when a 1h candle closes
             const hs = x.t + Q15 - H,
-              k0 = firstIdx(q, hs);
-            if (q[k0]?.t !== hs) continue;
-            const c = {
-              o: q[k0].o,
-              h: Math.max(...q.slice(k0, j + 1).map((y) => y.h)),
-              l: Math.min(...q.slice(k0, j + 1).map((y) => y.l)),
-              c: x.c,
+              c = hourCandle(q, hs);
+            if (!c) continue;
+            // the rule: the SAME code as the live bot (src/strategy/v10/wall-engine.ts)
+            const st = tracker.step(c, wAt(hs), {
+              kind,
+              tpPct,
+              roomRatio: ratio,
+              maxStopPct: MAXSTOP,
+              ...(tpR !== undefined ? { tpR } : {}),
+            });
+            for (const k of st.skips)
+              if (k.why === "TP_BEYOND_WALL") noRoom++;
+              else bigStop++;
+            const g = st.signal;
+            if (!g) continue;
+            const te = g.candleEnd,
+              t0 = g.touchedAt,
+              short = g.side === "SHORT";
+            pos = {
+              sym,
+              v,
+              t: te,
+              dir: g.side,
+              entry: g.entry,
+              stop: g.stop,
+              tp: g.tp,
+              res: "24h",
+              net: 0,
+              risk: g.riskPct,
+              oiStay: (100 * (oiAt(te) - oiAt(t0))) / oiAt(t0),
+              oiSig: (100 * (oiAt(te) - oiAt(hs))) / oiAt(hs),
+              sq: liqSum(t0, te, !short),
+              newCoin,
             };
-            const W = wAt(hs);
-            if (!W || !W.lower || !W.upper) continue;
-            const key = `${W.lower.lo}|${W.lower.hi}|${W.upper.lo}|${W.upper.hi}`;
-            if (key !== prevKey) {
-              touched = { lower: false, upper: false };
-              since = { lower: NaN, upper: NaN };
-              prevKey = key;
-            }
-            const lw = W.lower,
-              uw = W.upper;
-            // upper wall -> SHORT
-            const inU = c.h >= uw.lo && c.l <= uw.hi,
-              inL = c.l <= lw.hi && c.h >= lw.lo;
-            const outU =
-              kind === "BODY"
-                ? Math.max(c.o, c.c) < uw.lo && (touched.upper || inU)
-                : c.h < uw.lo && touched.upper;
-            const outL =
-              kind === "BODY"
-                ? Math.min(c.o, c.c) > lw.hi && (touched.lower || inL)
-                : c.l > lw.hi && touched.lower;
-            if (inU && !touched.upper) {
-              touched.upper = true;
-              since.upper = hs;
-            }
-            if (inL && !touched.lower) {
-              touched.lower = true;
-              since.lower = hs;
-            }
-            for (const short of [true, false]) {
-              if (short ? !outU : !outL) continue;
-              const entry = c.c,
-                stop = short ? uw.hi : lw.lo,
-                tp = short
-                  ? entry * (1 - tpPct / 100)
-                  : entry * (1 + tpPct / 100);
-              const risk = (100 * Math.abs(stop - entry)) / entry,
-                side = short ? "upper" : "lower";
-              const drop = (): void => {
-                touched[side] = false;
-                since[side] = NaN;
-              };
-              if (short ? tp < lw.lo : tp > uw.hi) {
-                noRoom++;
-                drop();
-                continue;
-              }
-              const roomDist = short ? entry - lw.lo : uw.hi - entry;
-              if (risk > MAXSTOP || roomDist < ratio * Math.abs(stop - entry)) {
-                bigStop++;
-                drop();
-                continue;
-              }
-              const t0 = Number.isFinite(since[side]) ? since[side] : hs,
-                te = x.t + Q15;
-              pos = {
-                sym,
-                v,
-                t: te,
-                dir: short ? "SHORT" : "LONG",
-                entry,
-                stop,
-                tp,
-                res: "24h",
-                net: 0,
-                risk,
-                oiStay: (100 * (oiAt(te) - oiAt(t0))) / oiAt(t0),
-                oiSig: (100 * (oiAt(te) - oiAt(hs))) / oiAt(hs),
-                sq: liqSum(t0, te, !short),
-                newCoin,
-              };
-              break;
-            }
           }
           if (list)
             for (const p of res)
@@ -596,13 +510,17 @@ async function main(): Promise<void> {
     console.log(
       `\n═══ ALL COINS (no BTC / ETH) · 1h rule · TP ${TPP}% · stop = the wall's far edge (fee ${FEE}% in) ═══`,
     );
-    for (const [kind, ratio] of VARIANTS) {
-      const v = `${kind} room>=${ratio}x stop`,
-        l = hAll.filter((p) => p.v === v),
+    const R = (p: HT): number => p.net / p.risk; // the net result in R (1R = the $ lost at the first SL)
+    for (const { v } of VARIANTS) {
+      const l = hAll.filter((p) => p.v === v),
         sm = l.reduce((a, p) => a + p.net, 0),
-        w = l.filter((p) => p.net > 0).length;
+        w = l.filter((p) => p.net > 0).length,
+        sr = l.reduce((a, p) => a + R(p), 0);
       console.log(
         `\n  ${v.padEnd(22)} ${String(l.length).padStart(3)} trades · win ${l.length ? Math.round((100 * w) / l.length) : 0}% · avg ${l.length ? sp(sm / l.length) : "n/a"}% · sum ${sp(sm, 1)}% · per $1000 per trade ${sp(sm * 10, 0)}$`,
+      );
+      console.log(
+        `      IN R (sized by the SL): sum ${sp(sr, 1)}R · avg ${l.length ? sp(sr / l.length) : "n/a"}R · with $50 risk ${sp(sr * 50, 0)}$ · TP ${l.filter((p) => p.res === "TP").length} · SL ${l.filter((p) => p.res === "STOP").length} · BE ${l.filter((p) => p.res === "BE").length} · 24h ${l.filter((p) => p.res === "24h").length}`,
       );
       const wk = new Map<number, HT[]>();
       for (const p of l) {
@@ -617,7 +535,10 @@ async function main(): Promise<void> {
           `      week of ${new Date(mon).toISOString().slice(5, 10)}: ${ll.length} trades · sum ${sp(
             ll.reduce((a, p) => a + p.net, 0),
             1,
-          )}%`,
+          )}% · ${sp(
+            ll.reduce((a, p) => a + R(p), 0),
+            1,
+          )}R`,
         );
       const coins = [...new Set(l.map((p) => p.sym))]
         .map(
