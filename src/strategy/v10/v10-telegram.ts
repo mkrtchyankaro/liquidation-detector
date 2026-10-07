@@ -12,33 +12,23 @@ import { formatZoneLine } from "./v10-zone";
  * the close 1 ATR back from the top (bottom); "oiPeak" -- OI up -> OI falls after its peak -> the first red (green) candle.
  */
 const SEP = "------------------------------";
-const utc = (ms: number): string =>
-  new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+const utc = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 const hm = (ms: number): string => new Date(ms).toISOString().slice(11, 16);
-const dhm = (ms: number): string =>
-  new Date(ms).toISOString().slice(5, 16).replace("T", " ");
+const dhm = (ms: number): string => new Date(ms).toISOString().slice(5, 16).replace("T", " ");
 const sp = (v: number): string => `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
 const coin = (s: string): string => s.replace(/USDT$/, "");
 /** "07.10.2026 12:00" (UTC) -- the date too: in Armenia it can already be the next day */
-const dmy = (ms: number): string => {
-  const d = new Date(ms).toISOString();
-  return `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(0, 4)} ${d.slice(11, 16)}`;
-};
+const dmy = (ms: number): string => { const d = new Date(ms).toISOString(); return `${d.slice(8, 10)}.${d.slice(5, 7)}.${d.slice(0, 4)} ${d.slice(11, 16)}`; };
 const W = 15 * 60_000;
 
 /** "V10 · BTC" / "V10 · ALT" / "V10 · WALL" */
-export const v10Head = (t: { kind?: string }): string =>
-  `V10 · ${t.kind === "OWN" ? "ALT" : t.kind === "WALL" ? "WALL" : "BTC"}`;
+export const v10Head = (t: { kind?: string }): string => `V10 · ${t.kind === "OWN" ? "ALT" : t.kind === "WALL" ? "WALL" : "BTC"}`;
 
 /** "10-03 01:30" -- every time in UTC */
 const t15 = (ms: number): string => dhm(ms);
 
 /** Johnny's 3 points, short, UTC (Oct 3). `who` = whose candles (BTC or the alt). */
-function threePoints(
-  a: V10SignalDoc["turn"],
-  who: string,
-  rankH: number,
-): string[] {
+function threePoints(a: V10SignalDoc["turn"], who: string, rankH: number): string[] {
   const top = a.side === "SHORT";
   if (a.entry === "flush") {
     // Oct 4, the ALT LONG: a fall with OI DOWN (longs closed / liquidated, RANK 1), then a candle with OI UP 1 ATR off the low
@@ -54,7 +44,7 @@ function threePoints(
     return [
       `1️⃣ ${t15(a.moveStartT)} → ${hm(a.peakT)} · ${who} · OI ${sp(a.moveOiPct)} · գինը ${sp(a.buildPricePct ?? NaN)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
       `2️⃣ ${hm(a.peakT)} → ${hm(a.topT ?? a.extremeT + W)} · OI ${sp(a.declineOiPct)} · գինը ${sp(a.declinePricePct ?? NaN)} → ${top ? "գագաթ" : "հատակ"}`,
-      `3️⃣ ${hm(a.candleEnd - W)} ${top ? "կարմիր" : "կանաչ"} մոմ · ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : (a.backPct ?? NaN))} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "storyFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
+      `3️⃣ ${hm(a.candleEnd - W)} ${top ? "կարմիր" : "կանաչ"} մոմ · ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : a.backPct ?? NaN)} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "storyFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
     ];
   }
   if (a.atr !== undefined) {
@@ -63,7 +53,7 @@ function threePoints(
     return [
       `1️⃣ ${t15(a.moveStartT)} → ${hm(a.extremeT + W)} · ${who} ${top ? "⬆️" : "⬇️"} ${sp(a.movePct)} · OI ${sp(a.moveOiPct)} (RANK 1 · ${a.prior} շարժում / ${rankH}ժ)`,
       `2️⃣ OI-ի գագաթից հետո OI ${sp(a.fromPeakOiPct)}`,
-      `3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : (a.backPct ?? NaN))} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "atrFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
+      `3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${top ? "գագաթից" : "հատակից"} ${sp(top ? -(a.backPct ?? NaN) : a.backPct ?? NaN)} (1 ATR = ${atrPct.toFixed(2)}%${a.entry === "atrFrozen" ? ", շարժման սկզբից" : ""}) → entry`,
     ];
   }
   return [
@@ -74,10 +64,7 @@ function threePoints(
 }
 
 /** part 2: the alt moved on its own */
-export function v10OwnStory(
-  sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">,
-  t: Pick<V10TradeDoc, "symbol" | "side">,
-): string[] {
+export function v10OwnStory(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">, t: Pick<V10TradeDoc, "symbol" | "side">): string[] {
   const o = sig.own;
   return [
     `📖 ${coin(t.symbol)} · 15m · UTC`,
@@ -87,11 +74,7 @@ export function v10OwnStory(
 }
 
 /** part 1: BTC's 3 points, then this alt with BTC */
-export function v10Story(
-  sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">,
-  t: Pick<V10TradeDoc, "symbol" | "side" | "pick">,
-  picks: number,
-): string[] {
+export function v10Story(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">, t: Pick<V10TradeDoc, "symbol" | "side" | "pick">, picks: number): string[] {
   return [
     `📖 BTC · 15m · UTC`,
     ...threePoints(sig.turn, "BTC", sig.rankWindowHours),
@@ -101,39 +84,23 @@ export function v10Story(
 
 /** Oct 5 (Johnny, ADA 10-04 20:15): where the move started vs the entry and the TP -- the min move is measured to the
  *  top, so after a deep pullback the TP can lie beyond the move's start (it asks back more than the whole move) */
-export function roomLine(
-  turn: Pick<V10SignalDoc["turn"], "extreme" | "movePct">,
-  side: "LONG" | "SHORT",
-  entry: number,
-  tp: number | null,
-): string[] {
+export function roomLine(turn: Pick<V10SignalDoc["turn"], "extreme" | "movePct">, side: "LONG" | "SHORT", entry: number, tp: number | null): string[] {
   const start = turn.extreme / (1 + turn.movePct / 100);
   if (!(start > 0) || !(entry > 0)) return [];
-  const short = side === "SHORT",
-    left = ((short ? 1 : -1) * 100 * (entry - start)) / start;
+  const short = side === "SHORT", left = ((short ? 1 : -1) * 100 * (entry - start)) / start;
   const beyond = tp === null ? null : short ? tp < start : tp > start;
-  const ch = short ? left : -left; // the price change from the start to the entry, signed
+  const ch = short ? left : -left;   // the price change from the start to the entry, signed
   const gb = (100 * (turn.extreme - entry)) / (turn.extreme - start);
-  return [
-    `📏 Շարժման սկիզբ ${fmtPrice(start)} · սկզբից մինչև մուտք ${ch >= 0 ? "+" : ""}${ch.toFixed(2)}% · շարժման ${Number.isFinite(gb) ? gb.toFixed(0) : "?"}%-ն արդեն հետ է եկել${short && gb >= 50 ? " ⚠️" : ""}${beyond === null ? "" : beyond ? " · ⚠️ TP-ն շարժման սկզբից էլ անդին է" : " · TP-ն շարժման մեջ է ✅"}`,
-  ];
+  return [`📏 Շարժման սկիզբ ${fmtPrice(start)} · սկզբից մինչև մուտք ${ch >= 0 ? "+" : ""}${ch.toFixed(2)}% · շարժման ${Number.isFinite(gb) ? gb.toFixed(0) : "?"}%-ն արդեն հետ է եկել${short && gb >= 50 ? " ⚠️" : ""}${beyond === null ? "" : beyond ? " · ⚠️ TP-ն շարժման սկզբից էլ անդին է" : " · TP-ն շարժման մեջ է ✅"}`];
 }
 
-const arrow = (v: number): string =>
-  Number.isFinite(v)
-    ? `${v >= 0 ? "⬆️" : "⬇️"}${Math.abs(v).toFixed(2)}%`
-    : "n/a";
+const arrow = (v: number): string => (Number.isFinite(v) ? `${v >= 0 ? "⬆️" : "⬇️"}${Math.abs(v).toFixed(2)}%` : "n/a");
 
 /** Oct 5 (Johnny's layout): the ALT entry message, compact. SHORT measures from the top (գագաթ), LONG from the bottom
  *  (հատակ). The 4h zone in the TP's way is a WARNING only when it is a FLIP built over >= 10 days (the "strong" one). */
 export function formatOwnEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
-  const long = t.side === "LONG",
-    short = !long,
-    risk = t.actualRiskUsd ?? t.plannedRiskUsd;
-  const entry = t.entryPrice!,
-    sl = t.slPrice!,
-    tp = t.tpPrice,
-    a = sig.turn;
+  const long = t.side === "LONG", short = !long, risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+  const entry = t.entryPrice!, sl = t.slPrice!, tp = t.tpPrice, a = sig.turn;
   const notional = t.quantity !== null ? entry * t.quantity : NaN;
   const fees = estimateFeesUsd(notional);
   const pctOf = (p: number): string => sp((100 * (p - entry)) / entry);
@@ -150,57 +117,33 @@ export function formatOwnEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
     ``,
   ];
   // 📏 the move and how much of it was given back at the entry
-  const start = a.extreme / (1 + a.movePct / 100),
-    gb = (100 * (a.extreme - entry)) / (a.extreme - start);
-  out.push(
-    `📏 ${short ? "բարձրացել է" : "իջել է"} ${Math.abs(a.movePct).toFixed(2)}%`,
-  );
-  if (Number.isFinite(gb))
-    out.push(`📏 հետ է եկել ${gb.toFixed(0)}%${gb >= 50 ? " ⚠️" : ""}`);
+  const start = a.extreme / (1 + a.movePct / 100), gb = (100 * (a.extreme - entry)) / (a.extreme - start);
+  out.push(`📏 ${short ? "բարձրացել է" : "իջել է"} ${Math.abs(a.movePct).toFixed(2)}%`);
+  if (Number.isFinite(gb)) out.push(`📏 հետ է եկել ${gb.toFixed(0)}%${gb >= 50 ? " ⚠️" : ""}`);
   // 📖 the story
   const o = sig.own;
   out.push("", "📖 Պատմություն");
-  out.push(
-    `1️⃣ ${t15(a.moveStartT)} → ${hm(a.extremeT + W)} · Գին ${arrow(a.movePct)}, OI ${arrow(a.moveOiPct)}`,
-  );
+  out.push(`1️⃣ ${t15(a.moveStartT)} → ${hm(a.extremeT + W)} · Գին ${arrow(a.movePct)}, OI ${arrow(a.moveOiPct)}`);
   if (a.entry === "flush") {
     const back = (100 * (a.price - a.extreme)) / a.extreme;
-    out.push(
-      `2️⃣ ${hm(a.candleEnd - W)} մոմ · OI ${arrow(a.candleOiPct)} (նոր դիրքեր)`,
-    );
+    out.push(`2️⃣ ${hm(a.candleEnd - W)} մոմ · OI ${arrow(a.candleOiPct)} (նոր դիրքեր)`);
     out.push(`3️⃣ փակվեց հատակից ${arrow(back)} (≥ 1 ATR)`);
   } else {
     out.push(`2️⃣ OI-ի գագաթից հետո OI ${arrow(a.fromPeakOiPct)}`);
-    const back = a.backPct ?? NaN,
-      atrPct = a.atr !== undefined ? (100 * a.atr) / a.extreme : NaN;
-    out.push(
-      `3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${ext}ից ${arrow(short ? -back : back)}${Number.isFinite(atrPct) ? ` (≥ 1 ATR = ${atrPct.toFixed(2)}%)` : ""}`,
-    );
+    const back = a.backPct ?? NaN, atrPct = a.atr !== undefined ? (100 * a.atr) / a.extreme : NaN;
+    out.push(`3️⃣ ${hm(a.candleEnd - W)} մոմը փակվեց ${ext}ից ${arrow(short ? -back : back)}${Number.isFinite(atrPct) ? ` (≥ 1 ATR = ${atrPct.toFixed(2)}%)` : ""}`);
   }
   if (o) out.push(`₿ ${sp(o.btcPct)} · R² ${o.follow.toFixed(2)}`);
   // 📚 the limit orders
   const b = "book" in t ? t.book : undefined;
   if (b && b.now && b.supportNowPct !== null) {
-    const split = (sup: number): string => {
-      const bids = short ? sup : 100 - sup;
-      return `գնորդ ${Math.round(bids)}% · վաճառող ${Math.round(100 - bids)}%`;
-    };
+    const split = (sup: number): string => { const bids = short ? sup : 100 - sup; return `գնորդ ${Math.round(bids)}% · վաճառող ${Math.round(100 - bids)}%`; };
     out.push("", "📚 Լիմիտ օրդեր");
-    if (b.supportTopPct !== null)
-      out.push(`${ext} – ${split(b.supportTopPct)}`);
-    out.push(
-      `մուտք – ${split(b.supportNowPct)}${b.grew === true ? " ⚠️" : b.grew === false ? " ✅" : ""}`,
-    );
-    const w = b.walls,
-      rel = (x: number): string => sp((100 * (x - entry)) / entry);
-    if (w?.bids.length)
-      out.push(
-        `ներքևում գնորդ՝ ${usdShort(w.bids[0].usd)} ${fmtPrice(w.bids[0].price)} (${rel(w.bids[0].price)})`,
-      );
-    if (w?.asks.length)
-      out.push(
-        `վերևում վաճառող՝ ${usdShort(w.asks[0].usd)} ${fmtPrice(w.asks[0].price)} (${rel(w.asks[0].price)})`,
-      );
+    if (b.supportTopPct !== null) out.push(`${ext} – ${split(b.supportTopPct)}`);
+    out.push(`մուտք – ${split(b.supportNowPct)}${b.grew === true ? " ⚠️" : b.grew === false ? " ✅" : ""}`);
+    const w = b.walls, rel = (x: number): string => sp((100 * (x - entry)) / entry);
+    if (w?.bids.length) out.push(`ներքևում գնորդ՝ ${usdShort(w.bids[0].usd)} ${fmtPrice(w.bids[0].price)} (${rel(w.bids[0].price)})`);
+    if (w?.asks.length) out.push(`վերևում վաճառող՝ ${usdShort(w.asks[0].usd)} ${fmtPrice(w.asks[0].price)} (${rel(w.asks[0].price)})`);
   } else if (b !== undefined) out.push("", "📚 Լիմիտ օրդեր՝ տվյալ չկա");
   // 🧱 the 4h zone
   if ("zone4h" in t) {
@@ -208,28 +151,13 @@ export function formatOwnEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
     out.push("", "🧱 4h զոնա");
     if (!z) out.push("չկա (3+ դիպչումով զոնա չգտնվեց)");
     else {
-      out.push(
-        `${fmtPrice(z.lo)} – ${fmtPrice(z.hi)} · ${z.flip ? "FLIP ✅" : "FLIP չէ"}`,
-      );
-      if (z.strongBelowAtr !== undefined)
-        out.push(
-          z.strongBelowAtr === null
-            ? "FLIP զոնա ներքևում՝ չկա"
-            : `FLIP զոնա ներքևում՝ ${z.strongBelowAtr.toFixed(1)} ATR`,
-        );
+      out.push(`${fmtPrice(z.lo)} – ${fmtPrice(z.hi)} · ${z.flip ? "FLIP ✅" : "FLIP չէ"}`);
+      if (z.strongBelowAtr !== undefined) out.push(z.strongBelowAtr === null ? "FLIP զոնա ներքևում՝ չկա" : `FLIP զոնա ներքևում՝ ${z.strongBelowAtr.toFixed(1)} ATR`);
       if (tp !== null && z.zones) {
-        const inWay = z.zones.filter((x) =>
-          short ? x.hi >= tp && x.lo < entry : x.lo <= tp && x.hi > entry,
-        );
+        const inWay = z.zones.filter((x) => (short ? x.hi >= tp && x.lo < entry : x.lo <= tp && x.hi > entry));
         const strong = inWay.find((x) => x.strong);
-        if (strong)
-          out.push(
-            `⚠️ TP-ի ճանապարհին FLIP զոնա՝ ${fmtPrice(strong.lo)} – ${fmtPrice(strong.hi)}`,
-          );
-        else if (inWay.length)
-          out.push(
-            `TP-ի ճանապարհին զոնա՝ ${fmtPrice(inWay[0].lo)} – ${fmtPrice(inWay[0].hi)} (FLIP չէ)`,
-          );
+        if (strong) out.push(`⚠️ TP-ի ճանապարհին FLIP զոնա՝ ${fmtPrice(strong.lo)} – ${fmtPrice(strong.hi)}`);
+        else if (inWay.length) out.push(`TP-ի ճանապարհին զոնա՝ ${fmtPrice(inWay[0].lo)} – ${fmtPrice(inWay[0].hi)} (FLIP չէ)`);
         else out.push("TP-ի ճանապարհին զոնա չկա ✅");
       }
     }
@@ -237,21 +165,12 @@ export function formatOwnEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
   out.push("", `🆔 ${t.orderSignalId}`);
   return out.join("\n");
 }
-const usdShort = (v: number): string =>
-  v >= 1e6
-    ? `$${(v / 1e6).toFixed(1)}M`
-    : v >= 1e3
-      ? `$${(v / 1e3).toFixed(0)}k`
-      : `$${v.toFixed(0)}`;
+const usdShort = (v: number): string => (v >= 1e6 ? `$${(v / 1e6).toFixed(1)}M` : v >= 1e3 ? `$${(v / 1e3).toFixed(0)}k` : `$${v.toFixed(0)}`);
 
 /** Oct 7 (Johnny): the WALL entry -- every price to set by hand if the server ever fails (SL / TP with their %) */
 export function formatWallEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
-  const long = t.side === "LONG",
-    risk = t.actualRiskUsd ?? t.plannedRiskUsd,
-    w = t.wall ?? sig.wall;
-  const entry = t.entryPrice!,
-    sl = t.slPrice!,
-    tp = t.tpPrice;
+  const long = t.side === "LONG", risk = t.actualRiskUsd ?? t.plannedRiskUsd, w = t.wall ?? sig.wall;
+  const entry = t.entryPrice!, sl = t.slPrice!, tp = t.tpPrice;
   const notional = t.quantity !== null ? entry * t.quantity : NaN;
   const pctOf = (p: number): string => sp((100 * (p - entry)) / entry);
   const rr = tp !== null ? Math.abs(tp - entry) / Math.abs(entry - sl) : NaN;
@@ -266,18 +185,11 @@ export function formatWallEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
   if (t.timeoutAt !== undefined) out.push(`⏱ փակում՝ ${dmy(t.timeoutAt)} UTC`);
   if (w) {
     out.push("", "🧱 Պատեր");
-    out.push(
-      `վերևի  ${fmtPrice(w.walls.upper.lo)} – ${fmtPrice(w.walls.upper.hi)}`,
-    );
-    out.push(
-      `ներքևի ${fmtPrice(w.walls.lower.lo)} – ${fmtPrice(w.walls.lower.hi)}`,
-    );
+    out.push(`վերևի  ${fmtPrice(w.walls.upper.lo)} – ${fmtPrice(w.walls.upper.hi)}`);
+    out.push(`ներքևի ${fmtPrice(w.walls.lower.lo)} – ${fmtPrice(w.walls.lower.hi)}`);
     out.push(`տեղ՝ ${w.roomX.toFixed(2)} × SL`);
   }
-  out.push(
-    "",
-    `✋ Ձեռքով՝ SL ${fmtPrice(sl)} · TP ${tp !== null ? fmtPrice(tp) : "n/a"}`,
-  );
+  out.push("", `✋ Ձեռքով՝ SL ${fmtPrice(sl)} · TP ${tp !== null ? fmtPrice(tp) : "n/a"}`);
   out.push(`🆔 ${t.orderSignalId}`);
   return out.join("\n");
 }
@@ -285,11 +197,8 @@ export function formatWallEntry(sig: V10SignalDoc, t: V10TradeDoc): string {
 export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
   if (sig.kind === "WALL") return formatWallEntry(sig, t);
   if (sig.kind === "OWN") return formatOwnEntry(sig, t);
-  const long = t.side === "LONG",
-    risk = t.actualRiskUsd ?? t.plannedRiskUsd;
-  const entry = t.entryPrice!,
-    sl = t.slPrice!,
-    tp = t.tpPrice;
+  const long = t.side === "LONG", risk = t.actualRiskUsd ?? t.plannedRiskUsd;
+  const entry = t.entryPrice!, sl = t.slPrice!, tp = t.tpPrice;
   const notional = t.quantity !== null ? entry * t.quantity : NaN;
   const fees = estimateFeesUsd(notional);
   const pctOf = (p: number): string => sp((100 * (p - entry)) / entry);
@@ -307,30 +216,20 @@ export function formatV10Entry(sig: V10SignalDoc, t: V10TradeDoc): string {
     ``,
     ...v10Story(sig, t, sig.picks.length),
     ...("book" in t ? ["", ...formatBookLines(t.book, t.side)] : []),
-    ...("book" in t && t.book?.walls
-      ? ["", ...formatWallLines(t.book, { side: t.side, entry, tp })]
-      : []),
-    ...("zone4h" in t
-      ? ["", formatZoneLine(t.zone4h, { side: t.side, entry, tp })]
-      : []),
+    ...("book" in t && t.book?.walls ? ["", ...formatWallLines(t.book, { side: t.side, entry, tp })] : []),
+    ...("zone4h" in t ? ["", formatZoneLine(t.zone4h, { side: t.side, entry, tp })] : []),
   ].join("\n");
 }
 
 const REASON: Record<string, string> = {
-  TP_FILLED: "✅ TAKE PROFIT",
-  SL_FILLED: "❌ STOP LOSS",
-  POSITION_CLOSED_EXTERNALLY: "⚪ CLOSED OUTSIDE THE BOT",
-  CLOSED_NO_FILLS_FOUND: "⚪ CLOSED (no fills found)",
-  FAILSAFE_CLOSED: "⚪ FAIL-SAFE CLOSE (no SL found)",
-  MANUAL_CLOSE: "⚪ CLOSED BY HAND",
+  TP_FILLED: "✅ TAKE PROFIT", SL_FILLED: "❌ STOP LOSS",
+  POSITION_CLOSED_EXTERNALLY: "⚪ CLOSED OUTSIDE THE BOT", CLOSED_NO_FILLS_FOUND: "⚪ CLOSED (no fills found)",
+  FAILSAFE_CLOSED: "⚪ FAIL-SAFE CLOSE (no SL found)", MANUAL_CLOSE: "⚪ CLOSED BY HAND",
   TIMEOUT_CLOSED: "⏱ TIME OUT -- CLOSED AT MARKET",
 };
 
 export function formatV10Close(t: V10TradeDoc): string {
-  const held =
-    t.closedAt !== null
-      ? Math.max(0, Math.round((t.closedAt - t.createdAt) / 60_000))
-      : null;
+  const held = t.closedAt !== null ? Math.max(0, Math.round((t.closedAt - t.createdAt) / 60_000)) : null;
   return [
     `${REASON[t.closeReason ?? ""] ?? "⚪ CLOSED"} · ${v10Head(t)} · ${t.symbol} · ${t.side} · ${t.mode}`,
     SEP,
@@ -343,18 +242,7 @@ export function formatV10Close(t: V10TradeDoc): string {
   ].join("\n");
 }
 
-export function formatV10Failure(
-  t: Pick<
-    V10TradeDoc,
-    | "symbol"
-    | "side"
-    | "mode"
-    | "orderSignalId"
-    | "failureReason"
-    | "state"
-    | "kind"
-  >,
-): string {
+export function formatV10Failure(t: Pick<V10TradeDoc, "symbol" | "side" | "mode" | "orderSignalId" | "failureReason" | "state" | "kind">): string {
   return [
     `⚠️ ${v10Head(t)} · ${t.symbol} · ${t.side} · ${t.mode} · ${t.state === "SKIPPED" ? "NOT OPENED (skipped)" : "NOT OPENED"}`,
     SEP,

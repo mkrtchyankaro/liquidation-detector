@@ -139,7 +139,7 @@ export class V10LiveService {
       const r = rulesFor(s, u.userId);
       return `${u.userId}:${u.mode}(${[r.short ? "S" : "", r.long ? "L" : ""].join("") || "none"},btc:${r.btc ? `sl${r.slPct}/tp${r.tpPct}` : "off"},alt:${r.own ? `sl${r.ownSlPct}/tp${r.ownTpPct}${r.ownLong ? "+L" : ""}` : "off"}${r.maxOpen ? `,max${r.maxOpen}` : ""})`;
     }).join(" ") || "(none)"}`);
-    log.warn(`[V10_WALL_READY] wall=${s.wall} tp=${s.wallTpPct}% room>=${s.wallRoomRatio}x maxStop=${s.wallMaxStopPct ?? "off"} timeout=${s.wallTimeoutHours}h coins=${s.wallSymbols.length} source=${this.wallSource ? "yes" : "NONE"} users=${this.users().map((u) => {
+    log.warn(`[V10_WALL_READY] wall=${s.wall} tp=${s.wallTpPct}% room>=${s.wallRoomRatio}x maxStop=${s.wallMaxStopPct ?? "off"} timeout=${s.wallTimeoutHours}h rebuild=${s.wallRebuildHours ?? "off"} coins=${s.wallSymbols.length} source=${this.wallSource ? "yes" : "NONE"} users=${this.users().map((u) => {
       const r = rulesFor(s, u.userId);
       return `${u.userId}:${u.mode}(${r.wall ? `on,$${r.wallRiskUsd ?? u.riskUsd}${r.wallMaxOpen ? `,max${r.wallMaxOpen}` : ""}` : "off"})`;
     }).join(" ") || "(none)"}`);
@@ -320,7 +320,7 @@ export class V10LiveService {
       if (this.wallDoneSym.size > 5000) this.wallDoneSym = new Set([...this.wallDoneSym].slice(-2500));
     };
     if (!this.wallSource || !this.users().some((u) => u.mode !== "OFF" && rulesFor(s, u.userId).wall)) return done();
-    const params = { kind: "WICK" as const, tpPct: s.wallTpPct, roomRatio: s.wallRoomRatio, maxStopPct: s.wallMaxStopPct ?? Infinity };
+    const params = { kind: "WICK" as const, tpPct: s.wallTpPct, roomRatio: s.wallRoomRatio, maxStopPct: s.wallMaxStopPct ?? Infinity, ...(s.wallRebuildHours !== null ? { rebuildHours: s.wallRebuildHours } : {}) };
     const openWall = (await this.store.findOpenTrades()).filter((t) => t.kind === "WALL");
     let pending = 0;
     for (const sym of s.wallSymbols) {
@@ -363,8 +363,9 @@ export class V10LiveService {
           if (st.blocked) { st.tracker.reset(); st.blocked = false; }
           const c = hourCandle(data.q15, hs);
           if (!c) continue;
-          const step = st.tracker.step(c, wallsAt(data, hs), params);
+          const step = st.tracker.step(c, wallsAt(data, hs, st.tracker.minFieldStart), params);
           const current = hs === end - H;
+          if (current && step.broken) log.warn({ symbol: sym, way: step.broken, hour: new Date(hs).toISOString() }, `[V10_WALL_BROKEN] -- the walls are void, new walls from now on, no signal for ${s.wallRebuildHours}h`);
           if (current) for (const k of step.skips) log.info({ symbol: sym, side: k.side, why: k.why, detail: k.detail }, "[V10_WALL_SKIP]");
           // a signal of an EARLIER hour (catching up after a restart) is never traded -- it only ends that touch
           if (step.signal) { if (current) sig = step.signal; else st.tracker.reset(); }

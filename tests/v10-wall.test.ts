@@ -483,6 +483,48 @@ async function run(): Promise<void> {
     },
   );
 
+  await scenario(
+    "engine: a BROKEN wall (a 1h body below the lower wall) voids the field: no signal while waiting, the new walls only from after the break",
+    () => {
+      const m = market(),
+        tr = new WallTracker(),
+        P2 = { ...P, rebuildHours: 24 };
+      const W = wallsAt(m, E - H, tr.minFieldStart);
+      const brk = tr.step({ t: E - H, o: 99.8, h: 100.5, l: 98, c: 99 }, W, P2);
+      assert.deepStrictEqual(
+        [brk.broken, tr.fieldFrom, brk.signal],
+        ["DOWN", E, null],
+      );
+      // the old liquidations are before the break -> no walls from the new field yet
+      const after = wallsAt(m, E + 5 * H, tr.minFieldStart)!;
+      assert.deepStrictEqual([after.lower, after.upper], [null, null]);
+      // inside the wait: nothing, whatever the candle
+      assert.strictEqual(
+        tr.step({ t: E + 2 * H, o: 107.4, h: 108.3, l: 106.9, c: 107 }, W, P2)
+          .waiting,
+        true,
+      );
+      // off (the live default) -> the same candle is NOT a break
+      assert.strictEqual(
+        new WallTracker().step(
+          { t: E - H, o: 99.8, h: 100.5, l: 98, c: 99 },
+          W,
+          P,
+        ).broken,
+        undefined,
+      );
+      // a wick below with the body back inside the room is NOT a break
+      assert.strictEqual(
+        new WallTracker().step(
+          { t: E - H, o: 103, h: 104, l: 98, c: 103.5 },
+          W,
+          P2,
+        ).broken,
+        undefined,
+      );
+    },
+  );
+
   await scenario("engine: the 1h candle needs all four 15m candles", () => {
     const m = market();
     const c = hourCandle(m.q15, E - H)!;
@@ -511,9 +553,18 @@ async function run(): Promise<void> {
           off.wallRoomRatio,
           off.wallMaxStopPct,
           off.wallTimeoutHours,
+          off.wallRebuildHours,
           off.wallSymbols,
         ],
-        [false, 2, 1.33, null, 24, ["AAAUSDT", "BBBUSDT"]],
+        [false, 2, 1.33, null, 24, null, ["AAAUSDT", "BBBUSDT"]],
+      );
+      assert.strictEqual(
+        settings({ wallRebuildHours: 24 }).wallRebuildHours,
+        24,
+      );
+      assert.throws(
+        () => settings({ wallRebuildHours: 0 }),
+        /wallRebuildHours/,
       );
       const s = parseV10Settings(
         {
