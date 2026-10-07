@@ -35,12 +35,6 @@
  *                            (upper wall: SHORTS liquidated · lower wall: LONGS) -- above / below the median
  *        default coins with --h1: all SYMBOLS (new coins have ~5 days of our liquidations, trades start 2 days in)
  *
- *   --h1 --rrtest  (Oct 7) WICK, room >= 1.33x, the TP three ways: fixed --tp % · RR (TP = --rr x the SL distance) ·
- *        RR + BREAKEVEN (once the price went --be R our way, the SL moves to the entry +0.1% -- the fees are covered).
- *        Results also in R: the position is sized by the SL, so 1R = the $ risked (e.g. $50).
- *   --h1 --betest  (Oct 7) WICK, room >= 1.33x, TP --tp % (2): as now · + BREAKEVEN at 1R · SL <= --maxsl % (1.5) ·
- *        SL <= 1.5% + BREAKEVEN
- *
  *   npx tsx src/tools/wall-trade-test.ts
  *   options: --symbols SOLUSDT,XRPUSDT,...  (default: the 8 coins)  --list (every trade)  --h1
  */
@@ -134,10 +128,9 @@ interface HT {
   entry: number;
   stop: number;
   tp: number;
-  res: "TP" | "STOP" | "BE" | "24h";
+  res: "TP" | "STOP" | "24h";
   net: number;
   risk: number;
-  beOn?: boolean;
   oiStay: number;
   oiSig: number;
   sq: number;
@@ -181,59 +174,12 @@ async function main(): Promise<void> {
     hAll: HT[] = [];
   const TPP = Number(arg("tp", "1.5")),
     MAXSTOP = Number(arg("maxstop", "1000"));
-  interface Var {
-    v: string;
-    kind: "WICK" | "BODY";
-    ratio: number;
-    tpR?: number;
-    beR?: number;
-    maxSl?: number;
-  }
-  const MAXSL = Number(arg("maxsl", "1.5"));
-  const RR = Number(arg("rr", "2")),
-    BE = Number(arg("be", "1"));
-  const VARIANTS: Var[] = argv.includes("--betest")
-    ? [
-        { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
-        { v: `WICK TP ${TPP}% + BE at 1R`, kind: "WICK", ratio: 1.33, beR: 1 },
-        {
-          v: `WICK TP ${TPP}% SL<=${MAXSL}%`,
-          kind: "WICK",
-          ratio: 1.33,
-          maxSl: MAXSL,
-        },
-        {
-          v: `WICK TP ${TPP}% SL<=${MAXSL}% + BE`,
-          kind: "WICK",
-          ratio: 1.33,
-          maxSl: MAXSL,
-          beR: 1,
-        },
-      ]
-    : argv.includes("--rrtest")
-      ? [
-          { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
-          { v: `WICK RR ${RR}`, kind: "WICK", ratio: 1.33, tpR: RR },
-          {
-            v: `WICK RR ${RR} + BE at ${BE}R`,
-            kind: "WICK",
-            ratio: 1.33,
-            tpR: RR,
-            beR: BE,
-          },
-        ]
-      : (
-          [
-            ["BODY", 1.33],
-            ["BODY", 1.5],
-            ["WICK", 1.33],
-            ["WICK", 1.5],
-          ] as const
-        ).map(([kind, ratio]) => ({
-          v: `${kind} room>=${ratio}x stop`,
-          kind,
-          ratio,
-        }));
+  const VARIANTS = [
+    ["BODY", 1.33],
+    ["BODY", 1.5],
+    ["WICK", 1.33],
+    ["WICK", 1.5],
+  ] as const;
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     for (const sym of syms) {
@@ -311,8 +257,9 @@ async function main(): Promise<void> {
         console.log(
           `\n═══ ${sym} · 1h rule · from ${utc(testFrom)} UTC${newCoin ? " · NEW coin" : ""} ═══`,
         );
-        for (const { v, kind, ratio, tpR, beR, maxSl } of VARIANTS) {
+        for (const [kind, ratio] of VARIANTS) {
           const tpPct = TPP,
+            v = `${kind} room>=${ratio}x stop`,
             res: HT[] = [];
           let pos: HT | null = null,
             noRoom = 0,
@@ -333,22 +280,13 @@ async function main(): Promise<void> {
                     ? x.c
                     : NaN;
               if (Number.isFinite(out)) {
-                p.res = hitS ? (p.beOn ? "BE" : "STOP") : hitT ? "TP" : "24h";
+                p.res = hitS ? "STOP" : hitT ? "TP" : "24h";
                 p.net =
                   (100 * (long ? out - p.entry : p.entry - out)) / p.entry -
                   FEE;
                 res.push(p);
                 pos = null;
                 tracker.reset();
-              } else if (beR !== undefined && !p.beOn) {
-                // breakeven: the price went beR x the first risk our way -> from the next candle the SL is at the entry +0.1%
-                const r0 = (p.risk / 100) * p.entry;
-                if (
-                  long ? x.h >= p.entry + beR * r0 : x.l <= p.entry - beR * r0
-                ) {
-                  p.stop = long ? p.entry * 1.001 : p.entry * 0.999;
-                  p.beOn = true;
-                }
               }
               continue;
             }
@@ -361,8 +299,7 @@ async function main(): Promise<void> {
               kind,
               tpPct,
               roomRatio: ratio,
-              maxStopPct: Math.min(MAXSTOP, maxSl ?? Infinity),
-              ...(tpR !== undefined ? { tpR } : {}),
+              maxStopPct: MAXSTOP,
             });
             for (const k of st.skips)
               if (k.why === "TP_BEYOND_WALL") noRoom++;
@@ -396,7 +333,7 @@ async function main(): Promise<void> {
               );
           const sm = res.reduce((a, p) => a + p.net, 0);
           console.log(
-            `  ${v.padEnd(22)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped: TP beyond the other wall ${noRoom}, room < ${ratio}x stop${maxSl !== undefined ? ` or SL > ${maxSl}%` : ""} ${bigStop}${pos ? ` · OPEN NOW ${(pos as HT).dir} ${utc((pos as HT).t)} entry ${px((pos as HT).entry)} stop ${px((pos as HT).stop)} tp ${px((pos as HT).tp)}` : ""}`,
+            `  ${v.padEnd(22)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped: TP beyond the other wall ${noRoom}, room < ${ratio}x stop ${bigStop}${pos ? ` · OPEN NOW ${(pos as HT).dir} ${utc((pos as HT).t)} entry ${px((pos as HT).entry)} stop ${px((pos as HT).stop)} tp ${px((pos as HT).tp)}` : ""}`,
           );
           hAll.push(...res);
         }
@@ -532,17 +469,13 @@ async function main(): Promise<void> {
     console.log(
       `\n═══ ALL COINS (no BTC / ETH) · 1h rule · TP ${TPP}% · stop = the wall's far edge (fee ${FEE}% in) ═══`,
     );
-    const R = (p: HT): number => p.net / p.risk; // the net result in R (1R = the $ lost at the first SL)
-    for (const { v } of VARIANTS) {
-      const l = hAll.filter((p) => p.v === v),
+    for (const [kind, ratio] of VARIANTS) {
+      const v = `${kind} room>=${ratio}x stop`,
+        l = hAll.filter((p) => p.v === v),
         sm = l.reduce((a, p) => a + p.net, 0),
-        w = l.filter((p) => p.net > 0).length,
-        sr = l.reduce((a, p) => a + R(p), 0);
+        w = l.filter((p) => p.net > 0).length;
       console.log(
         `\n  ${v.padEnd(22)} ${String(l.length).padStart(3)} trades · win ${l.length ? Math.round((100 * w) / l.length) : 0}% · avg ${l.length ? sp(sm / l.length) : "n/a"}% · sum ${sp(sm, 1)}% · per $1000 per trade ${sp(sm * 10, 0)}$`,
-      );
-      console.log(
-        `      IN R (sized by the SL): sum ${sp(sr, 1)}R · avg ${l.length ? sp(sr / l.length) : "n/a"}R · with $50 risk ${sp(sr * 50, 0)}$ · TP ${l.filter((p) => p.res === "TP").length} · SL ${l.filter((p) => p.res === "STOP").length} · BE ${l.filter((p) => p.res === "BE").length} · 24h ${l.filter((p) => p.res === "24h").length}`,
       );
       const wk = new Map<number, HT[]>();
       for (const p of l) {
@@ -557,10 +490,7 @@ async function main(): Promise<void> {
           `      week of ${new Date(mon).toISOString().slice(5, 10)}: ${ll.length} trades · sum ${sp(
             ll.reduce((a, p) => a + p.net, 0),
             1,
-          )}% · ${sp(
-            ll.reduce((a, p) => a + R(p), 0),
-            1,
-          )}R`,
+          )}%`,
         );
       const coins = [...new Set(l.map((p) => p.sym))]
         .map(

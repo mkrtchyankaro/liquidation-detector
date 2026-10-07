@@ -2,14 +2,17 @@ import type { Db } from "mongodb";
 import { childLogger } from "../../infrastructure/logging/logger";
 import { MINUTE_BARS } from "../../collector/minute-bars";
 import { getSymbolFilters, roundToStep, runEntrySequence } from "../../execution/entry-sequence";
-import { ourIds, recoverEntry, settle, symbolClear, type SettleRest } from "../../execution/real-settle";
+import { ourIds, positionAmt, recoverEntry, settle, symbolClear, type SettleRest } from "../../execution/real-settle";
+import { strategyClientOrderId } from "../../execution/client-order-id";
 import { simTrade } from "../../research/sltp";
 import type { MinBar } from "../../research/dc15";
 import { estimateFeesUsd } from "../v9/v9-fees";
 import { BTC, NEW_COIN_DAYS, rulesFor, type V10Settings } from "./v10-config";
-import { againstCandles, btcRank1At, givebackPct, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick } from "./v10-engine";
+import { againstCandles, btcRank1At, givebackPct, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick, type V10Turn } from "./v10-engine";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "./v10-repository";
-import { formatV10Close, formatV10Entry, formatV10Failure, v10Head } from "./v10-telegram";
+import { formatV10Close, formatV10Entry, formatV10Failure, formatWallEntry, v10Head } from "./v10-telegram";
+import { hourCandle, wallsAt, WallTracker, type WallSignal } from "./wall-engine";
+import type { WallSource } from "./wall-data";
 import { bookView as makeBookView, type V10BookSource, type V10BookView } from "./v10-book";
 import { zoneWall, type V10ZoneSource, type V10ZoneView } from "./v10-zone";
 
@@ -28,6 +31,10 @@ const log = childLogger({ mod: "v10-live" });
  *         so it has the priority on a coin.
  *       Each signal is handled once (unique signalId in v10_signals, across restarts).
  *    2. PAPER trades: SL / TP on the minute high / low (SL first on a same-minute tie)
+ *    3. (Oct 7) part 3 "V10 · WALL", once per closed 1h candle (from 90 s after it, at most 10 min late), every coin of
+ *       wallSymbols: src/strategy/v10/wall-engine.ts = the research test's code. A coin is watched only after 2 days of
+ *       our liquidations and only while the minute data is fresh. SL = the wall's far edge (a fixed price), TP = wallTpPct
+ *       % from the signal price, both the SAME for PAPER and REAL; still open after wallTimeoutHours -> closed at market.
  *  every 15 s
  *    REAL trades: Binance position flat? -> cancel our leftovers -> exact close from Binance fills
  *
@@ -76,6 +83,11 @@ const ALT_LEAD_MS = 10 * M;
 const ALT_WAIT_MS = 5 * M;
 const FAILSAFE_NOTE = "entry without its SL -- closed at market";
 const BOOK_LATE_MS = 4 * M;      // a snapshot taken later than this after the close is not "at the close"
+const H = 60 * M;
+/** WALL: the touch memory is rebuilt from this many hours back after a restart */
+const WALL_WARMUP_H = 72;
+/** WALL: a coin is traded only after this much of our liquidation data (the walls are built from it) */
+const WALL_MIN_LIQ_MS = 2 * 24 * H;
 const RETRY_ALERT = 20;          // x 15 s = 5 min      // wait up to 5 min after the close for every alt's last minute     // alts' bars from a little before BTC's move start (priceAt looks back up to 6 min)
 
 export class V10LiveService {
@@ -91,6 +103,12 @@ export class V10LiveService {
   private indexesReady = false;
   /** 15m closes whose order book snapshot is stored */
   private bookDone = new Set<number>();
+  /** WALL: hour ends fully decided, `${hourEnd}:${symbol}` decided, and each coin's touch memory */
+  private wallDone = new Set<number>();
+  private wallDoneSym = new Set<string>();
+  private wallState = new Map<string, { tracker: WallTracker; lastHs: number; blocked: boolean }>();
+  /** WALL: a signal found but not stored yet (the database failed) -> retried every minute until stale */
+  private wallPending = new Map<string, WallSignal>();
 
   constructor(
     private readonly settings: V10Settings,
@@ -102,6 +120,8 @@ export class V10LiveService {
     private readonly book: V10BookSource | null = null,
     /** Oct 4: the 4h zone at the signal -- shown in the entry message and kept on the row, never changes a trade */
     private readonly zone: V10ZoneSource | null = null,
+    /** Oct 7: part 3 WALL -- Binance klines + our liquidations (null = WALL never runs) */
+    private readonly wallSource: WallSource | null = null,
   ) {}
 
   private async ensureIndexes(): Promise<boolean> {
@@ -118,6 +138,10 @@ export class V10LiveService {
     log.warn(`[V10_READY] entry=${s.rule.entry} ownEntry=${s.ownRule.entry} ownLongEntry=${s.ownLongRule.entry} ownR2=${s.ownR2Minutes}m short=${s.short} long=${s.long} sl=${s.slPct}% tp=${s.tpPct}% picks=${s.picks} rank=${s.rankWindowHours}h alts=${s.symbols.length} users=${this.users().map((u) => {
       const r = rulesFor(s, u.userId);
       return `${u.userId}:${u.mode}(${[r.short ? "S" : "", r.long ? "L" : ""].join("") || "none"},btc:${r.btc ? `sl${r.slPct}/tp${r.tpPct}` : "off"},alt:${r.own ? `sl${r.ownSlPct}/tp${r.ownTpPct}${r.ownLong ? "+L" : ""}` : "off"}${r.maxOpen ? `,max${r.maxOpen}` : ""})`;
+    }).join(" ") || "(none)"}`);
+    log.warn(`[V10_WALL_READY] wall=${s.wall} tp=${s.wallTpPct}% room>=${s.wallRoomRatio}x maxStop=${s.wallMaxStopPct ?? "off"} timeout=${s.wallTimeoutHours}h coins=${s.wallSymbols.length} source=${this.wallSource ? "yes" : "NONE"} users=${this.users().map((u) => {
+      const r = rulesFor(s, u.userId);
+      return `${u.userId}:${u.mode}(${r.wall ? `on,$${r.wallRiskUsd ?? u.riskUsd}${r.wallMaxOpen ? `,max${r.wallMaxOpen}` : ""}` : "off"})`;
     }).join(" ") || "(none)"}`);
     const tick = (): void => {
       const now = this.now();
@@ -143,6 +167,8 @@ export class V10LiveService {
       catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_BOOK_FAILED] -- retried next minute, trading unaffected"); }
       try { if (this.settings.enabled && await this.ensureIndexes()) await this.checkSignal(); }
       catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_SIGNAL_FAILED] -- retried next minute, V9 unaffected"); }
+      try { if (this.settings.enabled && this.wallSource && await this.ensureIndexes()) await this.checkWallSignals(); }
+      catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_WALL_SIGNAL_FAILED] -- retried next minute"); }
       try { await this.monitorPaper(); }
       catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_PAPER_MONITOR_FAILED] -- retried next minute"); }
     } finally {
@@ -283,6 +309,221 @@ export class V10LiveService {
     }
   }
 
+  // ── 1b. part 3 WALL (Oct 7) ──────────────────────────────────────────────────────────────────────────────────
+  /** once per closed 1h candle: every coin's walls and the 1h rule (wall-engine.ts = the research test's code) */
+  private async checkWallSignals(): Promise<void> {
+    const s = this.settings, now = this.now(), end = Math.floor(now / H) * H;
+    if (now - end < READY_MS || now - end > STALE_MS || this.wallDone.has(end)) return;
+    const done = (): void => {
+      this.wallDone.add(end);
+      if (this.wallDone.size > 100) this.wallDone = new Set([...this.wallDone].slice(-50));
+      if (this.wallDoneSym.size > 5000) this.wallDoneSym = new Set([...this.wallDoneSym].slice(-2500));
+    };
+    if (!this.wallSource || !this.users().some((u) => u.mode !== "OFF" && rulesFor(s, u.userId).wall)) return done();
+    const params = { kind: "WICK" as const, tpPct: s.wallTpPct, roomRatio: s.wallRoomRatio, maxStopPct: s.wallMaxStopPct ?? Infinity };
+    const openWall = (await this.store.findOpenTrades()).filter((t) => t.kind === "WALL");
+    let pending = 0;
+    for (const sym of s.wallSymbols) {
+      const key = `${end}:${sym}`;
+      if (this.wallDoneSym.has(key)) continue;
+      const waiting = this.wallPending.get(key);
+      if (waiting) {
+        try { await this.openWallSignal(sym, waiting, now); this.wallPending.delete(key); this.wallDoneSym.add(key); }
+        catch (err) { pending++; log.error({ symbol: sym, err: err instanceof Error ? err.message : String(err) }, "[V10_WALL_SIGNAL_STORE_FAILED] -- retried next minute"); }
+        continue;
+      }
+      try {
+        // our minute data must be fresh: the collector that writes it also writes the liquidations the walls are made of
+        const bars = await this.load(sym, end - 10 * M, end);
+        const last = bars[bars.length - 1];
+        if (!last || last.t < end - 2 * M) {
+          if (now - end < ALT_WAIT_MS) { pending++; continue; }
+          log.warn({ symbol: sym, hourEnd: new Date(end).toISOString(), lastBar: last ? new Date(last.t).toISOString() : null }, "[V10_WALL_DATA_STALE] -- no WALL decision for this coin this hour");
+          this.wallDoneSym.add(key);
+          continue;
+        }
+        const data = await this.wallSource.data(sym, now);
+        // the walls are built from our liquidations: a coin with less than 2 days of them is not traded yet (as tested)
+        if (data.firstLiqT === null || end - data.firstLiqT < WALL_MIN_LIQ_MS) { this.wallDoneSym.add(key); continue; }
+        // the hour's four 15m candles must all be there
+        if (!hourCandle(data.q15, end - H)) {
+          if (now - end < ALT_WAIT_MS) { pending++; continue; }
+          log.warn({ symbol: sym, hourEnd: new Date(end).toISOString() }, "[V10_WALL_CANDLE_MISSING] -- no WALL decision for this coin this hour");
+          this.wallDoneSym.add(key);
+          continue;
+        }
+        let st = this.wallState.get(sym);
+        if (!st) { st = { tracker: new WallTracker(), lastHs: end - (WALL_WARMUP_H + 1) * H, blocked: false }; this.wallState.set(sym, st); }
+        // a WALL trade open on the coin -> the coin waits (as in the test); after it, the touch memory starts fresh
+        const blocked = openWall.some((t) => t.symbol === sym);
+        let sig: WallSignal | null = null;
+        for (let hs = st.lastHs + H; hs <= end - H; hs += H) {
+          st.lastHs = hs;
+          if (blocked) { st.blocked = true; continue; }
+          if (st.blocked) { st.tracker.reset(); st.blocked = false; }
+          const c = hourCandle(data.q15, hs);
+          if (!c) continue;
+          const step = st.tracker.step(c, wallsAt(data, hs), params);
+          const current = hs === end - H;
+          if (current) for (const k of step.skips) log.info({ symbol: sym, side: k.side, why: k.why, detail: k.detail }, "[V10_WALL_SKIP]");
+          // a signal of an EARLIER hour (catching up after a restart) is never traded -- it only ends that touch
+          if (step.signal) { if (current) sig = step.signal; else st.tracker.reset(); }
+        }
+        if (sig) {
+          st.tracker.reset();
+          // the touch memory has moved on: if storing the signal fails, the SIGNAL is kept and retried, never lost
+          this.wallPending.set(key, sig);
+          await this.openWallSignal(sym, sig, now);
+          this.wallPending.delete(key);
+        }
+        this.wallDoneSym.add(key);
+      } catch (err) {
+        pending++;
+        log.error({ symbol: sym, err: err instanceof Error ? err.message : String(err) }, "[V10_WALL_COIN_FAILED] -- this coin retried next minute");
+      }
+    }
+    if (pending === 0) done();
+    if (now - end >= STALE_MS - M) for (const k of this.wallPending.keys()) if (k.startsWith(`${end}:`)) {
+      log.error({ key: k }, "[V10_WALL_SIGNAL_LOST] -- could not be stored before it became stale");
+      this.wallPending.delete(k);
+    }
+  }
+
+  private async openWallSignal(symbol: string, w: WallSignal, now: number): Promise<void> {
+    const signalId = `v10wall-${new Date(w.candleEnd).toISOString().slice(0, 16)}-${symbol.replace(/USDT$/, "")}-${w.side}`;
+    const turn: V10Turn = { candleEnd: w.candleEnd, side: w.side, price: w.entry, candleOiPct: 0, label: "WALL", moveStartT: w.touchedAt, peakT: w.hs, moveOiPct: 0, extreme: w.entry, extremeT: w.hs, movePct: 0, fromPeakOiPct: 0, prior: 0 };
+    const pick: V10Pick = { symbol, rank: 1, x: 0, follow: 0, coinPct: 0, btcPct: 0, price: w.entry };
+    const sig: V10SignalDoc = { signalId, kind: "WALL", side: w.side, symbol, turn, picks: [pick], rankWindowHours: 0, createdAt: new Date(now), wall: w };
+    if (!(await this.store.insertSignal(sig))) return; // already handled (restart)
+    log.warn({ signalId, side: w.side, entry: w.entry, sl: w.stop, tp: w.tp, lower: w.walls.lower, upper: w.walls.upper }, "[V10_WALL_SIGNAL]");
+    await Promise.all(this.users().map((u) => this.openWallTrade(u, sig, w).catch((err) =>
+      log.error({ userId: u.userId, signalId, symbol, err: err instanceof Error ? err.message : String(err) }, "[V10_WALL_OPEN_UNEXPECTED] -- isolated"))));
+  }
+
+  private async openWallTrade(u: V10UserRef, sig: V10SignalDoc, w: WallSignal): Promise<void> {
+    if (u.mode === "OFF") return;
+    const r = rulesFor(this.settings, u.userId);
+    if (!r.wall) return;
+    const riskUsd = r.wallRiskUsd ?? u.riskUsd;
+    const orderSignalId = `${sig.signalId}:${sig.symbol}`;
+    const base: V10TradeDoc = {
+      tradeId: `${orderSignalId}:${u.userId}`, orderSignalId, signalId: sig.signalId, kind: "WALL", userId: u.userId, mode: u.mode,
+      symbol: sig.symbol, side: w.side, pick: { rank: 1, x: 0, follow: 0, coinPct: 0, btcPct: 0 },
+      state: "OPEN", createdAt: w.candleEnd, entryPrice: null, slPrice: w.stop, tpPrice: null, slPct: w.riskPct, tpPct: this.settings.wallTpPct,
+      quantity: null, plannedRiskUsd: riskUsd, actualRiskUsd: null, binance: null,
+      closedAt: null, exitPrice: null, pnlUsd: null, pnlR: null, feesUsd: null, closeReason: null, failureReason: null, closeAttempts: 0, entryInProgress: true, entryStartedAt: null,
+      wall: w, timeoutAt: w.candleEnd + this.settings.wallTimeoutHours * H,
+    };
+    const skip = async (reason: string, tell: boolean, state: "SKIPPED" | "FAILED" = "SKIPPED"): Promise<void> => {
+      const t = { ...base, state, failureReason: reason, entryInProgress: false };
+      if (!(await this.store.insertTrade(t))) await this.store.updateTrade(base.tradeId, { state, failureReason: reason, entryInProgress: false });
+      log.warn({ userId: u.userId, tradeId: base.tradeId, reason }, `[V10_TRADE_${state}]`);
+      if (tell) await this.notify(u, formatV10Failure(t));
+    };
+    const open = await this.store.findOpenTrades();
+    // one trade per coin per user, whatever the part or the side (a REAL account in one-way mode never holds both)
+    if (open.some((t) => t.userId === u.userId && t.symbol === sig.symbol)) return skip(`a V10 trade on ${sig.symbol} is already open for this user`, false);
+    if (r.wallMaxOpen !== null) {
+      const mine = open.filter((t) => t.userId === u.userId && t.kind === "WALL");
+      if (mine.length >= r.wallMaxOpen) return skip(`MAX_OPEN: ${mine.length} WALL trades already open (${mine.map((t) => `${t.symbol} ${t.side}`).join(", ")}), limit ${r.wallMaxOpen}`, true);
+    }
+    const short = w.side === "SHORT";
+    if (!(w.entry > 0) || !(Math.abs(w.entry - w.stop) > 0) || (short ? !(w.stop > w.entry && w.tp < w.entry) : !(w.stop < w.entry && w.tp > w.entry)))
+      return skip(`bad levels: entry ${w.entry}, SL ${w.stop}, TP ${w.tp}`, true, "FAILED");
+
+    if (u.mode === "PAPER") {
+      const t: V10TradeDoc = { ...base, entryPrice: w.entry, slPrice: w.stop, tpPrice: w.tp, quantity: riskUsd / Math.abs(w.entry - w.stop), actualRiskUsd: riskUsd, entryInProgress: false };
+      if (!(await this.store.insertTrade(t))) return;
+      log.warn({ tradeId: t.tradeId, entry: w.entry, sl: w.stop, tp: w.tp }, "[V10_WALL_PAPER_ENTRY]");
+      await this.notify(u, formatWallEntry(sig, t));
+      return;
+    }
+
+    // REAL -- the same safety as the other parts: fresh signal, no V9 trade, the symbol completely clear on the account,
+    // the SL / TP are the signal's prices (the SL = the wall's far edge); a price already at / beyond them -> not opened
+    const rest = u.binanceRest;
+    if (u.mode !== "REAL" || !rest) return;
+    if (this.now() - w.candleEnd > STALE_MS) return skip("signal too old for a market entry", true);
+    if (await this.store.hasOpenV9Trade(u.userId, sig.symbol)) return skip(`a REAL V9 trade on ${sig.symbol} is open for this user -- V10 never trades on top of it`, true);
+    const busy = await symbolClear(rest, sig.symbol);
+    if (busy) return skip(`${busy} -- V10 never trades on top of it`, true);
+    const book = (await rest.getBookTicker?.(sig.symbol).catch(() => null)) as { bidPrice?: string; askPrice?: string } | null;
+    const exec = Number(short ? book?.bidPrice : book?.askPrice);
+    if (!(exec > 0)) return skip("no executable price from Binance", true);
+    if (short ? exec >= w.stop : exec <= w.stop) return skip(`the price already reached the SL: now ${exec}, signal ${w.entry}, SL ${+w.stop.toPrecision(8)} -- the signal is over`, true);
+    if (short ? exec <= w.tp : exec >= w.tp) return skip(`the price already reached the TP: now ${exec}, signal ${w.entry}, TP ${+w.tp.toPrecision(8)} -- too late`, true);
+    const row: V10TradeDoc = { ...base, entryStartedAt: this.now() };
+    if (!(await this.store.insertTrade(row))) return;
+    this.entering.add(row.tradeId);
+    try {
+      const out = await runEntrySequence(rest, {
+        userId: u.userId, globalSignalId: orderSignalId, symbol: sig.symbol, side: w.side,
+        quantity: riskUsd / Math.abs(exec - w.stop), entryPriceEstimate: exec,
+        slPrice: w.stop, initialTpPrice: w.tp,
+        riskUsd, leverage: u.leverage, marginMode: u.marginMode,
+      });
+      if (out.outcome === "ENTRY_FAILED" || out.outcome === "PROTECTION_FAILED_CLOSED") {
+        await this.store.updateTrade(row.tradeId, { failureReason: out.reason });
+        log.error({ tradeId: row.tradeId, reason: out.reason, outcome: out.outcome }, "[V10_ENTRY_NOT_CONFIRMED] -- handed to the recovery");
+        return;
+      }
+      const binance: V10TradeDoc["binance"] = {
+        entryClientOrderId: out.entryClientOrderId, slAlgoId: out.slBinanceAlgoId, slClientAlgoId: out.slClientAlgoId,
+        ...(out.outcome === "ENTRY_ACTIVE_WITH_TP" ? { tpOrderId: out.tpBinanceOrderId, tpClientOrderId: out.tpClientOrderId } : { tpFailureReason: out.tpFailureReason }),
+      };
+      const fields: Partial<V10TradeDoc> = { entryPrice: out.entryPrice, quantity: out.quantity, tpPrice: out.tpPrice ?? null, actualRiskUsd: out.actualRiskUsd ?? null, binance, entryInProgress: false };
+      await this.store.updateTrade(row.tradeId, fields);
+      log.warn({ tradeId: row.tradeId, ...fields }, "[V10_WALL_REAL_ENTRY]");
+      await this.notify(u, formatWallEntry(sig, { ...row, ...fields } as V10TradeDoc));
+    } finally {
+      this.entering.delete(row.tradeId);
+    }
+  }
+
+  /** WALL (REAL): still open after wallTimeoutHours -> a reduce-only MARKET close of what is left of OUR position.
+   *  Our close orders have deterministic client ids (MARKET_EXIT revision 0, 1, ...): after a crash they are found, never
+   *  sent twice; a close that filled nothing (expired / cancelled) is followed by the next revision. timeoutSentAt is set
+   *  only once one of OUR close orders really filled (it makes the close report say TIMEOUT). Runs every cycle after the
+   *  time-out until Binance shows the position gone; the normal settle then cancels our SL / TP and reports the close.
+   *  false = do not settle this cycle (retried next cycle). */
+  private async timeoutClose(t: V10TradeDoc, u: V10UserRef, rest: SettleRest): Promise<boolean> {
+    const ids = [0, 1, 2, 3, 4].map((r) => strategyClientOrderId(t.userId, t.orderSignalId, "MARKET_EXIT", r));
+    const find = async (id: string): Promise<{ status?: string; executedQty?: string | number } | null> => {
+      try { return (await rest.getOrderByClientId(t.symbol, id)) as { status?: string; executedQty?: string | number }; }
+      catch (err) { if (/-2013|does not exist|not found|-2011/i.test(err instanceof Error ? err.message : String(err))) return null; throw err; }
+    };
+    const mark = async (): Promise<void> => {
+      if (t.timeoutSentAt) return;
+      const now = this.now();
+      await this.store.updateTrade(t.tradeId, { timeoutSentAt: now });
+      t.timeoutSentAt = now;
+    };
+    let ours: Array<{ status?: string; executedQty?: string | number }>, amt: number;
+    try {
+      ours = [];
+      for (const id of ids) { const o = await find(id); if (!o) break; ours.push(o); }
+      amt = await positionAmt(rest, t.symbol);
+    } catch (err) {
+      await this.retried(t, u, `timeout close: Binance unreadable (${err instanceof Error ? err.message : String(err)})`);
+      return false;
+    }
+    if (ours.some((o) => Number(o.executedQty) > 0)) await mark();
+    const mine = amt !== 0 && Math.sign(amt) === (t.side === "LONG" ? 1 : -1);
+    if (!mine) return true;                                                     // over -> the settle reports it
+    if (ours.some((o) => o.status === "NEW" || o.status === "PARTIALLY_FILLED")) return false;   // our close is still working
+    if (ours.length >= ids.length) { await this.retried(t, u, `timeout close: ${ids.length} market closes sent, the ${t.symbol} position (${amt}) is still there`); return false; }
+    // never more than our own quantity (another trade's position is never touched); less is fine (our TP partly filled)
+    if (t.quantity !== null && Math.abs(amt) > t.quantity * 1.001) { await this.retried(t, u, `timeout close: the ${t.symbol} position (${amt}) is bigger than ours (${t.quantity}) -- nothing touched`); return false; }
+    const f = await getSymbolFilters(rest, t.symbol);
+    if (!f) { await this.retried(t, u, "timeout close: symbol filters unreadable"); return false; }
+    const qty = Math.min(Math.abs(amt), t.quantity ?? Math.abs(amt)), id = ids[ours.length];
+    await rest.createOrder({ symbol: t.symbol, side: t.side === "LONG" ? "SELL" : "BUY", type: "MARKET", quantity: qty.toFixed(f.qtyPrecision), reduceOnly: "true", newClientOrderId: id });
+    log.warn({ tradeId: t.tradeId, quantity: qty, revision: ours.length }, "[V10_WALL_TIMEOUT_CLOSE_SENT]");
+    const o = await find(id).catch(() => null);
+    if (o && Number(o.executedQty) > 0) await mark();
+    return true;
+  }
+
   private async openForAll(sig: V10SignalDoc): Promise<void> {
     for (const p of sig.picks) {
       const book = await this.bookFor(sig, p.symbol), zone = await this.zoneFor(sig, p);
@@ -320,7 +561,7 @@ export class V10LiveService {
 
     // Johnny Oct 3 (ETH +0.36%): the coin must have moved MORE than this user's TP -- we want back more than it went.
     // BTC part: the alt's own move with BTC (to its extreme); ALT part: the alt's move from its OI low to the top.
-    const moved = moveOf(sig, p);
+    const moved = moveOf(sig as Parameters<typeof moveOf>[0], p);
     if (!(moved > rules.tpPct)) return skip(`the move was only ${moved.toFixed(2)}%, not more than the TP ${rules.tpPct}% -- a quiet market, not taken`, false);
 
     // Oct 5: the price already gave back too much of its move at the entry (the giveback test's top quarter) -- per user
@@ -353,8 +594,10 @@ export class V10LiveService {
     // Oct 4: LONG and SHORT are independent -- one open trade per coin per SIDE (REAL: the account check below still
     // refuses a coin that has any position, so a REAL account never holds both)
     if (open.some((t) => t.userId === u.userId && t.symbol === p.symbol && t.side === sig.side)) return skip(`a V10 ${sig.side} on ${p.symbol} is already open for this user`, false);
+    // Oct 7: a WALL trade on the coin (either side) -> the coin is busy for this user
+    if (open.some((t) => t.userId === u.userId && t.symbol === p.symbol && t.kind === "WALL")) return skip(`a V10 WALL trade on ${p.symbol} is already open for this user`, false);
     if (rules.maxOpen !== null) {
-      const mine = open.filter((t) => t.userId === u.userId);
+      const mine = open.filter((t) => t.userId === u.userId && t.kind !== "WALL");   // Oct 7: WALL has its own limit
       if (mine.length >= rules.maxOpen) return skip(`MAX_OPEN: ${mine.length} V10 trades already open (${mine.map((t) => `${t.symbol} ${t.side}`).join(", ")}), limit ${rules.maxOpen}`, true);
     }
 
@@ -428,8 +671,19 @@ export class V10LiveService {
       const bars = (await this.load(symbol, from, now)).filter((b) => b.t + M <= now); // closed minutes only
       for (const t of list) {
         const entry = t.entryPrice!, risk = Math.abs(entry - t.slPrice!), rr = Math.abs(t.tpPrice! - entry) / risk;
-        const tr = simTrade(bars, t.createdAt, entry, t.slPrice!, rr, t.side === "SHORT" ? "DOWN" : "UP");
-        if (tr.exit === "OPEN") continue;
+        // WALL (Oct 7): only the minutes before its timeout count; still open then -> closed at that minute's close
+        const deadline = t.kind === "WALL" && t.timeoutAt !== undefined ? t.timeoutAt : Infinity;
+        const use = deadline < Infinity ? bars.filter((b) => b.t < deadline) : bars;
+        const tr = simTrade(use, t.createdAt, entry, t.slPrice!, rr, t.side === "SHORT" ? "DOWN" : "UP");
+        if (tr.exit === "OPEN") {
+          const lastBar = use[use.length - 1] ?? (now >= deadline + 5 * M ? bars[bars.length - 1] : undefined);
+          if (deadline < Infinity && lastBar && (lastBar.t + M >= deadline || now >= deadline + 5 * M)) {
+            const sg = t.side === "LONG" ? 1 : -1, fees = estimateFeesUsd(entry * t.quantity!), riskUsd = t.actualRiskUsd ?? t.plannedRiskUsd;
+            const pnlUsd = sg * (lastBar.close - entry) * t.quantity! - fees.sl;
+            await this.closeTrade(t, { closedAt: Math.min(deadline, lastBar.t + M), exitPrice: lastBar.close, pnlUsd, pnlR: pnlUsd / riskUsd, feesUsd: fees.sl, closeReason: "TIMEOUT_CLOSED" });
+          }
+          continue;
+        }
         const fees = estimateFeesUsd(entry * t.quantity!), riskUsd = t.actualRiskUsd ?? t.plannedRiskUsd;
         const feesUsd = tr.exit === "TP" ? fees.tp : fees.sl;
         const pnlUsd = (tr.exit === "TP" ? rr * riskUsd : -riskUsd) - feesUsd;
@@ -507,7 +761,8 @@ export class V10LiveService {
     try {
       const f = await getSymbolFilters(rest, t.symbol);
       if (!f) return { tpOrderId: null, tpPrice: null };
-      const tp = roundToStep(levels(t.side, entry, t.slPct, t.tpPct).tp, f.tickSize, f.pricePrecision);
+      // WALL: the signal's own TP price (the same as PAPER); the other parts: the % from the entry
+      const tp = roundToStep(t.kind === "WALL" && t.wall ? t.wall.tp : levels(t.side, entry, t.slPct, t.tpPct).tp, f.tickSize, f.pricePrecision);
       const res = (await rest.createOrder({
         symbol: t.symbol, side: t.side === "LONG" ? "SELL" : "BUY", type: "LIMIT", timeInForce: "GTC", price: tp.toFixed(f.pricePrecision),
         quantity: qty.toFixed(f.qtyPrecision), reduceOnly: "true", newClientOrderId: ourIds(t.userId, t.orderSignalId).tp,
@@ -529,6 +784,10 @@ export class V10LiveService {
   }
 
   private async checkRealTrade(t: V10TradeDoc, u: V10UserRef, rest: SettleRest): Promise<void> {
+    // WALL (Oct 7): past its timeout -> our market close first (once); the settle below reports it
+    if (t.kind === "WALL" && t.timeoutAt !== undefined && t.entryPrice !== null && this.now() >= t.timeoutAt) {
+      if (!(await this.timeoutClose(t, u, rest))) return;
+    }
     const other = await this.store.openV9TradeSince(t.userId, t.symbol, t.entryStartedAt ?? t.createdAt);
     const r = await settle(rest, { userId: t.userId, orderSignalId: t.orderSignalId, symbol: t.symbol, side: t.side, entryStartedAt: t.entryStartedAt ?? t.createdAt, quantity: t.quantity, binance: t.binance }, this.now(), other);
     if (r.status === "RETRY") return this.retried(t, u, r.why);
@@ -547,9 +806,11 @@ export class V10LiveService {
     const risk = t.actualRiskUsd ?? t.plannedRiskUsd;
     // closed by the bot's own fail-safe (not by the user / Binance): an entry problem was the reason it happened
     const failsafe = r.report.reason === "POSITION_CLOSED_EXTERNALLY" && t.failureReason !== null;
+    // WALL: closed by our own timeout market order
+    const timedOut = r.report.reason === "POSITION_CLOSED_EXTERNALLY" && t.timeoutSentAt !== undefined;
     await this.closeTrade(t, {
       closedAt: this.now(), exitPrice: r.report.exitPrice, pnlUsd: r.report.realizedPnlUsd,
-      pnlR: risk > 0 ? r.report.realizedPnlUsd / risk : null, feesUsd: r.report.feesUsd, closeReason: failsafe ? "FAILSAFE_CLOSED" : r.report.reason,
+      pnlR: risk > 0 ? r.report.realizedPnlUsd / risk : null, feesUsd: r.report.feesUsd, closeReason: timedOut ? "TIMEOUT_CLOSED" : failsafe ? "FAILSAFE_CLOSED" : r.report.reason,
     }, u);
   }
 

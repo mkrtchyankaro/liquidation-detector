@@ -75,5 +75,5 @@ if ! pm2 describe "${APP_NAME}" | grep -q "status.*online"; then
 fi
 
 echo "==> Startup user modes:"
-pm2 logs "${APP_NAME}" --lines 400 --nostream | grep -E "V9_USER_MODE|REAL_NOT_READY|REAL_DOWNGRADED|COLLECTOR_STARTED" | tail -10 || true
+pm2 logs "${APP_NAME}" --lines 400 --nostream | grep -E "V9_USER_MODE|V10_USER_MODE|V10_READY|V10_WALL_READY|REAL_NOT_READY|REAL_DOWNGRADED|COLLECTOR_STARTED" | tail -12 || true
 echo "==> Done. Previous build kept in dist.prev/ for quick rollback."

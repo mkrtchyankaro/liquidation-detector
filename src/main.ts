@@ -35,6 +35,7 @@ import {
   type V10UserRef,
 } from "./strategy/v10/v10-live.service";
 import { V10BookRecorder } from "./strategy/v10/v10-book";
+import { BinanceMongoWallSource } from "./strategy/v10/wall-data";
 import { V10ZoneFinder } from "./strategy/v10/v10-zone";
 import { V10Repository } from "./strategy/v10/v10-repository";
 
@@ -292,6 +293,7 @@ async function main(): Promise<void> {
           Date.now,
           new V10BookRecorder(mongo.db),
           new V10ZoneFinder(),
+          new BinanceMongoWallSource(mongo.db),
         )
       : null;
   if (v10)

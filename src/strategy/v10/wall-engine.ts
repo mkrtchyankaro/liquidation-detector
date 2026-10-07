@@ -165,8 +165,6 @@ export interface WallParams {
   tpPct: number;
   roomRatio: number;
   maxStopPct: number;
-  /** research (Oct 7): the TP at this many times the SL distance instead of tpPct (absent = tpPct, the live rule) */
-  tpR?: number;
 }
 export interface WallSignal {
   side: "LONG" | "SHORT";
@@ -240,15 +238,8 @@ export class WallTracker {
       if (short ? !outU : !outL) continue;
       const side = short ? "upper" : "lower";
       const entry = c.c,
-        stop = short ? uw.hi : lw.lo;
-      const tp =
-        p.tpR !== undefined
-          ? short
-            ? entry - p.tpR * (stop - entry)
-            : entry + p.tpR * (entry - stop)
-          : short
-            ? entry * (1 - p.tpPct / 100)
-            : entry * (1 + p.tpPct / 100);
+        stop = short ? uw.hi : lw.lo,
+        tp = short ? entry * (1 - p.tpPct / 100) : entry * (1 + p.tpPct / 100);
       const riskPct = (100 * Math.abs(stop - entry)) / entry;
       const drop = (): void => {
         this.touched[side] = false;

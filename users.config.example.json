@@ -43,6 +43,11 @@
     "own": false,
     "ownSlPct": 1,
     "ownTpPct": 2,
+    "wall": false,
+    "wallTpPct": 2,
+    "wallRoomRatio": 1.33,
+    "wallTimeoutHours": 24,
+    "wallExcludeSymbols": ["ETHUSDT"],
     "userModes": { "main": "PAPER", "karo": "OFF" },
     "perUser": {
       "main": { "own": true },
