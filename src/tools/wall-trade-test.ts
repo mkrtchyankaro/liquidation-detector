@@ -38,6 +38,8 @@
  *   --h1 --rrtest  (Oct 7) WICK, room >= 1.33x, the TP three ways: fixed --tp % · RR (TP = --rr x the SL distance) ·
  *        RR + BREAKEVEN (once the price went --be R our way, the SL moves to the entry +0.1% -- the fees are covered).
  *        Results also in R: the position is sized by the SL, so 1R = the $ risked (e.g. $50).
+ *   --h1 --final  (Oct 7) the live rule (WICK, room >= 1.33x, TP --tp % (2), SL <= --maxsl % (1.5)) with the time limit
+ *        24h / 48h / 72h / none (none: a trade stays until its SL or TP; still open at the end = not counted, shown)
  *   --h1 --brtest  (Oct 7) WICK, room >= 1.33x, TP --tp % (2), SL <= --maxsl % (1.5): as now · a BROKEN wall voids the
  *        field and waits 12h / 24h for the new walls (wall-engine.ts rebuildHours)
  *   --h1 --betest  (Oct 7) WICK, room >= 1.33x, TP --tp % (2): as now · + BREAKEVEN at 1R · SL <= --maxsl % (1.5) ·
@@ -140,6 +142,7 @@ interface HT {
   net: number;
   risk: number;
   beOn?: boolean;
+  heldH?: number;
   oiStay: number;
   oiSig: number;
   sq: number;
@@ -180,7 +183,8 @@ async function main(): Promise<void> {
   await client.connect();
   const all: Trade[] = [];
   const h1 = argv.includes("--h1"),
-    hAll: HT[] = [];
+    hAll: HT[] = [],
+    openEnd: Array<{ v: string; sym: string }> = [];
   const TPP = Number(arg("tp", "1.5")),
     MAXSTOP = Number(arg("maxstop", "1000"));
   interface Var {
@@ -191,75 +195,86 @@ async function main(): Promise<void> {
     beR?: number;
     maxSl?: number;
     rebuild?: number;
+    timeoutH?: number;
   }
   const MAXSL = Number(arg("maxsl", "1.5"));
   const RR = Number(arg("rr", "2")),
     BE = Number(arg("be", "1"));
-  const VARIANTS: Var[] = argv.includes("--brtest")
-    ? [
-        {
-          v: `WICK TP ${TPP}% SL<=${MAXSL}%`,
+  const VARIANTS: Var[] = argv.includes("--final")
+    ? [24, 48, 72, Infinity].map(
+        (h): Var => ({
+          v: `TP ${TPP}% SL<=${MAXSL}% · ${Number.isFinite(h) ? `${h}h limit` : "NO time limit"}`,
           kind: "WICK",
           ratio: 1.33,
           maxSl: MAXSL,
-        },
-        ...[12, 24].map(
-          (h): Var => ({
-            v: `... + broken wall, wait ${h}h`,
-            kind: "WICK",
-            ratio: 1.33,
-            maxSl: MAXSL,
-            rebuild: h,
-          }),
-        ),
-      ]
-    : argv.includes("--betest")
+          timeoutH: h,
+        }),
+      )
+    : argv.includes("--brtest")
       ? [
-          { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
-          {
-            v: `WICK TP ${TPP}% + BE at 1R`,
-            kind: "WICK",
-            ratio: 1.33,
-            beR: 1,
-          },
           {
             v: `WICK TP ${TPP}% SL<=${MAXSL}%`,
             kind: "WICK",
             ratio: 1.33,
             maxSl: MAXSL,
           },
-          {
-            v: `WICK TP ${TPP}% SL<=${MAXSL}% + BE`,
-            kind: "WICK",
-            ratio: 1.33,
-            maxSl: MAXSL,
-            beR: 1,
-          },
-        ]
-      : argv.includes("--rrtest")
-        ? [
-            { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
-            { v: `WICK RR ${RR}`, kind: "WICK", ratio: 1.33, tpR: RR },
-            {
-              v: `WICK RR ${RR} + BE at ${BE}R`,
+          ...[12, 24].map(
+            (h): Var => ({
+              v: `... + broken wall, wait ${h}h`,
               kind: "WICK",
               ratio: 1.33,
-              tpR: RR,
-              beR: BE,
+              maxSl: MAXSL,
+              rebuild: h,
+            }),
+          ),
+        ]
+      : argv.includes("--betest")
+        ? [
+            { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
+            {
+              v: `WICK TP ${TPP}% + BE at 1R`,
+              kind: "WICK",
+              ratio: 1.33,
+              beR: 1,
+            },
+            {
+              v: `WICK TP ${TPP}% SL<=${MAXSL}%`,
+              kind: "WICK",
+              ratio: 1.33,
+              maxSl: MAXSL,
+            },
+            {
+              v: `WICK TP ${TPP}% SL<=${MAXSL}% + BE`,
+              kind: "WICK",
+              ratio: 1.33,
+              maxSl: MAXSL,
+              beR: 1,
             },
           ]
-        : (
-            [
-              ["BODY", 1.33],
-              ["BODY", 1.5],
-              ["WICK", 1.33],
-              ["WICK", 1.5],
-            ] as const
-          ).map(([kind, ratio]) => ({
-            v: `${kind} room>=${ratio}x stop`,
-            kind,
-            ratio,
-          }));
+        : argv.includes("--rrtest")
+          ? [
+              { v: `WICK TP ${TPP}%`, kind: "WICK", ratio: 1.33 },
+              { v: `WICK RR ${RR}`, kind: "WICK", ratio: 1.33, tpR: RR },
+              {
+                v: `WICK RR ${RR} + BE at ${BE}R`,
+                kind: "WICK",
+                ratio: 1.33,
+                tpR: RR,
+                beR: BE,
+              },
+            ]
+          : (
+              [
+                ["BODY", 1.33],
+                ["BODY", 1.5],
+                ["WICK", 1.33],
+                ["WICK", 1.5],
+              ] as const
+            ).map(([kind, ratio]) => ({
+              v: `${kind} room>=${ratio}x stop`,
+              kind,
+              ratio,
+            }));
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
     for (const sym of syms) {
@@ -339,7 +354,17 @@ async function main(): Promise<void> {
         console.log(
           `\n═══ ${sym} · 1h rule · from ${utc(testFrom)} UTC${newCoin ? " · NEW coin" : ""} ═══`,
         );
-        for (const { v, kind, ratio, tpR, beR, maxSl, rebuild } of VARIANTS) {
+        for (const {
+          v,
+          kind,
+          ratio,
+          tpR,
+          beR,
+          maxSl,
+          rebuild,
+          timeoutH,
+        } of VARIANTS) {
+          const limit = (timeoutH ?? 24) * H;
           const tpPct = TPP,
             res: HT[] = [];
           let pos: HT | null = null,
@@ -358,11 +383,12 @@ async function main(): Promise<void> {
                 ? p.stop
                 : hitT
                   ? p.tp
-                  : x.t + Q15 - p.t >= D
+                  : x.t + Q15 - p.t >= limit
                     ? x.c
                     : NaN;
               if (Number.isFinite(out)) {
                 p.res = hitS ? (p.beOn ? "BE" : "STOP") : hitT ? "TP" : "24h";
+                p.heldH = (x.t + Q15 - p.t) / H;
                 p.net =
                   (100 * (long ? out - p.entry : p.entry - out)) / p.entry -
                   FEE;
@@ -430,6 +456,7 @@ async function main(): Promise<void> {
             `  ${v.padEnd(22)} ${String(res.length).padStart(3)} trades · TP ${res.filter((p) => p.res === "TP").length} · STOP ${res.filter((p) => p.res === "STOP").length} · 24h ${res.filter((p) => p.res === "24h").length} · avg stop ${res.length ? (res.reduce((a, p) => a + p.risk, 0) / res.length).toFixed(2) : "n/a"}% · sum ${sp(sm)}% · skipped: TP beyond the other wall ${noRoom}, room < ${ratio}x stop${maxSl !== undefined ? ` or SL > ${maxSl}%` : ""} ${bigStop}${rebuild !== undefined ? ` · walls broken ${breaks}` : ""}${pos ? ` · OPEN NOW ${(pos as HT).dir} ${utc((pos as HT).t)} entry ${px((pos as HT).entry)} stop ${px((pos as HT).stop)} tp ${px((pos as HT).tp)}` : ""}`,
           );
           hAll.push(...res);
+          if (pos) openEnd.push({ v, sym });
         }
         continue;
       }
@@ -572,6 +599,16 @@ async function main(): Promise<void> {
       console.log(
         `\n  ${v.padEnd(22)} ${String(l.length).padStart(3)} trades · win ${l.length ? Math.round((100 * w) / l.length) : 0}% · avg ${l.length ? sp(sm / l.length) : "n/a"}% · sum ${sp(sm, 1)}% · per $1000 per trade ${sp(sm * 10, 0)}$`,
       );
+      const held = l.map((p) => p.heldH ?? 0).sort((a, b) => a - b);
+      if (held.length)
+        console.log(
+          `      held: median ${held[Math.floor(held.length / 2)].toFixed(0)}h · longest ${held[held.length - 1].toFixed(0)}h · time-limit closes ${l.filter((p) => p.res === "24h").length} · still open at the end ${openEnd.filter((o) => o.v === v).length} (${
+            openEnd
+              .filter((o) => o.v === v)
+              .map((o) => o.sym.replace("USDT", ""))
+              .join(", ") || "-"
+          })`,
+        );
       console.log(
         `      IN R (sized by the SL): sum ${sp(sr, 1)}R · avg ${l.length ? sp(sr / l.length) : "n/a"}R · with $50 risk ${sp(sr * 50, 0)}$ · TP ${l.filter((p) => p.res === "TP").length} · SL ${l.filter((p) => p.res === "STOP").length} · BE ${l.filter((p) => p.res === "BE").length} · 24h ${l.filter((p) => p.res === "24h").length}`,
       );

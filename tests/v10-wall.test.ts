@@ -562,6 +562,10 @@ async function run(): Promise<void> {
         settings({ wallRebuildHours: 24 }).wallRebuildHours,
         24,
       );
+      assert.strictEqual(
+        settings({ wallTimeoutHours: null }).wallTimeoutHours,
+        null,
+      );
       assert.throws(
         () => settings({ wallRebuildHours: 0 }),
         /wallRebuildHours/,
@@ -786,6 +790,40 @@ async function run(): Promise<void> {
         ["CLOSED", "TIMEOUT_CLOSED", 107, E + 24 * H],
       );
       assert.ok(t.msgs.at(-1)!.startsWith("⏱ TIME OUT"), t.msgs.at(-1));
+    },
+  );
+
+  await scenario(
+    "live PAPER: no time limit (wallTimeoutHours null) -> no timeoutAt, still open after 2 days, no time-out line in the message",
+    async () => {
+      const store = fakeStore(),
+        t = tg();
+      let now = E + 100_000;
+      const users: V10UserRef[] = [
+        {
+          userId: "main",
+          mode: "PAPER",
+          riskUsd: 10,
+          binanceRest: null,
+          telegram: t,
+        },
+      ];
+      const svc = new V10LiveService(
+        settings({ wallTimeoutHours: null }),
+        () => users,
+        loaderOf(minuteBars()),
+        store,
+        () => now,
+        null,
+        null,
+        source(market()),
+      );
+      await svc.onMinute();
+      assert.strictEqual(store.trades[0].timeoutAt, undefined);
+      assert.ok(!t.msgs[0].includes("⏱"), t.msgs[0]);
+      now = E + 29 * H;
+      await svc.onMinute();
+      assert.strictEqual(store.trades[0].state, "OPEN");
     },
   );
 

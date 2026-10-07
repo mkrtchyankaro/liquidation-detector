@@ -44,7 +44,7 @@
  *     "wallTpPct": 2,               // the TP % from the entry (tested 1.5 / 2 / 2.5: +23 / +24 / +22%)
  *     "wallRoomRatio": 1.33,        // entry -> the other wall's far edge must be >= this x (entry -> SL)
  *     "wallMaxStopPct": null,       // optional: no trade when the SL is more than this % away (null = off)
- *     "wallTimeoutHours": 24,       // a trade still open after this long is closed at market
+ *     "wallTimeoutHours": 24,       // a trade still open after this long is closed at market (null = no limit)
  *     "wallRebuildHours": null,     // optional: a 1h BODY wholly beyond a wall's far edge = BROKEN -> both walls void, the
  *                                 //   new field starts there, no WALL signal on the coin for this many hours (null = off)
  *     "wallExcludeSymbols": ["ETHUSDT"],  // coins that give no WALL signals (BTCUSDT never does)
@@ -121,7 +121,7 @@ export interface V10Settings {
   /** the alts to choose from (never BTCUSDT) */
   symbols: string[];
   /** Oct 7: part 3 WALL -- block default on / off and its rule (shared by every user: the signals are shared) */
-  wall: boolean; wallTpPct: number; wallRoomRatio: number; wallMaxStopPct: number | null; wallTimeoutHours: number; wallRebuildHours: number | null;
+  wall: boolean; wallTpPct: number; wallRoomRatio: number; wallMaxStopPct: number | null; wallTimeoutHours: number | null; wallRebuildHours: number | null;
   /** the coins WALL watches (symbols minus wallExcludeSymbols) */
   wallSymbols: string[];
   userModes: Map<string, V10UserMode>;
@@ -234,7 +234,8 @@ export function parseV10Settings(raw: unknown, knownUserIds: readonly string[], 
     if (!isNum(v.wallMaxStopPct, 0.1, 20)) throw new Error(`"v10.wallMaxStopPct" must be a percent between 0.1 and 20, or null (off)`);
     wallMaxStopPct = v.wallMaxStopPct;
   }
-  const wallTimeoutHours = num("wallTimeoutHours", 24, 1, 168, "a number of hours between 1 and 168");
+  // null = no time limit (Oct 7, Johnny: a trade stays until its SL or TP)
+  const wallTimeoutHours = v.wallTimeoutHours === null ? null : num("wallTimeoutHours", 24, 1, 168, "a number of hours between 1 and 168, or null (no limit)");
   let wallRebuildHours: number | null = null;
   if (v.wallRebuildHours !== undefined && v.wallRebuildHours !== null) {
     if (!isNum(v.wallRebuildHours, 1, 168)) throw new Error(`"v10.wallRebuildHours" must be a number of hours between 1 and 168, or null (off)`);

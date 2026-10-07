@@ -139,7 +139,7 @@ export class V10LiveService {
       const r = rulesFor(s, u.userId);
       return `${u.userId}:${u.mode}(${[r.short ? "S" : "", r.long ? "L" : ""].join("") || "none"},btc:${r.btc ? `sl${r.slPct}/tp${r.tpPct}` : "off"},alt:${r.own ? `sl${r.ownSlPct}/tp${r.ownTpPct}${r.ownLong ? "+L" : ""}` : "off"}${r.maxOpen ? `,max${r.maxOpen}` : ""})`;
     }).join(" ") || "(none)"}`);
-    log.warn(`[V10_WALL_READY] wall=${s.wall} tp=${s.wallTpPct}% room>=${s.wallRoomRatio}x maxStop=${s.wallMaxStopPct ?? "off"} timeout=${s.wallTimeoutHours}h rebuild=${s.wallRebuildHours ?? "off"} coins=${s.wallSymbols.length} source=${this.wallSource ? "yes" : "NONE"} users=${this.users().map((u) => {
+    log.warn(`[V10_WALL_READY] wall=${s.wall} tp=${s.wallTpPct}% room>=${s.wallRoomRatio}x maxStop=${s.wallMaxStopPct ?? "off"} timeout=${s.wallTimeoutHours !== null ? `${s.wallTimeoutHours}h` : "none"} rebuild=${s.wallRebuildHours ?? "off"} coins=${s.wallSymbols.length} source=${this.wallSource ? "yes" : "NONE"} users=${this.users().map((u) => {
       const r = rulesFor(s, u.userId);
       return `${u.userId}:${u.mode}(${r.wall ? `on,$${r.wallRiskUsd ?? u.riskUsd}${r.wallMaxOpen ? `,max${r.wallMaxOpen}` : ""}` : "off"})`;
     }).join(" ") || "(none)"}`);
@@ -413,7 +413,7 @@ export class V10LiveService {
       state: "OPEN", createdAt: w.candleEnd, entryPrice: null, slPrice: w.stop, tpPrice: null, slPct: w.riskPct, tpPct: this.settings.wallTpPct,
       quantity: null, plannedRiskUsd: riskUsd, actualRiskUsd: null, binance: null,
       closedAt: null, exitPrice: null, pnlUsd: null, pnlR: null, feesUsd: null, closeReason: null, failureReason: null, closeAttempts: 0, entryInProgress: true, entryStartedAt: null,
-      wall: w, timeoutAt: w.candleEnd + this.settings.wallTimeoutHours * H,
+      wall: w, ...(this.settings.wallTimeoutHours !== null ? { timeoutAt: w.candleEnd + this.settings.wallTimeoutHours * H } : {}),
     };
     const skip = async (reason: string, tell: boolean, state: "SKIPPED" | "FAILED" = "SKIPPED"): Promise<void> => {
       const t = { ...base, state, failureReason: reason, entryInProgress: false };
