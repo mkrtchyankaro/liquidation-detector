@@ -88,7 +88,13 @@ interface Ev {
   real: boolean;
   res: "TARGET" | "STOP" | "-";
   early: number;
+  first: boolean;
+  depth: number;
+  sims: number[];
 }
+// stop placements tried for every trigger: d = how deep into the wall the stop is (0 = the near edge, 1 = the far edge);
+// the last one = stop at the far edge, but get out at the close of the first 15m candle that closes back inside the wall
+const DEPTHS = [0, 0.25, 0.5, 0.75, 1];
 interface Exit {
   name: string;
   bounce: boolean;
@@ -323,6 +329,36 @@ async function main(): Promise<void> {
             break;
           }
         }
+        // the worst point against us before TARGET / STOP (or 24h), as a depth into the wall: 0% = near edge, 100% = far edge
+        const wid = hi - lo,
+          stopAt = (d: number): number => (up ? hi - d * wid : lo + d * wid);
+        let worst = entry;
+        for (let m = k + 1; m < Math.min(Qs.length, k + 97); m++) {
+          worst = up ? Math.min(worst, Qs[m].l) : Math.max(worst, Qs[m].h);
+          if (
+            up
+              ? Qs[m].l <= stop || Qs[m].h >= target
+              : Qs[m].h >= stop || Qs[m].l <= target
+          )
+            break;
+        }
+        const depth = (100 * (up ? hi - worst : worst - lo)) / wid;
+        // net % (fee 0.1) for each stop placement; NaN = neither in 24h
+        const sim = (d: number, closeOut: boolean): number => {
+          const st = stopAt(d),
+            risk = (100 * Math.abs(entry - st)) / entry,
+            rew = (100 * Math.abs(target - entry)) / entry;
+          for (let m = k + 1; m < Math.min(Qs.length, k + 97); m++) {
+            if (up ? Qs[m].l <= st : Qs[m].h >= st) return -risk - 0.1;
+            if (up ? Qs[m].h >= target : Qs[m].l <= target) return rew - 0.1;
+            if (closeOut && (up ? Qs[m].c <= hi : Qs[m].c >= lo))
+              return (
+                (100 * (up ? Qs[m].c - entry : entry - Qs[m].c)) / entry - 0.1
+              );
+          }
+          return NaN;
+        };
+        const sims = [...DEPTHS.map((d) => sim(d, false)), sim(1, true)];
         const risk = (100 * Math.abs(entry - stop)) / entry,
           reward = (100 * Math.abs(target - entry)) / entry;
         const early = exitClose > 0 ? (exitClose - (x.t + 15 * M)) / M : NaN;
@@ -340,10 +376,10 @@ async function main(): Promise<void> {
             ),
           );
         console.log(
-          `    -> ${fake ? "FAKE (closed back in the wall within 1h)" : "REAL (stayed out 1h)"} · ${res === "-" ? "neither in 24h" : `${res} first ${utc(when)}`}${Number.isFinite(early) ? ` · ${early >= 0 ? `${early} min BEFORE` : `${-early} min AFTER`} the 1h exit candle closed` : ""}`,
+          `    -> ${fake ? "FAKE (closed back in the wall within 1h)" : "REAL (stayed out 1h)"} · ${res === "-" ? "neither in 24h" : `${res} first ${utc(when)}`} · worst against: ${depth <= 0 ? "never back in the wall" : `${depth.toFixed(0)}% into the wall (${px(worst)})`}${Number.isFinite(early) ? ` · ${early >= 0 ? `${early} min BEFORE` : `${-early} min AFTER`} the 1h exit candle closed` : ""}`,
         );
         if (k + 97 <= Qs.length || res !== "-")
-          evs.push({ real: !fake, res, early });
+          evs.push({ real: !fake, res, early, first: n === 1, depth, sims });
       }
       if (n === 0)
         console.log(`    15m: no candle body fully outside the wall yet`);
@@ -496,6 +532,41 @@ async function main(): Promise<void> {
           `  15m trigger vs the 1h exit candle close: median ${er.map((e) => e.early).sort((x, y) => x - y)[Math.floor(er.length / 2)]} min earlier`,
         );
       console.log(`  (fees ~0.1% per trade are not in TARGET / STOP)`);
+      const dl = evs
+        .filter((e) => e.res === "TARGET")
+        .map((e) => Math.max(0, e.depth))
+        .sort((x, y) => x - y);
+      const pc = (p: number): string =>
+        dl.length
+          ? `${dl[Math.min(dl.length - 1, Math.floor((p / 100) * dl.length))].toFixed(0)}%`
+          : "n/a";
+      if (dl.length)
+        console.log(
+          `  triggers that reached TARGET: how deep back into the wall first -- median ${pc(50)} · 75% of them <= ${pc(75)} · 90% <= ${pc(90)} · never back in: ${dl.filter((d) => d === 0).length}/${dl.length}`,
+        );
+      console.log(
+        `\n  STOP PLACEMENT (same triggers, fee 0.1%; open after 24h = left out)`,
+      );
+      const names = [
+        ...DEPTHS.map((d) => `stop ${Math.round(d * 100)}% into the wall`),
+        "stop at far edge + out on a 15m close back in",
+      ];
+      for (const [label, set] of [
+        ["all triggers", evs],
+        ["first trigger of each visit", evs.filter((e) => e.first)],
+      ] as const) {
+        console.log(`   ${label}:`);
+        names.forEach((nm, j) => {
+          const v = set.map((e) => e.sims[j]).filter(Number.isFinite);
+          const w = v.filter((x) => x > 0).length;
+          console.log(
+            `     ${nm.padEnd(46)} n=${String(v.length).padStart(3)}  win ${v.length ? Math.round((100 * w) / v.length) : 0}%  avg ${v.length ? sp(v.reduce((a, b) => a + b, 0) / v.length) : "n/a"}%  sum ${sp(
+              v.reduce((a, b) => a + b, 0),
+              1,
+            )}%`,
+          );
+        });
+      }
     }
     console.log(`(one coin, ~2 weeks -- a look, not proof)`);
   } finally {
