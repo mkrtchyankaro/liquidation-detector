@@ -1,6 +1,7 @@
 /**
  * DATA AVAILABILITY AUDIT (Johnny, Oct 9 2026). READ-ONLY: it only READS our MongoDB (find / aggregate / count) and
  * writes one text file under reports/; it changes nothing in the DB, the collector or the bot. No Binance calls.
+ * Oct 9: no server-side sort any more (it hit MongoDB's 32 MB sort limit): min/max by $group, then one day at a time.
  * For one coin it walks EVERY collection in the DB that holds documents of that coin and prints:
  *   first / last time, rows, the typical spacing (median gap) and the biggest gaps, the fields of one document,
  *   and what the price in it really is (from the collector code, see PRICE_NOTE).
@@ -99,35 +100,62 @@ async function main(): Promise<void> {
       }
       const toMs = (v: unknown): number =>
         v instanceof Date ? v.getTime() : Number(v);
-      // stream only the time field, in time order (an index on {symbol, time} exists for the big ones; allowDiskUse otherwise)
-      const cur = col.aggregate<Document>(
-        [
-          { $match: { symbol: sym } },
-          { $project: { _id: 0, x: `$${tf}` } },
-          { $sort: { x: 1 } },
-        ],
-        { allowDiskUse: true },
-      );
+      // first / last without sorting (a $group needs almost no memory), then the times read ONE DAY AT A TIME by a range
+      // query and sorted in this process -- no server-side sort, so no memory limit on the DB (the first version hit
+      // MongoDB's 32 MB sort limit on oi_second_observations)
+      const mm = (
+        await col
+          .aggregate<Document>([
+            { $match: { symbol: sym } },
+            {
+              $group: {
+                _id: null,
+                a: { $min: `$${tf}` },
+                b: { $max: `$${tf}` },
+              },
+            },
+          ])
+          .toArray()
+      )[0];
+      const isDate = one[tf] instanceof Date;
+      const lo = toMs(mm?.a),
+        hi = toMs(mm?.b);
       let n = 0,
         first = NaN,
         prev = NaN;
       const gaps: number[] = [];
       const big: { a: number; g: number }[] = [];
-      for await (const d of cur) {
-        const t = toMs(d.x);
-        if (!Number.isFinite(t)) continue;
-        if (n === 0) first = t;
-        else {
-          const g = t - prev;
-          if (gaps.length < 200_000) gaps.push(g);
-          if (big.length < nGaps || g > big[big.length - 1].g) {
-            big.push({ a: prev, g });
-            big.sort((x, y) => y.g - x.g);
-            if (big.length > nGaps) big.pop();
-          }
+      for (
+        let d0 = Math.floor(lo / 86_400_000) * 86_400_000;
+        d0 <= hi;
+        d0 += 86_400_000
+      ) {
+        const range = isDate
+          ? { $gte: new Date(d0), $lt: new Date(d0 + 86_400_000) }
+          : { $gte: d0, $lt: d0 + 86_400_000 };
+        const ts: number[] = [];
+        for await (const d of col.find(
+          { symbol: sym, [tf]: range },
+          { projection: { _id: 0, [tf]: 1 } },
+        )) {
+          const t = toMs(d[tf]);
+          if (Number.isFinite(t)) ts.push(t);
         }
-        prev = t;
-        n++;
+        ts.sort((x, y) => x - y);
+        for (const t of ts) {
+          if (n === 0) first = t;
+          else {
+            const g = t - prev;
+            if (gaps.length < 200_000) gaps.push(g);
+            if (big.length < nGaps || g > big[big.length - 1].g) {
+              big.push({ a: prev, g });
+              big.sort((x, y) => y.g - x.g);
+              if (big.length > nGaps) big.pop();
+            }
+          }
+          prev = t;
+          n++;
+        }
       }
       gaps.sort((x, y) => x - y);
       const med = gaps.length ? gaps[Math.floor(gaps.length / 2)] : NaN;
