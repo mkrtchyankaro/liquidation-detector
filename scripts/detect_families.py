@@ -291,7 +291,7 @@ def main():
                 if a.source == "db":
                     raise SystemExit(msg + " -- nothing to detect. (Binance public klines: --source binance)")
                 raise SystemExit(msg + " -- stopped. Run with --source binance to use Binance public 4H klines instead.")
-            notes.append(f"DB minute_bars for {sym}: {utc(span[0])} -> {utc(span[1])} UTC (mark price from the 1/s polls)")
+            notes.append(f"DB minute_bars for {sym}: {utc(span[0])} -> {utc(span[1])} UTC (book mid price sampled at the ~1/s OI polls, not traded price)")
         if a.source in ("auto", "binance"):
             bn = binance_4h(sym, hist_from, end)
             for k, v in bn.items():
