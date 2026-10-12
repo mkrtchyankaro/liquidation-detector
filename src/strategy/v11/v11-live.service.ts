@@ -8,7 +8,7 @@ import { estimateFeesUsd } from "../shared/fees";
 import type { MinBarLoader } from "../shared/minute-loader";
 import { v11RulesFor, type V11Settings } from "./v11-config";
 import type { V11Source } from "./v11-data";
-import { decideAt, H, type V11Side, type V11Signal } from "./v11-engine";
+import { decideAt, H, tpFor, type V11Side, type V11Signal } from "./v11-engine";
 import type { V11SignalDoc, V11Store, V11TradeDoc } from "./v11-repository";
 import { formatV11Close, formatV11Entry, formatV11Failure, v11SignalLine, V11_HEAD } from "./v11-telegram";
 
@@ -196,7 +196,7 @@ export class V11LiveService {
   static levels(sig: Pick<V11SignalDoc, "side" | "price" | "stop">, slBufferPct: number, tpR: number): { sl: number; tp: number; riskPct: number } {
     const d = sig.side === "SHORT" ? 1 : -1;
     const sl = sig.stop * (1 + (d * slBufferPct) / 100);
-    const tp = sig.price - tpR * (sl - sig.price);
+    const tp = tpFor(sig.price, sl, tpR);
     return { sl, tp, riskPct: (100 * d * (sl - sig.price)) / sig.price };
   }
 
@@ -494,5 +494,3 @@ export class V11LiveService {
     }
   }
 }
-
-export const V11_INTERNALS = { READY_MS, STALE_MS };

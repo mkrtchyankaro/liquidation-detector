@@ -2,7 +2,7 @@
  * DC on 15m candles + the OI rule. Usage: npx tsx tests/dc15.test.ts
  */
 import * as assert from "assert";
-import { atrBefore, candles, coinInWindow, oiChange, outcome, ownness, pastRank, turns, type Candle, type MinBar, type Turn } from "../src/strategy/lib/dc15";
+import { atrBefore, candles, coinInWindow, ownness, pastRank, turns, type Candle, type MinBar, type Turn } from "../src/strategy/lib/dc15";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -57,12 +57,6 @@ scenario("no look-ahead: the turns on cut data are the same as on full data up t
   const full = turns(mk(story), 1, 14, true), cut = turns(mk(story).slice(0, 22), 1, 14, true);
   assert.deepStrictEqual(cut, full.filter((x) => x.t <= 22 * W));
 });
-scenario("outcome: signed by direction, best / worst inside the window", () => {
-  const bars: MinBar[] = [0, 1, 2, 3].map((i) => ({ t: i * 60_000, high: 101 + i, low: 99 - i, close: 100 - i, oiFirst: 1, oiLast: 1 }));
-  const o = outcome(bars, 0, 100, "DOWN", [1 / 30], 1);
-  assert.ok(Math.abs(o.at[0] - 1) < 1e-9, String(o.at[0]));   // after 2 minutes close 99 -> +1% for a SHORT
-  assert.ok(o.worst < 0 && o.best > 0);
-});
 scenario("pastRank: compared only with the accepted moves of the window BEFORE it", () => {
   const H = 3_600_000;
   const t = (h: number, oi: number, accepted = true): Turn => ({ t: h * H, newDir: "UP", price: 1, moveStartT: 0, extreme: 1, extremeT: 0, movePct: -oi / 10, moveOiPct: oi, candleOiPct: 0, label: "", accepted, atr: 1, moveLiqL: 0, moveLiqS: 0, candleLiqL: 0, candleLiqS: 0, moveLiq: "NONE", candleLiq: "NONE", forced: NaN });
@@ -101,11 +95,6 @@ scenario("price filter: movePct = start close -> extreme; pastRank by price uses
   const list = [t(0, 1, 5), t(1, 3, 1)];
   assert.deepStrictEqual(pastRank(list, 24).map((r) => r.rank), [1, 1]);                 // OI: 3 > 1
   assert.deepStrictEqual(pastRank(list, 24, (x) => x.movePct).map((r) => r.rank), [1, 2]); // price: 1 < 5
-});
-scenario("coin OI change: last known OI at each time, no look-ahead", () => {
-  const oi = new Map<number, number>([[0, 100], [60_000, 110], [120_000, 999]]);
-  assert.ok(Math.abs(oiChange(oi, 60_000, 120_000) - 10) < 1e-9); // at 2:00 the minute 2:00 is not closed yet -> 110
-  assert.ok(Number.isNaN(oiChange(oi, 0, 60_000)));                // nothing known before 0:00
 });
 scenario("x fix: with a direction, the move is measured to the extreme, not to a close that came back", () => {
   const btc = new Map<number, number>(), coin = new Map<number, number>();

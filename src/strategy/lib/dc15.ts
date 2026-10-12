@@ -121,25 +121,6 @@ export function turns(c: readonly Candle[], k: number, n: number, useOi: boolean
   return out;
 }
 
-/** after a signal at time t (price p, direction dir): % in the signal's direction after h hours, best and worst within maxH */
-export function outcome(bars: readonly MinBar[], t: number, p: number, dir: Dir, hours: number[], maxH: number): { at: number[]; best: number; worst: number } {
-  const sg = dir === "UP" ? 1 : -1;
-  const at = hours.map((h) => {
-    const target = t + h * 3_600_000;
-    let v = NaN;
-    for (const b of bars) { if (b.t >= target) break; if (b.t >= t) v = b.close; }
-    return Number.isFinite(v) && bars.length && bars[bars.length - 1].t + M >= target ? (sg * 100 * (v - p)) / p : NaN;
-  });
-  let best = -Infinity, worst = Infinity;
-  for (const b of bars) {
-    if (b.t < t) continue;
-    if (b.t >= t + maxH * 3_600_000) break;
-    const fav = sg * 100 * ((dir === "UP" ? b.high : b.low) - p) / p, adv = sg * 100 * ((dir === "UP" ? b.low : b.high) - p) / p;
-    best = Math.max(best, fav); worst = Math.min(worst, adv);
-  }
-  return { at, best: Number.isFinite(best) ? best : NaN, worst: Number.isFinite(worst) ? worst : NaN };
-}
-
 /**
  * HOW BIG WAS THIS MOVE'S OI, COMPARED WITH THE MOVES BEFORE IT? (Johnny, Oct 2) No threshold: each accepted turn's
  * |move OI %| (or another `key`, e.g. the move's price %) against the accepted turns of the `windowH` hours BEFORE it (known at the signal -> live-safe).
@@ -156,14 +137,6 @@ export function pastRank(list: readonly Turn[], windowH: number, key: (t: Turn) 
     return { turn: t, rank: bigger + 1, share: before.length ? (before.length - bigger) / before.length : NaN, prior: before.length };
   });
 }
-
-/**
- * THE COINS IN THE MOVE (Johnny, Oct 2): over the BTC move window [from, to] -- known at the signal:
- *   pct     the coin's move (close at `from` -> close at `to`), x = pct / BTC's pct
- *           with `up` given: both moves to their furthest close in that direction inside the window (the extreme)
- *   follow  R2 of the coin's 1-minute returns on BTC's inside the window (1 = moved exactly with BTC)
- */
-export interface Close { t: number; close: number }
 export function priceAt(bars: ReadonlyMap<number, number>, t: number): number {
   for (let k = Math.floor(t / M) * M - M; k >= t - 6 * M; k -= M) { const v = bars.get(k); if (v) return v; }
   return NaN;
@@ -203,12 +176,6 @@ export function coinInWindow(coin: ReadonlyMap<number, number>, btc: ReadonlyMap
     follow = sxx > 0 && syy > 0 ? (sxy * sxy) / (sxx * syy) : NaN;
   }
   return { pct, btcPct, x: btcPct !== 0 ? pct / btcPct : NaN, follow, points: xs.length };
-}
-
-/** OI change % of a coin between two times, from its minute OI (the last known OI at each time -- live-safe) */
-export function oiChange(oi: ReadonlyMap<number, number>, from: number, to: number): number {
-  const a = priceAt(oi, from), b = priceAt(oi, to);
-  return a > 0 && b > 0 ? 100 * (b / a - 1) : NaN;
 }
 
 /**

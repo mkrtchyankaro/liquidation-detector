@@ -16,13 +16,9 @@ import {
 } from "./collector/minute-bars";
 import { checkRealReadiness } from "./execution/readiness";
 import {
-  mongoBarLoader,
-  ZzPaperService,
-  type ZzUserRef,
-} from "./strategy/zz/zz-paper.service";
-import {
   mongoMinuteLoader,
   OaPaperService,
+  type OaUserRef,
 } from "./strategy/oa/oa-paper.service";
 import {
   mongoV10Loader,
@@ -45,7 +41,6 @@ const log = childLogger({ mod: "main" });
  *
  *   MarketCollector   Binance liquidations + OI (1/s) -> MongoDB
  *   ContextCollector  long/short ratios (5m) + funding/premium (1m) -> MongoDB (research only)
- *   ZzPaperService    OI-zigzag strategy, PAPER only: Telegram messages to the "zz" users, never orders
  *   OaPaperService    OI-accumulation strategy (1h), PAPER only: Telegram messages to the "oa" users, never orders
  *   MinuteBarWriter   1 row per symbol per minute (price, OI, liquidations), kept 365 days (research only)
  *   V10LiveService    every 15m candle: BTC top / bottom (DC + OI rule, RANK 1) -> the alts that moved most with BTC
@@ -94,7 +89,7 @@ async function main(): Promise<void> {
 
   if (config.legacyBlocks.length)
     log.warn(
-      `[LEGACY_CONFIG_IGNORED] users.config.json still has ${config.legacyBlocks.map((b) => `"${b}"`).join(", ")} -- V9 was removed, the block is ignored (it can be deleted)`,
+      `[LEGACY_CONFIG_IGNORED] users.config.json still has ${config.legacyBlocks.map((b) => `"${b}"`).join(", ")} -- V9 / ZZ were removed, the block is ignored (it can be deleted)`,
     );
 
   // ── REAL only if every gate agrees AND the account proves it can trade (checked once per user, shared by V10 / V11) ──
@@ -222,33 +217,8 @@ async function main(): Promise<void> {
   const minuteBars = new MinuteBarWriter(env.symbols, mongo.db);
   minuteBars.start();
 
-  // OI-zigzag strategy: PAPER only (never places orders).
-  const zzUsers: ZzUserRef[] = config.zz.users
-    .map((id) => users.find((u) => u.userId === id))
-    .filter((u): u is UserConfig => !!u)
-    .map((u) => ({
-      userId: u.userId,
-      riskUsd: u.riskUsd,
-      telegram: telegramOf(u),
-    }));
-  const zz = config.zz.enabled
-    ? new ZzPaperService(
-        config.zz,
-        () => zzUsers,
-        mongoBarLoader(mongo.db),
-        mongo.db,
-      )
-    : null;
-  if (zz)
-    void zz
-      .start()
-      .catch((err) =>
-        log.error(
-          `[ZZ_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- ZZ PAPER not running, V10 / V11 unaffected`,
-        ),
-      );
   // OI-accumulation strategy (1h): PAPER only (never places orders).
-  const oaUsers: ZzUserRef[] = config.oa.users
+  const oaUsers: OaUserRef[] = config.oa.users
     .map((id) => users.find((u) => u.userId === id))
     .filter((u): u is UserConfig => !!u)
     .map((u) => ({
@@ -342,7 +312,6 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     log.info(`shutting down (${signal})`);
     v11?.stop();
-    zz?.stop();
     oa?.stop();
     v10?.stop();
     context.stop();

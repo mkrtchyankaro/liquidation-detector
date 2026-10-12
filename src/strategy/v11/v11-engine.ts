@@ -169,7 +169,7 @@ export function rallyAt(bars: ReadonlyArray<V11Bar | null>, k: number, side: V11
 const liqOf = (b: V11Bar, side: V11Side): number => (side === "SHORT" ? b.shortLiq : b.longLiq);
 
 /** is hour j a wick of the rally at k (the conditions only, not "the first one") */
-function wickCond(B: ReadonlyArray<V11Bar>, k: number, s: number, j: number, side: V11Side, norm: number): boolean {
+function wickCond(B: ReadonlyArray<V11Bar>, s: number, j: number, side: V11Side, norm: number): boolean {
   const d = sgn(side), x = B[j];
   let top = -Infinity;                                  // d x (the extreme since s, before j)
   for (let i = s; i < j; i++) top = Math.max(top, d * (d > 0 ? B[i].h : B[i].l));
@@ -201,10 +201,10 @@ export function wicksAt(bars: ReadonlyArray<V11Bar | null>, w: number, side: V11
     const B = bars as ReadonlyArray<V11Bar>;
     const s = B.findIndex((b) => b && b.t + H === rally.startT);
     const norm = quantile(B.slice(k - r.normHours, k).map((b) => liqOf(b, side)), r.liqPct);
-    if (!wickCond(B, k, s, w, side, norm)) continue;
+    if (!wickCond(B, s, w, side, norm)) continue;
     // the FIRST wick of this rally only
     let earlier = false;
-    for (let j = k + 1; j < w && !earlier; j++) if (j - 3 >= 0 && have(bars, j - 3, j) && wickCond(B, k, s, j, side, norm)) earlier = true;
+    for (let j = k + 1; j < w && !earlier; j++) if (j - 3 >= 0 && have(bars, j - 3, j) && wickCond(B, s, j, side, norm)) earlier = true;
     if (earlier) continue;
     const x = B[w], liq = liqOf(x, side);
     found.push({
@@ -252,8 +252,7 @@ export function decideAt(bars: ReadonlyArray<V11Bar | null>, i: number, side: V1
 }
 
 /** TP price for R (the reward in risks) from the entry and the SL */
-export function tpFor(side: V11Side, entry: number, stop: number, rr: number): number {
+export function tpFor(entry: number, stop: number, rr: number): number {
   // SHORT: stop above -> TP below; LONG: stop below -> TP above. Both: entry - R x (stop - entry)
-  void side;
   return entry - rr * (stop - entry);
 }

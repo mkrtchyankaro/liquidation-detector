@@ -1,8 +1,5 @@
 {
   "realOrdersEnabled": false,
-  "zz": {
-    "enabled": false
-  },
   "oa": {
     "enabled": true,
     "users": [

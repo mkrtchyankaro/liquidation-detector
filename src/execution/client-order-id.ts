@@ -35,13 +35,3 @@ export function strategyClientOrderId(userId: string, globalSignalId: string, pu
   if (id.length > 36) throw new Error(`clientOrderId exceeded Binance's 36-char limit: "${id}" (${id.length} chars)`);
   return id;
 }
-
-/** Confirms an id was produced by THIS strategy's scheme (by prefix)
- *  -- never used to decode identity; the Mongo strategy_orders row is
- *  the only source of the actual fields for a given id. Used by
- *  startup orphan recovery to filter candidates before consulting
- *  Mongo, and to positively rule OUT legacy V3 orders (prefix "v3")
- *  and manual/unrelated orders. */
-export function isStrategyOwnedOrderId(clientOrderId: string): boolean {
-  return clientOrderId.startsWith(PREFIX) && clientOrderId.length === PREFIX.length + HASH_HEX_LENGTH;
-}

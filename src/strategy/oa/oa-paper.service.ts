@@ -17,7 +17,7 @@ const log = childLogger({ mod: "oa-paper" });
 
 /**
  * OA PAPER -- the OI-accumulation strategy running live, PAPER ONLY (Telegram messages, never a Binance order).
- * Completely separate from V9 and ZZ: own settings, own collection (oa_paper_trades), own messages.
+ * Completely separate from V10 and V11: own settings, own collection (oa_paper_trades), own messages.
  *
  * Every minute at hh:mm:45 (minute_bars are written at :20):
  *   1. open OA trades: SL / TP / 48h time exit checked on the new minutes (SL first on a same-minute tie)
@@ -209,7 +209,7 @@ export class OaPaperService {
         } catch (err) {
           log.error(
             { symbol, err: err instanceof Error ? err.message : String(err) },
-            "[OA_SYMBOL_FAILED] -- isolated, V9/ZZ and other symbols unaffected",
+            "[OA_SYMBOL_FAILED] -- isolated, other symbols unaffected",
           );
         }
       }

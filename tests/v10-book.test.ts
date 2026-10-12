@@ -4,7 +4,7 @@
  */
 import * as assert from "assert";
 import { bookBands, bookView, bookWalls, formatBookLines, formatWallLines, supportPct, type BookBands } from "../src/strategy/v10/v10-book";
-import { roomLine } from "../src/strategy/v10/v10-telegram";
+import {  } from "../src/strategy/v10/v10-telegram";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {
@@ -76,15 +76,6 @@ scenario("wall lines: the biggest buyer / seller with x the 15m volume; the bigg
   assert.ok(none.includes("TP-ի ճանապարհին գնորդների մեծ պատ չկա"), none);
   assert.deepStrictEqual(formatWallLines(bookView("SHORT", T - W, T, null, snap(50, 50)), { side: "SHORT", entry: 100, tp: 98 }), []);
   if (process.env.SHOW) console.log(l);
-});
-scenario("room: the TP beyond the move's start -> ⚠️ (ADA 10-04 20:15: +4.17% to the top, entry 2.17% off it)", () => {
-  const start = 0.24, top = start * 1.0417, entry = top * (1 - 0.0217);
-  const l = roomLine({ extreme: top, movePct: 4.17 }, "SHORT", entry, entry * 0.98).join("");
-  assert.ok(l.includes("սկզբից մինչև մուտք +1.91%") && l.includes("շարժման 54%-ն արդեն հետ է եկել ⚠️") && l.includes("⚠️ TP-ն շարժման սկզբից էլ անդին է"), l);
-  const ok = roomLine({ extreme: start * 1.06, movePct: 6 }, "SHORT", start * 1.05, start * 1.05 * 0.98).join("");
-  assert.ok(ok.includes("TP-ն շարժման մեջ է ✅"), ok);
-  const lg = roomLine({ extreme: 90, movePct: -10 }, "LONG", 92, 92 * 1.02).join("");
-  assert.ok(lg.includes("սկզբից մինչև մուտք -8.00%") && lg.includes("✅"), lg);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

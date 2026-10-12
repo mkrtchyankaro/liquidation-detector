@@ -1,9 +1,5 @@
-// Common domain types used across the whole application.
 
-export type Side = 'LONG' | 'SHORT';
 export type OrderSide = 'BUY' | 'SELL';
-export type Direction = 'BULLISH' | 'BEARISH';
-export type TradingMode = 'paper' | 'live';
 
 export type KlineInterval = '1m' | '3m' | '5m' | '15m' | '30m' | '1h' | '4h' | '1d';
 

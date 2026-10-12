@@ -63,16 +63,6 @@ function threePoints(a: V10SignalDoc["turn"], who: string, rankH: number): strin
   ];
 }
 
-/** part 2: the alt moved on its own */
-export function v10OwnStory(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours" | "own">, t: Pick<V10TradeDoc, "symbol" | "side">): string[] {
-  const o = sig.own;
-  return [
-    `📖 ${coin(t.symbol)} · 15m · UTC`,
-    ...threePoints(sig.turn, coin(t.symbol), sig.rankWindowHours),
-    `BTC-ն այդ ընթացքում ${o ? sp(o.btcPct) : "n/a"} · ${o?.how === "BTC OPPOSITE" ? "գնաց հակառակ" : "բացատրում է կեսից քիչը"} (R² ${o ? o.follow.toFixed(2) : "n/a"}${o?.r2Minutes ? `, ${o.r2Minutes}m` : ""})`,
-  ];
-}
-
 /** part 1: BTC's 3 points, then this alt with BTC */
 export function v10Story(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">, t: Pick<V10TradeDoc, "symbol" | "side" | "pick">, picks: number): string[] {
   return [
@@ -80,18 +70,6 @@ export function v10Story(sig: Pick<V10SignalDoc, "turn" | "rankWindowHours">, t:
     ...threePoints(sig.turn, "BTC", sig.rankWindowHours),
     `${coin(t.symbol)}-ն BTC-ի հետ ${sp(t.pick.coinPct)} (x${t.pick.x.toFixed(2)}, R² ${t.pick.follow.toFixed(2)}) · #${t.pick.rank}/${picks}`,
   ];
-}
-
-/** Oct 5 (Johnny, ADA 10-04 20:15): where the move started vs the entry and the TP -- the min move is measured to the
- *  top, so after a deep pullback the TP can lie beyond the move's start (it asks back more than the whole move) */
-export function roomLine(turn: Pick<V10SignalDoc["turn"], "extreme" | "movePct">, side: "LONG" | "SHORT", entry: number, tp: number | null): string[] {
-  const start = turn.extreme / (1 + turn.movePct / 100);
-  if (!(start > 0) || !(entry > 0)) return [];
-  const short = side === "SHORT", left = ((short ? 1 : -1) * 100 * (entry - start)) / start;
-  const beyond = tp === null ? null : short ? tp < start : tp > start;
-  const ch = short ? left : -left;   // the price change from the start to the entry, signed
-  const gb = (100 * (turn.extreme - entry)) / (turn.extreme - start);
-  return [`📏 Շարժման սկիզբ ${fmtPrice(start)} · սկզբից մինչև մուտք ${ch >= 0 ? "+" : ""}${ch.toFixed(2)}% · շարժման ${Number.isFinite(gb) ? gb.toFixed(0) : "?"}%-ն արդեն հետ է եկել${short && gb >= 50 ? " ⚠️" : ""}${beyond === null ? "" : beyond ? " · ⚠️ TP-ն շարժման սկզբից էլ անդին է" : " · TP-ն շարժման մեջ է ✅"}`];
 }
 
 const arrow = (v: number): string => (Number.isFinite(v) ? `${v >= 0 ? "⬆️" : "⬇️"}${Math.abs(v).toFixed(2)}%` : "n/a");

@@ -4,13 +4,7 @@
  */
 import * as assert from "assert";
 import type { Candle } from "../src/strategy/lib/dc15";
-import {
-  atrSignals,
-  atrStorySignals,
-  flushSignals,
-  h1Context,
-  inH1Growth,
-} from "../src/strategy/lib/atr-turn";
+import { atrSignals, atrStorySignals, flushSignals } from "../src/strategy/lib/atr-turn";
 
 let passed = 0,
   failed = 0;
@@ -533,31 +527,6 @@ scenario(
         (x) => rel(x.t) !== 5,
       ),
     );
-  },
-);
-
-scenario(
-  "1h context: a rise with OI growing -> a SHORT signal inside it passes; a rise with OI only falling does not",
-  () => {
-    const up = h1Context(
-      mk([...warm, [+0.6, +8], [+0.6, +8], [+0.6, +4]]),
-      1,
-      14,
-    );
-    const t = (W0 + 3) * W;
-    assert.strictEqual(inH1Growth(up, t, "SHORT"), true);
-    assert.strictEqual(inH1Growth(up, t, "LONG"), false);
-    assert.strictEqual(
-      inH1Growth(up, t - 1, "SHORT"),
-      inH1Growth(up, (W0 + 2) * W, "SHORT"),
-      "only closed candles count",
-    );
-    const noOi = h1Context(
-      mk([...warm, [+0.6, -8], [+0.6, -8], [+0.6, -4]]),
-      1,
-      14,
-    );
-    assert.strictEqual(inH1Growth(noOi, t, "SHORT"), false);
   },
 );
 

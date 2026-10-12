@@ -154,8 +154,6 @@ export interface V10Pick {
   price: number;
 }
 
-export type V10BtcTurn = V10Turn;
-
 const toTurn = (
   s: PeakSignal | AtrSignal | StorySignal,
   entry: V10Entry,

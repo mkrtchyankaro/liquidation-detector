@@ -120,8 +120,8 @@ async function run(): Promise<void> {
   });
 
   await scenario("tpFor: SHORT entry 100, SL 101, 2R -> 98; LONG entry 100, SL 99, 2.5R -> 102.5; quantile = the research's", () => {
-    assert.strictEqual(tpFor("SHORT", 100, 101, 2), 98);
-    assert.strictEqual(tpFor("LONG", 100, 99, 2.5), 102.5);
+    assert.strictEqual(tpFor(100, 101, 2), 98);
+    assert.strictEqual(tpFor(100, 99, 2.5), 102.5);
     assert.strictEqual(quantile([5, 1, 4, 2, 3], 0.85), 5);
     assert.strictEqual(quantile([5, 1, 4, 2, 3], 0.5), 3);
   });

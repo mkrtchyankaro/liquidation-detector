@@ -833,5 +833,3 @@ export class V10LiveService {
     }
   }
 }
-
-export const V10_INTERNALS = { READY_MS, STALE_MS, V10_CANDLE_MS };
