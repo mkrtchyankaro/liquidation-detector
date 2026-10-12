@@ -11,13 +11,18 @@
  * --to      end, UTC, exclusive ("…01:00" -> last row is the 00:00–01:00 hour)
  * --csv     optional: also write the table to this CSV file
  *
- * Source: collection minute_bars (1 row per symbol per minute, kept 365 days):
- *   price open/high/low/close, OI first/last/min/max (in coins), LONG/SHORT liquidation USD + count.
+ * Sources (read-only):
+ *   price   Binance futures klines (same candles as TradingView, Binance last price)
+ *   OI      Binance /futures/data/openInterestHist 5m (in COINS; Binance keeps only the last ~30 days):
+ *           OI open = value at candle start, OI close = value at candle end, high/low over the 5m points in between
+ *   liq     our DB: liq_raw_events (every event, kept ~14 days); older candles fall back to minute_bars sums.
+ *           Column "liq" says which: R = raw events, M = minute_bars.
  * LONG liq = longs liquidated (forced sells), SHORT liq = shorts liquidated (forced buys).
- * Only find() is used — nothing is written to the database.
+ * Only find() on Mongo and public GET requests to Binance — nothing is written anywhere.
  */
 import "dotenv/config";
 import { writeFileSync } from "fs";
+import axios from "axios";
 import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
 
@@ -87,9 +92,16 @@ const usd = (v: number) =>
       : `$${v.toFixed(0)}`;
 const sig = (p: number) => (p >= 100 ? 2 : p >= 1 ? 4 : 6);
 
+const fapi = axios.create({
+  baseURL: process.env.BINANCE_FAPI_URL ?? "https://fapi.binance.com",
+  timeout: 30_000,
+});
+const M5 = 300_000;
+const toMs = (v: unknown) => (v instanceof Date ? v.getTime() : Number(v));
+
 interface Row {
   hour: number;
-  minutes: number;
+  liqSrc: string;
   open: number | null;
   high: number | null;
   low: number | null;
@@ -119,7 +131,6 @@ async function main() {
   const HOUR = TFS[tfName];
   if (!HOUR)
     throw new Error(`--tf must be one of ${Object.keys(TFS).join(", ")}`);
-  const PER = HOUR / 60_000; // minutes per candle
   const from = Math.floor(parseUtc(fromS) / HOUR) * HOUR;
   const to = Math.ceil(parseUtc(toS) / HOUR) * HOUR;
   if (to <= from) throw new Error("--to must be after --from");
@@ -130,18 +141,12 @@ async function main() {
   await client.connect();
   try {
     const db = client.db(process.env.MONGO_OWN_DB ?? "liquidation_detector");
-    const bars = await db
-      .collection(MINUTE_BARS)
-      .find({ symbol, ts: { $gte: new Date(from), $lt: new Date(to) } })
-      .project({ _id: 0 })
-      .sort({ ts: 1 })
-      .toArray();
-
+    // price: Binance klines
     const rows: Row[] = [];
     for (let h = from; h < to; h += HOUR)
       rows.push({
         hour: h,
-        minutes: 0,
+        liqSrc: "-",
         open: null,
         high: null,
         low: null,
@@ -155,23 +160,117 @@ async function main() {
         shortUsd: 0,
         shortN: 0,
       });
+    for (let s0 = from; s0 < to; s0 += 1000 * HOUR) {
+      const kl: unknown[][] = (
+        await fapi.get("/fapi/v1/klines", {
+          params: {
+            symbol,
+            interval: tfName,
+            startTime: s0,
+            endTime: Math.min(to, s0 + 1000 * HOUR) - 1,
+            limit: 1000,
+          },
+        })
+      ).data;
+      for (const k of kl) {
+        const r = rows[Math.floor((Number(k[0]) - from) / HOUR)];
+        if (r) {
+          r.open = Number(k[1]);
+          r.high = Number(k[2]);
+          r.low = Number(k[3]);
+          r.close = Number(k[4]);
+        }
+      }
+    }
+    // OI: Binance 5m history
+    const oi = new Map<number, number>();
+    const oiFrom = Math.max(from, Date.now() - 30 * 86_400_000 + M5);
+    for (let s0 = oiFrom; s0 <= to; s0 += 499 * M5) {
+      const hist: { timestamp: number; sumOpenInterest: string }[] = (
+        await fapi.get("/futures/data/openInterestHist", {
+          params: {
+            symbol,
+            period: "5m",
+            limit: 500,
+            startTime: s0,
+            endTime: Math.min(to, s0 + 499 * M5),
+          },
+        })
+      ).data;
+      for (const x of hist)
+        oi.set(Number(x.timestamp), Number(x.sumOpenInterest));
+    }
+    for (const r of rows) {
+      const pts: number[] = [];
+      for (let t = r.hour; t <= r.hour + HOUR; t += M5) {
+        const v = oi.get(t);
+        if (v !== undefined) pts.push(v);
+      }
+      r.oiOpen = oi.get(r.hour) ?? null;
+      r.oiClose = oi.get(r.hour + HOUR) ?? null;
+      if (pts.length) {
+        r.oiHigh = Math.max(...pts);
+        r.oiLow = Math.min(...pts);
+      }
+    }
+    // liquidations: raw events where we still have them, minute_bars before that
+    const oldestRaw = (
+      await db
+        .collection("liq_raw_events")
+        .find({ symbol })
+        .sort({ timestamp: 1 })
+        .limit(1)
+        .project({ timestamp: 1 })
+        .toArray()
+    )[0];
+    const rawFrom = oldestRaw
+      ? Math.ceil(toMs(oldestRaw.timestamp) / HOUR) * HOUR
+      : Infinity; // first candle fully covered by raw events
+    const raw = await db
+      .collection("liq_raw_events")
+      .find({
+        symbol,
+        victim: { $in: ["LONG", "SHORT"] },
+        timestamp: { $gte: from, $lt: to },
+      })
+      .project({ _id: 0, timestamp: 1, victim: 1, quoteQty: 1 })
+      .toArray();
+    const bars =
+      from < rawFrom
+        ? await db
+            .collection(MINUTE_BARS)
+            .find({
+              symbol,
+              ts: {
+                $gte: new Date(from),
+                $lt: new Date(Math.min(to, rawFrom)),
+              },
+            })
+            .project({
+              _id: 0,
+              ts: 1,
+              longLiqUsd: 1,
+              shortLiqUsd: 1,
+              longLiqCount: 1,
+              shortLiqCount: 1,
+            })
+            .toArray()
+        : [];
+    for (const r of rows) r.liqSrc = r.hour >= rawFrom ? "R" : "M";
+    for (const e of raw) {
+      const r = rows[Math.floor((toMs(e.timestamp) - from) / HOUR)];
+      if (!r || r.liqSrc !== "R") continue;
+      if (e.victim === "LONG") {
+        r.longUsd += Number(e.quoteQty);
+        r.longN++;
+      } else {
+        r.shortUsd += Number(e.quoteQty);
+        r.shortN++;
+      }
+    }
     for (const b of bars) {
       const r = rows[Math.floor((new Date(b.ts).getTime() - from) / HOUR)];
-      if (!r) continue;
-      r.minutes++;
-      if (b.open != null && r.open === null) r.open = b.open;
-      if (b.high != null)
-        r.high = r.high === null ? b.high : Math.max(r.high, b.high);
-      if (b.low != null)
-        r.low = r.low === null ? b.low : Math.min(r.low, b.low);
-      if (b.close != null) r.close = b.close;
-      if (b.oiFirst != null && b.oiFirst > 0 && r.oiOpen === null)
-        r.oiOpen = b.oiFirst;
-      if (b.oiLast != null && b.oiLast > 0) r.oiClose = b.oiLast;
-      if (b.oiMax != null && b.oiMax > 0)
-        r.oiHigh = r.oiHigh === null ? b.oiMax : Math.max(r.oiHigh, b.oiMax);
-      if (b.oiMin != null && b.oiMin > 0)
-        r.oiLow = r.oiLow === null ? b.oiMin : Math.min(r.oiLow, b.oiMin);
+      if (!r || r.liqSrc !== "M") continue;
       r.longUsd += Number(b.longLiqUsd ?? 0);
       r.longN += Number(b.longLiqCount ?? 0);
       r.shortUsd += Number(b.shortLiqUsd ?? 0);
@@ -184,12 +283,12 @@ async function main() {
     const d = sig(p0 ?? 1);
 
     console.log(
-      `\n${symbol}  ${iso(from)} → ${iso(to)} UTC   (${rows.length} candles of ${tfName}, ${bars.length} minute rows)`,
+      `\n${symbol}  ${iso(from)} → ${iso(to)} UTC   (${rows.length} candles of ${tfName} · price + OI: Binance · liquidations: our DB)`,
     );
     console.log(`start: price ${num(p0, d)}   OI ${num(oi0, 0)} coins\n`);
     const head = [
       `${tfName} candle UTC`,
-      "min",
+      "liq",
       "open",
       "high",
       "low",
@@ -211,7 +310,7 @@ async function main() {
     ];
     const table: string[][] = [];
     const csv: string[] = [
-      "hour_utc,minutes,open,high,low,close,price_pct,oi_open,oi_close,oi_change,oi_change_pct,oi_change_usd,oi_high,oi_low,oi_from_start_pct,price_from_start_pct,long_liq_usd,long_liq_count,short_liq_usd,short_liq_count",
+      "hour_utc,liq_source,open,high,low,close,price_pct,oi_open,oi_close,oi_change,oi_change_pct,oi_change_usd,oi_high,oi_low,oi_from_start_pct,price_from_start_pct,long_liq_usd,long_liq_count,short_liq_usd,short_liq_count",
     ];
     let L = 0,
       Ln = 0,
@@ -235,7 +334,7 @@ async function main() {
       if (r.close !== null) last = r;
       table.push([
         iso(r.hour).slice(5),
-        String(r.minutes),
+        r.liqSrc,
         num(r.open, d),
         num(r.high, d),
         num(r.low, d),
@@ -260,7 +359,7 @@ async function main() {
       csv.push(
         [
           iso(r.hour),
-          r.minutes,
+          r.liqSrc,
           r.open,
           r.high,
           r.low,
@@ -306,12 +405,17 @@ async function main() {
     console.log(
       `       LONG liq ${usd(L)} (${Ln})   SHORT liq ${usd(S)} (${Sn})`,
     );
-    const gaps = rows.filter((r) => r.minutes < PER).length;
-    if (gaps)
+    const noOi = rows.filter(
+      (r) => r.oiOpen === null || r.oiClose === null,
+    ).length;
+    if (noOi)
       console.log(
-        `note: ${gaps} candle(s) have fewer than ${PER} minute rows (column "min") — data gap, numbers for those hours are partial.`,
+        `note: ${noOi} candle(s) without Binance OI (Binance keeps OI history only ~30 days).`,
       );
-
+    if (rows.some((r) => r.liqSrc === "M"))
+      console.log(
+        `note: liq column M = from minute_bars (raw events are kept ~14 days; minute_bars can miss a few late events).`,
+      );
     const out = arg("csv");
     if (out) {
       writeFileSync(out, csv.join("\n") + "\n");
