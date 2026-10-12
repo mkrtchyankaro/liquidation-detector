@@ -1,5 +1,7 @@
 /**
- * HOUR VIEW — read-only, hour by hour: price, open interest, liquidations (UTC).
+ * HOUR VIEW — read-only, candle by candle (1h default, or --tf 4h / 15m / 1d): price, open interest, liquidations (UTC).
+ *   npx tsx src/tools/hour-view.ts --symbol BTC --from "01 Oct 00:00" --to "03 Oct 00:00" --tf 4h
+ *   4h candles start at 00/04/08/12/16/20 UTC (same as Binance / TradingView).
  *
  *   npx tsx src/tools/hour-view.ts --symbol BCH --from "2026-10-04 20:00" --to "2026-10-05 01:00"
  *   npx tsx src/tools/hour-view.ts --symbol BTC --from "02 Oct 01:00" --to "02 Oct 14:00" --csv bch.csv
@@ -19,7 +21,15 @@ import { writeFileSync } from "fs";
 import { MongoClient } from "mongodb";
 import { MINUTE_BARS } from "../collector/minute-bars";
 
-const HOUR = 3_600_000;
+const TFS: Record<string, number> = {
+  "5m": 300_000,
+  "15m": 900_000,
+  "30m": 1_800_000,
+  "1h": 3_600_000,
+  "2h": 7_200_000,
+  "4h": 14_400_000,
+  "1d": 86_400_000,
+};
 const argv = process.argv.slice(2);
 const arg = (n: string, d?: string): string | undefined => {
   const i = argv.indexOf(`--${n}`);
@@ -100,11 +110,16 @@ async function main() {
     toS = arg("to");
   if (!symbol || !fromS || !toS) {
     console.log(
-      'usage: npx tsx src/tools/hour-view.ts --symbol BCH --from "2026-10-04 20:00" --to "2026-10-05 01:00" [--csv out.csv]',
+      'usage: npx tsx src/tools/hour-view.ts --symbol BCH --from "2026-10-04 20:00" --to "2026-10-05 01:00" [--tf 1h|4h|15m|1d] [--csv out.csv]',
     );
     process.exit(1);
   }
   if (!symbol.endsWith("USDT")) symbol += "USDT";
+  const tfName = (arg("tf", "1h") ?? "1h").toLowerCase();
+  const HOUR = TFS[tfName];
+  if (!HOUR)
+    throw new Error(`--tf must be one of ${Object.keys(TFS).join(", ")}`);
+  const PER = HOUR / 60_000; // minutes per candle
   const from = Math.floor(parseUtc(fromS) / HOUR) * HOUR;
   const to = Math.ceil(parseUtc(toS) / HOUR) * HOUR;
   if (to <= from) throw new Error("--to must be after --from");
@@ -169,11 +184,11 @@ async function main() {
     const d = sig(p0 ?? 1);
 
     console.log(
-      `\n${symbol}  ${iso(from)} → ${iso(to)} UTC   (${rows.length} hours, ${bars.length} minute rows)`,
+      `\n${symbol}  ${iso(from)} → ${iso(to)} UTC   (${rows.length} candles of ${tfName}, ${bars.length} minute rows)`,
     );
     console.log(`start: price ${num(p0, d)}   OI ${num(oi0, 0)} coins\n`);
     const head = [
-      "hour UTC",
+      `${tfName} candle UTC`,
       "min",
       "open",
       "high",
@@ -291,10 +306,10 @@ async function main() {
     console.log(
       `       LONG liq ${usd(L)} (${Ln})   SHORT liq ${usd(S)} (${Sn})`,
     );
-    const gaps = rows.filter((r) => r.minutes < 60).length;
+    const gaps = rows.filter((r) => r.minutes < PER).length;
     if (gaps)
       console.log(
-        `note: ${gaps} hour(s) have fewer than 60 minute rows (column "min") — data gap, numbers for those hours are partial.`,
+        `note: ${gaps} candle(s) have fewer than ${PER} minute rows (column "min") — data gap, numbers for those hours are partial.`,
       );
 
     const out = arg("csv");
