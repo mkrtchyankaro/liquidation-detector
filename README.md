@@ -73,6 +73,7 @@ bash deploy.sh                                             # pull, build, test, 
 npx tsx src/tools/v11-replay.ts --days 14                  # V11 on the last days with the live code (read-only)
 npx tsx src/tools/hour-view.ts --symbol BTC --from "02 Oct 01:00" --to "02 Oct 14:00"   # price / OI / liquidations per candle
 npx tsx src/tools/research-1h-export.ts --days 14           # 1h research export (Binance price + OI, our liquidations)
+npx tsx src/tools/h2-holdout.ts reports/research-1h/all_1h.csv   # the frozen H2 holdout test (read-only)
 npx tsx src/tools/test-live-entry.ts --user karo --confirm  # real tiny order round-trip
 npm test
 ```
