@@ -1,12 +1,12 @@
-import { fmtPrice, fmtQty, fmtUsd } from "../v9/v9-telegram";
-import { estimateFeesUsd } from "../v9/v9-fees";
+import { fmtPrice, fmtQty, fmtUsd } from "../shared/format";
+import { estimateFeesUsd } from "../shared/fees";
 import type { V10SignalDoc, V10TradeDoc } from "./v10-repository";
 import { formatBookLines, formatWallLines } from "./v10-book";
 import { formatZoneLine } from "./v10-zone";
 
 /**
  * V10 messages (plain text). Header "V10 · BTC" (part 1, BTC-led) or "V10 · ALT" (part 2, the alt's own move) on every
- * message so it is never mixed up with V9 or with the other part.
+ * message so it is never mixed up with V11 or with the other part.
  * 🔻 SHORT entry · 🔺 LONG entry · ✅ TP · ❌ SL · ⚪ other close · ⚠️ not opened. $ figures use THIS user's trade.
  * The story = Johnny's 3 points, 15m, UTC, mirrored for LONG: "atr" -- OI grew with the price -> OI below its peak ->
  * the close 1 ATR back from the top (bottom); "oiPeak" -- OI up -> OI falls after its peak -> the first red (green) candle.

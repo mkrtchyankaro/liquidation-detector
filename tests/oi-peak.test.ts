@@ -2,8 +2,8 @@
  * Johnny's V10 rule (OI up -> OI peak -> first red candle with OI down). Usage: npx tsx tests/oi-peak.test.ts
  */
 import * as assert from "assert";
-import type { Candle } from "../src/research/dc15";
-import { oiPeakSignals } from "../src/research/oi-peak";
+import type { Candle } from "../src/strategy/lib/dc15";
+import { oiPeakSignals } from "../src/strategy/lib/oi-peak";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {

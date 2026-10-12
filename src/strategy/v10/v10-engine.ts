@@ -21,15 +21,15 @@ import {
   priceAt,
   type MinBar,
   type Own,
-} from "../../research/dc15";
-import { oiPeakSignals, type PeakSignal } from "../../research/oi-peak";
+} from "../lib/dc15";
+import { oiPeakSignals, type PeakSignal } from "../lib/oi-peak";
 import {
   atrSignals,
   atrStorySignals,
   flushSignals,
   type AtrSignal,
   type StorySignal,
-} from "../../research/atr-turn";
+} from "../lib/atr-turn";
 
 export const V10_TF_MIN = 15;
 export const V10_K = 1;

@@ -1,31 +1,13 @@
 {
   "realOrdersEnabled": false,
-  "v9": {
-    "enabled": true,
-    "symbols": [
-      "BTCUSDT",
-      "ETHUSDT",
-      "SOLUSDT",
-      "BNBUSDT",
-      "DOGEUSDT",
-      "ADAUSDT",
-      "LINKUSDT",
-      "AVAXUSDT",
-      "SUIUSDT"
-    ],
-    "rr": 2.2,
-    "minSlPct": 0.33,
-    "timeStopHours": 24,
-    "frameOnlyUsers": ["karo"],
-    "maxOpenPerUser": { "karo": 2 },
-    "rrPerUser": { "karo": 1.5 },
-    "minStopPerUser": { "karo": 0.7 },
-    "userModes": { "main": "PAPER", "karo": "PAPER" }
+  "zz": {
+    "enabled": false
   },
-  "zz": { "enabled": false },
   "oa": {
     "enabled": true,
-    "users": ["main"],
+    "users": [
+      "main"
+    ],
     "rr": 2.5,
     "minSlPct": 0.3,
     "continuation": true,
@@ -47,15 +29,64 @@
     "wallTpPct": 2,
     "wallRoomRatio": 1.33,
     "wallTimeoutHours": 24,
-    "wallExcludeSymbols": ["ETHUSDT"],
-    "userModes": { "main": "PAPER", "karo": "OFF" },
+    "wallExcludeSymbols": [
+      "ETHUSDT"
+    ],
+    "userModes": {
+      "main": "PAPER",
+      "karo": "OFF"
+    },
     "perUser": {
-      "main": { "own": true },
+      "main": {
+        "own": true
+      },
       "karo": {
         "short": true,
         "long": false,
         "slPct": 1,
         "tpPct": 1,
+        "maxOpen": 3
+      }
+    }
+  },
+  "v11": {
+    "enabled": false,
+    "short": true,
+    "long": false,
+    "tpR": 2,
+    "riskUsd": null,
+    "slBufferPct": 0,
+    "rallyTypes": [
+      "T1",
+      "T2",
+      "FLAT"
+    ],
+    "meaningfulOnly": false,
+    "minRiskPct": null,
+    "maxRiskPct": null,
+    "maxOpen": null,
+    "timeoutHours": 48,
+    "excludeSymbols": [],
+    "rule": {
+      "rallyHours": 6,
+      "rallyX": 2,
+      "normHours": 72,
+      "oiNormHours": 24,
+      "oiX": 1,
+      "watchHours": 12,
+      "liqPercentile": 85,
+      "minLiqUsd": 30000,
+      "minLiqX": 2,
+      "confirmCandles": 2,
+      "maxConfirmMovePct": 0.3
+    },
+    "userModes": {
+      "main": "OFF",
+      "karo": "OFF"
+    },
+    "perUser": {
+      "karo": {
+        "tpR": 2,
         "maxOpen": 3
       }
     }
@@ -67,9 +98,13 @@
       "telegram": {
         "enabled": true,
         "botToken": "123456:REPLACE_ME",
-        "chatIds": ["REPLACE_ME"]
+        "chatIds": [
+          "REPLACE_ME"
+        ]
       },
-      "risk": { "riskUsd": 10 }
+      "risk": {
+        "riskUsd": 10
+      }
     },
     {
       "userId": "karo",
@@ -77,7 +112,9 @@
       "telegram": {
         "enabled": true,
         "botToken": "123456:REPLACE_ME",
-        "chatIds": ["REPLACE_ME"]
+        "chatIds": [
+          "REPLACE_ME"
+        ]
       },
       "binance": {
         "enabled": true,
@@ -86,7 +123,9 @@
         "leverage": 20,
         "marginMode": "ISOLATED"
       },
-      "risk": { "riskUsd": 1 }
+      "risk": {
+        "riskUsd": 1
+      }
     }
   ]
 }

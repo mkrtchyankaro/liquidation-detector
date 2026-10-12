@@ -1,15 +1,17 @@
 import type { Db } from "mongodb";
+import { otherOpenRealTrade, otherRealTradeSince } from "../../execution/other-trades";
 import type { V10OwnMove, V10Pick, V10Side, V10Turn } from "./v10-engine";
 import type { V10BookView } from "./v10-book";
 import type { V10ZoneView } from "./v10-zone";
 import type { WallSignal } from "./wall-engine";
 
 /**
- * V10 storage -- its own collections, never V9's:
+ * V10 storage -- its own collections, never V11's:
  *   v10_signals  one row per BTC signal (unique signalId) -- also what makes a signal handled exactly once,
  *                across restarts
  *   v10_trades   one row per (signal, alt, user) (unique tradeId)
- * V9's v9_trades is only READ, to never open a V10 REAL trade on a symbol where the same user has a V9 trade open.
+ * V11's v11_trades is only READ, to never open a V10 REAL trade on a symbol where the same user has a REAL V11 trade
+ * open (Oct 12 2026: V9 was removed; this check used to read v9_trades).
  */
 export const V10_SIGNALS = "v10_signals";
 export const V10_TRADES = "v10_trades";
@@ -112,10 +114,10 @@ export interface V10Store {
   insertTrade(doc: V10TradeDoc): Promise<boolean>;
   updateTrade(tradeId: string, fields: Partial<V10TradeDoc>): Promise<void>;
   findOpenTrades(): Promise<V10TradeDoc[]>;
-  /** does this user have a REAL V9 trade open on this symbol? */
-  hasOpenV9Trade(userId: string, symbol: string): Promise<boolean>;
-  /** when a REAL V9 trade of this user, still open on this symbol, was opened at or after `after` (ms), else null */
-  openV9TradeSince(
+  /** does this user have a REAL trade of another strategy (V11) open on this symbol? */
+  hasOpenOtherTrade(userId: string, symbol: string): Promise<boolean>;
+  /** when a REAL trade of another strategy (V11), still open on this symbol, was started at or after `after` (ms), else null */
+  openOtherTradeSince(
     userId: string,
     symbol: string,
     after: number,
@@ -187,36 +189,11 @@ export class V10Repository implements V10Store {
       .toArray() as Promise<V10TradeDoc[]>;
   }
 
-  async openV9TradeSince(
-    userId: string,
-    symbol: string,
-    after: number,
-  ): Promise<number | null> {
-    const t = await (
-      await this.db()
-    )
-      .collection("v9_trades")
-      .find({
-        state: "OPEN",
-        mode: "REAL",
-        userId,
-        symbol,
-        createdAt: { $gte: after },
-      })
-      .sort({ createdAt: 1 })
-      .limit(1)
-      .toArray();
-    return t.length ? Number(t[0].createdAt) : null;
+  async openOtherTradeSince(userId: string, symbol: string, after: number): Promise<number | null> {
+    return otherRealTradeSince(await this.db(), "V10", userId, symbol, after);
   }
 
-  async hasOpenV9Trade(userId: string, symbol: string): Promise<boolean> {
-    return (
-      (await (await this.db())
-        .collection("v9_trades")
-        .countDocuments(
-          { state: "OPEN", mode: "REAL", userId, symbol },
-          { limit: 1 },
-        )) > 0
-    );
+  async hasOpenOtherTrade(userId: string, symbol: string): Promise<boolean> {
+    return (await otherOpenRealTrade(await this.db(), "V10", userId, symbol)) !== null;
   }
 }

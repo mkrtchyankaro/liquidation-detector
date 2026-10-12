@@ -13,7 +13,8 @@ function scenario(name: string, fn: () => void): void {
 const syms = ["BTCUSDT", "ETHUSDT"];
 const base = () => ({
   realOrdersEnabled: true,
-  v9: { enabled: true, symbols: ["BTCUSDT"], rr: 2.2, userModes: { main: "PAPER", karo: "REAL" } },
+  v9: { enabled: true, symbols: ["BTCUSDT"], rr: 2.2, userModes: { main: "PAPER", karo: "REAL" } },   // removed strategy: ignored
+  v11: { enabled: true, tpR: 2.5, userModes: { main: "PAPER", karo: "REAL" }, perUser: { karo: { tpR: 2, rallyTypes: ["T1"], riskUsd: 2 } } },
   users: [
     { userId: "main", enabled: true, telegram: { enabled: true, botToken: "t", chatIds: "1,2" }, binance: { enabled: false }, risk: { riskUsd: 10 } },
     { userId: "karo", enabled: true, telegram: { enabled: true, botToken: "t", chatIds: ["3"] },
@@ -31,7 +32,8 @@ scenario("current production-style file (with old LOX/V5 fields) parses; old fie
   assert.strictEqual(c.users[0].binance, null);
   assert.strictEqual(c.users[1].binance!.leverage, 20);
   assert.strictEqual(c.users[1].riskUsd, 1);
-  assert.strictEqual(c.v9.userModes.get("karo"), "REAL");
+  assert.strictEqual(c.v11.userModes.get("karo"), "REAL");
+  assert.deepStrictEqual(c.legacyBlocks, ["v9"]);
 });
 scenario("realOrdersEnabled as a string fails fast", () => assert.throws(() => parseAppConfig({ ...base(), realOrdersEnabled: "true" }, "x", syms), /realOrdersEnabled/));
 scenario("binance enabled without keys fails fast", () => {
@@ -46,6 +48,11 @@ scenario("negative riskUsd fails fast", () => {
   const c = base(); c.users[1].risk.riskUsd = -1;
   assert.throws(() => parseAppConfig(c, "x", syms), /riskUsd/);
 });
-scenario("v9 errors surface with the file path", () => assert.throws(() => parseAppConfig({ ...base(), v9: { enabled: true, symbols: ["XRPUSDT"] } }, "users.config.json", syms), /users\.config\.json.*does not collect data/));
+scenario("v11 errors surface with the file path", () => assert.throws(() => parseAppConfig({ ...base(), v11: { enabled: true, symbols: ["XRPUSDT"] } }, "users.config.json", syms), /users\.config\.json.*does not collect data/));
+scenario("an old v9 block with garbage is ignored (V9 removed)", () => {
+  const c = parseAppConfig({ ...base(), v9: { enabled: "yes", nonsense: 1 } }, "x", syms);
+  assert.deepStrictEqual(c.legacyBlocks, ["v9"]);
+});
+scenario("V11 is written lower case or it fails", () => assert.throws(() => parseAppConfig({ ...base(), V11: { enabled: true } }, "x", syms), /"V11" must be written "v11"/));
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);
 if (failed > 0) process.exit(1);

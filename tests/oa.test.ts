@@ -11,7 +11,7 @@ import {
   type MinuteRow,
   type OaHour,
   type PathBar,
-} from "../src/research/oi-accumulation";
+} from "../src/strategy/lib/oi-accumulation";
 import {
   OaPaperService,
   type OaTradeDoc,

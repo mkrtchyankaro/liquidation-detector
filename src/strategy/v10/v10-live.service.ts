@@ -1,12 +1,12 @@
-import type { Db } from "mongodb";
 import { childLogger } from "../../infrastructure/logging/logger";
-import { MINUTE_BARS } from "../../collector/minute-bars";
+import { mongoMinBarLoader, type MinBarLoader } from "../shared/minute-loader";
 import { getSymbolFilters, roundToStep, runEntrySequence } from "../../execution/entry-sequence";
 import { ourIds, positionAmt, recoverEntry, settle, symbolClear, type SettleRest } from "../../execution/real-settle";
 import { strategyClientOrderId } from "../../execution/client-order-id";
-import { simTrade } from "../../research/sltp";
-import type { MinBar } from "../../research/dc15";
-import { estimateFeesUsd } from "../v9/v9-fees";
+import { withSymbolLock } from "../../execution/other-trades";
+import { simTrade } from "../lib/sltp";
+import type { MinBar } from "../lib/dc15";
+import { estimateFeesUsd } from "../shared/fees";
 import { BTC, NEW_COIN_DAYS, rulesFor, type V10Settings } from "./v10-config";
 import { againstCandles, btcRank1At, givebackPct, lastCandleEnd, levels, moveOf, ownMove, pickAlts, rank1At, V10_CANDLE_MS, V10_HISTORY_MS, type V10Pick, type V10Turn } from "./v10-engine";
 import type { V10SignalDoc, V10Store, V10TradeDoc } from "./v10-repository";
@@ -19,7 +19,7 @@ import { zoneWall, type V10ZoneSource, type V10ZoneView } from "./v10-zone";
 const log = childLogger({ mod: "v10-live" });
 
 /**
- * V10 LIVE -- BTC-led alts (Johnny, Oct 2 2026). Completely separate from V9: own settings ("v10"), own collections,
+ * V10 LIVE -- BTC-led alts (Johnny, Oct 2 2026). Completely separate from V11: own settings ("v10"), own collections,
  * own messages. Uses the minute_bars the bot already writes (price + OI + liquidations, 1 row per symbol per minute).
  *
  *  every minute at hh:mm:45
@@ -38,11 +38,11 @@ const log = childLogger({ mod: "v10-live" });
  *  every 15 s
  *    REAL trades: Binance position flat? -> cancel our leftovers -> exact close from Binance fills
  *
- * REAL entries reuse the V9 entry sequence (market entry -> SL verified, else fail-safe close -> TP). The SL / TP are
+ * REAL entries reuse the shared entry sequence (market entry -> SL verified, else fail-safe close -> TP). The SL / TP are
  * the SAME prices as PAPER (the configured % from the signal price); the size is set at the executable price so the $
  * risk stays riskUsd; a price already at / beyond the SL or TP -> not opened. Before a REAL entry the symbol must be
- * completely clear on that account (no position, no order, no stop) and the user must not have a REAL V9 trade open on
- * it. An entry that did not finish (crash, an error after the order may have been sent) is recovered by the 15 s
+ * completely clear on that account (no position, no order, no stop) and the user must not have a REAL V11 trade open on
+ * it (Oct 12: V9 was removed; the check used to be against V9). An entry that did not finish (crash, an error after the order may have been sent) is recovered by the 15 s
  * monitor: our SL resting -> the trade is adopted; no SL -> the position is closed at market. Never unprotected.
  * Users are independent: one user's failure never affects another.
  */
@@ -60,17 +60,10 @@ export interface V10UserRef {
   telegram: { sendMessage(text: string): Promise<unknown> } | null;
 }
 
-export type V10BarLoader = (symbol: string, fromTs: number, toTs: number) => Promise<MinBar[]>;
+export type V10BarLoader = MinBarLoader;
 
-export function mongoV10Loader(getDb: () => Promise<Db | null>): V10BarLoader {
-  return async (symbol, fromTs, toTs) => {
-    const db = await getDb();
-    if (!db) throw new Error("Mongo unavailable");
-    const rows = await db.collection(MINUTE_BARS).find({ symbol, ts: { $gte: new Date(fromTs), $lt: new Date(toTs) }, high: { $ne: null } })
-      .project({ _id: 0, ts: 1, high: 1, low: 1, close: 1, oiFirst: 1, oiLast: 1, longLiqUsd: 1, shortLiqUsd: 1 }).sort({ ts: 1 }).toArray();
-    return rows.map((d) => ({ t: new Date(d.ts).getTime(), high: Number(d.high), low: Number(d.low), close: Number(d.close), oiFirst: Number(d.oiFirst), oiLast: Number(d.oiLast), longLiq: Number(d.longLiqUsd) || 0, shortLiq: Number(d.shortLiqUsd) || 0 }));
-  };
-}
+/** the minute bars of our database (moved to ../shared/minute-loader.ts on Oct 12, unchanged) */
+export const mongoV10Loader = mongoMinBarLoader;
 
 const M = 60_000;
 const RUN_OFFSET_MS = 45_000;
@@ -166,7 +159,7 @@ export class V10LiveService {
       try { if (this.settings.enabled && this.book) await this.recordBook(); }
       catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_BOOK_FAILED] -- retried next minute, trading unaffected"); }
       try { if (this.settings.enabled && await this.ensureIndexes()) await this.checkSignal(); }
-      catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_SIGNAL_FAILED] -- retried next minute, V9 unaffected"); }
+      catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_SIGNAL_FAILED] -- retried next minute, the other strategies unaffected"); }
       try { if (this.settings.enabled && this.wallSource && await this.ensureIndexes()) await this.checkWallSignals(); }
       catch (err) { log.error({ err: err instanceof Error ? err.message : String(err) }, "[V10_WALL_SIGNAL_FAILED] -- retried next minute"); }
       try { await this.monitorPaper(); }
@@ -440,22 +433,28 @@ export class V10LiveService {
       return;
     }
 
-    // REAL -- the same safety as the other parts: fresh signal, no V9 trade, the symbol completely clear on the account,
+    // REAL -- the same safety as the other parts: fresh signal, no V11 trade, the symbol completely clear on the account,
     // the SL / TP are the signal's prices (the SL = the wall's far edge); a price already at / beyond them -> not opened
     const rest = u.binanceRest;
     if (u.mode !== "REAL" || !rest) return;
     if (this.now() - w.candleEnd > STALE_MS) return skip("signal too old for a market entry", true);
-    if (await this.store.hasOpenV9Trade(u.userId, sig.symbol)) return skip(`a REAL V9 trade on ${sig.symbol} is open for this user -- V10 never trades on top of it`, true);
-    const busy = await symbolClear(rest, sig.symbol);
-    if (busy) return skip(`${busy} -- V10 never trades on top of it`, true);
-    const book = (await rest.getBookTicker?.(sig.symbol).catch(() => null)) as { bidPrice?: string; askPrice?: string } | null;
-    const exec = Number(short ? book?.bidPrice : book?.askPrice);
-    if (!(exec > 0)) return skip("no executable price from Binance", true);
-    if (short ? exec >= w.stop : exec <= w.stop) return skip(`the price already reached the SL: now ${exec}, signal ${w.entry}, SL ${+w.stop.toPrecision(8)} -- the signal is over`, true);
-    if (short ? exec <= w.tp : exec >= w.tp) return skip(`the price already reached the TP: now ${exec}, signal ${w.entry}, TP ${+w.tp.toPrecision(8)} -- too late`, true);
-    const row: V10TradeDoc = { ...base, entryStartedAt: this.now() };
-    if (!(await this.store.insertTrade(row))) return;
-    this.entering.add(row.tradeId);
+    // Oct 12: the checks and our OPEN row under one lock per (user, symbol) -- V11 runs in the same process
+    const prep = await withSymbolLock(u.userId, sig.symbol, async (): Promise<{ row: V10TradeDoc; exec: number } | null> => {
+      if (await this.store.hasOpenOtherTrade(u.userId, sig.symbol)) { await skip(`a REAL V11 trade on ${sig.symbol} is open for this user -- V10 never trades on top of it`, true); return null; }
+      const busy = await symbolClear(rest, sig.symbol);
+      if (busy) { await skip(`${busy} -- V10 never trades on top of it`, true); return null; }
+      const book = (await rest.getBookTicker?.(sig.symbol).catch(() => null)) as { bidPrice?: string; askPrice?: string } | null;
+      const exec = Number(short ? book?.bidPrice : book?.askPrice);
+      if (!(exec > 0)) { await skip("no executable price from Binance", true); return null; }
+      if (short ? exec >= w.stop : exec <= w.stop) { await skip(`the price already reached the SL: now ${exec}, signal ${w.entry}, SL ${+w.stop.toPrecision(8)} -- the signal is over`, true); return null; }
+      if (short ? exec <= w.tp : exec >= w.tp) { await skip(`the price already reached the TP: now ${exec}, signal ${w.entry}, TP ${+w.tp.toPrecision(8)} -- too late`, true); return null; }
+      const row: V10TradeDoc = { ...base, entryStartedAt: this.now() };
+      if (!(await this.store.insertTrade(row))) return null;
+      this.entering.add(row.tradeId);
+      return { row, exec };
+    });
+    if (!prep) return;
+    const { row, exec } = prep;
     try {
       const out = await runEntrySequence(rest, {
         userId: u.userId, globalSignalId: orderSignalId, symbol: sig.symbol, side: w.side,
@@ -616,24 +615,29 @@ export class V10LiveService {
     const rest = u.binanceRest;
     if (u.mode !== "REAL" || !rest) return; // not REAL-capable (main.ts downgrades such users to PAPER)
     if (this.now() - sig.turn.candleEnd > STALE_MS) return skip("signal too old for a market entry", true);
-    if (await this.store.hasOpenV9Trade(u.userId, p.symbol)) return skip(`a REAL V9 trade on ${p.symbol} is open for this user -- V10 never trades on top of it`, true);
-    const busy = await symbolClear(rest, p.symbol);
-    if (busy) return skip(`${busy} -- V10 never trades on top of it`, true);
-    // SL / TP: the SAME prices as PAPER -- the configured % from the SIGNAL price (Johnny, Oct 2: UNI REAL entered
-    // +1.1% above the signal, after PAPER's SL had already been passed, and got its own wider SL). If the price a market
-    // order would get NOW is already at / beyond the SL or the TP, the signal is over -> not opened.
-    const lvl = levels(sig.side, p.price, rules.slPct, rules.tpPct);
-    const book = (await rest.getBookTicker?.(p.symbol).catch(() => null)) as { bidPrice?: string; askPrice?: string } | null;
-    const exec = Number(sig.side === "SHORT" ? book?.bidPrice : book?.askPrice);
-    if (!(exec > 0)) return skip("no executable price from Binance", true);
-    const short = sig.side === "SHORT";
-    if (short ? exec >= lvl.sl : exec <= lvl.sl) return skip(`the price already reached the SL: now ${exec}, signal ${p.price}, SL ${+lvl.sl.toPrecision(8)} -- the signal is over`, true);
-    if (short ? exec <= lvl.tp : exec >= lvl.tp) return skip(`the price already reached the TP: now ${exec}, signal ${p.price}, TP ${+lvl.tp.toPrecision(8)} -- too late`, true);
-    const ref = exec;
-    const startedAt = this.now();
-    const row: V10TradeDoc = { ...base, slPrice: lvl.sl, entryStartedAt: startedAt };
-    if (!(await this.store.insertTrade(row))) return; // already handled for this user
-    this.entering.add(row.tradeId);
+    // Oct 12: the checks and our OPEN row under one lock per (user, symbol) -- V11 runs in the same process
+    const prep = await withSymbolLock(u.userId, p.symbol, async (): Promise<{ row: V10TradeDoc; ref: number; lvl: ReturnType<typeof levels> } | null> => {
+      if (await this.store.hasOpenOtherTrade(u.userId, p.symbol)) { await skip(`a REAL V11 trade on ${p.symbol} is open for this user -- V10 never trades on top of it`, true); return null; }
+      const busy = await symbolClear(rest, p.symbol);
+      if (busy) { await skip(`${busy} -- V10 never trades on top of it`, true); return null; }
+      // SL / TP: the SAME prices as PAPER -- the configured % from the SIGNAL price (Johnny, Oct 2: UNI REAL entered
+      // +1.1% above the signal, after PAPER's SL had already been passed, and got its own wider SL). If the price a market
+      // order would get NOW is already at / beyond the SL or the TP, the signal is over -> not opened.
+      const lvl = levels(sig.side, p.price, rules.slPct, rules.tpPct);
+      const book = (await rest.getBookTicker?.(p.symbol).catch(() => null)) as { bidPrice?: string; askPrice?: string } | null;
+      const exec = Number(sig.side === "SHORT" ? book?.bidPrice : book?.askPrice);
+      if (!(exec > 0)) { await skip("no executable price from Binance", true); return null; }
+      const short = sig.side === "SHORT";
+      if (short ? exec >= lvl.sl : exec <= lvl.sl) { await skip(`the price already reached the SL: now ${exec}, signal ${p.price}, SL ${+lvl.sl.toPrecision(8)} -- the signal is over`, true); return null; }
+      if (short ? exec <= lvl.tp : exec >= lvl.tp) { await skip(`the price already reached the TP: now ${exec}, signal ${p.price}, TP ${+lvl.tp.toPrecision(8)} -- too late`, true); return null; }
+      const startedAt = this.now();
+      const row: V10TradeDoc = { ...base, slPrice: lvl.sl, entryStartedAt: startedAt };
+      if (!(await this.store.insertTrade(row))) return null; // already handled for this user
+      this.entering.add(row.tradeId);
+      return { row, ref: exec, lvl };
+    });
+    if (!prep) return;
+    const { row, ref, lvl } = prep;
     try {
       const out = await runEntrySequence(rest, {
         userId: u.userId, globalSignalId: orderSignalId, symbol: p.symbol, side: sig.side,
@@ -789,7 +793,7 @@ export class V10LiveService {
     if (t.kind === "WALL" && t.timeoutAt !== undefined && t.entryPrice !== null && this.now() >= t.timeoutAt) {
       if (!(await this.timeoutClose(t, u, rest))) return;
     }
-    const other = await this.store.openV9TradeSince(t.userId, t.symbol, t.entryStartedAt ?? t.createdAt);
+    const other = await this.store.openOtherTradeSince(t.userId, t.symbol, t.entryStartedAt ?? t.createdAt);
     const r = await settle(rest, { userId: t.userId, orderSignalId: t.orderSignalId, symbol: t.symbol, side: t.side, entryStartedAt: t.entryStartedAt ?? t.createdAt, quantity: t.quantity, binance: t.binance }, this.now(), other);
     if (r.status === "RETRY") return this.retried(t, u, r.why);
     if (t.retries) await this.store.updateTrade(t.tradeId, { retries: 0 });

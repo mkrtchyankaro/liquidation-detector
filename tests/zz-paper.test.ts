@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/zz-paper.test.ts
  */
 import * as assert from "assert";
-import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, trailingOiNoise, type ZBar } from "../src/research/oi-zigzag";
+import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, trailingOiNoise, type ZBar } from "../src/strategy/lib/oi-zigzag";
 import { ZzPaperService, checkExit, type ZzTradeDoc } from "../src/strategy/zz/zz-paper.service";
 import { parseZzSettings } from "../src/strategy/zz/zz-config";
 

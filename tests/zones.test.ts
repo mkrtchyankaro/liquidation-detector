@@ -9,7 +9,7 @@ import {
   atrSeries,
   zoneOfDays,
   type ZCandle,
-} from "../src/research/zones";
+} from "../src/strategy/lib/zones";
 
 let passed = 0,
   failed = 0;

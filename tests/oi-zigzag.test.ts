@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/oi-zigzag.test.ts
  */
 import * as assert from "assert";
-import { atr15Before, buildChains, calibrate, oneTradeAtATime, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, trailingOiNoise, type ZBar } from "../src/research/oi-zigzag";
+import { atr15Before, buildChains, calibrate, oneTradeAtATime, buildWaves, DEFAULT_CHAIN_PARAMS, oiPivots, quality, trailingOiNoise, type ZBar } from "../src/strategy/lib/oi-zigzag";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {

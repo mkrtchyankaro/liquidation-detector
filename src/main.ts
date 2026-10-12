@@ -15,11 +15,6 @@ import {
   MinuteBarWriter,
 } from "./collector/minute-bars";
 import { checkRealReadiness } from "./execution/readiness";
-import { V9LiveService, type V9UserRef } from "./strategy/v9/v9-live.service";
-import { V9MongoFeed } from "./strategy/v9/v9-feed";
-import { DEFAULT_V9_ENGINE_SETTINGS } from "./strategy/v9/v9-causal-engine";
-import { V9Repository } from "./strategy/v9/v9-repository";
-import { binanceFrameSource } from "./strategy/v9/v9-frame-source";
 import {
   mongoBarLoader,
   ZzPaperService,
@@ -38,11 +33,15 @@ import { V10BookRecorder } from "./strategy/v10/v10-book";
 import { BinanceMongoWallSource } from "./strategy/v10/wall-data";
 import { V10ZoneFinder } from "./strategy/v10/v10-zone";
 import { V10Repository } from "./strategy/v10/v10-repository";
+import { V11LiveService, type V11UserRef } from "./strategy/v11/v11-live.service";
+import { BinanceMongoV11Source } from "./strategy/v11/v11-data";
+import { V11Repository } from "./strategy/v11/v11-repository";
+import { mongoMinBarLoader } from "./strategy/shared/minute-loader";
 
 const log = childLogger({ mod: "main" });
 
 /**
- * liquidation-detector -- V9 bot.
+ * liquidation-detector -- V10 + V11 bot (Oct 12 2026: V9 was removed).
  *
  *   MarketCollector   Binance liquidations + OI (1/s) -> MongoDB
  *   ContextCollector  long/short ratios (5m) + funding/premium (1m) -> MongoDB (research only)
@@ -51,8 +50,8 @@ const log = childLogger({ mod: "main" });
  *   MinuteBarWriter   1 row per symbol per minute (price, OI, liquidations), kept 365 days (research only)
  *   V10LiveService    every 15m candle: BTC top / bottom (DC + OI rule, RANK 1) -> the alts that moved most with BTC
  *                     -> PAPER / REAL trades with fixed % SL / TP (own settings "v10", own collections)
- *   V9LiveService     every minute: V9 engine -> signals -> PAPER / REAL trades
- *                     -> Binance orders -> close detection -> Telegram
+ *   V11LiveService    every 1h candle: rally -> short-liquidation wick -> OI confirmation (squeeze wick)
+ *                     -> PAPER / REAL trades, SL = the wick's high, TP = R x risk (own settings "v11", own collections)
  *
  * Who trades what is decided ONLY by users.config.json.
  */
@@ -93,7 +92,12 @@ async function main(): Promise<void> {
         })
       : null;
 
-  // ── REAL only if every gate agrees AND the account proves it can trade (checked once per user, shared by V9 / V10) ──
+  if (config.legacyBlocks.length)
+    log.warn(
+      `[LEGACY_CONFIG_IGNORED] users.config.json still has ${config.legacyBlocks.map((b) => `"${b}"`).join(", ")} -- V9 was removed, the block is ignored (it can be deleted)`,
+    );
+
+  // ── REAL only if every gate agrees AND the account proves it can trade (checked once per user, shared by V10 / V11) ──
   const readiness = new Map<
     string,
     Promise<{ mode: "PAPER" | "REAL"; rest: BinanceRestClient | null }>
@@ -136,28 +140,6 @@ async function main(): Promise<void> {
     return p;
   };
 
-  // ── V9 users ──
-  const v9Users: V9UserRef[] = [];
-  for (const u of users) {
-    const requested = config.v9.enabled
-      ? (config.v9.userModes.get(u.userId) ?? "OFF")
-      : "OFF";
-    if (requested === "OFF") continue;
-    const { mode, rest } = await resolveMode(u, requested, "V9");
-    v9Users.push({
-      userId: u.userId,
-      mode,
-      riskUsd: u.riskUsd,
-      binanceRest: mode === "REAL" ? rest : null,
-      leverage: u.binance?.leverage,
-      marginMode: u.binance?.marginMode,
-      telegram: telegramOf(u),
-    });
-  }
-  log.warn(
-    `[V9_USER_MODE] enabled=${config.v9.enabled} ${v9Users.map((u) => `${u.userId}=${u.mode}($${u.riskUsd})`).join(" ") || "(no users)"}`,
-  );
-
   // ── V10 users (same REAL gates) ──
   // OFF users with Binance keys are listed too (mode OFF: no new trades) so a REAL V10 trade they still have open keeps
   // being watched and settled after the user was switched off.
@@ -184,6 +166,32 @@ async function main(): Promise<void> {
   }
   log.warn(
     `[V10_USER_MODE] enabled=${config.v10.enabled} ${v10Users.map((u) => `${u.userId}=${u.mode}($${u.riskUsd})`).join(" ") || "(no users)"}`,
+  );
+
+  // ── V11 users (same REAL gates, same rule: OFF users with Binance keys are listed to watch their open REAL trades) ──
+  const v11Users: V11UserRef[] = [];
+  for (const u of users) {
+    const requested = config.v11.enabled
+      ? (config.v11.userModes.get(u.userId) ?? "OFF")
+      : "OFF";
+    if (requested === "OFF" && !u.binance) continue;
+    const { mode, rest } =
+      requested === "OFF"
+        ? { mode: "OFF" as const, rest: null }
+        : await resolveMode(u, requested, "V11");
+    v11Users.push({
+      userId: u.userId,
+      mode,
+      riskUsd: u.riskUsd,
+      binanceRest: mode === "REAL" ? rest : null,
+      monitorRest: rest ?? restOf(u),
+      leverage: u.binance?.leverage,
+      marginMode: u.binance?.marginMode,
+      telegram: telegramOf(u),
+    });
+  }
+  log.warn(
+    `[V11_USER_MODE] enabled=${config.v11.enabled} ${v11Users.map((u) => `${u.userId}=${u.mode}($${config.v11.perUser.get(u.userId)?.riskUsd ?? config.v11.riskUsd ?? u.riskUsd})`).join(" ") || "(no users)"}`,
   );
 
   // System alerts (e.g. feed silent) go to every user with Telegram.
@@ -214,23 +222,7 @@ async function main(): Promise<void> {
   const minuteBars = new MinuteBarWriter(env.symbols, mongo.db);
   minuteBars.start();
 
-  const v9 = config.v9.enabled
-    ? new V9LiveService(
-        config.v9,
-        () => v9Users,
-        new V9MongoFeed(mongo.db),
-        new V9Repository(mongo.db),
-        {
-          ...DEFAULT_V9_ENGINE_SETTINGS,
-          minSlFraction: config.v9.minSlPct / 100,
-          lateSlPct: config.v9.lateSlPct,
-          lateSlMinPct: config.v9.lateSlMinPct,
-        },
-        Date.now,
-        binanceFrameSource(),
-      )
-    : null;
-  // OI-zigzag strategy: PAPER only, separate from V9 (never places orders).
+  // OI-zigzag strategy: PAPER only (never places orders).
   const zzUsers: ZzUserRef[] = config.zz.users
     .map((id) => users.find((u) => u.userId === id))
     .filter((u): u is UserConfig => !!u)
@@ -252,10 +244,10 @@ async function main(): Promise<void> {
       .start()
       .catch((err) =>
         log.error(
-          `[ZZ_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- ZZ PAPER not running, V9 unaffected`,
+          `[ZZ_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- ZZ PAPER not running, V10 / V11 unaffected`,
         ),
       );
-  // OI-accumulation strategy (1h): PAPER only, separate from V9 and ZZ (never places orders).
+  // OI-accumulation strategy (1h): PAPER only (never places orders).
   const oaUsers: ZzUserRef[] = config.oa.users
     .map((id) => users.find((u) => u.userId === id))
     .filter((u): u is UserConfig => !!u)
@@ -277,11 +269,11 @@ async function main(): Promise<void> {
       .start()
       .catch((err) =>
         log.error(
-          `[OA_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- OA PAPER not running, V9 unaffected`,
+          `[OA_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- OA PAPER not running, V10 / V11 unaffected`,
         ),
       );
 
-  // BTC-led alts: separate from V9 (own settings, collections, messages); its failure never stops V9.
+  // BTC-led alts: own settings, collections, messages; its failure never stops V11.
   // V10 disabled but users with Binance keys -> it still runs to WATCH any REAL V10 trade left open (no new signals).
   const v10 =
     config.v10.enabled || v10Users.length > 0
@@ -301,18 +293,40 @@ async function main(): Promise<void> {
       .start()
       .catch((err) =>
         log.error(
-          `[V10_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- V10 not running, V9 unaffected`,
+          `[V10_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- V10 not running, V11 unaffected`,
         ),
       );
 
-  if (v9)
-    void v9
+  // Squeeze wick (1h): own settings, collections, messages; its failure never stops V10.
+  // V11 disabled but users with Binance keys -> it still runs to WATCH any REAL V11 trade left open (no new signals).
+  const v11 =
+    config.v11.enabled || v11Users.length > 0
+      ? new V11LiveService(
+          config.v11,
+          () => v11Users,
+          new BinanceMongoV11Source(mongo.db),
+          mongoMinBarLoader(mongo.db),
+          new V11Repository(mongo.db),
+        )
+      : null;
+  if (v11)
+    void v11
       .start()
       .catch((err) =>
         log.error(
-          `[V9_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- V9 is NOT running`,
+          `[V11_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- V11 not running, V10 unaffected`,
         ),
       );
+
+  // V9 was removed (Oct 12 2026): a REAL V9 trade still open would no longer be watched by the bot -> say it loudly.
+  void (async () => {
+    const db = await mongo.db();
+    const n = db ? await db.collection("v9_trades").countDocuments({ state: "OPEN", mode: "REAL" }) : 0;
+    if (n > 0) {
+      log.error(`[V9_REAL_TRADES_LEFT_OPEN] ${n} REAL V9 trade(s) are still OPEN in v9_trades -- V9 was removed, nobody watches them: check them on Binance`);
+      await alertAll(`⚠️ ${n} REAL V9 trade(s) are still marked OPEN. V9 was removed from the bot -- please check them on Binance by hand.`);
+    }
+  })().catch(() => undefined);
 
   setInterval(() => {
     const m = process.memoryUsage();
@@ -327,7 +341,7 @@ async function main(): Promise<void> {
 
   const shutdown = async (signal: string): Promise<void> => {
     log.info(`shutting down (${signal})`);
-    v9?.stop();
+    v11?.stop();
     zz?.stop();
     oa?.stop();
     v10?.stop();
@@ -339,7 +353,7 @@ async function main(): Promise<void> {
   };
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
-  log.info("liquidation-detector (V9) started");
+  log.info("liquidation-detector (V10 + V11) started");
 }
 
 main().catch((err) => {

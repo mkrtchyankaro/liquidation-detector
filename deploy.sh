@@ -47,11 +47,11 @@ node -e '
   const env = require("./'"${BUILD_DIR}"'/config/env").loadEnv();
   const c = require("./'"${BUILD_DIR}"'/config/users-config").loadAppConfig(env.usersConfigPath, env.symbols);
   console.log("symbols collected: " + env.symbols.join(","));
-  console.log("realOrdersEnabled=" + c.realOrdersEnabled + "  v9.enabled=" + c.v9.enabled + (c.v9.enabled ? "  v9.symbols=" + c.v9.symbols.join(",") + "  rr=" + c.v9.rr : ""));
+  console.log("realOrdersEnabled=" + c.realOrdersEnabled + "  v10.enabled=" + c.v10.enabled + "  v11.enabled=" + c.v11.enabled + (c.v11.enabled ? "  v11.tpR=" + c.v11.tpR + "  v11.coins=" + c.v11.symbols.length : ""));
+  if (c.legacyBlocks.length) console.log("NOTE: ignored old blocks in users.config.json: " + c.legacyBlocks.join(",") + " (V9 was removed)");
+  const mode = (s, u) => { const m = s.enabled ? (s.userModes.get(u.userId) || "OFF") : "OFF"; return m === "OFF" ? "OFF" : m === "REAL" && c.realOrdersEnabled && !!u.binance ? "REAL(after readiness check)" : "PAPER"; };
   for (const u of c.users.filter((x) => x.enabled)) {
-    const m = c.v9.enabled ? (c.v9.userModes.get(u.userId) || "OFF") : "OFF";
-    const real = m === "REAL" && c.realOrdersEnabled && !!u.binance;
-    console.log("  " + u.userId.padEnd(10) + "V9=" + (m === "OFF" ? "OFF" : real ? "REAL (after readiness check)" : "PAPER") + "  riskUsd=" + u.riskUsd + "  telegram=" + (u.telegram ? "yes" : "no"));
+    console.log("  " + u.userId.padEnd(10) + "V10=" + mode(c.v10, u).padEnd(28) + "V11=" + mode(c.v11, u).padEnd(28) + "riskUsd=" + u.riskUsd + "  telegram=" + (u.telegram ? "yes" : "no"));
   }
 '
 
@@ -75,5 +75,5 @@ if ! pm2 describe "${APP_NAME}" | grep -q "status.*online"; then
 fi
 
 echo "==> Startup user modes:"
-pm2 logs "${APP_NAME}" --lines 400 --nostream | grep -E "V9_USER_MODE|V10_USER_MODE|V10_READY|V10_WALL_READY|REAL_NOT_READY|REAL_DOWNGRADED|COLLECTOR_STARTED" | tail -12 || true
+pm2 logs "${APP_NAME}" --lines 400 --nostream | grep -E "V10_USER_MODE|V11_USER_MODE|V10_READY|V10_WALL_READY|V11_READY|V11_MONITOR_ONLY|V9_REAL_TRADES_LEFT_OPEN|LEGACY_CONFIG_IGNORED|REAL_NOT_READY|REAL_DOWNGRADED|COLLECTOR_STARTED" | tail -16 || true
 echo "==> Done. Previous build kept in dist.prev/ for quick rollback."

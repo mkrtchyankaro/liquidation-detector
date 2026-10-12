@@ -1,7 +1,7 @@
 import type { Collection, Db } from "mongodb";
 import { childLogger } from "../../infrastructure/logging/logger";
 import { MINUTE_BARS } from "../../collector/minute-bars";
-import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, trailingOiNoise, type Chain, type ZBar } from "../../research/oi-zigzag";
+import { buildChains, buildWaves, DEFAULT_CHAIN_PARAMS, trailingOiNoise, type Chain, type ZBar } from "../lib/oi-zigzag";
 import type { ZzSettings } from "./zz-config";
 import { formatZzClose, formatZzEntry, formatZzSkip } from "./zz-telegram";
 

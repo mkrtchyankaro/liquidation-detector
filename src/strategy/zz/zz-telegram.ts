@@ -1,4 +1,4 @@
-import { fmtPrice, fmtQty, fmtUsd } from "../v9/v9-telegram";
+import { fmtPrice, fmtQty, fmtUsd } from "../shared/format";
 import type { ZzTradeDoc } from "./zz-paper.service";
 
 /**

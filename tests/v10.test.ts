@@ -3,8 +3,8 @@
  * Usage: npx tsx tests/v10.test.ts
  */
 import * as assert from "assert";
-import { candles, type MinBar } from "../src/research/dc15";
-import { oiPeakSignals } from "../src/research/oi-peak";
+import { candles, type MinBar } from "../src/strategy/lib/dc15";
+import { oiPeakSignals } from "../src/strategy/lib/oi-peak";
 import {
   parseV10Settings,
   rulesFor,
@@ -128,15 +128,15 @@ function market(): Map<string, MinBar[]> {
 function fakeStore(): V10Store & {
   signals: V10SignalDoc[];
   trades: V10TradeDoc[];
-  v9Open: Array<{ userId: string; symbol: string; createdAt?: number }>;
+  otherOpen: Array<{ userId: string; symbol: string; createdAt?: number }>;
 } {
   const signals: V10SignalDoc[] = [],
     trades: V10TradeDoc[] = [],
-    v9Open: Array<{ userId: string; symbol: string; createdAt?: number }> = [];
+    otherOpen: Array<{ userId: string; symbol: string; createdAt?: number }> = [];
   return {
     signals,
     trades,
-    v9Open,
+    otherOpen,
     ensureIndexes: async () => undefined,
     insertSignal: async (d) => {
       if (signals.some((x) => x.signalId === d.signalId)) return false;
@@ -154,10 +154,10 @@ function fakeStore(): V10Store & {
     },
     findOpenTrades: async () =>
       trades.filter((t) => t.state === "OPEN").map((t) => ({ ...t })),
-    hasOpenV9Trade: async (userId, symbol) =>
-      v9Open.some((x) => x.userId === userId && x.symbol === symbol),
-    openV9TradeSince: async (userId, symbol, after) => {
-      const x = v9Open.find(
+    hasOpenOtherTrade: async (userId, symbol) =>
+      otherOpen.some((x) => x.userId === userId && x.symbol === symbol),
+    openOtherTradeSince: async (userId, symbol, after) => {
+      const x = otherOpen.find(
         (v) =>
           v.userId === userId &&
           v.symbol === symbol &&
@@ -369,7 +369,7 @@ function fakeBinance(
       st.orders = st.orders.filter((o) => o !== tp);
       st.filledOrders.add(Number(tp.orderId));
     },
-    /** another trade's fill on the same symbol (e.g. V9 closing / opening) */
+    /** another trade's fill on the same symbol (e.g. V11 closing / opening) */
     foreignFill(
       side: "BUY" | "SELL",
       qty: number,
@@ -1798,15 +1798,15 @@ async function run(): Promise<void> {
   );
 
   await scenario(
-    "live REAL guards: an existing position / a V9 trade on the symbol -> not opened, with a message, no order sent",
+    "live REAL guards: an existing position / a REAL V11 trade on the symbol -> not opened, with a message, no order sent",
     async () => {
       const mk = market();
-      for (const setup of ["position", "v9"] as const) {
+      for (const setup of ["position", "other"] as const) {
         const store = fakeStore(),
           t = tg(),
           bx = fakeBinance(10);
         if (setup === "position") bx.st.position = 5;
-        else store.v9Open.push({ userId: "karo", symbol: "AAAUSDT" });
+        else store.otherOpen.push({ userId: "karo", symbol: "AAAUSDT" });
         const svc = new V10LiveService(
           settings({ picks: 1, userModes: { karo: "REAL" } }),
           () => [
@@ -1827,7 +1827,7 @@ async function run(): Promise<void> {
         assert.strictEqual(bx.st.created.length, 0, `${setup}: no order`);
         assert.ok(
           t.msgs[0].includes("NOT OPENED") &&
-            t.msgs[0].includes(setup === "v9" ? "V9 trade" : "position"),
+            t.msgs[0].includes(setup === "other" ? "V11 trade" : "position"),
           t.msgs[0],
         );
       }
@@ -2248,7 +2248,7 @@ async function run(): Promise<void> {
   );
 
   await scenario(
-    "REAL recovery never touches a position that is not ours: our entry order was never sent, V9 holds a position -> failed, no order",
+    "REAL recovery never touches a position that is not ours: our entry order was never sent, V11 holds a position -> failed, no order",
     async () => {
       const { store, t, bx, svc, tick } = realSetup();
       const row: V10TradeDoc = {
@@ -2283,12 +2283,12 @@ async function run(): Promise<void> {
         entryStartedAt: SIGNAL_END + 100_000,
       };
       store.trades.push(row);
-      bx.st.position = -50; // V9's SHORT on the same symbol
+      bx.st.position = -50; // V11's SHORT on the same symbol
       tick(6 * M);
       await svc.monitorReal();
       assert.strictEqual(store.trades[0].state, "FAILED");
       assert.strictEqual(bx.st.created.length, 0, "no order sent");
-      assert.strictEqual(bx.st.position, -50, "V9's position untouched");
+      assert.strictEqual(bx.st.position, -50, "V11's position untouched");
       assert.ok(t.msgs.at(-1)!.includes("NOT OPENED"), t.msgs.at(-1));
     },
   );
@@ -2348,16 +2348,16 @@ async function run(): Promise<void> {
   );
 
   await scenario(
-    "REAL: a V9 row in the database is never proof -- V9 writes it before checking the account; our SL / TP stay",
+    "REAL: a V11 row in the database is never proof -- V11 writes it before checking the account; our SL / TP stay",
     async () => {
       const { store, bx, svc, tick } = realSetup();
       await svc.onMinute();
       tick(10 * M);
-      store.v9Open.push({
+      store.otherOpen.push({
         userId: "karo",
         symbol: "AAAUSDT",
         createdAt: SIGNAL_END + 100_000 + 9 * M,
-      }); // V9's row, about to be SKIPPED
+      }); // V11's row, about to be SKIPPED
       await svc.monitorReal();
       assert.strictEqual(store.trades[0].state, "OPEN");
       assert.strictEqual(bx.st.algos.length, 1, "our SL is still resting");
@@ -2395,7 +2395,7 @@ async function run(): Promise<void> {
   );
 
   await scenario(
-    "REAL: closed by hand, then V9 opened on the OTHER side -> ours is settled from fills up to V9's entry, V9's position untouched",
+    "REAL: closed by hand, then V11 opened on the OTHER side -> ours is settled from fills up to V11's entry, V11's position untouched",
     async () => {
       const { store, bx, svc, tick } = realSetup();
       await svc.onMinute();
@@ -2410,8 +2410,8 @@ async function run(): Promise<void> {
         commissionAsset: "USDT",
         time: SIGNAL_END + 100_000 + 9 * M,
       });
-      bx.st.position = 7; // V9's LONG
-      store.v9Open.push({
+      bx.st.position = 7; // V11's LONG
+      store.otherOpen.push({
         userId: "karo",
         symbol: "AAAUSDT",
         createdAt: SIGNAL_END + 100_000 + 9.5 * M,
@@ -2434,14 +2434,14 @@ async function run(): Promise<void> {
       );
       assert.ok(
         Math.abs(d.exitPrice! - 9.9) < 1e-9,
-        `exit ${d.exitPrice} (V9's fill must not count)`,
+        `exit ${d.exitPrice} (V11's fill must not count)`,
       );
       assert.strictEqual(
         bx.st.algos.length + bx.st.orders.length,
         0,
         "our SL and TP are gone",
       );
-      assert.strictEqual(bx.st.position, 7, "V9's position untouched");
+      assert.strictEqual(bx.st.position, 7, "V11's position untouched");
     },
   );
 

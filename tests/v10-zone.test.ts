@@ -4,7 +4,7 @@
 import * as assert from "assert";
 import { formatZoneLine, zoneViewOf, V10ZoneFinder } from "../src/strategy/v10/v10-zone";
 import { formatV10Entry } from "../src/strategy/v10/v10-telegram";
-import type { ZCandle } from "../src/research/zones";
+import type { ZCandle } from "../src/strategy/lib/zones";
 import type { V10SignalDoc, V10TradeDoc } from "../src/strategy/v10/v10-repository";
 
 let passed = 0, failed = 0;

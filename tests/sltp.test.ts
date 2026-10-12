@@ -2,8 +2,8 @@
  * SL / TP simulation. Usage: npx tsx tests/sltp.test.ts
  */
 import * as assert from "assert";
-import { armedTurn, extremeIn, simTrade, stopFor } from "../src/research/sltp";
-import type { MinBar } from "../src/research/dc15";
+import { armedTurn, extremeIn, simTrade, stopFor } from "../src/strategy/lib/sltp";
+import type { MinBar } from "../src/strategy/lib/dc15";
 
 let passed = 0,
   failed = 0;

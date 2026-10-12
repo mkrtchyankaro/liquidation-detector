@@ -2,7 +2,7 @@
  * DC on 15m candles + the OI rule. Usage: npx tsx tests/dc15.test.ts
  */
 import * as assert from "assert";
-import { atrBefore, candles, coinInWindow, oiChange, outcome, ownness, pastRank, turns, type Candle, type MinBar, type Turn } from "../src/research/dc15";
+import { atrBefore, candles, coinInWindow, oiChange, outcome, ownness, pastRank, turns, type Candle, type MinBar, type Turn } from "../src/strategy/lib/dc15";
 
 let passed = 0, failed = 0;
 function scenario(name: string, fn: () => void): void {

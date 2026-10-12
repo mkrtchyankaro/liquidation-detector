@@ -1,4 +1,4 @@
-// PM2 process definition. Memory caps sized for a 1 GB server: the V9 bot
+// PM2 process definition. Memory caps sized for a 1 GB server: the bot
 // normally uses ~150-250 MB; pm2 restarts it if it ever exceeds 700 MB.
 module.exports = {
   apps: [

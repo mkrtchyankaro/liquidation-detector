@@ -1,20 +1,19 @@
 import * as fs from "fs";
-import { parseV9Settings, type V9Settings } from "../strategy/v9/v9-config";
 import { parseZzSettings, type ZzSettings } from "../strategy/zz/zz-config";
 import { parseOaSettings, type OaSettings } from "../strategy/oa/oa-config";
 import { parseV10Settings, type V10Settings } from "../strategy/v10/v10-config";
+import { parseV11Settings, type V11Settings } from "../strategy/v11/v11-config";
 
 /**
  * users.config.json -- the ONE file that decides who trades what.
  *
  * {
  *   "realOrdersEnabled": false,          // global master switch for REAL Binance orders
- *   "v9": { "enabled": true, "symbols": [...], "rr": 2.2,
- *           "userModes": { "main": "PAPER", "karo": "REAL" } },
  *   "zz": { "enabled": true, "users": ["main"] },   // OI-zigzag, PAPER only
  *   "oa": { "enabled": true, "users": ["main"] },   // OI accumulation (1h), PAPER only
  *   "v10": { "enabled": true, "short": true, "long": false, "slPct": 1, "tpPct": 1,
  *            "userModes": { "main": "PAPER", "karo": "OFF" } },  // BTC-led alts (see v10-config.ts)
+ *   "v11": { "enabled": false, "tpR": 2, "userModes": { "main": "PAPER" } },  // squeeze wick (see v11-config.ts)
  *   "users": [
  *     { "userId": "karo", "enabled": true,
  *       "telegram": { "enabled": true, "botToken": "...", "chatIds": ["123"] },
@@ -24,7 +23,7 @@ import { parseV10Settings, type V10Settings } from "../strategy/v10/v10-config";
  *   ]
  * }
  *
- * Unknown/old fields are ignored. Any malformed value fails startup with a
+ * Unknown/old fields are ignored (Oct 12 2026: V9 was removed -- an old "v9" block is ignored, see legacyBlocks). Any malformed value fails startup with a
  * clear message -- a typo must never silently arm or disarm real trading.
  */
 export interface UserConfig {
@@ -43,13 +42,16 @@ export interface UserConfig {
 export interface AppConfig {
   realOrdersEnabled: boolean;
   users: UserConfig[];
-  v9: V9Settings;
+  /** blocks of removed strategies still in the file (["v9"]) -- ignored, only logged */
+  legacyBlocks: string[];
   /** OI-zigzag strategy, PAPER only (Telegram messages, never orders). */
   zz: ZzSettings;
   /** OI-accumulation strategy (1h), PAPER only (Telegram messages, never orders). */
   oa: OaSettings;
   /** BTC-led alts (15m DC + OI rule on BTC -> the alts that moved most with it), PAPER / REAL per user. */
   v10: V10Settings;
+  /** squeeze wick (1h): rally -> short-liquidation wick -> OI confirmation, PAPER / REAL per user. */
+  v11: V11Settings;
 }
 
 const USER_ID = /^[a-z][a-z0-9_-]{1,31}$/;
@@ -74,7 +76,7 @@ export function parseAppConfig(
   if (!Array.isArray(r.users) || r.users.length === 0)
     fail(path, `"users" must be a non-empty array`);
   for (const k of Object.keys(r)) {
-    const known = ["v9", "zz", "oa", "v10"].find((b) => b === k.toLowerCase());
+    const known = ["zz", "oa", "v10", "v11"].find((b) => b === k.toLowerCase());
     if (known && known !== k)
       fail(
         path,
@@ -168,16 +170,6 @@ export function parseAppConfig(
     },
   );
 
-  let v9: V9Settings;
-  try {
-    v9 = parseV9Settings(
-      r.v9,
-      users.map((u) => u.userId),
-      collectedSymbols,
-    );
-  } catch (err) {
-    fail(path, err instanceof Error ? err.message : String(err));
-  }
   let zz: ZzSettings;
   try {
     zz = parseZzSettings(
@@ -208,13 +200,24 @@ export function parseAppConfig(
   } catch (err) {
     fail(path, err instanceof Error ? err.message : String(err));
   }
+  let v11: V11Settings;
+  try {
+    v11 = parseV11Settings(
+      r.v11,
+      users.map((u) => u.userId),
+      collectedSymbols,
+    );
+  } catch (err) {
+    fail(path, err instanceof Error ? err.message : String(err));
+  }
   return {
     realOrdersEnabled: r.realOrdersEnabled === true,
     users,
-    v9,
+    legacyBlocks: Object.keys(r).filter((k) => k.toLowerCase() === "v9"),
     zz,
     oa,
     v10,
+    v11,
   };
 }
 

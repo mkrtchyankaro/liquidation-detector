@@ -4,7 +4,7 @@
  * Usage: npx tsx tests/v10-wall.test.ts
  */
 import * as assert from "assert";
-import type { MinBar } from "../src/research/dc15";
+import type { MinBar } from "../src/strategy/lib/dc15";
 import { parseV10Settings, rulesFor } from "../src/strategy/v10/v10-config";
 import {
   V10LiveService,
@@ -162,8 +162,8 @@ function fakeStore(): V10Store & {
     },
     findOpenTrades: async () =>
       trades.filter((t) => t.state === "OPEN").map((t) => ({ ...t })),
-    hasOpenV9Trade: async () => false,
-    openV9TradeSince: async () => null,
+    hasOpenOtherTrade: async () => false,
+    openOtherTradeSince: async () => null,
   };
 }
 const tg = () => {
@@ -373,7 +373,7 @@ function fakeBinance(book: number, clock: () => number) {
       st.orders = st.orders.filter((o) => o !== tp);
       st.filledOrders.add(Number(tp.orderId));
     },
-    /** another trade's fill on the same symbol (e.g. V9 closing / opening) */
+    /** another trade's fill on the same symbol (e.g. V11 closing / opening) */
     foreignFill(
       side: "BUY" | "SELL",
       qty: number,

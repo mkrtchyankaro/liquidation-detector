@@ -3,14 +3,14 @@
  * variant: frozen ATR (from the move's start). Usage: npx tsx tests/atr-turn.test.ts
  */
 import * as assert from "assert";
-import type { Candle } from "../src/research/dc15";
+import type { Candle } from "../src/strategy/lib/dc15";
 import {
   atrSignals,
   atrStorySignals,
   flushSignals,
   h1Context,
   inH1Growth,
-} from "../src/research/atr-turn";
+} from "../src/strategy/lib/atr-turn";
 
 let passed = 0,
   failed = 0;

@@ -9,7 +9,7 @@ import {
   type MinuteRow,
   type OaTrade,
   type PathBar,
-} from "../../research/oi-accumulation";
+} from "../lib/oi-accumulation";
 import { oaParamsOf, type OaSettings } from "./oa-config";
 import { formatOaClose, formatOaEntry } from "./oa-telegram";
 

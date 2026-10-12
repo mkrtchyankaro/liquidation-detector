@@ -15,7 +15,7 @@ import {
   zoneQuality,
   zones,
   type ZCandle,
-} from "../../research/zones";
+} from "../lib/zones";
 
 const FAPI = process.env.BINANCE_FAPI_URL ?? "https://fapi.binance.com";
 const H4 = 4 * 3_600_000,

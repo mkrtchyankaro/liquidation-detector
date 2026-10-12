@@ -1,102 +1,83 @@
-# liquidation-detector (V9)
+# liquidation-detector (V10 + V11)
 
-Collects Binance futures liquidations and open interest, runs the **V9
-liquidation/OI episode strategy** live, and trades it per user in **PAPER** or
-**REAL** mode, reporting every entry and close on Telegram.
+Collects Binance futures liquidations and open interest, runs two strategies live and trades them per user in
+**PAPER** or **REAL** mode, reporting every entry and close on Telegram. (V9 was removed on Oct 12 2026.)
 
-## How it works
+| Strategy | Timeframe | Idea | Settings | Collections |
+|---|---|---|---|---|
+| **V10** | 15m / 1h | BTC-led alts (part BTC), an alt's own turn (part ALT), liquidation walls (part WALL) | `"v10"` | `v10_signals`, `v10_trades`, `v10_book` |
+| **V11** | 1h | **squeeze wick**: rally -> short-liquidation wick at a new high -> OI-confirmed SHORT | `"v11"` | `v11_signals`, `v11_trades` |
+| ZZ / OA | 15m / 1h | OI zigzag / OI accumulation -- **PAPER only**, Telegram messages, never orders | `"zz"`, `"oa"` | `zz_paper_trades`, `oa_paper_trades` |
+
+## V11 -- squeeze wick (`src/strategy/v11/`)
+
+Every closed 1h candle, every coin (price = Binance 1h klines, OI = Binance `openInterestHist` 5m at the hour edges,
+liquidations = our `minute_bars`). All thresholds are relative to the coin itself:
+
+1. **Rally**: the price rose over 6 h by >= 2x the coin's median |6h move| (72 h). Start = the lowest close of those hours.
+2. **Type**: OI start -> rally close vs the mean |hourly OI change| (24 h): **T1** fell (squeeze), **T2** rose, **FLAT**.
+3. **Wick** (within 12 h): a new high, short liquidations >= the coin's 85th percentile (72 h), close in the lower half.
+4. **Confirmation** (next 1-2 candles): a higher high cancels; OI up and the candle < +0.3 % confirms.
+5. **Trade**: SHORT at the next hour's open, **SL = the wick's high**, **TP = tpR x risk** (default 2R), time-out 48 h.
+
+Tested on 25 coins x 14 days: 44 entries, 2R -> 19 TP / 21 SL, +11R after fees (T1 only: 18 entries, +8.4R;
+"meaningful" liquidations only: 23 entries, +10.6R). `tests/v11-engine.test.ts` replays that data and must give the
+same 112 wicks and 44 entries. The LONG mirror exists (`"long": true`) but tested badly -- off by default.
+
+REAL safety (same as V10): the symbol must be completely clear on the account and the user must not have a REAL V10
+trade on it (V10 and V11 check each other under one lock); market entry -> SL verified (else fail-safe close) -> TP;
+an unfinished entry is recovered from our own client order ids; closes are settled from Binance fills.
+
+## Data
 
 ```
-Binance WS  forceOrder ──► liq_raw_events          ┐
-Binance WS  bookTicker ──► mid price (memory)      ├─ MarketCollector
-Binance REST openInterest (1/s) ──► oi_second_observations ┘
-                                   │
-               every minute (hh:mm:10)
-                                   ▼
-                         V9 engine (per symbol)
-      OI regimes (BIC) → episodes → confirmation → DOM/DIR/CLR/MOV/EXH
-                                   │ selected
-                                   ▼
-                  one signal id for everyone (symbol lock)
-             ┌─────────────────────┴─────────────────────┐
-           PAPER                                        REAL
-   simulated TP/SL + fees                 MARKET entry → STOP_MARKET SL → LIMIT TP (2.2R from fill)
-                                          Binance close detection from own fills
-             └──────────────► Telegram per user ◄─────────┘
+Binance WS  forceOrder ──► liq_raw_events (14 days)                ┐
+Binance REST openInterest (1/s) ──► oi_second_observations (1 day) ├─ MarketCollector
+                                   └──► minute_bars (365 days: price, OI, long / short liquidations per minute)
 ```
 
-MongoDB collections (all others are unused):
-
-| Collection | What | Kept |
-|---|---|---|
-| `liq_raw_events` | every liquidation (Binance keeps no history) | 4 days |
-| `oi_second_observations` | open interest every second + mid price | 3 days |
-| `v9_decisions` | every confirmed episode + why it was / was not a signal | 60 days |
-| `v9_trades` | every user's trade (entry, SL, TP, exit, PnL) | forever |
-| `v9_episode_timeline` | what the engine saw live, every minute per symbol | 60 days |
-| `market_positioning_5m` | % long of all accounts / top accounts / top positions (Binance keeps 30 days) | 1 year |
-| `market_premium_1m` | mark, index, premium %, funding rate | 1 year |
-
-`minute_bars` (kept 365 days): one row per symbol per minute -- price OHLC,
-OI first/last/min/max, LONG/SHORT liquidation USD and count -- written every
-minute from the raw rows. Research only (liquidation-episode studies over
-months, while raw rows are kept a few days).
-
-Candles, taker buy/sell volume and ATR are not stored: Binance keeps full
-kline history (taker buy volume is inside every kline), backtests fetch them.
-
-Restarts: episodes are recomputed from the stored raw data, so a restart loses
-nothing except the seconds the collector is down; an episode with a whole
-minute of missing data is never traded (`DATA_GAP`). Already-traded episodes
-are restored from `v9_trades`.
-
-## ZZ (OI zigzag) -- PAPER only
-
-A second, separate strategy that only sends Telegram messages (never orders):
-OI is cut into waves; a fast, forced LONG/SHORT **cleaning** (grade A/B) followed
-by an **accumulation** gives an expected move (price move per coin closed x coins
-opened). When the accumulation ends (OI falls back), the move already made shows
-the direction; TP = the remaining expected move, SL = TP / 2.2. Same code as the
-research tool `oi-zigzag`. Enabled with `"zz": { "enabled": true, "users": ["main"] }`;
-decisions are stored in `zz_paper_trades`.
+`market_positioning_5m` / `market_premium_1m` (ContextCollector) are research context only.
 
 ## Layout
 
 | Path | What |
 |---|---|
-| `src/main.ts` | wiring: config → collector → V9 service |
-| `src/collector/` | Binance data collection (market data + research context) |
-| `src/strategy/v9/` | V9 core (pure), causal engine, live service, feed, repository, Telegram text |
-| `src/strategy/zz/` | ZZ PAPER live service (Telegram only), config, messages |
-| `src/research/` | research-only logic (liquidation-episode definition), never used by trading |
-| `src/execution/` | Binance entry sequence, close report, account readiness |
-| `src/config/` | `.env` and `users.config.json` loading/validation |
-| `src/tools/` | `v9-show-signal` (full story of one signal), `v9-replay` (honest backtest), `test-live-entry` (real order round-trip test), `minute-bars-backfill`, `liq-episodes`, `oi-zigzag` (research: episodes and OI waves) |
-| `scripts/liquidation-episodes-v13.js` | original research script (reference for the equivalence test) |
+| `src/main.ts` | wiring: config -> collectors -> V10 / V11 / ZZ / OA services |
+| `src/collector/` | Binance data collection, minute bars |
+| `src/strategy/v10/` | V10 engine, live service, repository, messages, order-book / zone / wall parts |
+| `src/strategy/v11/` | V11 engine (pure), data source, config, live service, repository, messages |
+| `src/strategy/lib/` | pure strategy maths used live (15m DC, OI peak, ATR turn, zones, SL/TP simulation, OI zigzag / accumulation) |
+| `src/strategy/shared/` | number formatting, fee estimate, minute-bar loader |
+| `src/strategy/zz/`, `src/strategy/oa/` | PAPER-only strategies |
+| `src/execution/` | Binance entry sequence, settle / recovery, readiness, the V10 / V11 cross-check and lock |
+| `src/config/` | `.env` and `users.config.json` loading / validation |
+| `src/tools/` | read-only tools (below) and `test-live-entry` |
+| `pine/` | TradingView indicator (liquidation ledger) |
 
 ## Configuration
 
 `.env`: `MONGO_URI`, `MONGO_OWN_DB` (default `liquidation_detector`), `SYMBOLS` (comma list).
 
-`users.config.json` (see `users.config.example.json`):
-- `realOrdersEnabled` — global switch; without it nobody trades REAL.
-- `v9.userModes` — `OFF` / `PAPER` / `REAL` per user.
-- `v9.rr` (default 2.2) and `v9.minSlPct` (default 0.33): stops closer than this
-  are moved out to it (TP follows), keeping stop-out fees <= ~0.3R.
-- per user: `telegram`, `binance` (keys, leverage cap, margin mode), `risk.riskUsd`.
+`users.config.json` (see `users.config.example.json`; every V11 field is explained in `src/strategy/v11/v11-config.ts`):
+- `realOrdersEnabled` -- global switch; without it nobody trades REAL.
+- `v10` / `v11` -- `enabled`, `userModes` (`OFF` / `PAPER` / `REAL` per user), `perUser` overrides.
+- `v11`: `short`, `long`, `tpR`, `riskUsd`, `slBufferPct`, `rallyTypes`, `meaningfulOnly`, `minRiskPct`, `maxRiskPct`,
+  `maxOpen`, `timeoutHours`, `symbols`, `excludeSymbols`, `rule` (the signal thresholds).
+- per user: `telegram`, `binance` (keys, leverage, margin mode), `risk.riskUsd`.
 
-A REAL user is checked at startup (keys, One-Way mode, USDT balance); on
-failure it runs PAPER and is told why on Telegram.
+A REAL user is checked at startup (keys, One-Way mode, USDT balance); on failure it runs PAPER and is told why.
+An old `"v9"` block is ignored (logged as `[LEGACY_CONFIG_IGNORED]`).
 
 ## Commands
 
 ```bash
-bash deploy.sh                                         # pull, build, test, validate config, restart
-npx tsx src/tools/v9-show-signal.ts <signalId>        # the whole story of one signal
-npx tsx src/tools/v9-replay.ts                         # causal replay of history (read-only)
-npx tsx src/tools/test-live-entry.ts --user karo --confirm   # real tiny order round-trip
-npx tsx src/tools/minute-bars-backfill.ts              # once: raw rows -> minute_bars (safe to re-run)
-npx tsx src/tools/liq-episodes.ts [--symbols ADA]      # liquidation episodes with liq $, OI drop $, OI rise $
-npx tsx src/tools/oi-zigzag.ts --symbols ETH --days 2 --html   # OI waves: cleaning -> accumulation -> resolution (+ chart)
+bash deploy.sh                                             # pull, build, test, validate config, restart
+npx tsx src/tools/v11-replay.ts --days 14                  # V11 on the last days with the live code (read-only)
+npx tsx src/tools/hour-view.ts --symbol BTC --from "02 Oct 01:00" --to "02 Oct 14:00"   # price / OI / liquidations per candle
+npx tsx src/tools/research-1h-export.ts --days 14           # 1h research export (Binance price + OI, our liquidations)
+npx tsx src/tools/oi-research-export.ts                    # minute-level research export
+npx tsx src/tools/oi-compare.ts                             # our OI vs Binance's OI history
+npx tsx src/tools/test-live-entry.ts --user karo --confirm  # real tiny order round-trip
+npx tsx src/tools/minute-bars-backfill.ts                  # raw rows -> minute_bars (safe to re-run)
 npm test
 ```
