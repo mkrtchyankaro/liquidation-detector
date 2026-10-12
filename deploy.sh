@@ -48,7 +48,7 @@ node -e '
   const c = require("./'"${BUILD_DIR}"'/config/users-config").loadAppConfig(env.usersConfigPath, env.symbols);
   console.log("symbols collected: " + env.symbols.join(","));
   console.log("realOrdersEnabled=" + c.realOrdersEnabled + "  v10.enabled=" + c.v10.enabled + "  v11.enabled=" + c.v11.enabled + (c.v11.enabled ? "  v11.tpR=" + c.v11.tpR + "  v11.coins=" + c.v11.symbols.length : ""));
-  if (c.legacyBlocks.length) console.log("NOTE: ignored old blocks in users.config.json: " + c.legacyBlocks.join(",") + " (V9 / ZZ were removed)");
+  if (c.legacyBlocks.length) console.log("NOTE: ignored old blocks in users.config.json: " + c.legacyBlocks.join(",") + " (V9 / ZZ / OA were removed)");
   const mode = (s, u) => { const m = s.enabled ? (s.userModes.get(u.userId) || "OFF") : "OFF"; return m === "OFF" ? "OFF" : m === "REAL" && c.realOrdersEnabled && !!u.binance ? "REAL(after readiness check)" : "PAPER"; };
   for (const u of c.users.filter((x) => x.enabled)) {
     console.log("  " + u.userId.padEnd(10) + "V10=" + mode(c.v10, u).padEnd(28) + "V11=" + mode(c.v11, u).padEnd(28) + "riskUsd=" + u.riskUsd + "  telegram=" + (u.telegram ? "yes" : "no"));

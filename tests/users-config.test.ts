@@ -49,9 +49,9 @@ scenario("negative riskUsd fails fast", () => {
   assert.throws(() => parseAppConfig(c, "x", syms), /riskUsd/);
 });
 scenario("v11 errors surface with the file path", () => assert.throws(() => parseAppConfig({ ...base(), v11: { enabled: true, symbols: ["XRPUSDT"] } }, "users.config.json", syms), /users\.config\.json.*does not collect data/));
-scenario("an old v9 block with garbage is ignored (V9 removed)", () => {
-  const c = parseAppConfig({ ...base(), v9: { enabled: "yes", nonsense: 1 } }, "x", syms);
-  assert.deepStrictEqual(c.legacyBlocks, ["v9"]);
+scenario("old v9 / zz / oa blocks, even with garbage, are ignored (removed strategies)", () => {
+  const c = parseAppConfig({ ...base(), v9: { enabled: "yes", nonsense: 1 }, zz: { enabled: true, users: ["nobody"] }, oa: { enabled: 7 } }, "x", syms);
+  assert.deepStrictEqual(c.legacyBlocks, ["v9", "zz", "oa"]);
 });
 scenario("V11 is written lower case or it fails", () => assert.throws(() => parseAppConfig({ ...base(), V11: { enabled: true } }, "x", syms), /"V11" must be written "v11"/));
 console.log(`\nRESULTS: ${passed} passed, ${failed} failed`);

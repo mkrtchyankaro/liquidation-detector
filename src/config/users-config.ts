@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import { parseOaSettings, type OaSettings } from "../strategy/oa/oa-config";
 import { parseV10Settings, type V10Settings } from "../strategy/v10/v10-config";
 import { parseV11Settings, type V11Settings } from "../strategy/v11/v11-config";
 
@@ -8,7 +7,6 @@ import { parseV11Settings, type V11Settings } from "../strategy/v11/v11-config";
  *
  * {
  *   "realOrdersEnabled": false,          // global master switch for REAL Binance orders
- *   "oa": { "enabled": true, "users": ["main"] },   // OI accumulation (1h), PAPER only
  *   "v10": { "enabled": true, "short": true, "long": false, "slPct": 1, "tpPct": 1,
  *            "userModes": { "main": "PAPER", "karo": "OFF" } },  // BTC-led alts (see v10-config.ts)
  *   "v11": { "enabled": false, "tpR": 2, "userModes": { "main": "PAPER" } },  // squeeze wick (see v11-config.ts)
@@ -21,7 +19,7 @@ import { parseV11Settings, type V11Settings } from "../strategy/v11/v11-config";
  *   ]
  * }
  *
- * Unknown/old fields are ignored (Oct 12 2026: V9 and ZZ were removed -- an old "v9" / "zz" block is ignored, see legacyBlocks). Any malformed value fails startup with a
+ * Unknown/old fields are ignored (Oct 12 2026: V9, ZZ and OA were removed -- an old "v9" / "zz" / "oa" block is ignored, see legacyBlocks). Any malformed value fails startup with a
  * clear message -- a typo must never silently arm or disarm real trading.
  */
 export interface UserConfig {
@@ -40,10 +38,8 @@ export interface UserConfig {
 export interface AppConfig {
   realOrdersEnabled: boolean;
   users: UserConfig[];
-  /** blocks of removed strategies still in the file (["v9", "zz"]) -- ignored, only logged */
+  /** blocks of removed strategies still in the file (["v9", "zz", "oa"]) -- ignored, only logged */
   legacyBlocks: string[];
-  /** OI-accumulation strategy (1h), PAPER only (Telegram messages, never orders). */
-  oa: OaSettings;
   /** BTC-led alts (15m DC + OI rule on BTC -> the alts that moved most with it), PAPER / REAL per user. */
   v10: V10Settings;
   /** squeeze wick (1h): rally -> short-liquidation wick -> OI confirmation, PAPER / REAL per user. */
@@ -72,7 +68,7 @@ export function parseAppConfig(
   if (!Array.isArray(r.users) || r.users.length === 0)
     fail(path, `"users" must be a non-empty array`);
   for (const k of Object.keys(r)) {
-    const known = ["oa", "v10", "v11"].find((b) => b === k.toLowerCase());
+    const known = ["v10", "v11"].find((b) => b === k.toLowerCase());
     if (known && known !== k)
       fail(
         path,
@@ -166,16 +162,6 @@ export function parseAppConfig(
     },
   );
 
-  let oa: OaSettings;
-  try {
-    oa = parseOaSettings(
-      r.oa,
-      users.map((u) => u.userId),
-      collectedSymbols,
-    );
-  } catch (err) {
-    fail(path, err instanceof Error ? err.message : String(err));
-  }
   let v10: V10Settings;
   try {
     v10 = parseV10Settings(
@@ -199,8 +185,7 @@ export function parseAppConfig(
   return {
     realOrdersEnabled: r.realOrdersEnabled === true,
     users,
-    legacyBlocks: Object.keys(r).filter((k) => ["v9", "zz"].includes(k.toLowerCase())),
-    oa,
+    legacyBlocks: Object.keys(r).filter((k) => ["v9", "zz", "oa"].includes(k.toLowerCase())),
     v10,
     v11,
   };

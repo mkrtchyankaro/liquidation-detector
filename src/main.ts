@@ -16,11 +16,6 @@ import {
 } from "./collector/minute-bars";
 import { checkRealReadiness } from "./execution/readiness";
 import {
-  mongoMinuteLoader,
-  OaPaperService,
-  type OaUserRef,
-} from "./strategy/oa/oa-paper.service";
-import {
   mongoV10Loader,
   V10LiveService,
   type V10UserRef,
@@ -41,7 +36,6 @@ const log = childLogger({ mod: "main" });
  *
  *   MarketCollector   Binance liquidations + OI (1/s) -> MongoDB
  *   ContextCollector  long/short ratios (5m) + funding/premium (1m) -> MongoDB (research only)
- *   OaPaperService    OI-accumulation strategy (1h), PAPER only: Telegram messages to the "oa" users, never orders
  *   MinuteBarWriter   1 row per symbol per minute (price, OI, liquidations), kept 365 days (research only)
  *   V10LiveService    every 15m candle: BTC top / bottom (DC + OI rule, RANK 1) -> the alts that moved most with BTC
  *                     -> PAPER / REAL trades with fixed % SL / TP (own settings "v10", own collections)
@@ -89,7 +83,7 @@ async function main(): Promise<void> {
 
   if (config.legacyBlocks.length)
     log.warn(
-      `[LEGACY_CONFIG_IGNORED] users.config.json still has ${config.legacyBlocks.map((b) => `"${b}"`).join(", ")} -- V9 / ZZ were removed, the block is ignored (it can be deleted)`,
+      `[LEGACY_CONFIG_IGNORED] users.config.json still has ${config.legacyBlocks.map((b) => `"${b}"`).join(", ")} -- V9 / ZZ / OA were removed, the block is ignored (it can be deleted)`,
     );
 
   // ── REAL only if every gate agrees AND the account proves it can trade (checked once per user, shared by V10 / V11) ──
@@ -217,32 +211,6 @@ async function main(): Promise<void> {
   const minuteBars = new MinuteBarWriter(env.symbols, mongo.db);
   minuteBars.start();
 
-  // OI-accumulation strategy (1h): PAPER only (never places orders).
-  const oaUsers: OaUserRef[] = config.oa.users
-    .map((id) => users.find((u) => u.userId === id))
-    .filter((u): u is UserConfig => !!u)
-    .map((u) => ({
-      userId: u.userId,
-      riskUsd: u.riskUsd,
-      telegram: telegramOf(u),
-    }));
-  const oa = config.oa.enabled
-    ? new OaPaperService(
-        config.oa,
-        () => oaUsers,
-        mongoMinuteLoader(mongo.db),
-        mongo.db,
-      )
-    : null;
-  if (oa)
-    void oa
-      .start()
-      .catch((err) =>
-        log.error(
-          `[OA_START_FAILED] ${err instanceof Error ? err.message : String(err)} -- OA PAPER not running, V10 / V11 unaffected`,
-        ),
-      );
-
   // BTC-led alts: own settings, collections, messages; its failure never stops V11.
   // V10 disabled but users with Binance keys -> it still runs to WATCH any REAL V10 trade left open (no new signals).
   const v10 =
@@ -312,7 +280,6 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string): Promise<void> => {
     log.info(`shutting down (${signal})`);
     v11?.stop();
-    oa?.stop();
     v10?.stop();
     context.stop();
     minuteBars.stop();

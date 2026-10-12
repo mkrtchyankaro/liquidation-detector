@@ -1,15 +1,5 @@
 {
   "realOrdersEnabled": false,
-  "oa": {
-    "enabled": true,
-    "users": [
-      "main"
-    ],
-    "rr": 2.5,
-    "minSlPct": 0.3,
-    "continuation": true,
-    "reversal": false
-  },
   "v10": {
     "enabled": true,
     "short": true,
