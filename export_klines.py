@@ -2,12 +2,13 @@
 """READ-ONLY export of Binance USDT-M futures klines for the 4H zone study.
 - Uses ONLY the public endpoint GET https://fapi.binance.com/fapi/v1/klines (no API key, no account access, no orders).
 - Does not touch the bot, the DB or any config.
-- 23 altcoins (BTC and ETH excluded), intervals 1d, 4h and 1h, 2026-06-15 00:00 UTC -> 2026-10-15 00:00 UTC (end exclusive).
-  (06-15 start = 90-day zone window before 10-01 plus ATR(14) warm-up.)
+- 23 altcoins (BTC and ETH excluded), intervals 1d, 4h and 1h, requested 2025-10-01 00:00 UTC -> 2026-10-15 00:00 UTC (end exclusive).
+  First it PROBES each symbol's first available candle on Binance; a symbol listed later starts at its listing.
+  integrity.json reports per symbol: first available candle and days of history before the backtest start (2026-10-01).
 - Keeps only CLOSED candles (close_time < time of the request).
 - Writes klines_1d.csv, klines_4h.csv, klines_1h.csv, integrity.json and zones4h_export.zip in the output folder.
 
-Usage:  python3 export_klines.py [--out ./zones4h_export] [--start 2026-06-15] [--end 2026-10-15]
+Usage:  python3 export_klines.py [--out ./zones4h_export] [--start 2025-10-01] [--end 2026-10-15]
 Needs only the Python 3 standard library."""
 import argparse, csv, datetime as dt, hashlib, json, os, sys, time, urllib.request, urllib.error, zipfile
 
@@ -55,6 +56,12 @@ def fetch(symbol, interval, start_ms, end_ms, now_ms):
     dedup = {r['open_ms']: r for r in out}
     return [dedup[k] for k in sorted(dedup)]
 
+BT_START = None  # set in main: 2026-10-01 00:00 UTC
+
+def first_available(symbol, interval):
+    rows = get(f'{BASE}?symbol={symbol}&interval={interval}&startTime=0&limit=1')
+    return int(rows[0][0]) if rows else None
+
 def check(rows, interval, start_ms, end_ms, now_ms):
     step = STEP[interval]; exp_end = min(end_ms, (now_ms // step) * step)
     expected = list(range(start_ms, exp_end, step)); have = {r['open_ms'] for r in rows}
@@ -82,23 +89,35 @@ def agg_check(r4, r1, small='1h', k=4):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--out', default='./zones4h_export'); ap.add_argument('--start', default='2026-06-15'); ap.add_argument('--end', default='2026-10-15')
+    ap.add_argument('--out', default='./zones4h_export'); ap.add_argument('--start', default='2025-10-01'); ap.add_argument('--end', default='2026-10-15')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     s_ms = ms(dt.datetime.strptime(a.start, '%Y-%m-%d')); e_ms = ms(dt.datetime.strptime(a.end, '%Y-%m-%d'))
     now_ms = int(time.time() * 1000)
     if now_ms < e_ms:
         print(f'NOTE: end {a.end} 00:00 UTC is in the future; only candles closed before now ({iso(now_ms)} UTC) are exported.')
-    rep = dict(created_utc=iso(now_ms), start=a.start, end_exclusive=a.end, endpoint=BASE, symbols={})
+    bt_ms = ms(dt.datetime(2026, 10, 1))
+    rep = dict(created_utc=iso(now_ms), start_requested=a.start, end_exclusive=a.end, backtest_start='2026-10-01 00:00', endpoint=BASE, symbols={})
+    starts = {}
+    for sym in SYMBOLS:
+        fa = first_available(sym, '1d')
+        eff = max(s_ms, ((fa + STEP['1d'] - 1) // STEP['1d']) * STEP['1d']) if fa is not None else s_ms
+        starts[sym] = eff
+        days = (bt_ms - eff) / STEP['1d']
+        rep['symbols'][sym] = dict(history=dict(first_available_1d=iso(fa) if fa else None, export_start=iso(eff),
+                                                days_before_backtest=round(days, 1), history_ok_6m=days >= 182, history_ok_12m=days >= 365))
+        print(f"{sym:10s} first candle on Binance {iso(fa) if fa else '?'}; export from {iso(eff)}; {days:.0f} days before 2026-10-01"
+              f"{'' if days >= 182 else '  <-- LESS THAN 6 MONTHS'}")
+        time.sleep(0.25)
     files = {}
     for itv in ('1d', '4h', '1h'):
         path = os.path.join(a.out, f'klines_{itv}.csv'); files[itv] = path
         with open(path, 'w', newline='') as f:
             w = csv.DictWriter(f, fieldnames=COLS); w.writeheader()
             for sym in SYMBOLS:
-                rows = fetch(sym, itv, s_ms, e_ms, now_ms)
+                rows = fetch(sym, itv, starts[sym], e_ms, now_ms)
                 for r in rows: w.writerow(r)
-                rep['symbols'].setdefault(sym, {})[itv] = check(rows, itv, s_ms, e_ms, now_ms)
+                rep['symbols'].setdefault(sym, {})[itv] = check(rows, itv, starts[sym], e_ms, now_ms)
                 rep['symbols'][sym].setdefault('_rows', {})[itv] = rows
                 c = rep['symbols'][sym][itv]
                 print(f"{sym:10s} {itv}: {c['got']}/{c['expected']} candles, missing {c['missing']}, bad OHLC {c['bad_ohlc']}, first {c['first']}, last {c['last']}")
@@ -107,6 +126,8 @@ def main():
         rep['symbols'][sym]['4h_vs_1h'] = agg_check(rows['4h'], rows['1h'], '1h', 4)
         rep['symbols'][sym]['1d_vs_4h'] = agg_check(rows['1d'], rows['4h'], '4h', 6)
     rep['summary'] = dict(symbols=len(SYMBOLS),
+                          symbols_under_6m=[s for s, v in rep['symbols'].items() if not v['history']['history_ok_6m']],
+                          symbols_under_12m=[s for s, v in rep['symbols'].items() if not v['history']['history_ok_12m']],
                           missing_1d=sum(v['1d']['missing'] for v in rep['symbols'].values()),
                           missing_4h=sum(v['4h']['missing'] for v in rep['symbols'].values()),
                           missing_1h=sum(v['1h']['missing'] for v in rep['symbols'].values()),
